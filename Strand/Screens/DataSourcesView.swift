@@ -254,6 +254,15 @@ struct DataSourcesView: View {
                 .disabled(model.hasActiveImport || nutritionImporting || liftingImporting || activityFileImporting)
                 if liftingImporting { ProgressView().controlSize(.small) }
             }
+            // ALPHAPROG GETS ITS OWN BUTTON, in this card rather than a card of its own: it writes the
+            // same source and feeds the same muscle view, and a second card would ask the wearer to know
+            // which app they exported from before they could find the button. Same arrangement as the
+            // Android lane.
+            Button { presentImporter(.alphaprog) } label: {
+                Label("Import from Alphaprog…", systemImage: "tray.and.arrow.down")
+            }
+            .buttonStyle(NoopButtonStyle(.secondary))
+            .disabled(model.hasActiveImport || nutritionImporting || liftingImporting || activityFileImporting)
             if let s = liftingSummary {
                 Text(s).font(StrandFont.subhead)
                     .foregroundStyle(liftingFailed ? StrandPalette.statusWarning : StrandPalette.statusPositive)
@@ -373,6 +382,8 @@ struct DataSourcesView: View {
             importNutrition(url: url)
         case .lifting:
             importLifting(url: url)
+        case .alphaprog:
+            importLifting(url: url, forceAlphaprog: true)
         case .activityFile:
             importActivityFile(url: url)
         case .wearable:
@@ -440,7 +451,7 @@ struct DataSourcesView: View {
     /// Parse a Hevy CSV / Liftosaur JSON lifting export and upsert each workout as a Strength session
     /// (source "lifting") with a transparent volume-load note. No `strain` is stored, so these never
     /// feed the HR-based Effort — lifting volume is reported alongside it, never folded into it.
-    private func importLifting(url: URL) {
+    private func importLifting(url: URL, forceAlphaprog: Bool = false) {
         liftingImporting = true
         liftingSummary = nil
         liftingFailed = false
@@ -449,17 +460,26 @@ struct DataSourcesView: View {
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             do {
                 let data = try Data(contentsOf: url)
-                // ALPHAPROG IS SNIFFED BY WHETHER IT PARSES, not by an extension or a header guess.
-                // Its export is a .csv like Hevy's, so a name-based sniff would send it to the wrong
-                // parser — and Hevy's reader makes nonsense of a printed workout rather than failing,
-                // which is the worst kind of wrong. A file that yields Alphaprog sessions IS one.
+                // WHICH PARSER, and why it is decided this way.
+                //
+                // The Alphaprog BUTTON parses only as Alphaprog: the wearer said which app the file came
+                // from, and falling through to Hevy's reader would take a file they named and quietly
+                // read it as something else.
+                //
+                // The shared button SNIFFS BY WHETHER IT PARSES, not by extension or a header guess.
+                // Alphaprog exports a .csv exactly as Hevy does, so a name-based sniff would send it to
+                // the wrong parser — and Hevy's reader makes nonsense of a printed workout rather than
+                // failing, which is the worst kind of wrong. A file that yields Alphaprog sessions IS one.
                 let text = String(data: data, encoding: .utf8) ?? ""
                 let alphaprog = text.isEmpty ? nil : AlphaprogImporter.parse(text)
+                let useAlphaprog = forceAlphaprog || !(alphaprog?.workouts.isEmpty ?? true)
+
                 let result: LiftingImportResult
                 var unattributed: [String] = []
-                if let alphaprog, !alphaprog.workouts.isEmpty {
-                    let sessions = AlphaprogImporter.toSessions(alphaprog)
-                    unattributed = alphaprog.unattributed
+                if useAlphaprog {
+                    let parsed = alphaprog ?? AlphaprogImporter.Parsed(workouts: [], unattributed: [])
+                    let sessions = AlphaprogImporter.toSessions(parsed)
+                    unattributed = parsed.unattributed
                     result = LiftingImportResult(
                         sessions: sessions,
                         skipped: 0,
@@ -469,7 +489,9 @@ struct DataSourcesView: View {
                     result = LiftingImporter.parse(data: data)
                 }
                 guard result.sessionCount > 0 else {
-                    liftingSummary = String(localized: "No workouts found. Point at a Hevy CSV, a Liftosaur JSON or an Alphaprog CSV export.")
+                    liftingSummary = forceAlphaprog
+                        ? String(localized: "No sessions found — point at an Alphaprog CSV export.")
+                        : String(localized: "No workouts found. Point at a Hevy CSV, a Liftosaur JSON or an Alphaprog CSV export.")
                     liftingFailed = true
                     logImport("Lifting log: no workouts found (\(result.skipped) skipped)")
                     liftingImporting = false
@@ -827,6 +849,9 @@ struct DataSourcesView: View {
                 // Hevy exports .csv, Liftosaur exports .json — accept both (plus plain text, since some
                 // share sheets type a .csv as text/plain). The importer sniffs the actual format.
                 return [.commaSeparatedText, .json, .plainText]
+            case .alphaprog:
+                // A semicolon-separated .csv, which some share sheets type as plain text.
+                return [.commaSeparatedText, .plainText]
             case .activityFile:
                 // GPX/TCX are XML; FIT is binary. None have a system UTType, so build them by extension
                 // (falling back to .xml/.data) and add .data so an untyped share-sheet file is selectable.

@@ -133,7 +133,12 @@ final class HealthKitBridge: ObservableObject {
         // its own narrow type; Health Connect has no caffeine-only scope (caffeine is a field on
         // NutritionRecord, behind READ_NUTRITION — the whole food log), which is why Android is not
         // matched here. Never written back.
-        .dietaryCaffeine
+        .dietaryCaffeine,
+        // Macros — READ-ONLY (#nutrition). A food diary kept in ANY app that writes to Health lands on
+        // the Today nutrition tile without being typed in twice. Banked under their own source, not
+        // apple-health, because the nutrition lane is what consumes them. Never written back: NOOP is
+        // not a food diary and must not appear in Health as one.
+        .dietaryEnergyConsumed, .dietaryProtein, .dietaryCarbohydrates, .dietaryFatTotal
     ]
     private static let quantityWriteIds: [HKQuantityTypeIdentifier] = [
         .restingHeartRate, .heartRateVariabilitySDNN, .oxygenSaturation, .respiratoryRate
@@ -1466,6 +1471,116 @@ final class HealthKitBridge: ObservableObject {
                     // logged list as new rows and rebuild it. HealthKit sample uuids are stable.
                     return CaffeineIntake(id: s.uuid, at: s.startDate, mg: mg,
                                           externalId: s.uuid.uuidString)
+                }
+                cont.resume(returning: out)
+            }
+            store.execute(q)
+        }
+    }
+
+    // MARK: - Today's macros
+    //
+    // WHY A LIVE READ AND NOT AN IMPORT. A food diary is filled in across the day — breakfast at eight,
+    // dinner at nine — so a figure frozen at import time is wrong by lunchtime. This is one read of
+    // today, called on every refresh of the screen that shows it. Twin of the Android
+    // `HealthConnectImporter.refreshTodayMacros`, banking the same keys under the same shape.
+    //
+    // ONE LOG WINS THE DAY. Two apps that both mirror the same meals would otherwise double every macro,
+    // so the sources are summed SEPARATELY and the one with the most food in it is taken WHOLE — not
+    // field by field, which would let the protein come from one diary and the carbohydrate from another
+    // and describe a meal nobody ate. A partial mirror is missing entries, never carrying extra ones,
+    // so the fullest single log is the one nearest to what was actually eaten.
+    //
+    // IT NEVER WRITES A ZERO. "You ate nothing" and "your diary has not been opened yet" are different
+    // statements, and only the second one is ever true here.
+
+    /// One day's macros, all four independently absent-able.
+    struct Macros: Equatable, Sendable {
+        var kcal: Double?
+        var proteinG: Double?
+        var carbsG: Double?
+        var fatG: Double?
+
+        var isEmpty: Bool { kcal == nil && proteinG == nil && carbsG == nil && fatG == nil }
+        /// How much food the log describes, for picking between two of them. Grams only: a kcal figure
+        /// is an order of magnitude larger and would decide the comparison on its own.
+        var massG: Double { (proteinG ?? 0) + (carbsG ?? 0) + (fatG ?? 0) }
+    }
+
+    /// The source id today's macros are banked under.
+    static let nutritionSourceId = "apple-health-nutrition"
+
+    /// Read today's macros from HealthKit and bank them. Nil when there is nothing to show.
+    @discardableResult
+    func refreshTodayMacros() async -> Macros? {
+        guard HKHealthStore.isHealthDataAvailable() else { return nil }
+        let calendar = Calendar.current
+        let startOfDay = calendar.startOfDay(for: Date())
+        let dayKey = Repository.localDayKey(Date())
+
+        var bySource: [String: Macros] = [:]
+        func add(_ id: HKQuantityTypeIdentifier, unit: HKUnit, into field: WritableKeyPath<Macros, Double?>) async {
+            for (source, value) in await macroSums(id, unit: unit, start: startOfDay, end: Date()) {
+                var m = bySource[source] ?? Macros()
+                // Summed, keeping "absent" distinct from zero: a source with no protein adds nothing.
+                m[keyPath: field] = (m[keyPath: field] ?? 0) + value
+                bySource[source] = m
+            }
+        }
+        await add(.dietaryEnergyConsumed, unit: .kilocalorie(), into: \.kcal)
+        await add(.dietaryProtein, unit: .gram(), into: \.proteinG)
+        await add(.dietaryCarbohydrates, unit: .gram(), into: \.carbsG)
+        await add(.dietaryFatTotal, unit: .gram(), into: \.fatG)
+
+        guard let winner = Self.pickMacroLog(bySource) else { return nil }
+
+        var points: [MetricPoint] = []
+        if let v = winner.kcal { points.append(MetricPoint(day: dayKey, key: NutritionCsvImport.Keys.caloriesIn, value: v)) }
+        if let v = winner.proteinG { points.append(MetricPoint(day: dayKey, key: NutritionCsvImport.Keys.proteinG, value: v)) }
+        if let v = winner.carbsG { points.append(MetricPoint(day: dayKey, key: NutritionCsvImport.Keys.carbsG, value: v)) }
+        if let v = winner.fatG { points.append(MetricPoint(day: dayKey, key: NutritionCsvImport.Keys.fatG, value: v)) }
+        guard !points.isEmpty else { return nil }
+
+        if let store = await repo.storeHandle() {
+            // The figures are still good even when the write fails — the caller can show them, and the
+            // next refresh tries again.
+            try? await store.upsertDevice(id: Self.nutritionSourceId, mac: nil, name: "Apple Health nutrition")
+            _ = try? await store.upsertMetricSeries(points, deviceId: Self.nutritionSourceId)
+        }
+        return winner
+    }
+
+    /// Choose one app's day out of everything that logged food today. See the note above.
+    ///
+    /// Ties break on nothing in particular, because a tie means the two logs agree.
+    static func pickMacroLog(_ bySource: [String: Macros]) -> Macros? {
+        bySource.values.filter { !$0.isEmpty }.max { $0.massG < $1.massG }
+    }
+
+    /// Today's total of one dietary type, PER SOURCE APP.
+    ///
+    /// Grouped by source rather than summed outright, because the double-counting this guards against is
+    /// two apps mirroring the same meals — which a single total cannot see.
+    private func macroSums(_ id: HKQuantityTypeIdentifier, unit: HKUnit,
+                           start: Date, end: Date) async -> [String: Double] {
+        guard let type = HKQuantityType.quantityType(forIdentifier: id) else { return [:] }
+        let predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            HKQuery.predicateForSamples(withStart: start, end: end, options: .strictStartDate),
+            // NOOP's own writes can never come back as an import. It writes no food today, but the guard
+            // costs nothing and keeps the rule uniform across every read in this file.
+            Self.notNoopAuthored,
+        ])
+        return await withCheckedContinuation { (cont: CheckedContinuation<[String: Double], Never>) in
+            let q = HKSampleQuery(sampleType: type, predicate: predicate,
+                                  limit: HKObjectQueryNoLimit, sortDescriptors: nil) { _, samples, error in
+                guard error == nil, let samples = samples as? [HKQuantitySample] else {
+                    cont.resume(returning: [:]); return
+                }
+                var out: [String: Double] = [:]
+                for s in samples {
+                    let v = s.quantity.doubleValue(for: unit)
+                    guard v.isFinite, v > 0 else { continue }
+                    out[s.sourceRevision.source.bundleIdentifier, default: 0] += v
                 }
                 cont.resume(returning: out)
             }

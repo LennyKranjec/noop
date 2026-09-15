@@ -271,28 +271,28 @@ struct TrendsView: View {
                 VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                     // The main card list ripples in once on appear (Reduce-Motion safe).
                     Group {
+                        // MUSCLE LOAD FIRST. It is the card this tab is opened for on a lifting week,
+                        // and it was sitting below four charts and a training-load panel — far enough
+                        // down that the wearer had to go looking for the thing they came to see.
+                        MuscleModelCardView()
+                            .staggeredAppear(index: 0)
                         // Week-in-review digest (#208) with prev/next week browsing (#710) — self-hides
                         // only when NO week in history has data. Past weeks render in the same format.
                         weeklyDigestNav
-                            .staggeredAppear(index: 0)
+                            .staggeredAppear(index: 1)
                         // The Charge / Effort / Rest trio, presented in NOOP's pip language.
                         weekInReview(charge: recovery, effort: strain, rest: rest)
-                            .staggeredAppear(index: 1)
-                        rangeBar(recovery: recovery)
                             .staggeredAppear(index: 2)
-                        heroRecovery(recovery: recovery)
+                        rangeBar(recovery: recovery)
                             .staggeredAppear(index: 3)
-                        smallMultiples(hrv: hrv, rhr: rhr, strain: strain)
+                        heroRecovery(recovery: recovery)
                             .staggeredAppear(index: 4)
+                        smallMultiples(hrv: hrv, rhr: rhr, strain: strain)
+                            .staggeredAppear(index: 5)
                         // Long-horizon training load (CTL/ATL/TSB). Uses the FULL history, not the
                         // range window — chronic load is inherently a 42-day horizon. Self-hides its
                         // chart behind an honest "needs N more days" state until enough history exists.
                         TrainingLoadCard(days: repo.days)
-                            .staggeredAppear(index: 5)
-                        // Where the lifting volume went, by muscle group. Reads the banked per-muscle
-                        // totals the lifting import writes; with no log imported the body sits unlit and
-                        // the card says so rather than shading it from strain.
-                        MuscleModelCardView()
                             .staggeredAppear(index: 6)
                         yearStrip
                             .staggeredAppear(index: 7)

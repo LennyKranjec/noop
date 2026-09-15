@@ -394,11 +394,16 @@ struct LiquidTodayView: View {
                         // section that used to be its card renders nothing. It is KEPT rather than
                         // deleted so a layout arranged on either platform round-trips unchanged.
                         case .dailyMission: EmptyView()
-                        // On this platform the intraday stress read lives on the Focus tab and the water
-                        // tile is one of the Your Cards, so both sections keep their slot in the saved
-                        // order without drawing a second copy of a surface that already exists.
+                        // The intraday stress read lives on the Focus tab on this platform, so its
+                        // section keeps its slot in the saved order without drawing a second copy of a
+                        // surface that already exists.
                         case .stressEnergy: EmptyView()
-                        case .hydrationNutrition: EmptyView()
+                        // The macros. Water is one of the Your Cards here rather than a second tile, so
+                        // this section carries the half that had no home.
+                        case .hydrationNutrition:
+                            if selectedDayOffset == 0 {
+                                NutritionTileView(refreshKey: repo.nutritionSeq)
+                            }
                         case .yourCards: yourCardsSection
                         case .menstrualCycle:
                             if selectedDayOffset == 0 { MenstrualCycleHomeCard() }

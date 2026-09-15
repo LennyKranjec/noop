@@ -64,7 +64,10 @@ struct CoachView: View {
     private var suggestions: [String] { coach.suggestions }
 
     var body: some View {
-        ScreenScaffold(title: "Coach",
+        // THE SYSTEM, not "Coach". The wearer renamed it: the tab, the chat sender and this heading all
+        // say the same word now, and a screen titled Coach under a tab labelled System reads as two
+        // different features.
+        ScreenScaffold(title: "System",
                        subtitle: "Ask about your charge, effort, rest and workouts, grounded in your own numbers.",
                        // Liquid finish: the same full-bleed day-of-sky backdrop Today + the other liquid
                        // tabs carry, so Coach sits in one atmosphere. Static + non-interactive; the frosted

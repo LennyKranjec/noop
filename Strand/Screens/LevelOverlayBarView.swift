@@ -47,9 +47,6 @@ struct LevelOverlayBarView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            StrandPalette.surfaceBase
-                .frame(height: levelBarHeight)
-
             HStack(spacing: 0) {
                 trendCluster
                     .frame(maxWidth: .infinity, alignment: .leading)
@@ -59,7 +56,12 @@ struct LevelOverlayBarView: View {
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
             .padding(.horizontal, 16)
+            .frame(maxWidth: .infinity)
             .frame(height: levelBarHeight)
+            // THE FILL BLEEDS UP BEHIND THE STATUS BAR, the content does not. That split is the whole
+            // fix: the strip reads as part of the chrome with no seam above it, while the trend chips,
+            // the levers and the pentagon all start below the clock, the battery and the notch.
+            .background(StrandPalette.surfaceBase.ignoresSafeArea(edges: .top))
 
             LevelRadarView(
                 breakdown: breakdown,

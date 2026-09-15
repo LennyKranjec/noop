@@ -206,6 +206,13 @@ final class Repository: ObservableObject {
     @Published private(set) var hydrationSeq = 0
     func noteHydrationChanged() { hydrationSeq += 1 }
 
+    /// Bumped when a platform health read tops up today's macros, so the Today nutrition tile re-reads.
+    ///
+    /// Its own counter for the same reason the cloud has one: the read writes straight through the store
+    /// handle and never goes through the strap refresh.
+    @Published private(set) var nutritionSeq = 0
+    func noteNutritionChanged() { nutritionSeq += 1 }
+
     /// Bumped whenever a WHOOP cloud sync lands rows. The Today hero re-reads its cloud day on this.
     ///
     /// Its OWN counter rather than `refreshSeq`: a cloud sync writes straight to the store through the

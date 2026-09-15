@@ -28,6 +28,8 @@ struct RootTabView: View {
     @EnvironmentObject private var homeScreenQuickActions: HomeScreenQuickActionSceneDelegate
     /// The coach, for the tab glyph's working state.
     @EnvironmentObject private var coach: AICoachEngine
+    /// The health store, for today's macros.
+    @EnvironmentObject private var health: HealthKitBridge
 
     /// The level strip's own data. Owned by the shell because the strip rides above every tab.
     @StateObject private var levelBar = LevelBarModel()
@@ -162,15 +164,24 @@ struct RootTabView: View {
             moreTab(path: $tabPaths[4], scrollSignal: scrollTop[4]).tag(4)
         }
         .tint(StrandPalette.accent)
+        // THE STRIP'S OWN ROOM, taken out of every tab's safe area so no screen's content starts
+        // underneath it. Without this the bar floated over the top of whatever was scrolled below.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            Color.clear.frame(height: levelBarHeight)
+        }
         // THE LEVEL STRIP, over every tab. An overlay rather than a toolbar: the radar hangs a third of
         // its own height past the bar's bottom edge, and a toolbar clips its content.
+        //
+        // IT DOES NOT IGNORE THE SAFE AREA. It used to, which put the whole strip UNDER the status bar:
+        // the clock sat on the trend chips, the battery sat on the levers, and the notch cut the top off
+        // the pentagon. The strip's own FILL still bleeds up behind the status bar (see the background
+        // inside the view) so there is no seam; only the content is inset.
         .overlay(alignment: .top) {
             LevelOverlayBarView(
                 trend: levelBar.trend,
                 countUpKey: levelCountUpKey,
                 onOpenTimeline: { showLevelTimeline = true }
             )
-            .ignoresSafeArea(edges: .top)
             .allowsHitTesting(true)
         }
         .task(id: repo.refreshSeq) {
@@ -217,6 +228,10 @@ struct RootTabView: View {
                                  including: tabPaths[selectedTab].isEmpty ? .all : .subviews)
         .task {
             await repo.refresh()
+            // TODAY'S MACROS, from whichever app the wearer keeps their food diary in. A live read
+            // rather than an import: a diary is filled in across the day, so a figure banked once is
+            // wrong by lunchtime. iOS-only, which is why it is here and not in the shared Today.
+            if await health.refreshTodayMacros() != nil { repo.noteNutritionChanged() }
             // Backup & Sync: on-launch catch-up (see RootView). Detached + utility priority so a
             // 100MB+ whole-DB ZIP never blocks startup; gated on the auto toggle (default OFF). (Must-fix #4.)
             let backupRepo = repo
