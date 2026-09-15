@@ -1535,10 +1535,10 @@ final class HealthKitBridge: ObservableObject {
         guard let winner = Self.pickMacroLog(bySource) else { return nil }
 
         var points: [MetricPoint] = []
-        if let v = winner.kcal { points.append(MetricPoint(day: dayKey, key: NutritionCsvImport.Keys.caloriesIn, value: v)) }
-        if let v = winner.proteinG { points.append(MetricPoint(day: dayKey, key: NutritionCsvImport.Keys.proteinG, value: v)) }
-        if let v = winner.carbsG { points.append(MetricPoint(day: dayKey, key: NutritionCsvImport.Keys.carbsG, value: v)) }
-        if let v = winner.fatG { points.append(MetricPoint(day: dayKey, key: NutritionCsvImport.Keys.fatG, value: v)) }
+        if let v = winner.kcal { points.append(MetricPoint(day: dayKey, key: NutritionCsvImporter.Keys.caloriesIn, value: v)) }
+        if let v = winner.proteinG { points.append(MetricPoint(day: dayKey, key: NutritionCsvImporter.Keys.proteinG, value: v)) }
+        if let v = winner.carbsG { points.append(MetricPoint(day: dayKey, key: NutritionCsvImporter.Keys.carbsG, value: v)) }
+        if let v = winner.fatG { points.append(MetricPoint(day: dayKey, key: NutritionCsvImporter.Keys.fatG, value: v)) }
         guard !points.isEmpty else { return nil }
 
         if let store = await repo.storeHandle() {

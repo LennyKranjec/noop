@@ -7,6 +7,10 @@ enum AIProvider: String, CaseIterable, Identifiable {
     case openAI
     case anthropic
     case gemini
+    /// Groq's OpenAI-compatible endpoint. Its own case rather than a preset of `custom`, because a
+    /// provider the app knows can carry its own model list, its own key-format check and its own row in
+    /// the picker — and because "Custom" is where a wearer's OWN server goes, which this is not.
+    case groq
     case custom
 
     var id: String { rawValue }
@@ -16,6 +20,7 @@ enum AIProvider: String, CaseIterable, Identifiable {
         case .openAI:    return "OpenAI"
         case .anthropic: return "Anthropic"
         case .gemini:    return "Google Gemini"
+        case .groq:      return "Groq"
         case .custom:    return "Custom (OpenAI-compatible)"
         }
     }
@@ -25,6 +30,9 @@ enum AIProvider: String, CaseIterable, Identifiable {
         case .openAI:    return "gpt-4o-mini"
         case .anthropic: return "claude-sonnet-4-6"
         case .gemini:    return "gemini-flash-latest"   // stable alias → current Flash, no version churn (#400)
+        // The 20B, not the 120B. Both are offered; the smaller one answers in a fraction of the time and
+        // is the right default for a coach that is asked short questions about a day's numbers.
+        case .groq:      return "openai/gpt-oss-20b"
         case .custom:    return ""   // the user picks the model their server serves
         }
     }
@@ -54,6 +62,15 @@ enum AIProvider: String, CaseIterable, Identifiable {
                 "gemini-flash-latest",
                 "gemini-flash-lite-latest"
             ]
+        case .groq:
+            // The two open-weight models the wearer asked for, then the Llama line Groq is fastest at.
+            // `refreshModels()` merges the live catalogue, so anything new appears without a code bump.
+            return [
+                "openai/gpt-oss-20b",
+                "openai/gpt-oss-120b",
+                "llama-3.3-70b-versatile",
+                "llama-3.1-8b-instant",
+            ]
         case .custom:
             return []   // populated from the server's /models (refreshModels) or typed in
         }
@@ -64,6 +81,7 @@ enum AIProvider: String, CaseIterable, Identifiable {
         case .openAI:    return URL(string: "https://api.openai.com/v1/chat/completions")!
         case .anthropic: return URL(string: "https://api.anthropic.com/v1/messages")!
         case .gemini:    return URL(string: "https://generativelanguage.googleapis.com/v1beta/models")!
+        case .groq:      return URL(string: "https://api.groq.com/openai/v1/chat/completions")!
         case .custom:    return AIProvider.customURL(path: "/chat/completions")
         }
     }
@@ -73,6 +91,7 @@ enum AIProvider: String, CaseIterable, Identifiable {
         case .openAI:    return URL(string: "https://api.openai.com/v1/models")!
         case .anthropic: return URL(string: "https://api.anthropic.com/v1/models")!
         case .gemini:    return URL(string: "https://generativelanguage.googleapis.com/v1beta/models")!
+        case .groq:      return URL(string: "https://api.groq.com/openai/v1/models")!
         case .custom:    return AIProvider.customURL(path: "/models")
         }
     }
@@ -82,6 +101,7 @@ enum AIProvider: String, CaseIterable, Identifiable {
         case .openAI:    return OpenAIClient()
         case .anthropic: return AnthropicClient()
         case .gemini:    return GeminiClient()
+        case .groq:      return OpenAIClient(provider: .groq)
         case .custom:    return CustomClient()
         }
     }

@@ -3,6 +3,13 @@ import StrandAnalytics
 
 struct OpenAIClient: AIProviderClient {
 
+    /// Which OpenAI-format endpoint this instance talks to.
+    ///
+    /// Groq serves the same `/chat/completions` wire format under its own host, so it shares this client
+    /// rather than getting a copy of it — one place to fix when the format moves, and no chance of the
+    /// two drifting into subtly different request bodies.
+    var provider: AIProvider = .openAI
+
     func send(
         key: String,
         model: String,
@@ -45,7 +52,7 @@ struct OpenAIClient: AIProviderClient {
         body["temperature"] = 0.6
         body["max_tokens"] = 4096
 
-        var req = URLRequest(url: AIProvider.openAI.endpoint)
+        var req = URLRequest(url: provider.endpoint)
         req.httpMethod = "POST"
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -95,7 +102,7 @@ struct OpenAIClient: AIProviderClient {
             body["max_tokens"] = 4096
         }
 
-        var req = URLRequest(url: AIProvider.openAI.endpoint)
+        var req = URLRequest(url: provider.endpoint)
         req.httpMethod = "POST"
         req.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")

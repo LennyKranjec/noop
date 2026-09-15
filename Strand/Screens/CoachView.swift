@@ -48,6 +48,8 @@ struct CoachView: View {
     @State private var briefStatus: String?
     /// K2: confirmation gate for the destructive "Clear conversation" toolbar action.
     @State private var showClearConfirm = false
+    /// The ⋯ sheet holding consent, instructions, the brief and the connection.
+    @State private var showCoachMenu = false
 
     // K4: on-device voice input for the composer (iOS only). macOS gets a no-op stub via
     // `#if os(iOS)` guards — the shared file keeps compiling for both targets.
@@ -63,53 +65,39 @@ struct CoachView: View {
     /// on each body evaluation so a fresh sync immediately updates the chips.
     private var suggestions: [String] { coach.suggestions }
 
+    // MARK: - The screen
+    //
+    // THE CHAT IS THE WHOLE SCREEN, which is the Android lane's arrangement and the reason this no longer
+    // goes through `ScreenScaffold`. That scaffold puts its content in a vertical scroll, which hands
+    // children an unbounded height — and a docked composer needs the opposite: a known viewport to sit at
+    // the bottom of. So the chat lays itself out, and the transcript is weighted against the input row.
+    //
+    // THE HEADER AND THE COMPOSER FLOAT. Stacked in a column the header was a solid block the
+    // conversation stopped underneath; as overlays the transcript runs the full height of the screen and
+    // scrolls BEHIND both, which is what makes this feel like a conversation rather than a panel between
+    // two bars. The transcript pads itself by exactly what each overlay takes, so nothing is permanently
+    // hidden — it can all be scrolled clear.
+    //
+    // EVERYTHING ELSE MOVED INTO A SHEET. Consent, the editable instructions, the morning brief, the
+    // provider and the model were five bars stacked above the transcript, re-explaining the screen on
+    // every visit and taking the room the conversation wanted. They are one ⋯ button now.
+    //
+    // THE UNCONFIGURED STATE KEEPS THE SCAFFOLD. Setup is a form, a form wants a scroll, and there is no
+    // conversation to give the screen to yet.
+
     var body: some View {
-        // THE SYSTEM, not "Coach". The wearer renamed it: the tab, the chat sender and this heading all
-        // say the same word now, and a screen titled Coach under a tab labelled System reads as two
-        // different features.
-        ScreenScaffold(title: "System",
-                       subtitle: "Ask about your charge, effort, rest and workouts, grounded in your own numbers.",
-                       // Liquid finish: the same full-bleed day-of-sky backdrop Today + the other liquid
-                       // tabs carry, so Coach sits in one atmosphere. Static + non-interactive; the frosted
-                       // message/setup cards below sit on the opaque canvas and stay legible.
-                       topBackground: liquidScaffoldSky()) {
+        Group {
             if coach.isConfigured {
-                connectedHeader
-                consentBar
-                // v5: a SECOND opt-in, only meaningful once data access is on, folds a summary of the
-                // new on-device signals (your strongest patterns + Lab Book) into the coach context.
-                if coach.dataConsent { onDeviceSignalsBar }
-                if coach.dataConsent && coach.provider == .gemini { multimodalChartBar }
-                systemPromptBar
-                morningBriefBar
-                transcript
-                if let error = coach.errorText, !error.isEmpty {
-                    errorBanner(error)
-                    // A rejected key is the one failure the wearer can act on from here, and the
-                    // message already tells them to: "Check the key and the provider you selected".
-                    // Until this, the screen offered nowhere to check it. Rendered INSIDE the error
-                    // branch, never on its own flag, so it cannot outlive the message justifying it.
-                    if coach.keyRejected { keyRepairPanel }
-                }
-                // K7: show follow-up chips after each assistant reply (when the transcript is
-                // non-empty and the last message is from the assistant and not mid-send);
-                // otherwise show the initial contextual chips.
-                if showFollowUpChips {
-                    followUpChips
-                } else {
-                    suggestionChips
-                }
-                composer
-                // K12: show a rough token estimate when the draft is non-empty.
-                if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                   let tokens = coach.estimatedTokens(forDraft: draft) {
-                    tokenEstimateBar(tokens)
-                }
-                privacyFootnote
+                chatScreen
             } else {
-                setupCard
+                ScreenScaffold(title: "System",
+                               subtitle: "Ask about your charge, effort, rest and workouts, grounded in your own numbers.",
+                               topBackground: liquidScaffoldSky()) {
+                    setupCard
+                }
             }
         }
+        .sheet(isPresented: $showCoachMenu) { coachMenuSheet }
         // macOS only. On iOS these two live in `connectionMenu` instead, because this bar is hidden for
         // a primary tab root and VISIBLE in the pillar sheet, so leaving them here would render nothing
         // on the Coach tab and a duplicate of the menu in the sheet. One control per platform, reachable
@@ -700,8 +688,130 @@ struct CoachView: View {
     }
     #endif
 
+    /// What the floating title row takes: the 34pt buttons plus the padding around them. The transcript
+    /// insets by exactly this, so the first bubble starts clear of the title instead of under it.
+    private var coachTitleOverlayHeight: CGFloat { 34 + 8 + 18 }
+
+    /// The full-screen chat: transcript underneath, title row and composer floating over it.
+    private var chatScreen: some View {
+        ZStack(alignment: .top) {
+            StrandPalette.surfaceBase.ignoresSafeArea()
+
+            transcript
+                // The room the two overlays take, so the first and last bubble can still be scrolled
+                // clear of them rather than sitting permanently underneath.
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    Color.clear.frame(height: coachTitleOverlayHeight)
+                }
+                .safeAreaInset(edge: .bottom, spacing: 0) { composerDock }
+
+            titleOverlay
+        }
+    }
+
+    /// Title and the two header buttons, over a fade so text scrolling under it does not collide.
+    private var titleOverlay: some View {
+        HStack(alignment: .top) {
+            // Title only. A subtitle explains the screen to somebody who has already opened it, on
+            // every visit, and takes a line the conversation wants.
+            Text("System")
+                .font(StrandFont.title1)
+                .foregroundStyle(StrandPalette.textPrimary)
+            Spacer(minLength: 8)
+            Button { showCoachMenu = true } label: {
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .frame(width: 34, height: 34)
+                    .background(StrandPalette.surfaceInset, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("System settings")
+            Button {
+                showClearConfirm = true
+            } label: {
+                Image(systemName: "square.and.pencil")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .frame(width: 34, height: 34)
+                    .background(StrandPalette.surfaceInset, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("New chat")
+        }
+        .padding(.horizontal, 20)
+        .padding(.top, 8)
+        .padding(.bottom, 18)
+        .background(
+            LinearGradient(
+                colors: [StrandPalette.surfaceBase,
+                         StrandPalette.surfaceBase.opacity(0.92),
+                         StrandPalette.surfaceBase.opacity(0)],
+                startPoint: .top, endPoint: .bottom)
+        )
+    }
+
+    /// The composer, the chips above it, and the things that only appear when they have something to say.
+    private var composerDock: some View {
+        VStack(spacing: 8) {
+            if let error = coach.errorText, !error.isEmpty {
+                errorBanner(error)
+                // A rejected key is the one failure the wearer can act on from here. Rendered INSIDE the
+                // error branch, never on its own flag, so it cannot outlive the message justifying it.
+                if coach.keyRejected { keyRepairPanel }
+            }
+            // K7: follow-ups after a reply, the opening chips before one.
+            if showFollowUpChips { followUpChips } else { suggestionChips }
+            composer
+            if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+               let tokens = coach.estimatedTokens(forDraft: draft) {
+                tokenEstimateBar(tokens)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 8)
+        .padding(.bottom, 6)
+        .background(
+            LinearGradient(
+                colors: [StrandPalette.surfaceBase.opacity(0),
+                         StrandPalette.surfaceBase.opacity(0.92),
+                         StrandPalette.surfaceBase],
+                startPoint: .top, endPoint: .bottom)
+        )
+    }
+
+    /// Everything that used to sit above the transcript. One sheet, opened from the header, so the chat
+    /// screen is a chat screen.
+    private var coachMenuSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
+                    connectedHeader
+                    consentBar
+                    // v5: a SECOND opt-in, only meaningful once data access is on.
+                    if coach.dataConsent { onDeviceSignalsBar }
+                    if coach.dataConsent && coach.provider == .gemini { multimodalChartBar }
+                    systemPromptBar
+                    morningBriefBar
+                    privacyFootnote
+                }
+                .padding(16)
+            }
+            .background(StrandPalette.surfaceBase)
+            .navigationTitle("System settings")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { showCoachMenu = false }
+                }
+            }
+        }
+    }
+
     private var transcript: some View {
-        StrandCard(padding: 16) {
+        Group {
             if coach.messages.isEmpty {
                 emptyTranscript
             } else {
@@ -728,7 +838,9 @@ struct CoachView: View {
                     #if os(iOS)
                     .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
                     #endif
-                    .frame(minHeight: 220, maxHeight: 460)
+                    // NO HEIGHT CAP any more. The transcript IS the screen now; capping it at 460 was
+                    // right when it was one card in a scrolling column and is wrong when it owns the
+                    // viewport — it would leave a band of empty canvas under a long conversation.
                     .onChangeCompat(of: coach.messages.count) { _ in
                         scrollToEnd(proxy)
                     }

@@ -91,17 +91,17 @@ struct NutritionTileView: View {
         func newest(_ key: String) async -> Double? {
             let today = Repository.localDayKey(Date())
             var best: Double?
-            for source in [HealthKitNutritionSourceId, NutritionCsvImport.sourceId] {
+            for source in [HealthKitNutritionSourceId, NutritionCsvImporter.sourceId] {
                 let rows = await repo.series(key: key, source: source, days: 2)
                 if let v = rows.last(where: { $0.day == today })?.value { best = v }
             }
             return best
         }
         macros = DayMacros(
-            kcal: await newest(NutritionCsvImport.Keys.caloriesIn),
-            proteinG: await newest(NutritionCsvImport.Keys.proteinG),
-            carbsG: await newest(NutritionCsvImport.Keys.carbsG),
-            fatG: await newest(NutritionCsvImport.Keys.fatG))
+            kcal: await newest(NutritionCsvImporter.Keys.caloriesIn),
+            proteinG: await newest(NutritionCsvImporter.Keys.proteinG),
+            carbsG: await newest(NutritionCsvImporter.Keys.carbsG),
+            fatG: await newest(NutritionCsvImporter.Keys.fatG))
         loaded = true
     }
 }
