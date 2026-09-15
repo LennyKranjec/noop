@@ -27,6 +27,14 @@ struct RootTabView: View {
     /// The scene-local receiver for actions chosen from NOOP's Home Screen icon menu.
     @EnvironmentObject private var homeScreenQuickActions: HomeScreenQuickActionSceneDelegate
 
+    /// The level strip's own data. Owned by the shell because the strip rides above every tab.
+    @StateObject private var levelBar = LevelBarModel()
+    /// Presents the level timeline the radar opens.
+    @State private var showLevelTimeline = false
+    /// Remembered for the LIFE OF THE SHELL, so the count-up runs once on opening rather than every
+    /// time a tab is switched — keyed on anything recomposition touches, the header would re-spin.
+    @State private var levelCountUpKey = Int(Date().timeIntervalSince1970)
+
     /// Which quick-action screen the centre FAB is presenting (nil = sheet closed).
     @State private var quickAction: QuickAction?
     /// Presents the Devices manager (pair / switch bands) when a screen asks the shell to open it.
@@ -126,6 +134,23 @@ struct RootTabView: View {
             moreTab(path: $tabPaths[4], scrollSignal: scrollTop[4]).tag(4)
         }
         .tint(StrandPalette.accent)
+        // THE LEVEL STRIP, over every tab. An overlay rather than a toolbar: the radar hangs a third of
+        // its own height past the bar's bottom edge, and a toolbar clips its content.
+        .overlay(alignment: .top) {
+            LevelOverlayBarView(
+                trend: levelBar.trend,
+                countUpKey: levelCountUpKey,
+                onOpenTimeline: { showLevelTimeline = true }
+            )
+            .ignoresSafeArea(edges: .top)
+            .allowsHitTesting(true)
+        }
+        .task(id: repo.refreshSeq) {
+            await levelBar.refresh(repo: repo, tick: repo.refreshSeq)
+        }
+        .sheet(isPresented: $showLevelTimeline) {
+            LevelTimelineSheetView(model: levelBar, repo: repo)
+        }
         // #1841: the same "Hide bar when scrolling" preference Android drives its own bar with. Here the
         // system owns the behaviour — iOS 26's tab bar MINIMISES to a pill on scroll down rather than
         // sliding away entirely, so this is the platform's read of the same intent, not a copy of ours.

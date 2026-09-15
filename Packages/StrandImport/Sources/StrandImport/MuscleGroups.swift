@@ -37,6 +37,33 @@ public enum MuscleGroup: String, CaseIterable, Sendable, Equatable {
     case calves
 }
 
+public extension MuscleGroup {
+    /// The `metricSeries` key one group's daily volume load is banked under.
+    ///
+    /// SPELLED OUT, not derived from `rawValue`. The Android twin keys these on its enum name lowercased
+    /// (`UPPER_BACK` becomes `muscle_volume_upper_back`) while Swift's rawValue is `upperBack`; deriving
+    /// it here would write `muscle_volume_upperback` and the same wearer's data would sit under two
+    /// different keys depending on which platform imported it. The stored bytes are part of the parity
+    /// contract, so the mapping is explicit and checkable.
+    var volumeKey: String {
+        switch self {
+        case .chest: return "muscle_volume_chest"
+        case .upperBack: return "muscle_volume_upper_back"
+        case .lats: return "muscle_volume_lats"
+        case .shoulders: return "muscle_volume_shoulders"
+        case .biceps: return "muscle_volume_biceps"
+        case .triceps: return "muscle_volume_triceps"
+        case .forearms: return "muscle_volume_forearms"
+        case .abs: return "muscle_volume_abs"
+        case .lowerBack: return "muscle_volume_lower_back"
+        case .glutes: return "muscle_volume_glutes"
+        case .quadriceps: return "muscle_volume_quadriceps"
+        case .hamstrings: return "muscle_volume_hamstrings"
+        case .calves: return "muscle_volume_calves"
+        }
+    }
+}
+
 public enum MuscleAttribution {
 
     /// Normalise a logged exercise name for matching.
