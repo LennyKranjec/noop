@@ -881,6 +881,54 @@ final class AICoachEngine: ObservableObject {
         return clean.isEmpty ? nil : clean
     }
 
+    /// Generate ONE answer under a caller-supplied framing, without touching the visible transcript.
+    ///
+    /// The seam every headless generation in the app goes through: today's mission, the muscle-load
+    /// note, the level's daily remark. Each of those wants its own system prompt — a mission is not a
+    /// brief and a muscle note is not either — and none of them may appear in the chat, because the
+    /// wearer did not ask a question and a transcript that fills with things they never said is one
+    /// they stop reading.
+    ///
+    /// NON-STREAMING, and it never throws. These run in the background with nothing to stream into and
+    /// nothing to show an error to; nil means "not available right now", which every caller already has
+    /// to handle for the un-configured case anyway.
+    ///
+    /// `grounding` is the data block. It is passed in rather than read here so a caller that needs a
+    /// SPECIFIC grounding (the muscle note wants the muscle table, not the sleep summary) is not forced
+    /// to send the whole context and hope the model picks the right half out of it.
+    func generateOneShot(systemPrompt: String, question: String) async -> String? {
+        guard isConfigured, dataConsent, let key = resolvedKey else { return nil }
+        let reply = try? await provider.client.send(
+            key: key,
+            model: model,
+            systemPrompt: systemPrompt,
+            messages: [(role: ChatMessage.Role.user, content: question)],
+            session: session
+        )
+        let clean = reply?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return clean.isEmpty ? nil : clean
+    }
+
+    /// Today's mission, generating it if today has none. Nil when it cannot be written.
+    ///
+    /// READ-THEN-GENERATE, keyed on the local day: the mission is one per day, so a screen that appears
+    /// twice in an afternoon must not spend a round trip the second time. A mission written yesterday
+    /// is deliberately not returned — see `DailyMissionStore.today`.
+    @discardableResult
+    func ensureDailyMission() async -> DailyMission? {
+        if let existing = DailyMissionStore.today() { return existing }
+        guard isConfigured, dataConsent else { return nil }
+        let grounding = await buildFullContext()
+        let answer = await generateOneShot(
+            systemPrompt: DailyMissionWriter.systemPrompt(grounding: grounding),
+            question: DailyMissionWriter.question)
+        guard let answer,
+              let mission = DailyMissionWriter.parse(answer, dayKey: DailyMissionStore.dayKey())
+        else { return nil }
+        DailyMissionStore.write(mission)
+        return mission
+    }
+
     /// Full data context = the metrics summary + recent workouts (+ an OPT-IN on-device-signals summary
     /// when the second consent is on). Used when the user has granted data access.
     func buildFullContext() async -> String {

@@ -7,13 +7,14 @@ import WhoopStore
 /// twin `com.noop.analytics.StreaksTest`. Cross-platform parity is the contract; if you change a
 /// threshold or a counting rule here, change it there in the same PR.
 ///
-/// Two rules carry the whole file, and both are the kind that are easy to get wrong in a way nobody
-/// notices until a real user complains:
+/// WHAT MATTERS HERE IS THE GAP RULE. A day with no data neither breaks a streak nor extends it — the
+/// strap comes off, a sync fails, the phone dies. Counting a missing day as a failure punishes the
+/// wearer for the app's own gaps; counting it as a success invents a day nobody measured. Nearly every
+/// bug this file could have is a variation on getting that wrong, so most of these are about absence.
 ///
-///   * A DAY WITH NO DATA neither breaks nor extends. The strap comes off; that is the app's gap, not
-///     the user's failure, and it is also not a day that can be credited.
-///   * MIDNIGHT IS NOT A WALL. 23:50 and 00:10 are twenty minutes apart. Get that wrong and the
-///     regularity streak breaks nightly for exactly the people whose bedtime sits near midnight.
+/// The second thing is that TODAY IS NOT YET A FAILURE. A streak that reads zero every morning until
+/// the day is secured is a streak that feels broken all day, so an unsatisfied today is simply not
+/// counted, and `todaySecured` is what says whether it is banked.
 final class StreaksTests: XCTestCase {
 
     /// A fixed calendar and a fixed "today" so the counts cannot drift with the wall clock or the
@@ -35,24 +36,164 @@ final class StreaksTests: XCTestCase {
         return String(format: "%04d-%02d-%02d", c.year!, c.month!, c.day!)
     }
 
-    private func metric(
-        _ daysAgo: Int,
-        sleepMin: Double? = nil,
-        steps: Int? = nil,
-        strain: Double? = nil
-    ) -> DailyMetric {
+    private func day(_ daysAgo: Int, sleepMin: Double?) -> DailyMetric {
         DailyMetric(
             day: key(daysAgo),
             totalSleepMin: sleepMin, efficiency: nil, deepMin: nil, remMin: nil, lightMin: nil,
-            disturbances: nil, restingHr: nil, avgHrv: nil, recovery: nil, strain: strain,
-            exerciseCount: nil, steps: steps
+            disturbances: nil, restingHr: nil, avgHrv: nil, recovery: nil, strain: nil,
+            exerciseCount: nil, steps: nil
         )
     }
 
-    private func streak(_ kind: StreakKind, _ days: [DailyMetric], onsets: [String: Int] = [:]) -> Streak? {
-        Streaks.evaluate(days: days, onsetByDay: onsets, today: today, calendar: calendar)
-            .first { $0.kind == kind }
+    /// `n` days ending today, oldest first, every night the same length.
+    private func steady(_ n: Int, _ hours: Double) -> [DailyMetric] {
+        (0..<n).reversed().map { day($0, sleepMin: hours * 60) }
     }
+
+    private func of(_ streaks: [Streak], _ kind: StreakKind) -> Streak {
+        streaks.first { $0.kind == kind }!
+    }
+
+    // MARK: - what is offered at all
+
+    func testExactlyTheThreeRulesAreOfferedAndAlwaysInTheSameOrder() {
+        // The strip is three fixed columns and the wearer learns which flame is which by POSITION.
+        // Sorting by length — which the previous cut did — makes the row unreadable at a glance, which
+        // is the only way it is ever read.
+        let expected: [StreakKind] = [.sleepConsistency, .sleepDebt, .stressTime]
+        XCTAssertEqual(Streaks.evaluate(days: steady(30, 8), today: today, calendar: calendar).map(\.kind), expected)
+        XCTAssertEqual(Streaks.evaluate(days: steady(3, 4), today: today, calendar: calendar).map(\.kind), expected)
+    }
+
+    func testNoDaysAtAllOffersNothing() {
+        XCTAssertTrue(Streaks.evaluate(days: [], today: today, calendar: calendar).isEmpty)
+    }
+
+    // MARK: - sleep consistency > 80 %
+
+    func testSteadyNightsHoldTheConsistencyStreak() {
+        let s = of(Streaks.evaluate(days: steady(30, 8), today: today, calendar: calendar), .sleepConsistency)
+        XCTAssertGreaterThanOrEqual(s.days, 20, "a month of identical nights must be a streak")
+        XCTAssertTrue(s.todaySecured)
+    }
+
+    func testWildlyVaryingNightsHoldNothing() {
+        let erratic = (0..<30).reversed().map { back in
+            day(back, sleepMin: back % 2 == 0 ? 3 * 60 : 10 * 60)
+        }
+        let s = of(Streaks.evaluate(days: erratic, today: today, calendar: calendar), .sleepConsistency)
+        XCTAssertEqual(s.days, 0)
+        XCTAssertFalse(s.todaySecured)
+    }
+
+    func testTwoNightsAreNotAConsistencyReading() {
+        // Consistency over two nights is not a number, so those days are UNMEASURED rather than
+        // failures — the engine's floor is three. A streak awarded on two nights would be one nobody
+        // earned; a streak broken on two would punish somebody for having just installed the app.
+        let s = of(Streaks.evaluate(days: steady(2, 8), today: today, calendar: calendar), .sleepConsistency)
+        XCTAssertEqual(s.days, 0)
+        XCTAssertFalse(s.todaySecured)
+    }
+
+    // MARK: - sleep debt < 1h
+
+    func testSleepingTheNeedEveryNightKeepsTheDebtStreakLit() {
+        let s = of(
+            Streaks.evaluate(days: steady(20, Streaks.sleepNeedHours), today: today, calendar: calendar),
+            .sleepDebt
+        )
+        XCTAssertGreaterThanOrEqual(s.days, 15)
+        XCTAssertTrue(s.todaySecured)
+    }
+
+    func testAFortnightOfShortNightsBreaksTheDebtStreak() {
+        // Six hours against a seven-hour need is an hour a night: the balance passes the limit on the
+        // second night and never comes back.
+        let s = of(Streaks.evaluate(days: steady(20, 6), today: today, calendar: calendar), .sleepDebt)
+        XCTAssertEqual(s.days, 0)
+        XCTAssertFalse(s.todaySecured)
+    }
+
+    func testASurplusIsNotCredit() {
+        // Ten-hour nights do not bank hours against a future short one in any model worth quoting, so a
+        // net-positive balance reads as NO DEBT rather than as a buffer.
+        let s = of(Streaks.evaluate(days: steady(20, 10), today: today, calendar: calendar), .sleepDebt)
+        XCTAssertGreaterThanOrEqual(s.days, 15)
+    }
+
+    func testOneHalfHourShortfallIsInsideTheHour() {
+        var nights = steady(20, Streaks.sleepNeedHours)
+        nights[nights.count - 3] = day(2, sleepMin: (Streaks.sleepNeedHours - 0.5) * 60)
+        let s = of(Streaks.evaluate(days: nights, today: today, calendar: calendar), .sleepDebt)
+        XCTAssertGreaterThanOrEqual(s.days, 3, "a single half-hour shortfall is under the limit")
+    }
+
+    // MARK: - non-activity stress < 6h
+
+    func testCalmDaysHoldTheStressStreak() {
+        let days = steady(10, 8)
+        let stress = Dictionary(uniqueKeysWithValues: days.map { ($0.day, 60.0) })
+        let s = of(
+            Streaks.evaluate(days: days, stressMinutesByDay: stress, today: today, calendar: calendar),
+            .stressTime
+        )
+        XCTAssertEqual(s.days, 10)
+        XCTAssertTrue(s.todaySecured)
+    }
+
+    func testADayOverTheLimitBreaksIt() {
+        let days = steady(10, 8)
+        var stress = Dictionary(uniqueKeysWithValues: days.map { ($0.day, 60.0) })
+        stress[key(3)] = Streaks.stressLimitMin + 1
+        let s = of(
+            Streaks.evaluate(days: days, stressMinutesByDay: stress, today: today, calendar: calendar),
+            .stressTime
+        )
+        XCTAssertEqual(s.days, 3)
+    }
+
+    func testExactlyTheLimitIsOverIt() {
+        // The rule the wearer stated is "under six hours". Six hours is not under six hours, and a
+        // boundary that quietly rounds in the wearer's favour is a boundary that means nothing.
+        let days = steady(4, 8)
+        let stress = Dictionary(uniqueKeysWithValues: days.map { ($0.day, Streaks.stressLimitMin) })
+        let s = of(
+            Streaks.evaluate(days: days, stressMinutesByDay: stress, today: today, calendar: calendar),
+            .stressTime
+        )
+        XCTAssertEqual(s.days, 0)
+    }
+
+    func testDaysWithNoBankedStressNeitherBreakNorExtend() {
+        // THE GAP DOCTRINE, on the streak most exposed to it: the figure is only banked on days the
+        // stress read actually ran, so most history has no row at all. Those days must SPAN, not fail —
+        // otherwise the streak reads zero forever for a wearer who has simply not opened that screen.
+        let days = steady(10, 8)
+        let stress = [key(0): 30.0, key(9): 30.0]
+        let s = of(
+            Streaks.evaluate(days: days, stressMinutesByDay: stress, today: today, calendar: calendar),
+            .stressTime
+        )
+        XCTAssertEqual(s.days, 2, "both measured days count, the eight unmeasured ones span")
+        XCTAssertTrue(s.todaySecured)
+    }
+
+    // MARK: - today is not yet a failure
+
+    func testAnUnsecuredTodayDoesNotBreakYesterdaysStreak() {
+        let days = steady(6, 8)
+        var stress = Dictionary(uniqueKeysWithValues: days.map { ($0.day, 30.0) })
+        // Today has already blown the budget; the days before it stand.
+        stress[key(0)] = Streaks.stressLimitMin + 120
+        let s = of(
+            Streaks.evaluate(days: days, stressMinutesByDay: stress, today: today, calendar: calendar),
+            .stressTime
+        )
+        XCTAssertEqual(s.days, 5)
+        XCTAssertFalse(s.todaySecured, "today is not banked")
+    }
+
+    // MARK: - midnight
 
     func testMidnightIsNotAWall() {
         // 23:50 = 1430, 00:10 = 10. Twenty minutes apart, not 1,420.
@@ -61,92 +202,5 @@ final class StreaksTests: XCTestCase {
         XCTAssertEqual(Streaks.clockDistance(600, 600), 0, accuracy: 0.001)
         // The furthest two clock times can be is twelve hours.
         XCTAssertEqual(Streaks.clockDistance(0, 720), 720, accuracy: 0.001)
-    }
-
-    func testConsecutiveGoodNightsCount() {
-        let days = (0...4).map { metric($0, sleepMin: 8 * 60) }
-        let s = streak(.sleepDuration, days)
-        XCTAssertEqual(s?.days, 5)
-        XCTAssertEqual(s?.todaySecured, true)
-    }
-
-    func testAShortNightEndsIt() {
-        let days = [
-            metric(0, sleepMin: 8 * 60),
-            metric(1, sleepMin: 8 * 60),
-            metric(2, sleepMin: 5 * 60),   // the break
-            metric(3, sleepMin: 8 * 60),
-        ]
-        XCTAssertEqual(streak(.sleepDuration, days)?.days, 2)
-    }
-
-    func testADayWithNoDataIsSpannedRatherThanCountedEitherWay() {
-        let days = [
-            metric(0, sleepMin: 8 * 60),
-            metric(1),                      // strap was off: no reading at all
-            metric(2, sleepMin: 8 * 60),
-        ]
-        // Two measured nights, and the gap between them did not reset the count.
-        XCTAssertEqual(streak(.sleepDuration, days)?.days, 2)
-    }
-
-    func testTodayNotBeingDoneYetDoesNotReadAsABrokenStreak() {
-        // At 09:00 nobody has hit their step count. A streak that reads zero every morning is one that
-        // feels broken all day, so an unfinished today is excluded rather than failed.
-        let days = [
-            metric(0, steps: 200),
-            metric(1, steps: 9_000),
-            metric(2, steps: 9_000),
-        ]
-        let s = streak(.movement, days)
-        XCTAssertEqual(s?.days, 2)
-        // …but it is honest about today not being banked.
-        XCTAssertEqual(s?.todaySecured, false)
-    }
-
-    func testAHardSessionCountsAsMovementEvenWithAlmostNoSteps() {
-        // Two hours on a bike puts up no steps. A movement streak that breaks on a ride is one the
-        // user stops believing.
-        let days = [
-            metric(0, steps: 400, strain: 15),
-            metric(1, steps: 9_000),
-        ]
-        XCTAssertEqual(streak(.movement, days)?.days, 2)
-    }
-
-    func testRegularityIsMeasuredAgainstTheirOwnMedianBedtime() {
-        let days = (0...4).map { metric($0, sleepMin: 7.5 * 60) }
-        // A rock-solid 03:00 sleeper is REGULAR. Judging them against a bedtime someone else picked
-        // would be the app imposing a lifestyle rather than reading one.
-        let onsets = Dictionary(uniqueKeysWithValues: days.map { ($0.day, 3 * 60) })
-        XCTAssertEqual(streak(.sleepRegularity, days, onsets: onsets)?.days, 5)
-    }
-
-    func testRegularityIsNotOfferedWithoutEnoughNightsToHaveAUsualBedtime() {
-        let days = (0...4).map { metric($0, sleepMin: 7.5 * 60) }
-        // Two nights is not a habit. A zero would imply a rule was broken; absence is the honest state.
-        let onsets = [days[0].day: 1380, days[1].day: 1380]
-        XCTAssertNil(streak(.sleepRegularity, days, onsets: onsets))
-    }
-
-    func testAWildlyDifferentNightBreaksRegularity() {
-        let days = (0...4).map { metric($0, sleepMin: 7.5 * 60) }
-        var onsets = Dictionary(uniqueKeysWithValues: days.map { ($0.day, 1380) })  // 23:00 every night
-        onsets[days[2].day] = 240                                                    // except one 04:00
-        XCTAssertEqual(streak(.sleepRegularity, days, onsets: onsets)?.days, 2)
-    }
-
-    func testNoDaysMeansNoStreaks() {
-        XCTAssertTrue(Streaks.evaluate(days: [], today: today, calendar: calendar).isEmpty)
-    }
-
-    func testTiesKeepAStableOrderAcrossPlatforms() {
-        // All three at zero. The order must match the Android twin's stable sort — regularity,
-        // duration, movement — or the two platforms draw the flames in a different order.
-        let days = (0...4).map { metric($0, sleepMin: 4 * 60, steps: 10) }
-        let onsets = Dictionary(uniqueKeysWithValues: days.map { ($0.day, 1380) })
-        let kinds = Streaks.evaluate(days: days, onsetByDay: onsets, today: today, calendar: calendar)
-            .map(\.kind)
-        XCTAssertEqual(kinds, [.sleepRegularity, .sleepDuration, .movement])
     }
 }
