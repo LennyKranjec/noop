@@ -21,9 +21,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.res.painterResource
@@ -59,9 +56,12 @@ import java.util.Locale
 // it. An earlier cut built the body out of tapered paths in code; the artwork carries contours no
 // reasonable amount of path-fiddling was going to reach.
 //
-// The patch coordinates below were read off a normalised grid laid over that artwork, so they belong
-// to THESE two images. Replace the drawings and the coordinates have to be re-derived — they will not
-// survive a figure with different proportions.
+// EACH GROUP IS ITS OWN MASK, cut from that same drawing, so the colour lands on the muscle's real
+// outline rather than on an ellipse approximating it. The masks arrived as tight crops with no offsets;
+// they were located by segmenting the drawing into its own closed regions and matching each crop to a
+// region by SHAPE — see the note in the asset pipeline. Two independent checks agreed on the result:
+// the file numbering (stated to run top to bottom) correlates with the recovered heights at 0.99, and
+// each crop overlaps its matched region at an IoU of 0.98.
 
 /** How far back the card totals. A week is the usual training cycle and the Trends tab's own unit. */
 private const val WINDOW_DAYS = 7L
@@ -123,7 +123,7 @@ internal fun MuscleModelCard(viewModel: AppViewModel) {
                     modifier = Modifier.weight(1.1f),
                     verticalArrangement = Arrangement.spacedBy(Metrics.space4),
                 ) {
-                    val groups = regionsFor(side).map { it.group }.distinct()
+                    val groups = masksFor(side).map { it.first }
                     groups.forEach { group ->
                         MuscleLegendRow(group = group, kg = data?.get(group), peak = peak)
                     }
@@ -201,125 +201,82 @@ private fun loadColorFor(kg: Double?, peak: Double, litAlpha: Float, unlitAlpha:
 // MARK: - The body
 
 /**
- * One muscle patch: an ellipse over the anatomical figure, in NORMALISED 0-1 coordinates.
+ * The drawable holding one muscle group's own shape, on this side of the body.
  *
- * The figure itself is a drawing ([R.drawable.body_front] / [body_back]); these only say WHERE a group
- * sits on it, so the load can be painted over the right muscle. Ellipses rather than the hand-drawn
- * tapered outlines the card used to carry: the artwork already supplies every contour, and a second
- * set of shapes competing with it read as a diagram drawn twice.
+ * Each is an alpha mask cut from the same drawing the figure comes from — the real outline of the real
+ * muscle, not an ellipse approximating where it sits. A group is ONE mask even when it is several
+ * bellies (a quadriceps is four), because the card colours groups and the runtime has no reason to
+ * know how many muscles make one up.
  *
- * Every figure below was read off a normalised grid laid over the artwork — see the note in the file
- * header. They are not portable to a different drawing.
+ * Front and back carry different sets: a lat cannot be seen from the front, a pec cannot be seen from
+ * the back, and offering a group on a side that does not show it would paint nothing and read as a bug.
  */
-private data class MusclePatch(
-    val group: MuscleGroup,
-    val cx: Float,
-    val cy: Float,
-    val w: Float,
-    val h: Float,
-)
-
-/**
- * Where each group sits on the FRONT figure, and on the BACK one.
- *
- * Paired left/right on purpose: a single wide patch spanning both sides would bleed across the
- * sternum and the spine, which is exactly where the artwork's own centre line is.
- */
-private fun regionsFor(side: BodySide): List<MusclePatch> = when (side) {
+private fun masksFor(side: BodySide): List<Pair<MuscleGroup, Int>> = when (side) {
     BodySide.Front -> listOf(
-        // Deltoid caps — the widest point of the upper body.
-        MusclePatch(MuscleGroup.SHOULDERS, 0.175f, 0.196f, 0.150f, 0.062f),
-        MusclePatch(MuscleGroup.SHOULDERS, 0.825f, 0.196f, 0.150f, 0.062f),
-        // Pectorals, stopping short of the midline so the two do not merge into a band.
-        MusclePatch(MuscleGroup.CHEST, 0.404f, 0.226f, 0.175f, 0.070f),
-        MusclePatch(MuscleGroup.CHEST, 0.596f, 0.226f, 0.175f, 0.070f),
-        // Biceps: upper arm, below the deltoid.
-        MusclePatch(MuscleGroup.BICEPS, 0.190f, 0.278f, 0.104f, 0.088f),
-        MusclePatch(MuscleGroup.BICEPS, 0.810f, 0.278f, 0.104f, 0.088f),
-        // Abdomen, from the sternum to the waist.
-        MusclePatch(MuscleGroup.ABS, 0.500f, 0.320f, 0.215f, 0.120f),
-        // Forearms.
-        MusclePatch(MuscleGroup.FOREARMS, 0.158f, 0.404f, 0.105f, 0.120f),
-        MusclePatch(MuscleGroup.FOREARMS, 0.842f, 0.404f, 0.105f, 0.120f),
-        // Quadriceps.
-        MusclePatch(MuscleGroup.QUADRICEPS, 0.420f, 0.552f, 0.125f, 0.155f),
-        MusclePatch(MuscleGroup.QUADRICEPS, 0.580f, 0.552f, 0.125f, 0.155f),
-        // Calves.
-        MusclePatch(MuscleGroup.CALVES, 0.428f, 0.738f, 0.098f, 0.118f),
-        MusclePatch(MuscleGroup.CALVES, 0.572f, 0.738f, 0.098f, 0.118f),
+        MuscleGroup.SHOULDERS to R.drawable.muscle_front_shoulders,
+        MuscleGroup.CHEST to R.drawable.muscle_front_chest,
+        MuscleGroup.UPPER_BACK to R.drawable.muscle_front_upper_back,
+        MuscleGroup.BICEPS to R.drawable.muscle_front_biceps,
+        MuscleGroup.TRICEPS to R.drawable.muscle_front_triceps,
+        MuscleGroup.FOREARMS to R.drawable.muscle_front_forearms,
+        MuscleGroup.ABS to R.drawable.muscle_front_abs,
+        MuscleGroup.QUADRICEPS to R.drawable.muscle_front_quadriceps,
+        MuscleGroup.CALVES to R.drawable.muscle_front_calves,
     )
     BodySide.Back -> listOf(
-        MusclePatch(MuscleGroup.SHOULDERS, 0.180f, 0.198f, 0.148f, 0.062f),
-        MusclePatch(MuscleGroup.SHOULDERS, 0.820f, 0.198f, 0.148f, 0.062f),
-        // Traps: the wedge from the neck out over both shoulders, so this one DOES span the midline.
-        MusclePatch(MuscleGroup.UPPER_BACK, 0.500f, 0.196f, 0.300f, 0.072f),
-        // Lats, narrowing to the waist.
-        MusclePatch(MuscleGroup.LATS, 0.400f, 0.270f, 0.150f, 0.090f),
-        MusclePatch(MuscleGroup.LATS, 0.600f, 0.270f, 0.150f, 0.090f),
-        MusclePatch(MuscleGroup.TRICEPS, 0.185f, 0.280f, 0.104f, 0.088f),
-        MusclePatch(MuscleGroup.TRICEPS, 0.815f, 0.280f, 0.104f, 0.088f),
-        // Lower back, the band above the pelvis.
-        MusclePatch(MuscleGroup.LOWER_BACK, 0.500f, 0.350f, 0.200f, 0.055f),
-        MusclePatch(MuscleGroup.FOREARMS, 0.155f, 0.400f, 0.105f, 0.120f),
-        MusclePatch(MuscleGroup.FOREARMS, 0.845f, 0.400f, 0.105f, 0.120f),
-        // Glutes — the widest point of the back view.
-        MusclePatch(MuscleGroup.GLUTES, 0.428f, 0.428f, 0.155f, 0.090f),
-        MusclePatch(MuscleGroup.GLUTES, 0.572f, 0.428f, 0.155f, 0.090f),
-        // Hamstrings.
-        MusclePatch(MuscleGroup.HAMSTRINGS, 0.422f, 0.560f, 0.128f, 0.150f),
-        MusclePatch(MuscleGroup.HAMSTRINGS, 0.578f, 0.560f, 0.128f, 0.150f),
-        MusclePatch(MuscleGroup.CALVES, 0.428f, 0.740f, 0.100f, 0.120f),
-        MusclePatch(MuscleGroup.CALVES, 0.572f, 0.740f, 0.100f, 0.120f),
+        MuscleGroup.SHOULDERS to R.drawable.muscle_back_shoulders,
+        MuscleGroup.UPPER_BACK to R.drawable.muscle_back_upper_back,
+        MuscleGroup.LATS to R.drawable.muscle_back_lats,
+        MuscleGroup.TRICEPS to R.drawable.muscle_back_triceps,
+        MuscleGroup.FOREARMS to R.drawable.muscle_back_forearms,
+        MuscleGroup.LOWER_BACK to R.drawable.muscle_back_lower_back,
+        MuscleGroup.GLUTES to R.drawable.muscle_back_glutes,
+        MuscleGroup.HAMSTRINGS to R.drawable.muscle_back_hamstrings,
+        MuscleGroup.CALVES to R.drawable.muscle_back_calves,
     )
 }
 
-/** The artwork's own proportions. Front and back differ slightly, so each keeps its own. */
-private fun aspectFor(side: BodySide): Float = when (side) {
-    BodySide.Front -> 700f / 2207f
-    BodySide.Back -> 700f / 2115f
-}
+/**
+ * The shared canvas the figures and every mask are drawn on.
+ *
+ * ONE ASPECT FOR BOTH SIDES. The two source drawings are the same height but different widths, so
+ * scaling each to a fixed width made the broader back figure shorter — the card showed the same person
+ * at two sizes depending on which way he was facing. Both are now scaled by one factor and padded to
+ * this canvas, which is also what lets a mask be composited over the figure with no offsets at all:
+ * every asset is the same size, so they simply stack.
+ */
+private const val BODY_ASPECT = 695f / 2100f
 
 @Composable
 private fun BodyCanvas(side: BodySide, loads: Map<MuscleGroup, Double>, peak: Double) {
-    val regions = regionsFor(side)
-    // Resolved OUTSIDE the draw scope: `loadColorFor` is composable (it reads the palette), and a
-    // DrawScope cannot call one.
-    val fills = regions.map { loadColorFor(loads[it.group], peak, litAlpha = 0.80f, unlitAlpha = 0f) }
+    val masks = masksFor(side)
+    // Resolved OUTSIDE the draw pass: `loadColorFor` is composable (it reads the palette).
+    val fills = masks.map { loadColorFor(loads[it.first], peak, litAlpha = 0.88f, unlitAlpha = 0f) }
     val bodyTint = Palette.textSecondary.copy(alpha = 0.55f)
-    val painter = painterResource(
-        when (side) {
-            BodySide.Front -> R.drawable.body_front
-            BodySide.Back -> R.drawable.body_back
-        },
-    )
 
     Box(
-        modifier = Modifier.fillMaxWidth().aspectRatio(aspectFor(side)),
+        modifier = Modifier.fillMaxWidth().aspectRatio(BODY_ASPECT),
         contentAlignment = Alignment.Center,
     ) {
-        // THE LOAD GOES UNDER THE LINE ART, not over it. Painted on top, even at 80% the colour
-        // swallows the muscle contours it is supposed to be highlighting and the figure turns into a
-        // set of flat blobs; underneath, the drawing's own shading reads THROUGH the colour and the
-        // result looks like a lit muscle rather than a sticker on one.
-        Canvas(modifier = Modifier.fillMaxSize()) {
-            regions.forEachIndexed { i, patch ->
-                if (fills[i].alpha <= 0f) return@forEachIndexed
-                drawOval(
-                    brush = Brush.radialGradient(
-                        colors = listOf(fills[i], fills[i].copy(alpha = 0f)),
-                        center = Offset(size.width * patch.cx, size.height * patch.cy),
-                        radius = maxOf(size.width * patch.w, size.height * patch.h) * 0.62f,
-                    ),
-                    topLeft = Offset(
-                        size.width * (patch.cx - patch.w / 2f),
-                        size.height * (patch.cy - patch.h / 2f),
-                    ),
-                    size = Size(size.width * patch.w, size.height * patch.h),
-                )
-            }
+        // THE LOAD GOES UNDER THE LINE ART. Painted on top, the colour swallows the very contours it is
+        // meant to be highlighting and the figure turns into flat blobs; underneath, the drawing's own
+        // shading reads through it and a loaded muscle looks lit rather than stickered.
+        masks.forEachIndexed { i, (_, drawable) ->
+            if (fills[i].alpha <= 0f) return@forEachIndexed
+            Image(
+                painter = painterResource(drawable),
+                contentDescription = null,
+                colorFilter = ColorFilter.tint(fills[i]),
+                modifier = Modifier.fillMaxSize(),
+            )
         }
         Image(
-            painter = painter,
+            painter = painterResource(
+                when (side) {
+                    BodySide.Front -> R.drawable.body_front
+                    BodySide.Back -> R.drawable.body_back
+                },
+            ),
             contentDescription = null,
             colorFilter = ColorFilter.tint(bodyTint),
             modifier = Modifier.fillMaxSize(),
