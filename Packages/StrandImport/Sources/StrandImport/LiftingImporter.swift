@@ -38,6 +38,16 @@ public struct LiftingSession: Sendable, Equatable {
     /// Optional workout title from the export (e.g. "Push Day"). Surfaced in the note, never the sport.
     public var title: String?
 
+    /// Volume split by the muscles that moved it.
+    ///
+    /// An exercise with two primary movers counts its FULL volume toward EACH, so this sums to more
+    /// than `volumeLoadKg` on a multi-mover day. It is a per-muscle EXPOSURE figure, never a partition
+    /// of the session, and presenting it as a split would be a claim the attribution cannot support.
+    ///
+    /// Empty when the export carries no exercise names this app can place — which is the honest state:
+    /// the body view stays dark for work it cannot attribute rather than shading it from a guess.
+    public var muscleVolumeKg: [MuscleGroup: Double]
+
     public init(
         start: Date,
         end: Date,
@@ -46,7 +56,8 @@ public struct LiftingSession: Sendable, Equatable {
         exerciseCount: Int,
         totalReps: Int,
         topSetKg: Double?,
-        title: String?
+        title: String?,
+        muscleVolumeKg: [MuscleGroup: Double] = [:]
     ) {
         self.start = start
         self.end = end
@@ -56,6 +67,7 @@ public struct LiftingSession: Sendable, Equatable {
         self.totalReps = totalReps
         self.topSetKg = topSetKg
         self.title = title
+        self.muscleVolumeKg = muscleVolumeKg
     }
 
     /// Duration in seconds, or nil when start == end (no real interval to claim).
@@ -93,6 +105,57 @@ public enum LiftingImporter {
 
     /// The sport name every imported lifting session is filed under (maps to the dumbbell icon).
     public static let sport = "Strength Training"
+
+    // MARK: - Muscle attribution
+    //
+    // Twin of the Android `LiftingImporter.muscleVolumeKg` / `muscleSeriesRows`. The attribution table
+    // is shared (`MuscleAttribution`), so an exercise name lands on the same groups on both platforms —
+    // which is the whole point of that file being a parity-pinned list rather than a heuristic.
+
+    /// Split per-exercise volume across the muscles each exercise moves.
+    ///
+    /// FULL VOLUME TO EACH MOVER, not a share. A bench press is a chest exercise and a triceps
+    /// exercise; dividing its volume between them would understate both, and there is no evidence for
+    /// any particular split. So the figure is exposure per muscle and sums to more than the session.
+    ///
+    /// An exercise the table cannot place contributes NOTHING rather than being spread over everything.
+    public static func muscleVolume(byExercise: [String: Double]) -> [MuscleGroup: Double] {
+        var out: [MuscleGroup: Double] = [:]
+        for (name, volume) in byExercise where volume > 0 {
+            for group in MuscleAttribution.muscles(name) { out[group, default: 0] += volume }
+        }
+        return out
+    }
+
+    /// The per-day, per-group rows the muscle view reads.
+    ///
+    /// ONE ROW PER (day, group), summed across every session on that day — the tall table holds one row
+    /// per (deviceId, day, key), so two sessions on one day must be added rather than the second
+    /// replacing the first.
+    ///
+    /// The day is the LOCAL day the session started on, matching every other day key in the app.
+    public static func muscleSeriesRows(
+        _ sessions: [LiftingSession],
+        calendar: Calendar = .current
+    ) -> [(day: String, key: String, value: Double)] {
+        var totals: [String: [MuscleGroup: Double]] = [:]
+        for session in sessions {
+            let c = calendar.dateComponents([.year, .month, .day], from: session.start)
+            let day = String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+            for (group, kg) in session.muscleVolumeKg where kg > 0 {
+                totals[day, default: [:]][group, default: 0] += kg
+            }
+        }
+        // Sorted so the rows are deterministic: an import that writes the same file twice must produce
+        // the same sequence, which is what makes a diff of two imports readable.
+        return totals.keys.sorted().flatMap { day -> [(day: String, key: String, value: Double)] in
+            let groups = totals[day] ?? [:]
+            return MuscleGroup.allCases.compactMap { group in
+                guard let kg = groups[group], kg > 0 else { return nil }
+                return (day: day, key: group.volumeKey, value: kg)
+            }
+        }
+    }
 
     /// Pounds → kilograms (exact avoirdupois definition), shared by the Hevy lb column and the
     /// Liftosaur `lb` unit.
@@ -224,6 +287,10 @@ public enum LiftingImporter {
         var reps = 0
         var top: Double?
         var exercises = Set<String>()
+        /// Volume per exercise NAME, so the muscle split is taken once at the end from whole
+        /// exercises rather than per set — an exercise with two movers must count its full volume
+        /// toward each, and doing that per set would be the same arithmetic done more times.
+        var volumeByExercise: [String: Double] = [:]
 
         init(start: Date, title: String?, zone: TimeZone) {
             self.start = start
@@ -241,7 +308,10 @@ public enum LiftingImporter {
             if let r = reps, r > 0 { self.reps += r }
             if let w = weightKg, w > 0 {
                 top = max(top ?? 0, w)
-                if let r = reps, r > 0 { volume += w * Double(r) }
+                if let r = reps, r > 0 {
+                    volume += w * Double(r)
+                    if !exercise.isEmpty { volumeByExercise[exercise, default: 0] += w * Double(r) }
+                }
             }
         }
 
@@ -256,7 +326,8 @@ public enum LiftingImporter {
                 exerciseCount: exercises.count,
                 totalReps: reps,
                 topSetKg: top,
-                title: title
+                title: title,
+                muscleVolumeKg: LiftingImporter.muscleVolume(byExercise: volumeByExercise)
             )
         }
     }
@@ -357,8 +428,10 @@ public enum LiftingImporter {
         var exercises = 0
 
         let entries = (record["entries"] as? [Any]) ?? []
+        var volumeByExercise: [String: Double] = [:]
         for case let entry as [String: Any] in entries {
             exercises += 1
+            let exerciseName = liftosaurExerciseName(entry)
             // Liftosaur entries carry a default unit; individual sets may override it.
             let entryUnit = (entry["unit"] as? String)?.lowercased()
             let setList = (entry["sets"] as? [Any]) ?? []
@@ -372,6 +445,7 @@ public enum LiftingImporter {
                 if let w = liftosaurWeightKg(set, entryUnit: entryUnit), w > 0 {
                     top = max(top ?? 0, w)
                     volume += w * Double(r)
+                    if let exerciseName { volumeByExercise[exerciseName, default: 0] += w * Double(r) }
                 }
             }
         }
@@ -385,8 +459,17 @@ public enum LiftingImporter {
             exerciseCount: exercises,
             totalReps: reps,
             topSetKg: top,
-            title: (record["programName"] as? String) ?? (record["dayName"] as? String)
+            title: (record["programName"] as? String) ?? (record["dayName"] as? String),
+            muscleVolumeKg: muscleVolume(byExercise: volumeByExercise)
         )
+    }
+
+    /// A Liftosaur entry's exercise name, which the export spells in more than one place.
+    private static func liftosaurExerciseName(_ entry: [String: Any]) -> String? {
+        if let e = entry["exercise"] as? [String: Any], let id = e["id"] as? String, !id.isEmpty { return id }
+        if let name = entry["exerciseName"] as? String, !name.isEmpty { return name }
+        if let name = entry["name"] as? String, !name.isEmpty { return name }
+        return nil
     }
 
     /// Resolve a Liftosaur set's weight to kilograms. The weight may be a bare number or an object

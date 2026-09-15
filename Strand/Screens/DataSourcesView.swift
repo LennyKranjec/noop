@@ -243,9 +243,9 @@ struct DataSourcesView: View {
     }
 
     private var liftingCard: some View {
-        card(title: String(localized: "Lifting log (Hevy / Liftosaur)"), icon: "dumbbell.fill",
+        card(title: String(localized: "Lifting log (Hevy / Liftosaur / Alphaprog)"), icon: "dumbbell.fill",
              tint: DomainTheme.effort.color,
-             subtitle: String(localized: "Import your strength-training history from a Hevy CSV export or a Liftosaur JSON export. Each workout becomes a Strength session with a training-volume estimate (weight × reps). It's a volume figure, not a measured strain. It never changes your Effort.")) {
+             subtitle: String(localized: "Import your strength-training history from a Hevy CSV export, a Liftosaur JSON export or an Alphaprog CSV export. Each workout becomes a Strength session with a training-volume estimate (weight × reps), and every set is attributed to the muscles that moved it for the muscle-load view. It's a volume figure, not a measured strain. It never changes your Effort.")) {
             HStack(spacing: NoopMetrics.space3) {
                 Button { presentImporter(.lifting) } label: {
                     Label(liftingImporting ? "Importing…" : "Choose export…", systemImage: "tray.and.arrow.down")
@@ -449,9 +449,27 @@ struct DataSourcesView: View {
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             do {
                 let data = try Data(contentsOf: url)
-                let result = LiftingImporter.parse(data: data)
+                // ALPHAPROG IS SNIFFED BY WHETHER IT PARSES, not by an extension or a header guess.
+                // Its export is a .csv like Hevy's, so a name-based sniff would send it to the wrong
+                // parser — and Hevy's reader makes nonsense of a printed workout rather than failing,
+                // which is the worst kind of wrong. A file that yields Alphaprog sessions IS one.
+                let text = String(data: data, encoding: .utf8) ?? ""
+                let alphaprog = text.isEmpty ? nil : AlphaprogImporter.parse(text)
+                let result: LiftingImportResult
+                var unattributed: [String] = []
+                if let alphaprog, !alphaprog.workouts.isEmpty {
+                    let sessions = AlphaprogImporter.toSessions(alphaprog)
+                    unattributed = alphaprog.unattributed
+                    result = LiftingImportResult(
+                        sessions: sessions,
+                        skipped: 0,
+                        earliest: sessions.first?.start,
+                        latest: sessions.last?.start)
+                } else {
+                    result = LiftingImporter.parse(data: data)
+                }
                 guard result.sessionCount > 0 else {
-                    liftingSummary = String(localized: "No workouts found. Point at a Hevy CSV export or a Liftosaur JSON export.")
+                    liftingSummary = String(localized: "No workouts found. Point at a Hevy CSV, a Liftosaur JSON or an Alphaprog CSV export.")
                     liftingFailed = true
                     logImport("Lifting log: no workouts found (\(result.skipped) skipped)")
                     liftingImporting = false
@@ -480,6 +498,15 @@ struct DataSourcesView: View {
                     )
                 }
                 try await store.upsertWorkouts(rows, deviceId: LiftingImporter.sourceId)
+                // THE PER-MUSCLE VOLUME, on the generic series seam the muscle view reads. Written
+                // alongside the workouts rather than derived later: the attribution needs the exercise
+                // NAMES, and the stored workout row keeps only the session's totals.
+                let muscleRows = LiftingImporter.muscleSeriesRows(result.sessions)
+                if !muscleRows.isEmpty {
+                    _ = try? await store.upsertMetricSeries(
+                        muscleRows.map { MetricPoint(day: $0.day, key: $0.key, value: $0.value) },
+                        deviceId: LiftingImporter.sourceId)
+                }
                 await repo.refresh()
                 let totalVolume = result.sessions.reduce(0.0) { $0 + $1.volumeLoadKg }
                 // Whole-phrase variants per count so translators never see a stitched plural.
@@ -495,6 +522,12 @@ struct DataSourcesView: View {
                     if lo != hi { msg += " · \(lo)-\(hi)" }
                 }
                 if result.skipped > 0 { msg += " · " + String(localized: "\(result.skipped) skipped") }
+                // Said out loud rather than swallowed: an exercise the attribution table cannot place
+                // contributes no volume at all, and the body view simply stays dark for it. The wearer
+                // should know which one, so it is reported rather than silently lost.
+                if !unattributed.isEmpty {
+                    msg += " · " + String(localized: "not attributed to a muscle: \(unattributed.joined(separator: ", "))")
+                }
                 liftingSummary = msg
                 liftingFailed = false
                 logImport("Lifting log: \(result.sessionCount) workouts, \(result.skipped) rejected")
