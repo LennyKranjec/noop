@@ -124,8 +124,10 @@ struct LevelRadarView: View {
         }
         .frame(width: diameter, height: diameter)
         .onAppear { runCountUp() }
-        .onChange(of: countUpKey) { _, _ in runCountUp() }
-        .onChange(of: level) { _, _ in runCountUp() }
+        // `onChangeCompat`, not `onChange`: the two-parameter form needs macOS 14 and this target is
+        // 13.0. The shim already exists for exactly this and is what the rest of the app uses.
+        .onChangeCompat(of: countUpKey) { _ in runCountUp() }
+        .onChangeCompat(of: level) { _ in runCountUp() }
     }
 
     /// The figure, counting up from zero on every open.
