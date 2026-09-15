@@ -2626,6 +2626,12 @@ def main(argv: list[str] | None = None) -> int:
         help="with --refresh-derived, repair metadata drift already present in the exact base",
     )
     parser.add_argument("--base", default="origin/main", help="exact git ref used to prove debt reductions")
+    parser.add_argument(
+        "--migrate-authority",
+        action="store_true",
+        help="re-base onto a freshly derived base authority when the base's stored one cannot be "
+             "reproduced; new debt still requires issue-bound dispositions",
+    )
     args = parser.parse_args(argv)
 
     root = args.root.resolve()
@@ -2636,6 +2642,12 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.repair_stale_base and not args.refresh_derived:
         print("FAIL --repair-stale-base requires --refresh-derived")
+        return 2
+    if args.migrate_authority and not args.refresh_derived:
+        print("FAIL --migrate-authority requires --refresh-derived")
+        return 2
+    if args.migrate_authority and args.repair_stale_base:
+        print("FAIL --repair-stale-base and --migrate-authority are different remedies; use one")
         return 2
     if args.refresh_derived:
         if args.bootstrap_map or args.write_baseline or args.no_baseline:
@@ -2664,6 +2676,8 @@ def main(argv: list[str] | None = None) -> int:
             ]
             if args.repair_stale_base:
                 command.append("--repair-stale-base")
+            if args.migrate_authority:
+                command.append("--migrate-authority")
             completed = subprocess.run(command, cwd=root, text=True, capture_output=True)
             if completed.returncode:
                 print("FAIL derived refresh rejected; snapshots restored")
