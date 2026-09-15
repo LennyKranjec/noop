@@ -70,7 +70,7 @@ struct LevelOverlayBarView: View {
             .contentShape(PentagonShape())
             .onTapGesture {
                 guard breakdown != nil else { return }
-                StrandHaptic.selection.fire()
+                StrandHaptic.selection.play()
                 onOpenTimeline()
             }
         }
