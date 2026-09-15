@@ -122,7 +122,7 @@ public enum LiftingImporter {
     public static func muscleVolume(byExercise: [String: Double]) -> [MuscleGroup: Double] {
         var out: [MuscleGroup: Double] = [:]
         for (name, volume) in byExercise where volume > 0 {
-            for group in MuscleAttribution.muscles(name) { out[group, default: 0] += volume }
+            for group in MuscleAttribution.muscles(for: name) { out[group, default: 0] += volume }
         }
         return out
     }

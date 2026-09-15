@@ -162,7 +162,7 @@ public enum AlphaprogImporter {
         func closeExercise() {
             guard let name = exerciseName else { return }
             exercises.append(Exercise(name: name, sets: sets))
-            if MuscleAttribution.muscles(name).isEmpty, seenUnattributed.insert(name).inserted {
+            if MuscleAttribution.muscles(for: name).isEmpty, seenUnattributed.insert(name).inserted {
                 unattributed.append(name)
             }
             exerciseName = nil

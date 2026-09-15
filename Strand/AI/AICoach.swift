@@ -171,6 +171,21 @@ final class AICoachEngine: ObservableObject {
     /// boundary in `send` — see `isStaleConversation`. Kotlin twin: `CoachViewModel.conversationDay`.
     private var conversationDay: Int?
     @Published var sending = false
+
+    /// True while ANY generation is in flight, including the headless ones.
+    ///
+    /// `sending` covers only the visible chat. The mission, the muscle note, the level's daily line and
+    /// a quest's naming all run without a transcript, and the tab bar's own busy state has to mean "the
+    /// system is working" rather than "you are mid-conversation" — otherwise the glyph sits still
+    /// through the one case where the wearer has no other way to tell anything is happening.
+    ///
+    /// A COUNT, not a flag: two headless generations can overlap (opening Today asks for the mission and
+    /// the quest naming in the same breath), and a boolean would be cleared by whichever finished first.
+    @Published private(set) var backgroundWork = 0
+
+    /// Whether the shell should show the system as working.
+    var isWorking: Bool { sending || backgroundWork > 0 }
+
     @Published var errorText: String?
 
     /// Whether the last failure was the provider turning the stored key away, as opposed to a rate
@@ -898,6 +913,8 @@ final class AICoachEngine: ObservableObject {
     /// to send the whole context and hope the model picks the right half out of it.
     func generateOneShot(systemPrompt: String, question: String) async -> String? {
         guard isConfigured, dataConsent, let key = resolvedKey else { return nil }
+        backgroundWork += 1
+        defer { backgroundWork -= 1 }
         let reply = try? await provider.client.send(
             key: key,
             model: model,

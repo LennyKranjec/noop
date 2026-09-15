@@ -26,6 +26,8 @@ struct RootTabView: View {
     @EnvironmentObject private var router: NavRouter
     /// The scene-local receiver for actions chosen from NOOP's Home Screen icon menu.
     @EnvironmentObject private var homeScreenQuickActions: HomeScreenQuickActionSceneDelegate
+    /// The coach, for the tab glyph's working state.
+    @EnvironmentObject private var coach: AICoachEngine
 
     /// The level strip's own data. Owned by the shell because the strip rides above every tab.
     @StateObject private var levelBar = LevelBarModel()
@@ -67,6 +69,13 @@ struct RootTabView: View {
     /// V8 liquid redesign is the default Today; the Settings toggle lets a user fall back to the classic
     /// Today if they prefer it (keyed identically to the SettingsView toggle). Default ON.
     @AppStorage("noop.liquidTodayEnabled") private var liquidTodayEnabled = true
+
+    /// True while the system is generating anything at all — chat or headless.
+    private var coachWorking: Bool { coach.isWorking }
+
+    /// Bumped when a generation ENDS while the wearer is looking somewhere else. The edge, not the
+    /// level: a flag would re-fire on every re-render.
+    @State private var coachFinishedElsewhere = 0
 
     /// The Today tab root, honouring the liquid/classic preference.
     @ViewBuilder private var todayTabRoot: some View {
@@ -138,7 +147,18 @@ struct RootTabView: View {
             tab(MindfulnessView(), "Focus", "figure.mind.and.body", path: $tabPaths[2], scrollSignal: scrollTop[2]).tag(2)
             // K3: Coach promoted to a top-level tab (was behind the More list). The sparkles icon
             // matches the More-tab row and the macOS sidebar entry.
-            tab(CoachView(), "Coach", "sparkles", path: $tabPaths[3], scrollSignal: scrollTop[3]).tag(3)
+            // THE GLYPH SAYS WHETHER THE SYSTEM IS WORKING. While a generation is in flight — the
+            // visible chat OR any of the headless ones — the sparkles become a progress glyph, so a
+            // wearer on another tab can see that something is being written. The platform tab bar owns
+            // its own item, so this is a glyph swap rather than the Android lane's spinner-in-the-slot;
+            // it lands in the same place and says the same thing.
+            tab(CoachView(), "System", coachWorking ? "circle.dotted" : "sparkles",
+                path: $tabPaths[3], scrollSignal: scrollTop[3])
+                .tag(3)
+                // THE POP IS A NOTIFICATION, and it only fires for somebody who cannot see the answer
+                // arrive: on the System tab itself the reply is right there filling the screen, and a
+                // bouncing icon underneath it would be telling you something you are already reading.
+                .symbolEffectPopCompat(trigger: coachFinishedElsewhere)
             moreTab(path: $tabPaths[4], scrollSignal: scrollTop[4]).tag(4)
         }
         .tint(StrandPalette.accent)
@@ -155,6 +175,10 @@ struct RootTabView: View {
         }
         .task(id: repo.refreshSeq) {
             await levelBar.refresh(repo: repo, tick: repo.refreshSeq)
+        }
+        .onChangeCompat(of: coachWorking) { working in
+            // Only on the falling edge, and only when they are not already reading the answer.
+            if !working, selectedTab != 3 { coachFinishedElsewhere += 1 }
         }
         .sheet(isPresented: $showLevelTimeline) {
             LevelTimelineSheetView(model: levelBar, repo: repo)
@@ -776,6 +800,24 @@ extension View {
         if #available(iOS 26.0, *) {
             // `.onScrollDown` minimises to a pill on downward scroll; `.never` pins it fully visible.
             self.tabBarMinimizeBehavior(enabled ? .onScrollDown : .never)
+        } else {
+            self
+        }
+    }
+}
+
+// MARK: - The finished-generation pop
+
+private extension View {
+    /// Bounce a symbol once when `trigger` changes, where the OS can do it.
+    ///
+    /// `symbolEffect(.bounce, value:)` is iOS 17; below that the glyph simply does not bounce, which is
+    /// the correct degradation — the swap to and from the progress glyph already carries the state, and
+    /// the bounce is the flourish on top of it.
+    @ViewBuilder
+    func symbolEffectPopCompat(trigger: Int) -> some View {
+        if #available(iOS 17.0, *) {
+            self.symbolEffect(.bounce, value: trigger)
         } else {
             self
         }
