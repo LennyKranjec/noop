@@ -195,9 +195,23 @@ private fun HeroRing(score: HeroScore, modifier: Modifier = Modifier) {
                     size = arcSize,
                     style = Stroke(width = stroke, cap = StrokeCap.Butt),
                 )
-                // THE TARGET MARK, under the reading so a full arc never hides it. Drawn as a notch
-                // across the track's own width rather than as a dot beside it: the mark has to be read
-                // against the arc, and anything sitting outside the ring reads as decoration.
+                // The reading. Starts at twelve and runs clockwise, which is the direction a dial is read.
+                score.fraction?.takeIf { it > 0f }?.let { frac ->
+                    drawArc(
+                        color = score.tint,
+                        startAngle = START_ANGLE,
+                        sweepAngle = 360f * frac.coerceIn(0f, 1f),
+                        useCenter = false,
+                        topLeft = topLeft,
+                        size = arcSize,
+                        style = Stroke(width = stroke, cap = StrokeCap.Round),
+                    )
+                }
+
+                // THE TARGET MARK, drawn LAST so it sits ON the arc rather than under it. Beneath, an
+                // arc that had passed the optimum covered the very line that says so — exactly the day
+                // the mark matters most. A notch across the track's own width, not a dot beside it:
+                // the mark has to be read against the arc, and anything outside the ring is decoration.
                 score.mark?.takeIf { it > 0f }?.let { mark ->
                     val angle = Math.toRadians((START_ANGLE + 360f * mark.coerceIn(0f, 1f)).toDouble())
                     val r = d / 2f
@@ -217,19 +231,6 @@ private fun HeroRing(score: HeroScore, modifier: Modifier = Modifier) {
                         ),
                         strokeWidth = MARK_WIDTH.toPx(),
                         cap = StrokeCap.Round,
-                    )
-                }
-
-                // The reading. Starts at twelve and runs clockwise, which is the direction a dial is read.
-                score.fraction?.takeIf { it > 0f }?.let { frac ->
-                    drawArc(
-                        color = score.tint,
-                        startAngle = START_ANGLE,
-                        sweepAngle = 360f * frac.coerceIn(0f, 1f),
-                        useCenter = false,
-                        topLeft = topLeft,
-                        size = arcSize,
-                        style = Stroke(width = stroke, cap = StrokeCap.Round),
                     )
                 }
             }
