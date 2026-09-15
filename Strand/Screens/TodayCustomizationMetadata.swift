@@ -11,6 +11,11 @@ extension TodaySection {
         case .workouts: return "figure.run"
         case .heartRate: return "waveform.path.ecg"
         case .recoveryVitals: return "heart.text.square"
+        case .stressEnergy: return "bolt.heart"
+        case .hydrationNutrition: return "drop"
+        case .dailyMission: return "target"
+        case .quests: return "flag.checkered"
+        case .streaks: return "flame"
         case .yourCards: return "rectangle.stack"
         case .menstrualCycle: return "drop.degreesign"
         case .journal: return "book.closed"
@@ -27,6 +32,11 @@ extension TodaySection {
         case .workouts: return StrandPalette.effortColor
         case .heartRate: return StrandPalette.metricRose
         case .recoveryVitals: return StrandPalette.metricCyan
+        case .stressEnergy: return StrandPalette.metricAmber
+        case .hydrationNutrition: return StrandPalette.metricCyan
+        case .dailyMission: return StrandPalette.accent
+        case .quests: return StrandPalette.metricPurple
+        case .streaks: return StrandPalette.statusWarning
         case .yourCards: return StrandPalette.accent
         case .menstrualCycle: return StrandPalette.restColor
         case .journal: return StrandPalette.metricAmber

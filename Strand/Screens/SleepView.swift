@@ -155,7 +155,7 @@ struct SleepView: View {
                        // with dropping the top-level LiveState observation (the sleep-mark card + the
                        // syncing note now own `live` in their own leaves), so a 1 Hz HR tick no longer
                        // re-evaluates this heavy body.
-                       onRefresh: { await repo.refresh() },
+                       onRefresh: { await repo.refreshEverything() },
                        lazy: true,
                        topBackground: resolved == nil ? nil : AnyView(sleepNightTopBackground)) {
             Group {

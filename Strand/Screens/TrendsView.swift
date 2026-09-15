@@ -249,7 +249,7 @@ struct TrendsView: View {
                        // PERF (scroll): lazy column — byte-identical layout (LazyVStack == eager VStack
                        // alignment/spacing/header). The content is one inner eager VStack, so the staggered
                        // section reveal is unchanged; this only defers building that stack until it scrolls in.
-                       onRefresh: { await repo.refresh() },
+                       onRefresh: { await repo.refreshEverything() },
                        lazy: true,
                        topBackground: liquidScaffoldSky()) {
             if repo.days.isEmpty {

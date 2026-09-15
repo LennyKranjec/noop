@@ -342,6 +342,9 @@ struct TodayView: View {
     // "Rest" tile shows THIS, formatted like Charge/Effort, with hours-in-bed kept as the caption, the
     // tile previously showed hours where the score belonged (#248). nil until loaded / no night yet.
     @State private var restScore: Double?
+    /// The three flames, resolved alongside the rest of the day so the strip never reads the store from
+    /// its own body. Empty until the first read, which is also the empty state the strip draws.
+    @State private var todayStreaks: [Streak] = []
 
     // The raw per-day merge winners remain available for watch-specific confidence behavior.
     @State private var provenanceByMetric: [String: String] = [:]
@@ -1427,7 +1430,7 @@ struct TodayView: View {
     }
 
     var body: some View {
-        ScreenScaffold(title: scaffoldTitle, onRefresh: { await repo.refresh() },
+        ScreenScaffold(title: scaffoldTitle, onRefresh: { await repo.refreshEverything() },
                        // PERF (scroll): lazy column so the scaffold materialises Today's content on demand.
                        // Today supplies its own inner eager VStack (below), so the staggered section reveal is
                        // unchanged, this only defers building the single inner stack until it scrolls in.
@@ -1533,6 +1536,12 @@ struct TodayView: View {
         // edited / deleted drink (hydrationSeq) and the Settings feature toggle both re-read just the two
         // hydration fields. Cheap (one metricSeries row), never re-runs the heavy loads.
         .task(id: repo.hydrationSeq) { await reloadHydration() }
+        // The flames key on the banked stress series, which a stress read writes without bumping
+        // refreshSeq — so they get their own trigger for the same reason hydration does.
+        .task(id: "\(repo.refreshSeq)-\(selectedDayOffset)") {
+            todayStreaks = Streaks.evaluate(days: repo.days,
+                                            stressMinutesByDay: await repo.bankedStressMinutes())
+        }
         .onChangeCompat(of: hydrationEnabled) { _ in Task { await reloadHydration() } }
         // #755: NO per-edge safety net here, on purpose. A deep offload segments into many slices that each
         // flip `backfilling` false→true, so re-running the heavy history-wide reads on that edge would re-fire
@@ -1983,6 +1992,20 @@ struct TodayView: View {
             heartRateTrendSection
         case .recoveryVitals:
             recoveryVitalsSection
+        // The quests and the flames render on the classic Today too — they are the shell's own
+        // surfaces, not the liquid design's. The mission is a running line inside the liquid hero and
+        // has no classic equivalent, and stress / water live on their own screens here; all three keep
+        // their slot in the saved order so a layout arranged on either platform round-trips.
+        case .quests:
+            if selectedDayOffset == 0 { QuestStripView() }
+        case .streaks:
+            if selectedDayOffset == 0 { StreakStripView(streaks: todayStreaks) }
+        case .dailyMission:
+            EmptyView()
+        case .stressEnergy:
+            EmptyView()
+        case .hydrationNutrition:
+            EmptyView()
         case .yourCards:
             yourCardsSection
         case .menstrualCycle:

@@ -194,7 +194,7 @@ struct AppleHealthView: View {
 
     var body: some View {
         ScreenScaffold(title: "Apple Health", subtitle: spanSubtitle.map { "\($0)" },
-                       onRefresh: { await repo.refresh() },
+                       onRefresh: { await repo.refreshEverything() },
                        // PERF: chart-heavy column (the tile grid plus the heart / activity / body / sleep
                        // sections, each carrying its own sparklines + metric charts). The LazyVStack path
                        // is byte-identical layout. NOTE: the populated branch wraps its sections in an

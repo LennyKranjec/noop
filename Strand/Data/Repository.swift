@@ -895,6 +895,20 @@ final class Repository: ObservableObject {
     var loadFireCounts: [String: Int] = [:]
     #endif
 
+    /// Pull everything from every cloud the wearer has connected, then re-read.
+    ///
+    /// WHAT A PULL-TO-REFRESH MEANS. The gesture says "get me up to date", and a refresh that only
+    /// re-read the local store while an account sat un-synced behind it answered a different question.
+    /// So the network legs run FIRST and `refresh()` then sees whatever they wrote.
+    ///
+    /// EACH LEG IS BEST-EFFORT AND BOUNDED BY ITS OWN STALENESS RULE. A wearer who pulls five times in a
+    /// minute makes at most one round trip per service; a dead network costs the gesture nothing but the
+    /// spinner, and everything already stored is left exactly as it was.
+    func refreshEverything() async {
+        await WhoopCloudSync.syncIfStale(repo: self)
+        await refresh()
+    }
+
     func refresh(days nDays: Int = 4000) async {
         guard let store = await ensureStore() else { return }
         refreshGen &+= 1

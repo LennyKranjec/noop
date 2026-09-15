@@ -161,7 +161,7 @@ struct WorkoutsView: View {
 
     var body: some View {
         ScreenScaffold(title: "Workouts", subtitle: "Every session, threaded together.",
-                       onRefresh: { await repo.refresh() },
+                       onRefresh: { await repo.refreshEverything() },
                        // PERF: the column ends in the full "All Sessions" log (the breakdown grid, the
                        // zones card, and a row-per-session table). On a large imported history the eager
                        // VStack built every section + the whole table up-front; the LazyVStack path (which

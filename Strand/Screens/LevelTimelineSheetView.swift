@@ -49,8 +49,13 @@ struct LevelTimelineSheetView: View {
     @ObservedObject var model: LevelBarModel
     let repo: Repository
 
+    @EnvironmentObject private var coach: AICoachEngine
+
     @Environment(\.dismiss) private var dismiss
     @State private var span: LevelSpan = .month
+    /// The system's own daily line about the weighting. Nil until one has been written — the panel then
+    /// falls back to reading the breakdown itself rather than showing a placeholder.
+    @State private var note: String?
 
     /// Where the rules are drawn. Quarters of the level's range — five lines is an axis, nine is graph
     /// paper.
@@ -90,6 +95,7 @@ struct LevelTimelineSheetView: View {
             }
         }
         .task(id: span.rawValue) { await model.loadHistory(repo: repo, spanDays: span.rawValue) }
+        .task(id: model.trend?.now?.level) { await loadNote() }
     }
 
     private var header: some View {
@@ -97,10 +103,32 @@ struct LevelTimelineSheetView: View {
             Image(systemName: "sparkles")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(StrandPalette.accent)
-            Text(headline)
+            Text(note ?? headline)
                 .font(.footnote)
                 .foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// The system's line, written at most once a day and only when the level has actually moved.
+    ///
+    /// The stored one first, so an unchanged level paints immediately; only a changed fingerprint reaches
+    /// the model. A nil answer leaves `headline` in place, which is the same sentence derived from the
+    /// breakdown arithmetically — honest, if less pointed.
+    private func loadNote() async {
+        guard let breakdown = model.trend?.now else { return }
+        let fingerprint = LevelCoachNote.fingerprint(breakdown)
+        if let stored = LevelCoachNote.stored(fingerprint: fingerprint) {
+            note = stored
+            return
+        }
+        let answer = await coach.generateOneShot(
+            systemPrompt: LevelCoachNote.systemPrompt(breakdown),
+            question: LevelCoachNote.question)
+        guard let answer else { return }
+        let clipped = String(answer.prefix(LevelCoachNote.maxChars))
+        LevelCoachNote.write(clipped, fingerprint: fingerprint)
+        note = clipped
     }
 
     /// Which parts are carrying the level and which is costing it, from the breakdown itself.

@@ -29,7 +29,7 @@ struct HealthView: View {
                        // PERF (scroll): lazy column — byte-identical layout (LazyVStack == eager VStack
                        // alignment/spacing/header); builds the trailing vitals/skin-temp/age sections on
                        // demand instead of all up-front.
-                       onRefresh: { await repo.refresh() },
+                       onRefresh: { await repo.refreshEverything() },
                        lazy: true,
                        // The day-of-sky liquid backdrop, matching Today / Sleep / Trends: a fixed,
                        // full-bleed time-of-day sky behind the scroll content (does not scroll).

@@ -451,7 +451,7 @@ struct RootTabView: View {
     private func moreTab(path: Binding<NavigationPath>, scrollSignal: Int) -> some View {
         NavigationStack(path: path) {
             ScreenScaffold(title: "More", subtitle: "Everything else, one tap away",
-                           onRefresh: { await repo.refresh() },
+                           onRefresh: { await repo.refreshEverything() },
                            topBackground: liquidScaffoldSky()) {
                 moreSection("Insights") {
                     MoreRow("What Moves You", "wand.and.sparkles", .insightsHub)

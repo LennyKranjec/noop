@@ -80,7 +80,7 @@ struct DataSourcesView: View {
     var body: some View {
         ScreenScaffold(title: "Data Sources",
                        subtitle: "Everything stays on \(Platform.deviceNounPhrase). Bring your history in once, then it's yours.",
-                       onRefresh: { await repo.refresh() },
+                       onRefresh: { await repo.refreshEverything() },
                        // PERF: a ten-card import/source column (WHOOP, Apple Health, Xiaomi, nutrition,
                        // lifting, activity files, wearables, Oura cloud, broadcast-out, live strap). The LazyVStack
                        // path is byte-identical layout. The cards stay in their inner VStack(sectionSpacing)
@@ -91,17 +91,21 @@ struct DataSourcesView: View {
                        lazy: true) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                 whoopCard.staggeredAppear(index: 0)
-                appleHealthCard.staggeredAppear(index: 1)
-                xiaomiCard.staggeredAppear(index: 2)
-                nutritionCard.staggeredAppear(index: 3)
-                liftingCard.staggeredAppear(index: 4)
-                activityFileCard.staggeredAppear(index: 5)
-                wearableCard.staggeredAppear(index: 6)
+                // The WHOOP CLOUD, directly under the strap import it complements: the strap gives raw
+                // signal this app scores itself, the cloud gives WHOOP's own scores. Two different
+                // things under one name, so they sit together and each says which it is.
+                WhoopCloudCard().staggeredAppear(index: 1)
+                appleHealthCard.staggeredAppear(index: 2)
+                xiaomiCard.staggeredAppear(index: 3)
+                nutritionCard.staggeredAppear(index: 4)
+                liftingCard.staggeredAppear(index: 5)
+                activityFileCard.staggeredAppear(index: 6)
+                wearableCard.staggeredAppear(index: 7)
                 #if OURA_CLOUD_IMPORT
-                ouraCloudCard.staggeredAppear(index: 7)
+                ouraCloudCard.staggeredAppear(index: 8)
                 #endif
-                broadcastHrCard.staggeredAppear(index: 8)
-                liveCard.staggeredAppear(index: 9)
+                broadcastHrCard.staggeredAppear(index: 9)
+                liveCard.staggeredAppear(index: 10)
             }
         }
         .onAppear {

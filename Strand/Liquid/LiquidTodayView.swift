@@ -583,8 +583,11 @@ struct LiquidTodayView: View {
                 // so a pull while disconnected or mid-offload safely no-ops. The sync status chip owns the
                 // ongoing offload progress; the pull spinner stays short (the reload below).
                 ble.syncNow()
-                await repo.refresh()
+                // The gesture says "get me up to date", so the clouds are pulled too — not only the
+                // strap and the local re-read.
+                await repo.refreshEverything()
                 await load()
+                await loadCloudDay()
                 try? await Task.sleep(nanoseconds: 350_000_000)   // let the fill read as "done"
                 withAnimation(.easeOut(duration: 0.25)) { refreshing = false }
             }
@@ -1721,6 +1724,9 @@ struct LiquidTodayView: View {
 
         streaks = Streaks.evaluate(days: repo.days, stressMinutesByDay: await repo.bankedStressMinutes())
         dailyMission = await coach.ensureDailyMission()?.text
+        // Whatever today has earned, at most one at a time. Safe on every appearance: it returns
+        // immediately when something is already waiting to be answered or today's list is full.
+        await QuestIssuer.issueIfDue(repo: repo, coach: coach)
     }
 
     private func load() async {

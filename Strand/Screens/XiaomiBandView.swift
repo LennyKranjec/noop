@@ -112,7 +112,7 @@ struct XiaomiBandView: View {
 
     var body: some View {
         ScreenScaffold(title: "Mi Band", subtitle: spanSubtitle.map { "\($0)" },
-                       onRefresh: { await repo.refresh() }, lazy: loaded && hasAnyData) {
+                       onRefresh: { await repo.refreshEverything() }, lazy: loaded && hasAnyData) {
             if loaded && !hasAnyData {
                 ComingSoon(what: "Nothing imported yet. In Data Sources, choose your Mi Fitness export (a .zip of the Mi Fitness app folder from the Files app) to bring in your steps, heart rate, sleep stages, SpO₂ and stress.")
             } else if !loaded {
