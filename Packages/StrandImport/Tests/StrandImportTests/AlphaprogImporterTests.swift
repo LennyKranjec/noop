@@ -124,8 +124,11 @@ final class AlphaprogImporterTests: XCTestCase {
         guard let rows = parsed().workouts.last?.exercises.first else { return XCTFail("no sessions") }
         XCTAssertEqual(rows.name, "Rudern mit Brustauflage eng")
         XCTAssertEqual(rows.sets.count, 3)
-        XCTAssertEqual(rows.sets.reduce(0) { $0 + $1.volumeKg },
-                       30 * 10 + 27.5 * 7 + 27.5 * 7, accuracy: 1e-9)
+        // Split out and typed: the inline literal sum was one expression the type-checker would not
+        // finish in time, which is a compile error rather than a slow test.
+        let volume: Double = rows.sets.reduce(0) { $0 + $1.volumeKg }
+        let expected: Double = 30.0 * 10.0 + 27.5 * 7.0 + 27.5 * 7.0
+        XCTAssertEqual(volume, expected, accuracy: 1e-9)
     }
 
     func testEveryExerciseInTheFileIsEitherPlacedOrKnowinglyUnplaceable() {
