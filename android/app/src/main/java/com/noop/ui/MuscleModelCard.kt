@@ -1,12 +1,14 @@
 package com.noop.ui
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -19,9 +21,12 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import com.noop.R
 import com.noop.ingest.LiftingImporter
@@ -47,6 +52,16 @@ import java.util.Locale
 //
 // A MUSCLE WITH TWO MOVERS IS COUNTED IN BOTH (see LiftingImporter.Session.muscleVolumeKg), so the
 // column does not sum to the session's volume load and must never be presented as a split of it.
+//
+// THE FIGURE IS A DRAWING, NOT GEOMETRY. `body_front` / `body_back` are anatomical line art, prepared
+// as WHITE-ON-TRANSPARENT so the card can tint them to the palette instead of being stuck with the
+// source's grey — which is what lets the same asset sit on a dark card without a pale rectangle round
+// it. An earlier cut built the body out of tapered paths in code; the artwork carries contours no
+// reasonable amount of path-fiddling was going to reach.
+//
+// The patch coordinates below were read off a normalised grid laid over that artwork, so they belong
+// to THESE two images. Replace the drawings and the coordinates have to be re-derived — they will not
+// survive a figure with different proportions.
 
 /** How far back the card totals. A week is the usual training cycle and the Trends tab's own unit. */
 private const val WINDOW_DAYS = 7L
@@ -186,215 +201,129 @@ private fun loadColorFor(kg: Double?, peak: Double, litAlpha: Float, unlitAlpha:
 // MARK: - The body
 
 /**
- * One muscle patch, as a TAPERED shape rather than a rectangle.
+ * One muscle patch: an ellipse over the anatomical figure, in NORMALISED 0-1 coordinates.
  *
- * Every real muscle is wider at one end than the other, and that single fact is most of what makes a
- * body read as a body: a pec narrows toward the sternum, a quad swells above the knee and pinches at
- * it, a calf is an egg. The old version was rounded rectangles of uniform width, which is why it
- * looked like a robot — anatomically it said nothing except "there is something here".
+ * The figure itself is a drawing ([R.drawable.body_front] / [body_back]); these only say WHERE a group
+ * sits on it, so the load can be painted over the right muscle. Ellipses rather than the hand-drawn
+ * tapered outlines the card used to carry: the artwork already supplies every contour, and a second
+ * set of shapes competing with it read as a diagram drawn twice.
  *
- * Coordinates are NORMALISED (0–1, x right, y down) so one geometry scales to any card width.
- * [topW]/[bottomW] are the widths at the two ends, [tilt] shifts the bottom sideways so limbs can
- * splay, and [round] is how much the corners are pulled in. Still stylised: the attribution table
- * knows 13 coarse groups, and a lifelike figure would promise a precision it does not have.
+ * Every figure below was read off a normalised grid laid over the artwork — see the note in the file
+ * header. They are not portable to a different drawing.
  */
-private data class MuscleShape(
+private data class MusclePatch(
     val group: MuscleGroup,
     val cx: Float,
     val cy: Float,
-    val topW: Float,
-    val bottomW: Float,
+    val w: Float,
     val h: Float,
-    val tilt: Float = 0f,
-    val round: Float = 0.35f,
 )
 
-private fun regionsFor(side: BodySide): List<MuscleShape> = when (side) {
+/**
+ * Where each group sits on the FRONT figure, and on the BACK one.
+ *
+ * Paired left/right on purpose: a single wide patch spanning both sides would bleed across the
+ * sternum and the spine, which is exactly where the artwork's own centre line is.
+ */
+private fun regionsFor(side: BodySide): List<MusclePatch> = when (side) {
     BodySide.Front -> listOf(
-        // Deltoids: round caps sitting proud of the torso, wider at the top than where they meet the arm.
-        MuscleShape(MuscleGroup.SHOULDERS, 0.250f, 0.200f, 0.150f, 0.105f, 0.080f, tilt = -0.012f, round = 0.6f),
-        MuscleShape(MuscleGroup.SHOULDERS, 0.750f, 0.200f, 0.150f, 0.105f, 0.080f, tilt = 0.012f, round = 0.6f),
-        // Pectorals: broad at the shoulder, narrowing toward the sternum.
-        MuscleShape(MuscleGroup.CHEST, 0.412f, 0.238f, 0.175f, 0.130f, 0.085f, tilt = 0.010f, round = 0.45f),
-        MuscleShape(MuscleGroup.CHEST, 0.588f, 0.238f, 0.175f, 0.130f, 0.085f, tilt = -0.010f, round = 0.45f),
-        // Biceps: the classic belly — thin at the shoulder, full mid-arm, thin at the elbow.
-        MuscleShape(MuscleGroup.BICEPS, 0.196f, 0.312f, 0.088f, 0.070f, 0.105f, tilt = -0.020f, round = 0.65f),
-        MuscleShape(MuscleGroup.BICEPS, 0.804f, 0.312f, 0.088f, 0.070f, 0.105f, tilt = 0.020f, round = 0.65f),
-        // Abdomen: the V — ribcage down to a narrow waist.
-        MuscleShape(MuscleGroup.ABS, 0.500f, 0.350f, 0.200f, 0.150f, 0.150f, round = 0.30f),
-        // Forearms: taper hard into the wrist.
-        MuscleShape(MuscleGroup.FOREARMS, 0.160f, 0.428f, 0.080f, 0.048f, 0.115f, tilt = -0.022f, round = 0.6f),
-        MuscleShape(MuscleGroup.FOREARMS, 0.840f, 0.428f, 0.080f, 0.048f, 0.115f, tilt = 0.022f, round = 0.6f),
-        // Quadriceps: heavy at the hip, pinched at the knee.
-        MuscleShape(MuscleGroup.QUADRICEPS, 0.418f, 0.610f, 0.165f, 0.105f, 0.205f, tilt = 0.012f, round = 0.40f),
-        MuscleShape(MuscleGroup.QUADRICEPS, 0.582f, 0.610f, 0.165f, 0.105f, 0.205f, tilt = -0.012f, round = 0.40f),
-        // Calves: an egg above a thin ankle.
-        MuscleShape(MuscleGroup.CALVES, 0.432f, 0.830f, 0.110f, 0.058f, 0.145f, tilt = 0.006f, round = 0.62f),
-        MuscleShape(MuscleGroup.CALVES, 0.568f, 0.830f, 0.110f, 0.058f, 0.145f, tilt = -0.006f, round = 0.62f),
+        // Deltoid caps — the widest point of the upper body.
+        MusclePatch(MuscleGroup.SHOULDERS, 0.175f, 0.196f, 0.150f, 0.062f),
+        MusclePatch(MuscleGroup.SHOULDERS, 0.825f, 0.196f, 0.150f, 0.062f),
+        // Pectorals, stopping short of the midline so the two do not merge into a band.
+        MusclePatch(MuscleGroup.CHEST, 0.404f, 0.226f, 0.175f, 0.070f),
+        MusclePatch(MuscleGroup.CHEST, 0.596f, 0.226f, 0.175f, 0.070f),
+        // Biceps: upper arm, below the deltoid.
+        MusclePatch(MuscleGroup.BICEPS, 0.190f, 0.278f, 0.104f, 0.088f),
+        MusclePatch(MuscleGroup.BICEPS, 0.810f, 0.278f, 0.104f, 0.088f),
+        // Abdomen, from the sternum to the waist.
+        MusclePatch(MuscleGroup.ABS, 0.500f, 0.320f, 0.215f, 0.120f),
+        // Forearms.
+        MusclePatch(MuscleGroup.FOREARMS, 0.158f, 0.404f, 0.105f, 0.120f),
+        MusclePatch(MuscleGroup.FOREARMS, 0.842f, 0.404f, 0.105f, 0.120f),
+        // Quadriceps.
+        MusclePatch(MuscleGroup.QUADRICEPS, 0.420f, 0.552f, 0.125f, 0.155f),
+        MusclePatch(MuscleGroup.QUADRICEPS, 0.580f, 0.552f, 0.125f, 0.155f),
+        // Calves.
+        MusclePatch(MuscleGroup.CALVES, 0.428f, 0.738f, 0.098f, 0.118f),
+        MusclePatch(MuscleGroup.CALVES, 0.572f, 0.738f, 0.098f, 0.118f),
     )
     BodySide.Back -> listOf(
-        MuscleShape(MuscleGroup.SHOULDERS, 0.250f, 0.200f, 0.150f, 0.105f, 0.080f, tilt = -0.012f, round = 0.6f),
-        MuscleShape(MuscleGroup.SHOULDERS, 0.750f, 0.200f, 0.150f, 0.105f, 0.080f, tilt = 0.012f, round = 0.6f),
-        // Traps: a wedge from the neck out to the shoulders, so it is wider at the BOTTOM.
-        MuscleShape(MuscleGroup.UPPER_BACK, 0.500f, 0.212f, 0.140f, 0.300f, 0.090f, round = 0.30f),
-        // Lats: the taper that makes a back a V — wide under the arm, narrow at the waist.
-        MuscleShape(MuscleGroup.LATS, 0.404f, 0.320f, 0.170f, 0.085f, 0.135f, tilt = 0.028f, round = 0.35f),
-        MuscleShape(MuscleGroup.LATS, 0.596f, 0.320f, 0.170f, 0.085f, 0.135f, tilt = -0.028f, round = 0.35f),
-        MuscleShape(MuscleGroup.TRICEPS, 0.196f, 0.312f, 0.090f, 0.068f, 0.108f, tilt = -0.020f, round = 0.65f),
-        MuscleShape(MuscleGroup.TRICEPS, 0.804f, 0.312f, 0.090f, 0.068f, 0.108f, tilt = 0.020f, round = 0.65f),
-        MuscleShape(MuscleGroup.LOWER_BACK, 0.500f, 0.425f, 0.150f, 0.185f, 0.085f, round = 0.30f),
-        MuscleShape(MuscleGroup.FOREARMS, 0.160f, 0.428f, 0.080f, 0.048f, 0.115f, tilt = -0.022f, round = 0.6f),
-        MuscleShape(MuscleGroup.FOREARMS, 0.840f, 0.428f, 0.080f, 0.048f, 0.115f, tilt = 0.022f, round = 0.6f),
-        // Glutes: round, and the widest point of the back view.
-        MuscleShape(MuscleGroup.GLUTES, 0.434f, 0.520f, 0.150f, 0.140f, 0.105f, round = 0.7f),
-        MuscleShape(MuscleGroup.GLUTES, 0.566f, 0.520f, 0.150f, 0.140f, 0.105f, round = 0.7f),
-        // Hamstrings: full under the glute, tapering to the back of the knee.
-        MuscleShape(MuscleGroup.HAMSTRINGS, 0.420f, 0.650f, 0.155f, 0.100f, 0.180f, tilt = 0.010f, round = 0.45f),
-        MuscleShape(MuscleGroup.HAMSTRINGS, 0.580f, 0.650f, 0.155f, 0.100f, 0.180f, tilt = -0.010f, round = 0.45f),
-        MuscleShape(MuscleGroup.CALVES, 0.432f, 0.830f, 0.110f, 0.058f, 0.145f, tilt = 0.006f, round = 0.62f),
-        MuscleShape(MuscleGroup.CALVES, 0.568f, 0.830f, 0.110f, 0.058f, 0.145f, tilt = -0.006f, round = 0.62f),
+        MusclePatch(MuscleGroup.SHOULDERS, 0.180f, 0.198f, 0.148f, 0.062f),
+        MusclePatch(MuscleGroup.SHOULDERS, 0.820f, 0.198f, 0.148f, 0.062f),
+        // Traps: the wedge from the neck out over both shoulders, so this one DOES span the midline.
+        MusclePatch(MuscleGroup.UPPER_BACK, 0.500f, 0.196f, 0.300f, 0.072f),
+        // Lats, narrowing to the waist.
+        MusclePatch(MuscleGroup.LATS, 0.400f, 0.270f, 0.150f, 0.090f),
+        MusclePatch(MuscleGroup.LATS, 0.600f, 0.270f, 0.150f, 0.090f),
+        MusclePatch(MuscleGroup.TRICEPS, 0.185f, 0.280f, 0.104f, 0.088f),
+        MusclePatch(MuscleGroup.TRICEPS, 0.815f, 0.280f, 0.104f, 0.088f),
+        // Lower back, the band above the pelvis.
+        MusclePatch(MuscleGroup.LOWER_BACK, 0.500f, 0.350f, 0.200f, 0.055f),
+        MusclePatch(MuscleGroup.FOREARMS, 0.155f, 0.400f, 0.105f, 0.120f),
+        MusclePatch(MuscleGroup.FOREARMS, 0.845f, 0.400f, 0.105f, 0.120f),
+        // Glutes — the widest point of the back view.
+        MusclePatch(MuscleGroup.GLUTES, 0.428f, 0.428f, 0.155f, 0.090f),
+        MusclePatch(MuscleGroup.GLUTES, 0.572f, 0.428f, 0.155f, 0.090f),
+        // Hamstrings.
+        MusclePatch(MuscleGroup.HAMSTRINGS, 0.422f, 0.560f, 0.128f, 0.150f),
+        MusclePatch(MuscleGroup.HAMSTRINGS, 0.578f, 0.560f, 0.128f, 0.150f),
+        MusclePatch(MuscleGroup.CALVES, 0.428f, 0.740f, 0.100f, 0.120f),
+        MusclePatch(MuscleGroup.CALVES, 0.572f, 0.740f, 0.100f, 0.120f),
     )
 }
 
-/**
- * The figure the patches sit on: head, neck, a V-tapered torso, tapering limbs.
- *
- * Drawn as the same tapered primitive, so the silhouette and the muscles agree about where the body
- * narrows. The ABS group on each row is a placeholder — the silhouette is never tinted by load, it
- * is only ever the faint body underneath.
- */
-private val silhouette: List<MuscleShape> = listOf(
-    MuscleShape(MuscleGroup.ABS, 0.500f, 0.058f, 0.115f, 0.100f, 0.085f, round = 0.85f),  // head
-    MuscleShape(MuscleGroup.ABS, 0.500f, 0.128f, 0.070f, 0.090f, 0.055f, round = 0.3f),   // neck
-    MuscleShape(MuscleGroup.ABS, 0.500f, 0.235f, 0.330f, 0.300f, 0.105f, round = 0.35f),  // chest shelf
-    MuscleShape(MuscleGroup.ABS, 0.500f, 0.360f, 0.300f, 0.225f, 0.160f, round = 0.35f),  // waist taper
-    MuscleShape(MuscleGroup.ABS, 0.500f, 0.485f, 0.235f, 0.300f, 0.110f, round = 0.35f),  // hips flare
-    MuscleShape(MuscleGroup.ABS, 0.196f, 0.312f, 0.100f, 0.082f, 0.115f, tilt = -0.022f, round = 0.6f),  // upper arms
-    MuscleShape(MuscleGroup.ABS, 0.804f, 0.312f, 0.100f, 0.082f, 0.115f, tilt = 0.022f, round = 0.6f),
-    MuscleShape(MuscleGroup.ABS, 0.158f, 0.430f, 0.090f, 0.055f, 0.125f, tilt = -0.024f, round = 0.6f),  // forearms
-    MuscleShape(MuscleGroup.ABS, 0.842f, 0.430f, 0.090f, 0.055f, 0.125f, tilt = 0.024f, round = 0.6f),
-    MuscleShape(MuscleGroup.ABS, 0.132f, 0.505f, 0.058f, 0.050f, 0.050f, round = 0.8f),   // hands
-    MuscleShape(MuscleGroup.ABS, 0.868f, 0.505f, 0.058f, 0.050f, 0.050f, round = 0.8f),
-    MuscleShape(MuscleGroup.ABS, 0.418f, 0.610f, 0.180f, 0.115f, 0.215f, tilt = 0.012f, round = 0.4f),   // thighs
-    MuscleShape(MuscleGroup.ABS, 0.582f, 0.610f, 0.180f, 0.115f, 0.215f, tilt = -0.012f, round = 0.4f),
-    MuscleShape(MuscleGroup.ABS, 0.432f, 0.830f, 0.120f, 0.062f, 0.160f, tilt = 0.006f, round = 0.6f),   // lower legs
-    MuscleShape(MuscleGroup.ABS, 0.568f, 0.830f, 0.120f, 0.062f, 0.160f, tilt = -0.006f, round = 0.6f),
-    MuscleShape(MuscleGroup.ABS, 0.425f, 0.930f, 0.070f, 0.085f, 0.040f, round = 0.5f),   // feet
-    MuscleShape(MuscleGroup.ABS, 0.575f, 0.930f, 0.070f, 0.085f, 0.040f, round = 0.5f),
-)
+/** The artwork's own proportions. Front and back differ slightly, so each keeps its own. */
+private fun aspectFor(side: BodySide): Float = when (side) {
+    BodySide.Front -> 700f / 2207f
+    BodySide.Back -> 700f / 2115f
+}
 
 @Composable
 private fun BodyCanvas(side: BodySide, loads: Map<MuscleGroup, Double>, peak: Double) {
-    val bodyFill = Palette.textSecondary.copy(alpha = 0.16f)
-    val bodyEdge = Palette.textSecondary.copy(alpha = 0.30f)
     val regions = regionsFor(side)
     // Resolved OUTSIDE the draw scope: `loadColorFor` is composable (it reads the palette), and a
     // DrawScope cannot call one.
-    val fills = regions.map { loadColorFor(loads[it.group], peak, litAlpha = 0.85f, unlitAlpha = 0.16f) }
-    // The glow a heavily-loaded group gets. Same hue, no alpha, drawn wide and soft underneath — which
-    // is what stops the hottest muscle reading as a flat sticker on a grey body.
-    val glows = regions.map { loadColorFor(loads[it.group], peak, litAlpha = 0.22f, unlitAlpha = 0f) }
-    val shares = regions.map { region ->
-        val kg = loads[region.group]
-        if (kg == null || kg <= 0 || peak <= 0) 0f else (kg / peak).toFloat().coerceIn(0f, 1f)
-    }
+    val fills = regions.map { loadColorFor(loads[it.group], peak, litAlpha = 0.80f, unlitAlpha = 0f) }
+    val bodyTint = Palette.textSecondary.copy(alpha = 0.55f)
+    val painter = painterResource(
+        when (side) {
+            BodySide.Front -> R.drawable.body_front
+            BodySide.Back -> R.drawable.body_back
+        },
+    )
 
-    Canvas(modifier = Modifier.fillMaxWidth().aspectRatio(0.46f)) {
-        // THREE PASSES, and the order is the whole difference between this reading as a body and as a
-        // diagram. The silhouette first, as a filled shape under a slightly brighter outline, so the
-        // figure has an edge instead of dissolving into the card. Then the glow of whatever is loaded,
-        // wide and soft. Then the muscles themselves on top, sharp.
-        silhouette.forEach { drawShape(it, bodyFill) }
-        silhouette.forEach { drawShape(it, bodyEdge, stroke = size.width * 0.004f) }
-
-        regions.forEachIndexed { i, shape ->
-            if (shares[i] > 0f) {
-                // Scaled up by a few percent and drawn behind: a halo the width of the muscle itself
-                // would just look like a thicker muscle.
-                drawShape(shape.inflated(1f + 0.10f * shares[i]), glows[i])
+    Box(
+        modifier = Modifier.fillMaxWidth().aspectRatio(aspectFor(side)),
+        contentAlignment = Alignment.Center,
+    ) {
+        // THE LOAD GOES UNDER THE LINE ART, not over it. Painted on top, even at 80% the colour
+        // swallows the muscle contours it is supposed to be highlighting and the figure turns into a
+        // set of flat blobs; underneath, the drawing's own shading reads THROUGH the colour and the
+        // result looks like a lit muscle rather than a sticker on one.
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            regions.forEachIndexed { i, patch ->
+                if (fills[i].alpha <= 0f) return@forEachIndexed
+                drawOval(
+                    brush = Brush.radialGradient(
+                        colors = listOf(fills[i], fills[i].copy(alpha = 0f)),
+                        center = Offset(size.width * patch.cx, size.height * patch.cy),
+                        radius = maxOf(size.width * patch.w, size.height * patch.h) * 0.62f,
+                    ),
+                    topLeft = Offset(
+                        size.width * (patch.cx - patch.w / 2f),
+                        size.height * (patch.cy - patch.h / 2f),
+                    ),
+                    size = Size(size.width * patch.w, size.height * patch.h),
+                )
             }
         }
-        regions.forEachIndexed { i, shape -> drawShape(shape, fills[i]) }
-
-        // A hairline down the sternum and the spine. One line, and the front stops reading as a single
-        // slab: it is what the eye uses to find the middle of a torso.
-        drawCentreSeam(bodyEdge)
-    }
-}
-
-/** This patch, grown about its own centre. Used for the load glow behind a lit muscle. */
-private fun MuscleShape.inflated(factor: Float): MuscleShape = copy(
-    topW = topW * factor,
-    bottomW = bottomW * factor,
-    h = h * factor,
-)
-
-/**
- * The line down the middle of the torso.
- *
- * Drawn rather than built into the silhouette because it has to sit ON TOP of the muscle patches — a
- * seam under the pecs is a seam nobody sees. Stops short of both ends: it is a suggestion of a sternum,
- * not a zip.
- */
-private fun DrawScope.drawCentreSeam(color: Color) {
-    val x = size.width * 0.5f
-    drawLine(
-        color = color,
-        start = androidx.compose.ui.geometry.Offset(x, size.height * 0.20f),
-        end = androidx.compose.ui.geometry.Offset(x, size.height * 0.46f),
-        strokeWidth = size.width * 0.004f,
-    )
-}
-
-/**
- * A patch, drawn as a tapered shape with a slight belly on each side.
- *
- * The two ends have different widths, the sides bow outward between them, and the corners are pulled
- * in by [MuscleShape.round]. That is the whole trick: straight parallel sides read as machinery, a
- * width that changes along the length reads as flesh.
- */
-private fun DrawScope.drawShape(shape: MuscleShape, color: Color, stroke: Float = 0f) {
-    val cx = size.width * shape.cx
-    val cy = size.height * shape.cy
-    val h = size.height * shape.h
-    val topHalf = size.width * shape.topW / 2f
-    val botHalf = size.width * shape.bottomW / 2f
-    val lean = size.width * shape.tilt
-    val top = cy - h / 2f
-    val bottom = cy + h / 2f
-    val topCx = cx - lean
-    val botCx = cx + lean
-
-    // Capped against BOTH the width and the height, so a short wide patch cannot round itself away.
-    val rTop = minOf(topHalf, h / 2f) * shape.round
-    val rBot = minOf(botHalf, h / 2f) * shape.round
-    // How far the sides bow out mid-length. Proportional to the patch, so every muscle swells alike.
-    val belly = (topHalf + botHalf) * 0.07f
-
-    val path = Path().apply {
-        moveTo(topCx - topHalf + rTop, top)
-        lineTo(topCx + topHalf - rTop, top)
-        quadraticBezierTo(topCx + topHalf, top, topCx + topHalf, top + rTop)
-        cubicTo(
-            topCx + topHalf + belly, top + h * 0.35f,
-            botCx + botHalf + belly, top + h * 0.68f,
-            botCx + botHalf, bottom - rBot,
+        Image(
+            painter = painter,
+            contentDescription = null,
+            colorFilter = ColorFilter.tint(bodyTint),
+            modifier = Modifier.fillMaxSize(),
         )
-        quadraticBezierTo(botCx + botHalf, bottom, botCx + botHalf - rBot, bottom)
-        lineTo(botCx - botHalf + rBot, bottom)
-        quadraticBezierTo(botCx - botHalf, bottom, botCx - botHalf, bottom - rBot)
-        cubicTo(
-            botCx - botHalf - belly, top + h * 0.68f,
-            topCx - topHalf - belly, top + h * 0.35f,
-            topCx - topHalf, top + rTop,
-        )
-        quadraticBezierTo(topCx - topHalf, top, topCx - topHalf + rTop, top)
-        close()
-    }
-    if (stroke > 0f) {
-        drawPath(path, color, style = androidx.compose.ui.graphics.drawscope.Stroke(width = stroke))
-    } else {
-        drawPath(path, color)
     }
 }
 

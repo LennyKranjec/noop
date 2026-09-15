@@ -189,4 +189,25 @@ class QuestTest {
         // A directive that matches nothing still improves something: an empty row reads as a bug.
         assertTrue(QuestGenerator.rewardsForText("do the thing").isNotEmpty())
     }
+
+    @Test
+    fun germanDirectivesMatchToo() {
+        // The directive is written in the wearer's own language, so the stems have to cover it.
+        assertTrue(QuestGenerator.rewardsForText("Schlafenszeit um 22:00").contains(QuestReward.SLEEP))
+        assertTrue(QuestGenerator.rewardsForText("10 Minuten Atemübung").contains(QuestReward.STRESS))
+        assertTrue(QuestGenerator.rewardsForText("Beine dehnen").contains(QuestReward.MUSCLE))
+    }
+
+    @Test
+    fun theRewardOrderIsFixedSoBothPlatformsDrawTheSameRow() {
+        // PARITY PIN. The Swift twin `QuestNamingTests` asserts this exact sequence; a different order
+        // on either side puts the icons on the card in a different order on that platform.
+        assertEquals(
+            listOf(
+                QuestReward.SLEEP, QuestReward.BRAIN, QuestReward.STRESS,
+                QuestReward.HEART, QuestReward.LUNGS, QuestReward.MUSCLE,
+            ),
+            QuestGenerator.rewardsForText("Walk, then stretch, then bed early, and breathe"),
+        )
+    }
 }
