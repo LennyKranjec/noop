@@ -30,6 +30,43 @@ import WhoopStore
 struct StressView: View {
     @EnvironmentObject var repo: Repository
 
+    // MARK: - What the Focus tab borrows
+    //
+    // The Focus tab IS this screen with the meditation log on top — the Android lane settled that, and a
+    // literal clone would be ~1,700 duplicated lines whose two halves drift the first time either is
+    // touched, a fix landing on one tab and silently not the other. The heading, the subtitle and one
+    // leading card are the entire difference, so they are parameters with the Stress screen's own values
+    // as defaults; every existing `StressView()` call site is unchanged.
+
+    private let title: LocalizedStringKey
+    private let subtitle: LocalizedStringKey
+    /// A card rendered ABOVE everything else, including the loading and empty states — the meditation
+    /// log is usable on a day with no scorable stress timeline, and hiding it behind the stress read
+    /// would make the Focus tab look broken on exactly the calm days it is most wanted.
+    private let leading: AnyView?
+
+    /// The Stress tab itself. Defaulted so `StressView()` keeps meaning exactly what it did.
+    init(
+        title: LocalizedStringKey = "Stress",
+        subtitle: LocalizedStringKey = "Autonomic load from HRV and resting heart rate"
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.leading = nil
+    }
+
+    /// The same screen under a different heading, with one card in front of it. Generic over the card
+    /// rather than taking an `AnyView` from the caller, so the call site reads as an ordinary builder.
+    init<Leading: View>(
+        title: LocalizedStringKey,
+        subtitle: LocalizedStringKey,
+        @ViewBuilder leading: () -> Leading
+    ) {
+        self.title = title
+        self.subtitle = subtitle
+        self.leading = AnyView(leading())
+    }
+
     /// The stored 0–3 stress series ("my-whoop"), oldest→newest. Empty → derive.
     @State private var storedSeries: [(day: String, value: Double)] = []
     @State private var loaded = false
@@ -64,7 +101,7 @@ struct StressView: View {
     @State private var modelSignature: StressInputs?
 
     var body: some View {
-        ScreenScaffold(title: "Stress", subtitle: "Autonomic load from HRV and resting heart rate",
+        ScreenScaffold(title: title, subtitle: subtitle,
                        // PERF (scroll): lazy column — byte-identical layout (LazyVStack == eager VStack
                        // alignment/spacing/header). The content is one inner eager VStack, so the staggered
                        // section reveal is unchanged; this only defers building that stack until it scrolls in.
@@ -73,6 +110,7 @@ struct StressView: View {
                        // fixed, full-bleed time-of-day sky behind the scroll content (does not scroll), so the
                        // Stress screen sits in the same liquid atmosphere as every other tab.
                        topBackground: liquidScaffoldSky()) {
+            if let leading { leading }
             if let model {
                 content(model)
             } else if !loaded {

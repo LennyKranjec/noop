@@ -125,9 +125,17 @@ struct RootTabView: View {
         // its dynamic interaction with scrolling content automatically; older supported releases use
         // the corresponding system material and safe-area behaviour from the same TabView.
         TabView(selection: nativeTabSelection) {
-            tab(todayTabRoot, "Today", "square.grid.2x2", path: $tabPaths[0], scrollSignal: scrollTop[0]).tag(0)
-            tab(TrendsView(), "Trends", "chart.line.uptrend.xyaxis", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
-            tab(SleepView(), "Sleep", "bed.double", path: $tabPaths[2], scrollSignal: scrollTop[2]).tag(2)
+            // A SUN, not a grid. Today is the day you are in, and a grid glyph says "a page of tiles" —
+            // which is what the screen is made of, not what it is for. The sun also pairs with the moon
+            // the Sleep and level surfaces already use, so the two halves of a day read as a pair in the
+            // bar. Matches the Android lane's `Icons.Filled.WbSunny`.
+            tab(todayTabRoot, "Today", "sun.max", path: $tabPaths[0], scrollSignal: scrollTop[0]).tag(0)
+            // Labelled Health, as on Android; the screen behind it is still Trends.
+            tab(TrendsView(), "Health", "chart.line.uptrend.xyaxis", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
+            // FOCUS TOOK SLEEP'S SLOT, matching the Android bar. Sleep is not gone — it is reached from
+            // the Health tab and from its own More row below — and Focus is the tab with something to do
+            // on it, which is what earns a slot in a five-slot bar.
+            tab(MindfulnessView(), "Focus", "figure.mind.and.body", path: $tabPaths[2], scrollSignal: scrollTop[2]).tag(2)
             // K3: Coach promoted to a top-level tab (was behind the More list). The sparkles icon
             // matches the More-tab row and the macOS sidebar entry.
             tab(CoachView(), "Coach", "sparkles", path: $tabPaths[3], scrollSignal: scrollTop[3]).tag(3)
@@ -151,6 +159,10 @@ struct RootTabView: View {
         .sheet(isPresented: $showLevelTimeline) {
             LevelTimelineSheetView(model: levelBar, repo: repo)
         }
+        // THE QUEST POP-UP, over every tab. It belongs to the shell rather than to Today for the same
+        // reason the level strip does: a directive that only appears on the tab you happened to be on is
+        // one the system never actually issued.
+        .questHost()
         // #1841: the same "Hide bar when scrolling" preference Android drives its own bar with. Here the
         // system owns the behaviour — iOS 26's tab bar MINIMISES to a pill on scroll down rather than
         // sliding away entirely, so this is the platform's read of the same intent, not a copy of ours.
@@ -450,6 +462,7 @@ struct RootTabView: View {
                     MoreRow("Compare", "rectangle.split.2x1.fill", .compare)
                 }
                 moreSection("Body") {
+                    MoreRow("Sleep", "bed.double.fill", .sleep)
                     MoreRow("Live", "waveform.path.ecg", .live)
                     MoreRow("Workouts", "figure.run", .workouts)
                     MoreRow("Health", "heart.text.square.fill", .health)
@@ -575,7 +588,7 @@ struct RootTabView: View {
 /// registration in `moreTab`.
 private enum MoreDestination: Hashable {
     case insightsHub, intelligence, coach, insights, explore, compare
-    case live, workouts, health, labBook, stress, breathe, intervals, rhythm
+    case live, workouts, health, labBook, sleep, stress, breathe, intervals, rhythm
     case fusedRecord, appleHealth, miBand, dataSources, backupSync, shortcutsExport, noopLimitations
     case alarms, automations, testCentre, siriShortcuts, powerSaving, settings
 
@@ -591,6 +604,9 @@ private enum MoreDestination: Hashable {
         case .workouts:        WorkoutsView()
         case .health:          HealthView()
         case .labBook:         LabBookView()
+        // Sleep handed its tab slot to Focus, so it needs a row here — a screen this central must not
+        // be reachable only as a link off another one.
+        case .sleep:           SleepView()
         case .stress:          StressView()
         case .breathe:         BreathingView()
         case .intervals:       IntervalTimerView()

@@ -289,10 +289,15 @@ struct TrendsView: View {
                         // chart behind an honest "needs N more days" state until enough history exists.
                         TrainingLoadCard(days: repo.days)
                             .staggeredAppear(index: 5)
-                        yearStrip
+                        // Where the lifting volume went, by muscle group. Reads the banked per-muscle
+                        // totals the lifting import writes; with no log imported the body sits unlit and
+                        // the card says so rather than shading it from strain.
+                        MuscleModelCardView()
                             .staggeredAppear(index: 6)
-                        exportReportRow
+                        yearStrip
                             .staggeredAppear(index: 7)
+                        exportReportRow
+                            .staggeredAppear(index: 8)
                     }
                 }
             }

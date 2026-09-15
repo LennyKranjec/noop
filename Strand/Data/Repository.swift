@@ -206,6 +206,15 @@ final class Repository: ObservableObject {
     @Published private(set) var hydrationSeq = 0
     func noteHydrationChanged() { hydrationSeq += 1 }
 
+    /// Bumped whenever a WHOOP cloud sync lands rows. The Today hero re-reads its cloud day on this.
+    ///
+    /// Its OWN counter rather than `refreshSeq`: a cloud sync writes straight to the store through the
+    /// store handle and never goes through the strap refresh, so the hero keyed on `refreshSeq` stayed
+    /// blank until something unrelated happened to reload the screen — which reads as a connection that
+    /// did not work.
+    @Published private(set) var whoopCloudSeq = 0
+    func noteWhoopCloudChanged() { whoopCloudSeq += 1 }
+
     /// Bumped whenever a period-start row is logged or removed. Cycle surfaces use this lightweight
     /// signal to reload their sensitive local history without forcing a full strap-data refresh.
     @Published private(set) var cycleTrackingSeq = 0

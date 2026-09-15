@@ -15,6 +15,7 @@ import SwiftUI
 import StrandDesign
 import WhoopStore
 import StrandAnalytics
+import StrandImport
 
 struct LiquidTodayView: View {
     @AppStorage(DayCycleMode.storageKey) private var dayCycleModeRaw = DayCycleMode.sleepOnset.rawValue
@@ -22,6 +23,9 @@ struct LiquidTodayView: View {
     @EnvironmentObject var repo: Repository
     @EnvironmentObject var router: NavRouter
     @EnvironmentObject var profile: ProfileStore
+    /// The coach, for today's mission. Read here rather than inside the marquee so one screen owns the
+    /// one-per-day generation and the strip stays a pure renderer.
+    @EnvironmentObject var coach: AICoachEngine
     // For the pull-to-sync gesture (#334): a pull kicks a manual strap history offload via ble.syncNow().
     // Observe BLEManager, NOT AppModel — AppModel @Publishes `bpm` on the ~1 Hz HR tick, so observing it
     // would re-render all of Today every second (the exact churn the LiveState leaves isolate). BLEManager
@@ -46,6 +50,30 @@ struct LiquidTodayView: View {
     /// Today's hydration total + goal (ml), resolved in `load()`. nil → the card shows "—".
     @State private var hydrationTotalML: Double?
     @State private var hydrationGoalML: Int?
+
+    // MARK: - The WHOOP trio, the mission and the flames
+    //
+    // All four are read in `load()` and held here rather than derived in `body`: each is a store round
+    // trip, and `body` runs on every HR tick.
+
+    /// WHOOP's own row for the selected day, read straight from the cloud source. Nil when the account
+    /// is not connected, or when WHOOP has not scored that day yet.
+    @State private var cloudDay: DailyMetric?
+    /// True when `cloudDay` is a CARRIED earlier day rather than the selected one. The hero's footer
+    /// shows that day's date, which is what makes the carry honest rather than a silent substitution.
+    @State private var cloudIsCarried = false
+    /// WHOOP's own `sleep_performance_percentage`, banked on the series seam.
+    ///
+    /// BANKED, NOT RE-SCORED. An earlier cut ran this app's own scorer over the night instead, which
+    /// produces a different number from the one the wearer reads in WHOOP's app — on a ring labelled
+    /// WHOOP. Two definitions of "sleep score" on one tile is a bug, not a rounding difference.
+    @State private var cloudSleepScore: Double?
+    /// Today's mission, as the running line above the hero. Nil until one has been written.
+    @State private var dailyMission: String?
+    /// The three flames. Empty until the first read, which is also the empty state the strip draws.
+    @State private var streaks: [Streak] = []
+    /// A ring tap's destination, pushed as a value so a re-tap of the Today tab can pop it.
+    @State private var heroTap: TabRoute?
 
     // async-loaded via the confirmed Repository accessors
     @State private var restScore: Double?          // sleep_performance, day-keyed
@@ -343,13 +371,34 @@ struct LiquidTodayView: View {
                     // nothing and keeps its slot in the saved order.
                     ForEach(sectionOrder) { section in
                         switch section {
-                        case .hero: heroCard
+                        case .hero:
+                            // THE MISSION, as a running line directly above the scores. Today only: a
+                            // mission is a thing to do now, and one hanging over a past day's numbers
+                            // would be an instruction for a day that is already over.
+                            if selectedDayOffset == 0, let mission = dailyMission {
+                                MissionMarqueeView(text: mission)
+                            }
+                            heroCard
                         case .liveSession: if liveSessionsBeta { liveSessionStartRow }
                         case .synthesis: synthesisSection
                         case .keyMetrics: keyMetricsSection
                         case .workouts: lastWorkoutsSection
                         case .heartRate: heartRateSection
                         case .recoveryVitals: recoveryVitalsSection
+                        // THE QUESTS BEING CARRIED. Today only, and only for today: a quest has a clock
+                        // on it, and showing one above a past day's numbers would invite completing it
+                        // for a day that is over.
+                        case .quests: if selectedDayOffset == 0 { QuestStripView() }
+                        case .streaks: if selectedDayOffset == 0 { StreakStripView(streaks: streaks) }
+                        // The mission is a running line inside the hero now (see `.hero` above), so the
+                        // section that used to be its card renders nothing. It is KEPT rather than
+                        // deleted so a layout arranged on either platform round-trips unchanged.
+                        case .dailyMission: EmptyView()
+                        // On this platform the intraday stress read lives on the Focus tab and the water
+                        // tile is one of the Your Cards, so both sections keep their slot in the saved
+                        // order without drawing a second copy of a surface that already exists.
+                        case .stressEnergy: EmptyView()
+                        case .hydrationNutrition: EmptyView()
                         case .yourCards: yourCardsSection
                         case .menstrualCycle:
                             if selectedDayOffset == 0 { MenstrualCycleHomeCard() }
@@ -439,6 +488,17 @@ struct LiquidTodayView: View {
         // classic TodayView's reloadHydration() uses.
         .task(id: "\(repo.refreshSeq)-\(selectedDayOffset)-\(repo.hydrationSeq)-\(hydrationEnabled)-\(dayCycleModeRaw)") {
             await load()
+        }
+        // The cloud read is keyed SEPARATELY from `load()`, on its own tick, because a WHOOP sync lands
+        // without bumping `refreshSeq` — the first cut keyed the hero on the day alone and the rings
+        // stayed blank until something else happened to reload the screen.
+        .task(id: "\(selectedDayKey)-\(repo.whoopCloudSeq)") { await loadCloudDay() }
+        // A ring tap pushes its own screen. `isPresented` rather than `navigationDestination(item:)`,
+        // which needs macOS 14 and this target is 13.
+        .navigationDestination(
+            isPresented: Binding(get: { heroTap != nil }, set: { if !$0 { heroTap = nil } })
+        ) {
+            heroTapDestination
         }
         .sheet(item: $guideSection) { section in
             NavigationStack { ScoringGuideView(initialSection: section, onClose: { guideSection = nil }) }
@@ -664,44 +724,110 @@ struct LiquidTodayView: View {
         .accessibilityLabel("Start a live session. Beta. Silent strap coaching against today's Charge.")
     }
 
+    // MARK: - The hero
+    //
+    // THE THREE SCORES AS RINGS, matching the Android lane and the design the wearer asked for. The
+    // Charge / Effort / Rest vessel row this replaced showed the app's OWN scoring of the same body; the
+    // rings show WHOOP's, which is what the wearer reads in WHOOP's app and what they asked to see here.
+    // The app's own figures did not go anywhere — they are the Key Metrics tiles and every screen below.
+    //
+    // A CLOUD ROW, NOT THE MERGED DAY. The merged view picks one winner per field across every source, so
+    // a locally derived recovery can legitimately outrank the cloud's — which is right for the rest of the
+    // app and wrong for a tile whose footer credits WHOOP by name.
+    //
+    // EACH RING OPENS ITS OWN THING. On Android every ring but the middle one used to land on the same
+    // guide page, so tapping Sleep explained Charge. Sleep, Recovery, Strain: three taps, three
+    // destinations, each about the number that was pressed.
+
     private var heroCard: some View {
-        HStack(alignment: .top, spacing: 4) {
-            // #543 carry: an unscored today shows the last scored night's REAL Charge (labelled as prior by
-            // the state pill) rather than an empty vessel, matching the classic Today, the widget/watch/Live
-            // Activity (`Repository.widgetAnchor`) and Android. Effort deliberately does NOT carry — it is
-            // today's own accumulation, so yesterday's number would be a false statement, not a stale one.
-            HeroScoreCell(label: String(localized: "Charge"), score: chargeDisplay.pct, tint: StrandPalette.chargeColor,
-                          animated: dataLoaded, onGuide: { guideSection = .charge },
-                          detailRoute: .metric(HeroRingMetric.charge))
-            // #45: the hero Effort must honour the user's Effort scale like every other Effort read-out.
-            // Show the value on the chosen scale (0–100 or WHOOP 0–21) with the matching vessel max, and
-            // one decimal on the compressed 0–21 axis to match the app-wide `effortDisplay` convention
-            // (12.6, not a rounded "13"); the 0–100 hero stays a whole number as before.
-            HeroScoreCell(label: String(localized: "Effort"),
-                          score: effortStrain(displayDay).map { UnitFormatter.effortValue($0, scale: effortScale) },
-                          tint: StrandPalette.effortColor, animated: dataLoaded,
-                          onGuide: { guideSection = .effort },
-                          maxValue: effortScale == .whoop ? 21 : 100,
-                          decimals: effortScale == .whoop ? 1 : 0,
-                          detailRoute: .metric(HeroRingMetric.effort))
-            HeroScoreCell(label: String(localized: "Rest"), score: restScore, tint: StrandPalette.restColor,
-                          animated: dataLoaded, onGuide: { guideSection = .rest },
-                          detailRoute: .metric(HeroRingMetric.rest))
-                .overlay(alignment: .top) {
-                    if let sourceLabel = heroSourceLabel {
-                        SourceBadge("\(sourceLabel)", tint: StrandPalette.textSecondary)
-                            // Match the badge's trailing edge to the Rest vessel and centre it on the card border.
-                            .fixedSize()
-                            .frame(width: HeroScoreCell.vesselDiameter, alignment: .trailing)
-                            .offset(y: -(NoopMetrics.space4 + NoopMetrics.sourceBadgeHeight / 2))
-                            .allowsHitTesting(false)
-                            .accessibilityLabel(Text("Source: \(sourceLabel)"))
-                    }
+        TodayTrioHeroView(
+            scores: heroScores,
+            dateLabel: heroDateLabel,
+            // Says WHOOP when the numbers came from WHOOP's own cloud, rather than crediting a source
+            // that did not produce them.
+            sourceLabel: cloudDay != nil ? "WHOOP" : heroSourceLabel,
+            onTapScore: { index in
+                switch index {
+                case 0: heroTap = .sleep
+                case 1: guideSection = .charge
+                default: heroTap = .metric(HeroRingMetric.effort)
                 }
-        }
-        .padding(.vertical, NoopMetrics.space4)
-        .padding(.horizontal, NoopMetrics.space3)
+            }
+        )
         .background(NoopPanelSurface(cornerRadius: 26, elevated: true, surfaceOpacity: cardOpacity))
+    }
+
+    /// The three rings, in the order the wearer asked for: Sleep, Recovery, Strain.
+    private var heroScores: [HeroScore] {
+        let recovery = cloudDay?.recovery ?? displayDay?.recovery
+        return [
+            HeroScore(id: 0, label: "Sleep", text: heroPercentText(cloudSleepScore ?? restScore),
+                      fraction: heroFraction(cloudSleepScore ?? restScore),
+                      tint: StrandPalette.restColor),
+            HeroScore(id: 1, label: "Recovery", text: heroPercentText(recovery),
+                      fraction: heroFraction(recovery),
+                      tint: StrandPalette.statusPositive),
+            // STRAIN ON WHOOP'S OWN 0-21 SCALE, always, and never as a percentage. This tile shows
+            // WHOOP's figures under WHOOP's name, and 14.9 is what their app says — rendering it as
+            // "71%" would be this app restating their number in units they do not use, on a tile that
+            // credits them for it. The cloud value is ALREADY 0-21; only a locally derived fallback
+            // needs converting, which is what `heroStrain21` is for.
+            HeroScore(id: 2, label: "Strain",
+                      text: heroStrain21.map { String(format: "%.1f", $0) } ?? "–",
+                      fraction: heroFraction(heroStrain21, max: whoopStrainMax),
+                      tint: StrandPalette.effortColor,
+                      // THE DAY'S OPTIMAL STRAIN, always drawn, so the arc can be read against the
+                      // target rather than against nothing: a 15.0 means something different on a 92 %
+                      // recovery than on a 19 %, and the number alone cannot say which.
+                      mark: heroFraction(optimalStrainCeiling, max: whoopStrainMax)),
+        ]
+    }
+
+    @ViewBuilder
+    private var heroTapDestination: some View {
+        switch heroTap {
+        case .sleep: SleepView()
+        case .metric(let key):
+            if let m = MetricCatalog.all.first(where: { $0.key == key }) {
+                MetricDetailView(metric: m)
+            } else {
+                HealthView()
+            }
+        default: EmptyView()
+        }
+    }
+
+    /// Strain on WHOOP's scale. The cloud row already is; a local Effort is 0–100 and is compressed.
+    private var heroStrain21: Double? {
+        if let cloud = cloudDay?.strain { return cloud }
+        guard let local = effortStrain(displayDay) else { return nil }
+        return local / 100 * whoopStrainMax
+    }
+
+    /// The top of the day's recommended strain band, on WHOOP's scale.
+    private var optimalStrainCeiling: Double? {
+        guard let recovery = cloudDay?.recovery ?? displayDay?.recovery else { return nil }
+        return CoupledView.optimalStrainRange(recovery: recovery).map { Double($0.upperBound) }
+    }
+
+    private func heroPercentText(_ value: Double?) -> String {
+        guard let value, value.isFinite else { return "–" }
+        return "\(Int(value.rounded()))%"
+    }
+
+    private func heroFraction(_ value: Double?, max: Double = 100) -> Double? {
+        guard let value, value.isFinite, max > 0 else { return nil }
+        return Swift.min(Swift.max(value / max, 0), 1)
+    }
+
+    /// The day the FIGURES are from, which on a carried row is not the selected day. This label is the
+    /// entire reason the carry is honest rather than a substitution nobody was told about.
+    private var heroDateLabel: String {
+        let key = (cloudIsCarried ? cloudDay?.day : nil) ?? selectedDayKey
+        guard let date = WhoopCloudApi.localDayDate(key) else { return key }
+        let f = DateFormatter()
+        f.dateFormat = "d MMM"
+        return f.string(from: date)
     }
 
     // MARK: - Heart rate
@@ -1566,6 +1692,36 @@ struct LiquidTodayView: View {
     }
 
     // MARK: - Data
+
+    /// WHOOP's own row for the selected day, plus the flames and today's mission.
+    ///
+    /// SEPARATE from `load()` on purpose: these are the reads that depend on a cloud sync rather than on
+    /// a strap refresh, and keying them together meant a sync landing was invisible until the next
+    /// unrelated reload.
+    private func loadCloudDay() async {
+        // A sync only if the last one has gone stale — opening Today is meant to be enough to see a
+        // freshly connected account, without a round trip on every appearance.
+        await WhoopCloudSync.syncIfStale(repo: repo)
+
+        let key = selectedDayKey
+        if let own = await repo.whoopCloudDay(key) {
+            cloudDay = own
+            cloudIsCarried = false
+        } else if selectedDayOffset == 0, let carried = await repo.whoopCloudCarriedDay(upTo: key) {
+            // A day WHOOP has not scored yet is common in the morning, and three dashes over a strap that
+            // is working is worse than last night's real numbers WITH the date they belong to — which the
+            // hero's footer shows. Today only: a past day that was never scored simply was not.
+            cloudDay = carried
+            cloudIsCarried = true
+        } else {
+            cloudDay = nil
+            cloudIsCarried = false
+        }
+        cloudSleepScore = await repo.whoopCloudSleepScore(day: cloudDay?.day ?? key)
+
+        streaks = Streaks.evaluate(days: repo.days, stressMinutesByDay: await repo.bankedStressMinutes())
+        dailyMission = await coach.ensureDailyMission()?.text
+    }
 
     private func load() async {
         // #989: today's hydration total + goal. One metricSeries row + a UserDefaults read, same as classic

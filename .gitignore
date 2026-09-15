@@ -101,6 +101,7 @@ Strand/Oura/OuraSecrets.xcconfig
 
 # Personal bundle id prefix (BYO; never committed)
 Config/BundleIdSecrets.xcconfig
+Config/WhoopSecrets.xcconfig
 
 # (#979) The linux-capture workbench moved from `tools/` to `Tools/` when the two case-colliding
 # trees were merged. On a case-SENSITIVE filesystem any capture a contributor already had stays

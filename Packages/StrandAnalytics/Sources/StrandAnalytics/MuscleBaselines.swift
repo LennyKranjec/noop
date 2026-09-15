@@ -101,6 +101,20 @@ public enum MuscleBaselines {
         return MuscleBaseline(mean: mean, sd: variance.squareRoot())
     }
 
+    /// Freeze whichever groups have the history for it. Groups that do not are simply absent.
+    ///
+    /// GENERIC OVER THE KEY rather than typed to `MuscleGroup`, because the group enum lives in
+    /// `StrandImport` (it is an import-attribution concept) and this package does not depend on it.
+    /// The call site supplies `[MuscleGroup: [Double]]` and gets `[MuscleGroup: MuscleBaseline]` back,
+    /// which is what the Android signature says; nothing here needs to know what a key is.
+    public static func deriveAll<Key: Hashable>(_ history: [Key: [Double]]) -> [Key: MuscleBaseline] {
+        var out: [Key: MuscleBaseline] = [:]
+        for (group, windows) in history {
+            if let baseline = derive(windows: windows) { out[group] = baseline }
+        }
+        return out
+    }
+
     /// Turn a day-keyed series of daily volume into one trailing-`days`-day sum per day.
     ///
     /// Runs over the CALENDAR days between the first and last entry, not over the entries: a day the

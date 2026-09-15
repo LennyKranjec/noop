@@ -16,3 +16,20 @@ BUNDLE_ID_PREFIX = com.noopapp
 // to stop Xcode from asking you to reselect a team after every `xcodegen generate`.
 DEVELOPMENT_TEAM =
 #include? "BundleIdSecrets.xcconfig"
+
+// MARK: - WHOOP cloud credentials
+//
+// The Apple twin of the Android lane's `android/local.properties` WHOOP_* keys. WhoopSecrets.xcconfig
+// is gitignored and user-created (template: WhoopSecrets.example.xcconfig); with it absent every
+// $(WHOOP_*) key below resolves to an empty string, `WhoopCredentials.fromBundle` is nil, and the app
+// simply does not offer the connection. NOT CONFIGURED IS A FIRST-CLASS STATE — nothing throws.
+//
+// Defaults are declared HERE rather than only in the secrets file so a clean checkout resolves them
+// to empty rather than leaving the literal "$(WHOOP_CLIENT_ID)" in the built Info.plist.
+WHOOP_CLIENT_ID =
+WHOOP_CLIENT_SECRET =
+// .xcconfig treats // as a start-of-comment ANYWHERE on a line, so the empty macro expansion $()
+// breaks up the "//" token without changing the resolved string — it is still exactly
+// noop://whoop-oauth at build time, matching the Android redirect byte for byte.
+WHOOP_REDIRECT_URI = noop:/$()/whoop-oauth
+#include? "WhoopSecrets.xcconfig"

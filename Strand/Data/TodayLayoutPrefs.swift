@@ -30,6 +30,18 @@ enum TodaySection: String, CaseIterable, Identifiable {
     case workouts
     case heartRate
     case recoveryVitals
+    /// Today's intraday stress read plus the charge-minus-effort bar.
+    case stressEnergy
+    /// The water tile and the macro tile, which replaced the Nutrition tab.
+    case hydrationNutrition
+    /// Kept so a layout saved on Android round-trips, and so the section can be re-ordered. It renders
+    /// NOTHING: the mission is a running line inside the hero now, because a one-sentence card cost more
+    /// of the screen than anything else on Today per word it carried.
+    case dailyMission
+    /// The quests currently being carried, as chips.
+    case quests
+    /// How many days in a row the good habits have held.
+    case streaks
     case yourCards
     case menstrualCycle
     case journal
@@ -50,6 +62,11 @@ enum TodaySection: String, CaseIterable, Identifiable {
         case .workouts:       return String(localized: "Workouts")
         case .heartRate:      return String(localized: "Heart Rate")
         case .recoveryVitals: return String(localized: "Recovery Vitals")
+        case .stressEnergy:   return String(localized: "Stress & Energy")
+        case .hydrationNutrition: return String(localized: "Water & Macros")
+        case .dailyMission:   return String(localized: "Today's mission")
+        case .quests:         return String(localized: "Quests")
+        case .streaks:        return String(localized: "Streaks")
         case .yourCards:      return String(localized: "Your Cards")
         case .menstrualCycle: return String(localized: "Menstrual Cycle")
         case .journal:        return String(localized: "Journal")
@@ -59,8 +76,12 @@ enum TodaySection: String, CaseIterable, Identifiable {
 
     /// The original, hard-coded section order — the default when the layout isn't customised. The journal
     /// widget (#656) is last by default, where it was first added, above the data-sources card.
+    /// Quests sit at the very top, above even the hero: they are the only thing on Today that is a
+    /// commitment with a clock on it, and a commitment below the fold is one you remember in the evening.
+    /// Streaks follow, where the flames read as the reward for it. Matches the Android default order.
     static let defaultOrder: [TodaySection] = [
-        .hero, .liveSession, .synthesis, .keyMetrics, .workouts, .heartRate, .recoveryVitals, .yourCards,
+        .quests, .hero, .dailyMission, .streaks, .liveSession, .synthesis, .keyMetrics, .workouts,
+        .heartRate, .recoveryVitals, .stressEnergy, .hydrationNutrition, .yourCards,
         .menstrualCycle, .journal, .addedCards,
     ]
 }
