@@ -3060,4 +3060,8 @@
     <string name="level_metric_lvl">lvl. %1$d</string>
     <string name="level_no_data">No data</string>
     <string name="level_days_a11y">Mean of the last %1$d days</string>
+    <string name="lifting_import_alphaprog">Import from Alphaprog…</string>
+    <string name="muscle_model_scale_warming">Some groups are still shaded relative to your heaviest — a muscle needs a month of history before its own normal is known.</string>
+    <string name="health_connect_category_nutrition">Nutrition</string>
+    <string name="health_connect_category_nutrition_detail">"Calories, protein, carbohydrate and fat from your food log"</string>
 </resources>

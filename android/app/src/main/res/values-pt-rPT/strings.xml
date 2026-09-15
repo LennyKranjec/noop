@@ -2842,4 +2842,8 @@
     <string name="level_metric_lvl">nív. %1$d</string>
     <string name="level_no_data">Sem dados</string>
     <string name="level_days_a11y">Média dos últimos %1$d dias</string>
+    <string name="lifting_import_alphaprog">Importar do Alphaprog…</string>
+    <string name="muscle_model_scale_warming">Alguns grupos ainda são sombreados em relação ao mais carregado — um músculo precisa de um mês de histórico para se conhecer o seu normal.</string>
+    <string name="health_connect_category_nutrition">Nutrição</string>
+    <string name="health_connect_category_nutrition_detail">"Calorias, proteína, hidratos de carbono e gordura do seu diário alimentar"</string>
 </resources>

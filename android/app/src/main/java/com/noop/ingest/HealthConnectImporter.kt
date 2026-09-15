@@ -12,6 +12,7 @@ import androidx.health.connect.client.records.HeartRateRecord
 import androidx.health.connect.client.records.HeartRateVariabilityRmssdRecord
 import androidx.health.connect.client.records.HydrationRecord
 import androidx.health.connect.client.records.LeanBodyMassRecord
+import androidx.health.connect.client.records.NutritionRecord
 import androidx.health.connect.client.records.OxygenSaturationRecord
 import androidx.health.connect.client.records.Record
 import androidx.health.connect.client.records.RespiratoryRateRecord
@@ -134,6 +135,18 @@ object HealthConnectImporter {
                 BodyFatRecord::class,
                 LeanBodyMassRecord::class,
             ),
+        ),
+
+        /**
+         * What the wearer ATE, which no strap can see.
+         *
+         * Its own category rather than a record folded into an existing one: somebody who granted
+         * "recovery" months ago consented to their sleep and their heart rate, and quietly widening
+         * that grant to cover their food diary would be taking a permission they never gave.
+         */
+        NUTRITION(
+            "nutrition",
+            setOf(NutritionRecord::class),
         ),
     }
 
@@ -966,6 +979,119 @@ object HealthConnectImporter {
         }
         return sum.toInt()
     }
+
+    // MARK: - today's macros, live
+
+    /** The source id everything this file banks for nutrition is written under. */
+    const val NUTRITION_SOURCE = "health-connect-nutrition"
+
+    /** One day's macros as the food log has them. Every field independently absent. */
+    data class Macros(
+        val kcal: Double?,
+        val proteinG: Double?,
+        val carbsG: Double?,
+        val fatG: Double?,
+    ) {
+        val isEmpty: Boolean get() = kcal == null && proteinG == null && carbsG == null && fatG == null
+
+        /** Total macro mass, used only to choose between two apps that both logged today. */
+        internal val massG: Double get() = (proteinG ?: 0.0) + (carbsG ?: 0.0) + (fatG ?: 0.0)
+    }
+
+    /**
+     * Live read of TODAY's macros from the health store, banked under [NUTRITION_SOURCE].
+     *
+     * WHY A LIVE READ AND NOT AN IMPORT. A food diary is filled in across the day — breakfast at eight,
+     * dinner at nine — so a figure frozen at import time is wrong by lunchtime. This is the same shape
+     * as [refreshTodaySteps]: one read of today, called on every refresh of the screen that shows it.
+     *
+     * APPLE HEALTH REACHES THIS PATH THROUGH HEALTH CONNECT. There is no Apple Health API on Android —
+     * Apple's own store is reachable on Android only through whichever app mirrors it into Health
+     * Connect, and on iOS the twin of this function reads HealthKit directly. The wearer asked for their
+     * macros to arrive on every refresh; this is where that happens on this platform.
+     *
+     * ONE LOG WINS THE DAY. Two apps that both mirror the same meals would otherwise double every macro,
+     * so the sources are summed separately and the one with the most food in it is taken WHOLE — not
+     * field-by-field, which would let the protein come from one diary and the carbohydrate from another
+     * and produce a meal nobody ate.
+     *
+     * Returns null when the store is unavailable, the category is off, the permission is not granted, or
+     * nothing has been logged today. Never throws, and never writes a zero: "you ate nothing" and "your
+     * diary has not been opened yet" are different statements, and only the second one is ever true here.
+     */
+    suspend fun refreshTodayMacros(context: Context, repo: WhoopRepository): Macros? {
+        if (sdkStatus(context) != HealthConnectClient.SDK_AVAILABLE) return null
+        if (ImportCategory.NUTRITION !in selectedCategories(context)) return null
+        val client = client(context)
+        val granted = try {
+            client.permissionController.getGrantedPermissions()
+        } catch (e: Exception) {
+            return null
+        }
+        if (HealthPermission.getReadPermission(NutritionRecord::class) !in granted) return null
+
+        val zone = ZoneId.systemDefault()
+        val today = LocalDate.now(zone)
+        val dayKey = today.toString()
+        val bySource = HashMap<String, Macros>()
+        readAll(
+            client, NutritionRecord::class,
+            // A day of slack either side, for the same reason [refreshTodaySteps] takes it: a record
+            // written at an offset east of the phone's can belong to today and start before its midnight.
+            TimeRangeFilter.between(today.minusDays(1).atStartOfDay(zone).toInstant(), Instant.now()),
+            context.packageName,
+        ) { r ->
+            if (localDayKey(r.startTime, r.startZoneOffset, zone) != dayKey) return@readAll
+            val src = r.metadata.dataOrigin.packageName
+            val had = bySource[src]
+            bySource[src] = Macros(
+                kcal = add(had?.kcal, r.energy?.inKilocalories),
+                proteinG = add(had?.proteinG, r.protein?.inGrams),
+                carbsG = add(had?.carbsG, r.totalCarbohydrate?.inGrams),
+                fatG = add(had?.fatG, r.totalFat?.inGrams),
+            )
+        }
+
+        val winner = pickMacroLog(bySource) ?: return null
+
+        val rows = buildList {
+            winner.kcal?.let { add(seriesRow(dayKey, NutritionCsvImporter.KEY_CALORIES_IN, it)) }
+            winner.proteinG?.let { add(seriesRow(dayKey, NutritionCsvImporter.KEY_PROTEIN_G, it)) }
+            winner.carbsG?.let { add(seriesRow(dayKey, NutritionCsvImporter.KEY_CARBS_G, it)) }
+            winner.fatG?.let { add(seriesRow(dayKey, NutritionCsvImporter.KEY_FAT_G, it)) }
+        }
+        if (rows.isEmpty()) return null
+        return try {
+            repo.upsertDevice(NUTRITION_SOURCE, name = "Health Connect nutrition")
+            repo.upsertMetricSeries(rows)
+            winner
+        } catch (e: Exception) {
+            // The figures are still good even when the write failed — the screen can show them and the
+            // next refresh will try again.
+            winner
+        }
+    }
+
+    /**
+     * Choose one app's day out of everything that logged food today.
+     *
+     * TAKEN WHOLE, NOT FIELD BY FIELD. Two apps mirroring the same meals would double every macro if
+     * summed, and taking the largest of each field separately would assemble a day out of two diaries —
+     * protein from one, carbohydrate from the other — describing a meal nobody ate. The fullest single
+     * log is the one nearest to "what they actually ate", because a partial mirror is missing entries,
+     * never carrying extra ones.
+     *
+     * Ties break on nothing in particular, because a tie means the two logs agree.
+     */
+    internal fun pickMacroLog(bySource: Map<String, Macros>): Macros? =
+        bySource.values.filterNot { it.isEmpty }.maxByOrNull { it.massG }
+
+    private fun seriesRow(day: String, key: String, value: Double) =
+        MetricSeriesRow(deviceId = NUTRITION_SOURCE, day = day, key = key, value = value)
+
+    /** Sum that keeps "absent" distinct from zero: a record with no protein field adds nothing. */
+    internal fun add(had: Double?, more: Double?): Double? =
+        if (more == null) had else (had ?: 0.0) + more
 
     // MARK: - paginated read helper
 

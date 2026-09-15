@@ -80,7 +80,13 @@ object MuscleAttribution {
      * Kept separate from [rules] because a rule must name at least one group. An entry here is the
      * deliberate absence of one, which is a different statement from "not recognised".
      */
-    internal val unattributable: List<String> = listOf("neck")
+    internal val unattributable: List<String> = listOf(
+        "neck",
+        // German: adductors. The thirteen groups have no adductor, and the medial thigh is not the
+        // quadriceps — placing it there would light the wrong muscle on the body view for thirty
+        // sessions. A blank invites a look; a wrong muscle does not.
+        "adduktor",
+    )
 
     /**
      * The primary movers for a logged exercise name, or an empty list when it cannot be placed.
@@ -102,6 +108,48 @@ object MuscleAttribution {
      * an ordered list rather than a map precisely because that order is the logic.
      */
     internal val rules: List<Pair<String, List<MuscleGroup>>> = listOf(
+        // MARK: German (Alphaprog and any other German-language log)
+        //
+        // Placed FIRST because the longest-phrase-first rule is about specificity, and these phrases
+        // cannot collide with the English ones below — no English lift contains "beinbeugen". Without
+        // them an Alphaprog import attributes nothing at all and the body view stays unlit, which is
+        // the honest behaviour for an unknown exercise and the wrong one for a known vocabulary.
+        //
+        // The compound legs first, as in the English section: "wadenheben an der beinpresse" is calves
+        // and must be decided before "beinpresse" sends it to quadriceps.
+        "wadenheben" to listOf(MuscleGroup.CALVES),
+        "beinbeugen" to listOf(MuscleGroup.HAMSTRINGS),
+        "beinstrecken" to listOf(MuscleGroup.QUADRICEPS),
+        "beinpresse" to listOf(MuscleGroup.QUADRICEPS, MuscleGroup.GLUTES),
+        "kniebeugen" to listOf(MuscleGroup.QUADRICEPS, MuscleGroup.GLUTES),
+        "wallsit" to listOf(MuscleGroup.QUADRICEPS),
+        "abduktor" to listOf(MuscleGroup.GLUTES),
+        // Back and the hinge. "Hyperextension" is spelled the same in both languages and is already in
+        // the English section below, so it is deliberately NOT repeated here: a second copy would be
+        // unreachable, and the two copies would drift apart the first time either was edited.
+        //
+        // Both spellings: `normalise` keeps letters as they are, so an umlaut survives it and an
+        // ASCII-only rule would silently never match the word the exporter actually writes.
+        "rückenstrecken" to listOf(MuscleGroup.LOWER_BACK),
+        "rueckenstrecken" to listOf(MuscleGroup.LOWER_BACK),
+        "latzug" to listOf(MuscleGroup.LATS, MuscleGroup.UPPER_BACK),
+        "rudern" to listOf(MuscleGroup.UPPER_BACK, MuscleGroup.LATS),
+        // "Butterfly Reverse" is the rear delt and the upper back; plain "Butterfly" is the chest. The
+        // reverse must therefore be tested first, or it matches "butterfly" and lights the pecs.
+        "butterfly reverse" to listOf(MuscleGroup.UPPER_BACK, MuscleGroup.SHOULDERS),
+        "butterfly" to listOf(MuscleGroup.CHEST),
+        // Chest, shoulders, arms.
+        "brustpresse" to listOf(MuscleGroup.CHEST, MuscleGroup.TRICEPS),
+        "schulterpresse" to listOf(MuscleGroup.SHOULDERS, MuscleGroup.TRICEPS),
+        "seitheben" to listOf(MuscleGroup.SHOULDERS),
+        "trizeps" to listOf(MuscleGroup.TRICEPS),
+        "bizeps" to listOf(MuscleGroup.BICEPS),
+        // Trunk. "Bauchmaschine" is the machine crunch. "Plank" is spelled the same in both languages
+        // and is already in the English section, so it is not repeated here.
+        "bauchmaschine" to listOf(MuscleGroup.ABS),
+        "bauchpresse" to listOf(MuscleGroup.ABS),
+
+        // MARK: English
         // legs — the specific curls and raises must precede the generic ones
         "leg curl" to listOf(MuscleGroup.HAMSTRINGS),
         "romanian deadlift" to listOf(MuscleGroup.HAMSTRINGS, MuscleGroup.GLUTES),

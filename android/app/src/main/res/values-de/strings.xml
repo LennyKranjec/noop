@@ -3032,4 +3032,8 @@
     <string name="level_metric_lvl">Lvl. %1$d</string>
     <string name="level_no_data">Keine Daten</string>
     <string name="level_days_a11y">Mittel der letzten %1$d Tage</string>
+    <string name="lifting_import_alphaprog">Aus Alphaprog importieren …</string>
+    <string name="muscle_model_scale_warming">Einige Gruppen werden noch relativ zur stärksten eingefärbt – ein Muskel braucht einen Monat Verlauf, bis sein eigener Normalwert feststeht.</string>
+    <string name="health_connect_category_nutrition">Ernährung</string>
+    <string name="health_connect_category_nutrition_detail">"Kalorien, Eiweiß, Kohlenhydrate und Fett aus deinem Ernährungstagebuch"</string>
 </resources>

@@ -70,7 +70,10 @@ public enum MuscleAttribution {
     ///
     /// Kept separate from `rules` because a rule must name at least one group. An entry here is the
     /// deliberate absence of one, which is a different statement from "not recognised".
-    static let unattributable: [String] = ["neck"]
+    ///
+    /// "Adduktoren" is the German log's own such case: the medial thigh is not the quadriceps, and
+    /// placing it there would light the wrong muscle on the body view for thirty sessions.
+    static let unattributable: [String] = ["neck", "adduktor"]
 
     /// The primary movers for a logged exercise name, or an empty array when it cannot be placed.
     ///
@@ -90,6 +93,48 @@ public enum MuscleAttribution {
     /// Longest-phrase-first, so a specific lift is decided before the generic word inside it. Held as
     /// an ordered array rather than a dictionary precisely because that order is the logic.
     static let rules: [(String, [MuscleGroup])] = [
+        // MARK: German (Alphaprog and any other German-language log)
+        //
+        // Placed FIRST because the longest-phrase-first rule is about specificity, and these phrases
+        // cannot collide with the English ones below — no English lift contains "beinbeugen". Without
+        // them a German import attributes nothing at all and the body view stays unlit, which is the
+        // honest behaviour for an unknown exercise and the wrong one for a known vocabulary.
+        //
+        // The compound legs first, as in the English section: "wadenheben an der beinpresse" is calves
+        // and must be decided before "beinpresse" sends it to quadriceps.
+        ("wadenheben", [.calves]),
+        ("beinbeugen", [.hamstrings]),
+        ("beinstrecken", [.quadriceps]),
+        ("beinpresse", [.quadriceps, .glutes]),
+        ("kniebeugen", [.quadriceps, .glutes]),
+        ("wallsit", [.quadriceps]),
+        ("abduktor", [.glutes]),
+        // Back and the hinge. "Hyperextension" is spelled the same in both languages and is already in
+        // the English section below, so it is deliberately NOT repeated here: a second copy would be
+        // unreachable, and the two copies would drift apart the first time either was edited.
+        //
+        // Both spellings: `normalise` keeps letters as they are, so an umlaut survives it and an
+        // ASCII-only rule would silently never match the word the exporter actually writes.
+        ("rückenstrecken", [.lowerBack]),
+        ("rueckenstrecken", [.lowerBack]),
+        ("latzug", [.lats, .upperBack]),
+        ("rudern", [.upperBack, .lats]),
+        // "Butterfly Reverse" is the rear delt and the upper back; plain "Butterfly" is the chest. The
+        // reverse must therefore be tested first, or it matches "butterfly" and lights the pecs.
+        ("butterfly reverse", [.upperBack, .shoulders]),
+        ("butterfly", [.chest]),
+        // Chest, shoulders, arms.
+        ("brustpresse", [.chest, .triceps]),
+        ("schulterpresse", [.shoulders, .triceps]),
+        ("seitheben", [.shoulders]),
+        ("trizeps", [.triceps]),
+        ("bizeps", [.biceps]),
+        // Trunk. "Bauchmaschine" is the machine crunch. "Plank" is spelled the same in both languages
+        // and is already in the English section, so it is not repeated here.
+        ("bauchmaschine", [.abs]),
+        ("bauchpresse", [.abs]),
+
+        // MARK: English
         // legs — the specific curls and raises must precede the generic ones
         ("leg curl", [.hamstrings]),
         ("romanian deadlift", [.hamstrings, .glutes]),

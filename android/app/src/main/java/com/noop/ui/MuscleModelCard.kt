@@ -25,9 +25,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
+import android.content.Context
 import com.noop.R
+import com.noop.analytics.MuscleBaseline
+import com.noop.analytics.MuscleBaselineStore
+import com.noop.analytics.MuscleBaselines
 import com.noop.ingest.LiftingImporter
 import com.noop.ingest.MuscleGroup
 import kotlinx.coroutines.Dispatchers
@@ -43,11 +48,19 @@ import java.util.Locale
 // heart rate: a strap cannot see which muscle did the work, so with no lifting log imported the
 // whole body sits unlit and the card says so rather than shading it from strain.
 //
-// WHAT THE COLOUR MEANS. Each group is shaded by its share of the HEAVIEST-loaded group in the same
-// window, so the body reads as "where the work went, relative to itself". It is deliberately NOT an
-// absolute scale: there is no per-muscle norm in this app to be "100 %" of, and inventing one would
-// dress a ranking up as a recommendation. The kg figure beside each group is the real quantity; the
-// colour is only the ranking made visible.
+// WHAT THE COLOUR MEANS. Each group is shaded by its Z-SCORE against its OWN frozen normal — how
+// unusual this week's volume is for that muscle, on a constant scale that runs from two standard
+// deviations below to two above (see MuscleBaselines). Mid-scale is a normal week; the top is a week
+// twice its usual swing above one. Because the ends are constants and the norm never moves, a colour
+// means the same thing next year as it does today, and the same thing on a calf as on a chest.
+//
+// IT USED TO BE A RANKING — each group as a share of the heaviest group that week — and a ranking
+// re-scales itself every time you look at it: train nothing but chest and the chest is scarlet; train
+// everything hard and the chest is the same scarlet. The colour could not say whether a week was heavy.
+//
+// A GROUP WITH NO FROZEN NORM YET falls back to that old relative shading, because a muscle needs a
+// month of history before "normal for it" is a thing this app can honestly claim. The card says so in a
+// line under the figure rather than letting the two scales sit side by side unannounced.
 //
 // A MUSCLE WITH TWO MOVERS IS COUNTED IN BOTH (see LiftingImporter.Session.muscleVolumeKg), so the
 // column does not sum to the session's volume load and must never be presented as a split of it.
@@ -73,15 +86,21 @@ private enum class BodySide { Front, Back }
 
 @Composable
 internal fun MuscleModelCard(viewModel: AppViewModel) {
+    val context = LocalContext.current
     var side by remember { mutableStateOf(BodySide.Front) }
-    var loads by remember { mutableStateOf<Map<MuscleGroup, Double>?>(null) }
+    var loaded by remember { mutableStateOf<MuscleLoads?>(null) }
 
     LaunchedEffect(viewModel.activeStrapId) {
-        loads = withContext(Dispatchers.IO) { runCatching { readMuscleLoads(viewModel) }.getOrNull() }
+        loaded = withContext(Dispatchers.IO) {
+            runCatching { readMuscleLoads(context, viewModel) }.getOrNull()
+        }
     }
 
-    val data = loads
-    val peak = data?.values?.maxOrNull() ?: 0.0
+    val data = loaded?.thisWeek
+    val scale = LoadScale(
+        baselines = loaded?.baselines.orEmpty(),
+        peak = data?.values?.maxOrNull() ?: 0.0,
+    )
 
     NoopCard {
         Column(verticalArrangement = Arrangement.spacedBy(Metrics.space12)) {
@@ -123,7 +142,7 @@ internal fun MuscleModelCard(viewModel: AppViewModel) {
                         .height(FIGURE_HEIGHT),
                     contentAlignment = Alignment.Center,
                 ) {
-                    BodyCanvas(side = side, loads = data.orEmpty(), peak = peak)
+                    BodyCanvas(side = side, loads = data.orEmpty(), scale = scale)
                 }
                 Spacer(Modifier.width(Metrics.space12))
                 Column(
@@ -132,7 +151,7 @@ internal fun MuscleModelCard(viewModel: AppViewModel) {
                 ) {
                     val groups = masksFor(side).map { it.first }
                     groups.forEach { group ->
-                        MuscleLegendRow(group = group, kg = data?.get(group), peak = peak)
+                        MuscleLegendRow(group = group, kg = data?.get(group), scale = scale)
                     }
                 }
             }
@@ -143,15 +162,23 @@ internal fun MuscleModelCard(viewModel: AppViewModel) {
                     style = NoopType.footnote,
                     color = Palette.textTertiary,
                 )
+            } else if (data != null && data.keys.any { scale.baselines[it] == null }) {
+                // Said out loud: two scales are on screen, and the wearer should not have to guess which
+                // groups are being judged against their own normal and which are still only ranked.
+                Text(
+                    uiString(R.string.muscle_model_scale_warming),
+                    style = NoopType.caption,
+                    color = Palette.textTertiary,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun MuscleLegendRow(group: MuscleGroup, kg: Double?, peak: Double) {
+private fun MuscleLegendRow(group: MuscleGroup, kg: Double?, scale: LoadScale) {
     // Resolved here, not inside the draw scope: `loadColorFor` reads the palette and is composable.
-    val dot = loadColorFor(kg, peak, litAlpha = 1f, unlitAlpha = 0.35f)
+    val dot = loadColorFor(group, kg, scale, litAlpha = 1f, unlitAlpha = 0.35f)
     Row(verticalAlignment = Alignment.CenterVertically) {
         Box(
             modifier = Modifier
@@ -196,13 +223,35 @@ private fun muscleLabel(group: MuscleGroup): String = uiString(
     },
 )
 
-/** Shade for a group's load as a share of the window's heaviest group. Null load = unlit. */
-@Composable
-private fun loadColorFor(kg: Double?, peak: Double, litAlpha: Float, unlitAlpha: Float): Color {
-    if (kg == null || kg <= 0 || peak <= 0) {
-        return Palette.textTertiary.copy(alpha = unlitAlpha)
+/**
+ * How a kilogram figure becomes a position on the colour ramp.
+ *
+ * ONE object so the body and the legend dot cannot disagree: they used to work the arithmetic out
+ * separately, which was fine while it was one division and would not have stayed fine.
+ */
+private class LoadScale(
+    val baselines: Map<MuscleGroup, MuscleBaseline>,
+    /** Heaviest group this week, for the groups whose own normal is not frozen yet. */
+    val peak: Double,
+) {
+    fun fraction(group: MuscleGroup, kg: Double): Float {
+        val frozen = baselines[group]
+        if (frozen != null) return MuscleBaselines.fraction(frozen, kg).toFloat()
+        return if (peak > 0) (kg / peak).toFloat() else 0f
     }
-    return Palette.sample(Palette.strainStops, (kg / peak).toFloat()).copy(alpha = litAlpha)
+}
+
+/** Shade for a group's load on [scale]. Null or zero load = unlit. */
+@Composable
+private fun loadColorFor(
+    group: MuscleGroup,
+    kg: Double?,
+    scale: LoadScale,
+    litAlpha: Float,
+    unlitAlpha: Float,
+): Color {
+    if (kg == null || kg <= 0) return Palette.textTertiary.copy(alpha = unlitAlpha)
+    return Palette.sample(Palette.strainStops, scale.fraction(group, kg)).copy(alpha = litAlpha)
 }
 
 // MARK: - The body
@@ -265,10 +314,12 @@ private const val BODY_ASPECT = 695f / 2100f
 private val FIGURE_HEIGHT = 300.dp
 
 @Composable
-private fun BodyCanvas(side: BodySide, loads: Map<MuscleGroup, Double>, peak: Double) {
+private fun BodyCanvas(side: BodySide, loads: Map<MuscleGroup, Double>, scale: LoadScale) {
     val masks = masksFor(side)
     // Resolved OUTSIDE the draw pass: `loadColorFor` is composable (it reads the palette).
-    val fills = masks.map { loadColorFor(loads[it.first], peak, litAlpha = 0.88f, unlitAlpha = 0f) }
+    val fills = masks.map {
+        loadColorFor(it.first, loads[it.first], scale, litAlpha = 0.88f, unlitAlpha = 0f)
+    }
     val bodyTint = Palette.textSecondary.copy(alpha = 0.55f)
 
     Box(
@@ -303,27 +354,58 @@ private fun BodyCanvas(side: BodySide, loads: Map<MuscleGroup, Double>, peak: Do
 
 // MARK: - Reading the banked per-muscle totals
 
+/** This week's per-group volume, and the frozen scale it is judged against. */
+private data class MuscleLoads(
+    val thisWeek: Map<MuscleGroup, Double>,
+    val baselines: Map<MuscleGroup, MuscleBaseline>,
+)
+
 /**
- * Sum each group's `muscle_volume_<group>` rows over the trailing [WINDOW_DAYS].
+ * How far back the baseline derivation looks. Deliberately generous: the scale is frozen forever, so it
+ * is worth reading everything the wearer has rather than the last training block.
+ */
+private const val HISTORY_DAYS = 5L * 365L
+
+/**
+ * Sum each group's `muscle_volume_<group>` rows over the trailing [WINDOW_DAYS], and resolve the frozen
+ * per-group scale.
  *
  * A group with no rows in the window is ABSENT from the map, not zero: "you did not train it" and
  * "you have no lifting log at all" are the same blank here, and the card says which by whether the
  * whole map came back empty.
+ *
+ * The full history is read ONLY while some group is still unfrozen: once the scale has settled — which
+ * it does permanently, a month in — every open of Today costs the seven-day read and nothing else.
  */
-private suspend fun readMuscleLoads(viewModel: AppViewModel): Map<MuscleGroup, Double> {
+private suspend fun readMuscleLoads(context: Context, viewModel: AppViewModel): MuscleLoads {
     val today = LocalDate.now()
-    val from = today.minusDays(WINDOW_DAYS - 1).toString()
     val to = today.toString()
-    val out = LinkedHashMap<MuscleGroup, Double>()
+    val weekFrom = today.minusDays(WINDOW_DAYS - 1).toString()
+
+    suspend fun rows(group: MuscleGroup, from: String) = viewModel.repo.metricSeries(
+        LiftingImporter.SOURCE_ID,
+        LiftingImporter.muscleVolumeKey(group),
+        from,
+        to,
+    )
+
+    val thisWeek = LinkedHashMap<MuscleGroup, Double>()
     for (group in MuscleGroup.entries) {
-        val rows = viewModel.repo.metricSeries(
-            LiftingImporter.SOURCE_ID,
-            LiftingImporter.muscleVolumeKey(group),
-            from,
-            to,
-        )
-        val total = rows.sumOf { it.value }
-        if (total > 0) out[group] = total
+        val week = rows(group, weekFrom).sumOf { it.value }
+        if (week > 0) thisWeek[group] = week
     }
-    return out
+
+    var baselines = MuscleBaselineStore.read(context)
+    if (baselines.size < MuscleGroup.entries.size) {
+        val historyFrom = today.minusDays(HISTORY_DAYS).toString()
+        val history = LinkedHashMap<MuscleGroup, List<Double>>()
+        for (group in MuscleGroup.entries) {
+            if (baselines.containsKey(group)) continue
+            val series = rows(group, historyFrom).associate { it.day to it.value }
+            if (series.isEmpty()) continue
+            history[group] = MuscleBaselines.rollingWindows(series, WINDOW_DAYS.toInt())
+        }
+        baselines = MuscleBaselineStore.resolve(context) { history }
+    }
+    return MuscleLoads(thisWeek = thisWeek, baselines = baselines)
 }

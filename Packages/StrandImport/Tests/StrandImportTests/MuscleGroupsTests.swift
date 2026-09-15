@@ -68,6 +68,26 @@ final class MuscleGroupsTests: XCTestCase {
                        "the guard must not swallow an ordinary curl")
     }
 
+    /// The German block, which the Alphaprog export is written in.
+    ///
+    /// The twin of `AlphaprogImporterTest` on the Kotlin side. Without these rules a German log
+    /// attributes nothing at all and the body view stays dark for a year of training — and the failure
+    /// is silent, because "not recognised" and "not trained" are the same blank on screen.
+    func testTheGermanLogAttributesCorrectly() {
+        // The compound leg lifts: both contain a word that would otherwise send them elsewhere.
+        XCTAssertEqual(MuscleAttribution.muscles(for: "Wadenheben an der Beinpresse"), [.calves])
+        XCTAssertEqual(MuscleAttribution.muscles(for: "Beinpresse"), [.quadriceps, .glutes])
+        // "Butterfly Reverse" contains "butterfly"; order is the only thing keeping it off the pecs.
+        XCTAssertEqual(MuscleAttribution.muscles(for: "Butterfly Reverse weit"), [.upperBack, .shoulders])
+        XCTAssertEqual(MuscleAttribution.muscles(for: "Butterfly weit"), [.chest])
+        // `normalise` keeps letters as they are, so an ASCII-only rule never matches the real word.
+        XCTAssertEqual(MuscleAttribution.muscles(for: "Trizepsdrücken mit dem Seil"), [.triceps])
+        XCTAssertEqual(MuscleAttribution.muscles(for: "Rückenstrecken"), [.lowerBack])
+        // The medial thigh is not the quadriceps, so it is a deliberate blank rather than a guess.
+        XCTAssertTrue(MuscleAttribution.muscles(for: "Adduktoren").isEmpty)
+        XCTAssertEqual(MuscleAttribution.muscles(for: "Abduktoren"), [.glutes])
+    }
+
     /// Hevy writes it as one word. A rule that only matches the spaced spelling silently attributes
     /// nothing for the spelling the catalogue actually uses, which reads as an unknown lift.
     func testSkullcrusherMatchesBothSpellings() {

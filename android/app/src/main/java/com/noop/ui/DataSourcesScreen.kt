@@ -67,6 +67,7 @@ import com.noop.ingest.AppleHealthImporter
 import com.noop.ingest.HealthConnectImporter
 import com.noop.ingest.HealthConnectWriter
 import com.noop.ingest.ActivityFileImporter
+import com.noop.ingest.AlphaprogImporter
 import com.noop.ingest.LiftingImporter
 import com.noop.ingest.NutritionCsvImporter
 import com.noop.ingest.XiaomiBandImporter
@@ -238,6 +239,16 @@ fun DataSourcesScreen(vm: AppViewModel) {
     ) { uri ->
         if (uri != null) runImport {
             LiftingImporter.importExport(context, uri, vm.repo).also { vm.loadWorkouts() }
+        }
+    }
+
+    // Alphaprog: a different exporter of the SAME thing, so it lands on the lifting source and reloads
+    // the Workouts list exactly as the lifting import does.
+    val alphaprogImportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) runImport {
+            AlphaprogImporter.importExport(context, uri, vm.repo).also { vm.loadWorkouts() }
         }
     }
 
@@ -720,6 +731,16 @@ fun DataSourcesScreen(vm: AppViewModel) {
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
             ) { liftingImportLauncher.launch(arrayOf("*/*")) }
+            // Alphaprog is the same kind of log from a different app, so it belongs in this card rather
+            // than a card of its own: it writes the same source, feeds the same muscle view, and a
+            // second card would ask the wearer to know which app they exported from before they can
+            // find the button.
+            BackupButton(
+                label = uiString(R.string.lifting_import_alphaprog),
+                icon = Icons.Filled.FileUpload,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) { alphaprogImportLauncher.launch(arrayOf("*/*")) }
         }
         }
 

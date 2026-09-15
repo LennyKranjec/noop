@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.noop.R
 import com.noop.analytics.HydrationStore
+import com.noop.ingest.HealthConnectImporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -302,9 +303,17 @@ private data class MacrosToday(
 
 @Composable
 internal fun NutritionTile(viewModel: AppViewModel) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     var macros by remember { mutableStateOf<MacrosToday?>(null) }
     LaunchedEffect(Unit) {
-        macros = withContext(Dispatchers.IO) { runCatching { readMacros(viewModel) }.getOrNull() }
+        macros = withContext(Dispatchers.IO) {
+            // A food diary is filled in across the day, so a figure banked at import time is wrong by
+            // lunchtime. Top today up from the health store BEFORE reading — best-effort, because a
+            // store that is unavailable or ungranted should leave the tile showing what is stored
+            // rather than showing nothing.
+            runCatching { HealthConnectImporter.refreshTodayMacros(context, viewModel.repo) }
+            runCatching { readMacros(viewModel) }.getOrNull()
+        }
     }
     val m = macros
 
@@ -420,17 +429,29 @@ private fun MacroRing(
     }
 }
 
-/** Today's macro row from the nutrition-CSV lane; every field independently absent. */
+/**
+ * Today's macros: the live health-store sync first, the imported CSV second.
+ *
+ * ONE LOG ON SCREEN, NOT A BLEND. Whichever source has today's day is taken whole; falling back per
+ * FIELD would let the protein come from the phone's food diary and the carbohydrate from a CSV exported
+ * last week, and put a meal on the tile that nobody ate.
+ *
+ * The live sync wins when it has anything, because it is today's diary as it stands right now — a CSV
+ * was true whenever it was exported.
+ */
 private suspend fun readMacros(viewModel: AppViewModel): MacrosToday {
     val day = LocalDate.now().toString()
-    suspend fun read(key: String): Double? =
-        viewModel.repo.metricSeries(NUTRITION_SOURCE, key, day, day).lastOrNull()?.value
-    return MacrosToday(
-        kcal = read("calories_in"),
-        proteinG = read("protein_g"),
-        carbsG = read("carbs_g"),
-        fatG = read("fat_g"),
+    suspend fun read(source: String, key: String): Double? =
+        viewModel.repo.metricSeries(source, key, day, day).lastOrNull()?.value
+    suspend fun from(source: String) = MacrosToday(
+        kcal = read(source, "calories_in"),
+        proteinG = read(source, "protein_g"),
+        carbsG = read(source, "carbs_g"),
+        fatG = read(source, "fat_g"),
     )
+    val live = from(HealthConnectImporter.NUTRITION_SOURCE)
+    val hasLive = live.kcal != null || live.proteinG != null || live.carbsG != null || live.fatG != null
+    return if (hasLive) live else from(NUTRITION_SOURCE)
 }
 
 /** The nutrition importer's source id — the same one NutritionCsvImporter writes under. */

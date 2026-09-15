@@ -180,14 +180,19 @@ class MuscleGroupsTest {
      */
     @Test
     fun theRuleTableMatchesTheSwiftSourceOfTruth() {
-        assertEquals(66, MuscleAttribution.rules.size)
-        assertEquals("leg curl", MuscleAttribution.rules.first().first)
+        assertEquals(86, MuscleAttribution.rules.size)
+        // The German block leads the table — see the note there on why specificity puts it first.
+        assertEquals("wadenheben", MuscleAttribution.rules.first().first)
+        assertEquals("leg curl", MuscleAttribution.rules[20].first)
         assertEquals("russian twist", MuscleAttribution.rules.last().first)
+        assertEquals(listOf("neck", "adduktor"), MuscleAttribution.unattributable)
         val order = MuscleAttribution.rules.map { it.first }
         for ((specific, generic) in listOf(
             "leg curl" to "curl", "wrist" to "curl", "nordic curl" to "curl",
             "rear delt" to "fly", "reverse fly" to "fly", "upright row" to "row",
             "romanian deadlift" to "deadlift", "hack squat" to "squat", "chest fly" to "fly",
+            // German: the compound leg lifts and the reverse butterfly, same specificity rule.
+            "wadenheben" to "beinpresse", "butterfly reverse" to "butterfly",
         )) {
             assertTrue(
                 "'$specific' must be ordered before '$generic'",
