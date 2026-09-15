@@ -813,6 +813,11 @@ struct DataSourcesView: View {
         case xiaomi
         case nutrition
         case lifting
+        /// Alphaprog is the SAME kind of log from a different app — same source, same muscle series —
+        /// so it gets its own BUTTON rather than its own card, matching the Android lane. A separate
+        /// target (rather than sniffing the one button's file) is what lets the wearer say which app
+        /// they exported from, so a file the sniff would misread cannot land in the wrong parser.
+        case alphaprog
         case activityFile
         case wearable
 

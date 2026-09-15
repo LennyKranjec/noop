@@ -82,6 +82,11 @@ public enum AlphaprogImporter {
     public struct Exercise: Equatable, Sendable {
         public let name: String
         public let sets: [Set]
+
+        public init(name: String, sets: [Set]) {
+            self.name = name
+            self.sets = sets
+        }
     }
 
     /// One parsed session, before it is turned into the shared `LiftingSession`.
@@ -90,6 +95,13 @@ public enum AlphaprogImporter {
         public let start: Date
         public let end: Date
         public let exercises: [Exercise]
+
+        public init(title: String, start: Date, end: Date, exercises: [Exercise]) {
+            self.title = title
+            self.start = start
+            self.end = end
+            self.exercises = exercises
+        }
 
         public var volumeLoadKg: Double {
             exercises.reduce(0) { $0 + $1.sets.reduce(0) { $0 + $1.volumeKg } }
@@ -118,6 +130,11 @@ public enum AlphaprogImporter {
         public let workouts: [Workout]
         /// Exercise names the attribution table has no muscles for, so the wearer can see the gap.
         public let unattributed: [String]
+
+        public init(workouts: [Workout], unattributed: [String]) {
+            self.workouts = workouts
+            self.unattributed = unattributed
+        }
     }
 
     /// Which grid the rows below a header belong to.
