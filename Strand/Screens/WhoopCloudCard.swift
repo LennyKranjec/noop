@@ -11,9 +11,9 @@ import AppKit
 //
 // The UI half of the cloud lane. Three states, and each of them says something the wearer can act on:
 //
-//   · NOT CONFIGURED — this build carries no credentials. Not an error, and not the wearer's problem to
-//     fix from inside the app: the row says so and offers nothing, rather than a Connect button that
-//     cannot work.
+//   · NO KEYS YET — two fields for the wearer's own WHOOP developer-app credentials, plus the redirect
+//     URL and the scope list to paste into WHOOP's portal. The shipped build carries no credentials of
+//     its own, deliberately: the `.ipa` is public, and a secret compiled into it is a secret given away.
 //   · NOT CONNECTED — a Connect button, which opens WHOOP's own consent page.
 //   · CONNECTED — what the last sync actually said, per endpoint, and a button to sync now.
 //
@@ -29,6 +29,13 @@ struct WhoopCloudCard: View {
     @State private var busy = false
     @State private var note: String? = WhoopCloudSync.lastNote
     @State private var lastResult: String?
+    /// Whether the credential fields are showing. Open by default only when there is nothing stored,
+    /// so a wearer who has already entered theirs is not shown two empty boxes every visit.
+    @State private var editingCredentials = false
+    @State private var clientIdField = WhoopCredentialStore.clientId ?? ""
+    /// NEVER seeded from storage — see the note on `WhoopCredentialStore.clientId`.
+    @State private var clientSecretField = ""
+    @State private var credentialsSaved = WhoopCredentialStore.isSet
 
     private let auth = WhoopWebAuth()
 
@@ -51,12 +58,8 @@ struct WhoopCloudCard: View {
                     if busy { ProgressView().controlSize(.small) }
                 }
 
-                if !WhoopCloudAuth.isConfigured {
-                    Text("This build carries no WHOOP credentials, so the connection is not offered. "
-                         + "Add your own developer app's client id and secret to "
-                         + "Config/WhoopSecrets.xcconfig and rebuild.")
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
+                if !WhoopCloudAuth.isConfigured || editingCredentials {
+                    credentialFields
                 } else if connected {
                     if let lastResult {
                         Text(lastResult)
@@ -88,13 +91,102 @@ struct WhoopCloudCard: View {
                          + "and keeps them up to date.")
                         .font(StrandFont.caption)
                         .foregroundStyle(StrandPalette.textTertiary)
-                    Button("Connect WHOOP") { Task { await connect() } }
-                        .font(StrandFont.footnote)
-                        .disabled(busy)
+                    HStack(spacing: 12) {
+                        Button("Connect WHOOP") { Task { await connect() } }
+                            .disabled(busy)
+                        if credentialsSaved {
+                            Button("Change app keys") { editingCredentials = true }
+                                .foregroundStyle(StrandPalette.textTertiary)
+                        }
+                    }
+                    .font(StrandFont.footnote)
                 }
             }
         }
         .task { connected = WhoopCloudAuth.isConnected }
+    }
+
+    // MARK: - The wearer's own developer-app keys
+    //
+    // WHY THIS IS TYPED IN THE APP rather than baked into the build: the shipped `.ipa` is public, and a
+    // credential compiled into it is a credential given away. These are the wearer's own, they go
+    // straight to the Keychain, and they are sent to exactly one place — WHOOP's token endpoint.
+    //
+    // THE REDIRECT IS NOT A FIELD. It has to match the URL scheme in the app's Info.plist exactly, so
+    // offering it would be offering a box whose only correct value is already known. It is shown
+    // instead, to be copied into WHOOP's portal, which is the half the wearer genuinely has to do.
+
+    private var credentialFields: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Create a free app at developer.whoop.com, then paste its two keys here. They stay in "
+                 + "this iPhone's Keychain — this build ships with none of its own.")
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextField("Client ID", text: $clientIdField)
+                .textFieldStyle(.roundedBorder)
+                .font(StrandFont.footnote)
+                #if os(iOS)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                #endif
+
+            SecureField("Client secret", text: $clientSecretField)
+                .textFieldStyle(.roundedBorder)
+                .font(StrandFont.footnote)
+
+            // The two things to paste into WHOOP's portal, spelled out so they are not guessed at.
+            VStack(alignment: .leading, spacing: 2) {
+                Text("In WHOOP's portal, set the redirect URL to:")
+                Text(WhoopCredentials.redirectURI).monospaced()
+                Text("and tick the scopes: \(WhoopCloudAuth.scopes)")
+            }
+            .font(StrandFont.caption)
+            .foregroundStyle(StrandPalette.textTertiary)
+            .textSelection(.enabled)
+            .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 12) {
+                Button("Save keys") { saveCredentials() }
+                    .disabled(clientIdField.trimmingCharacters(in: .whitespaces).isEmpty
+                              || clientSecretField.isEmpty)
+                if credentialsSaved {
+                    Button("Forget keys") {
+                        // The tokens go with them: a connection made under one app's credentials is
+                        // meaningless under another's, and leaving them would look connected while
+                        // every refresh quietly failed.
+                        WhoopCloudAuth.disconnect()
+                        WhoopCredentialStore.clear()
+                        credentialsSaved = false
+                        connected = false
+                        clientIdField = ""
+                        clientSecretField = ""
+                        lastResult = nil
+                    }
+                    .foregroundStyle(StrandPalette.statusCritical)
+                }
+                if editingCredentials, credentialsSaved {
+                    Button("Cancel") { editingCredentials = false }
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
+            }
+            .font(StrandFont.footnote)
+        }
+    }
+
+    private func saveCredentials() {
+        guard WhoopCredentialStore.save(clientId: clientIdField, clientSecret: clientSecretField) else {
+            lastResult = "Those keys could not be saved."
+            return
+        }
+        credentialsSaved = true
+        editingCredentials = false
+        // Cleared from memory the moment it is stored. Nothing on this screen ever needs it again, and
+        // a secret sitting in view state outlives the screen that showed it.
+        clientSecretField = ""
+        lastResult = "Keys saved. Now sign in to WHOOP."
+        SystemHaptics.play(.confirm)
     }
 
     private func connect() async {
