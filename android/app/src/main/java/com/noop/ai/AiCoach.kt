@@ -853,9 +853,10 @@ class AiCoach(
 
     /** `yyyy-MM-dd` in the wearer's own zone, matching Swift's `dateString` for the same line. */
     private fun workoutDay(startTs: Long): String =
-        java.time.LocalDate.ofInstant(
-            java.time.Instant.ofEpochSecond(startTs), java.time.ZoneId.systemDefault(),
-        ).toString()
+        // NOT LocalDate.ofInstant: that overload is API 34, this app's minSdk is 26 and nothing
+        // desugars java.time here, so it is a NoSuchMethodError on every phone below Android 14.
+        java.time.Instant.ofEpochSecond(startTs)
+            .atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString()
 
     /**
      * SUMMARY-ONLY on-device signals context (v5): the user's strongest associations (from the same
@@ -1694,7 +1695,18 @@ class AiCoach(
                 "genuinely helps. No tables or code blocks.\n" +
                 "Answer straight away with the reply itself. Do not deliberate in the open and never " +
                 "write a <think> block: on this phone every word of working is a second the Player " +
-                "spends watching a spinner."
+                "spends watching a spinner.\n" +
+                // THE MODEL'S OWN SWITCH, and it has to be a token rather than a sentence. Qwen is a
+                // hybrid-reasoning model whose chat template opens a thinking span on its own; asking it
+                // in prose not to deliberate is advice it reads AFTER the span is already open, which is
+                // why the paragraph above was not enough on its own — a simple question spent its whole
+                // budget reasoning and arrived as "ran out of room before it reached an answer".
+                //
+                // IT LIVES AT THE END OF THE SYSTEM PROMPT, never in the wearer's question. Appended to
+                // the question it was a stray token the model tried to interpret, which is the confusion
+                // that got the first attempt removed. Here the wearer never sees it and it is read as
+                // configuration, which is what it is.
+                "/no_think"
 
         /**
          * How much of the opt-in signals block rides along on device.

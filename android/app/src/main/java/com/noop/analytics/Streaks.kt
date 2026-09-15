@@ -2,7 +2,6 @@ package com.noop.analytics
 
 import com.noop.data.DailyMetric
 import java.time.LocalDate
-import kotlin.math.abs
 
 // MARK: - Streaks
 //
@@ -27,27 +26,53 @@ data class Streak(
     val todaySecured: Boolean,
 )
 
+/**
+ * The three streaks, and nothing else.
+ *
+ * Each is a rule the wearer named, each is a threshold on a figure the app already computes, and none
+ * of them can be satisfied by using the app. A fourth would dilute the row: three flames fit across a
+ * thin strip, and three things are the most anybody actually holds in mind.
+ */
 enum class StreakKind {
-    /** Falling asleep at a consistent hour. The single best predictor of how the rest reads. */
-    SLEEP_REGULARITY,
+    /** Sleep CONSISTENCY at or above 80 %: the spread of four weeks of nights, not one night. */
+    SLEEP_CONSISTENCY,
 
-    /** Seven hours or more, actually slept. */
-    SLEEP_DURATION,
+    /** Sleep DEBT under an hour: the rolling ledger, not a single short night. */
+    SLEEP_DEBT,
 
-    /** A day that involved moving. */
-    MOVEMENT,
+    /** Under six hours of high stress that was NOT exercise. */
+    STRESS_TIME,
 }
 
 object Streaks {
 
-    /** Sleep onsets within this many minutes of the wearer's own median count as "on time". */
-    const val REGULARITY_TOLERANCE_MIN = 60.0
+    /** Consistency at or above this holds the streak, on the 0-100 scale [VitalityEngine] produces. */
+    const val CONSISTENCY_TARGET_PCT = 80.0
 
-    /** The duration bar, in hours. Not eight: eight is a slogan, seven is the floor most adults need. */
-    const val DURATION_TARGET_HOURS = 7.0
+    /** How many nights the consistency figure is measured over. Four weeks, as everywhere else here. */
+    const val CONSISTENCY_WINDOW_NIGHTS = 28
 
-    /** Steps that make a day count as moved. Low on purpose — this is a floor, not a goal. */
-    const val MOVEMENT_TARGET_STEPS = 5_000
+    /** Debt below this holds the streak. An hour is a late film, not a deficit worth acting on. */
+    const val DEBT_LIMIT_MIN = 60.0
+
+    /**
+     * Nightly need the debt balance is measured against.
+     *
+     * The same seven hours the rest of the app treats as the adult floor. Held here rather than read
+     * from a profile because a personal need the wearer has never set would be a default wearing a
+     * personal label.
+     */
+    const val SLEEP_NEED_HOURS = 7.0
+
+    /**
+     * High stress below this many minutes holds the streak.
+     *
+     * NON-ACTIVITY by construction, not by subtraction: [DaytimeStress] masks ambulatory hours as
+     * exertion and leaves them unscored, so the minutes counted here are already only the ones where
+     * the wearer was still and the autonomic load was high anyway. A hard session does not spend this
+     * budget, which is the whole point of the rule.
+     */
+    const val STRESS_LIMIT_MIN = 6 * 60.0
 
     /**
      * Every streak worth showing, longest first.
@@ -58,59 +83,89 @@ object Streaks {
      */
     fun evaluate(
         days: List<DailyMetric>,
-        // Sleep ONSET is not on DailyMetric — the schema stores durations, not timestamps — so the
-        // caller supplies it from the sleep sessions, keyed by local day (`yyyy-MM-dd`) as minutes
-        // since midnight. Absent, the regularity streak is simply not offered: an onset guessed from a
-        // duration would be a fabricated figure, and a streak built on one would be worse than none.
-        onsetByDay: Map<String, Int> = emptyMap(),
+        /**
+         * Minutes of NON-ACTIVITY high stress per local day, as the stress read banked them.
+         *
+         * Supplied rather than derived: the figure costs a whole day of heart rate and R-R to compute,
+         * so recomputing it across a year of history inside a card is not an option. A day with no
+         * banked row is unmeasured, which neither breaks nor extends - the rule every gap here follows.
+         */
+        stressMinutesByDay: Map<String, Double> = emptyMap(),
         today: LocalDate = LocalDate.now(),
     ): List<Streak> {
         if (days.isEmpty()) return emptyList()
-        return listOfNotNull(
-            regularity(days, onsetByDay, today),
-            duration(days, today),
-            movement(days, today),
-        ).sortedByDescending { it.days }
+        // FIXED ORDER, not sorted by length. The strip is three fixed columns and the wearer learns
+        // which flame is which by position; re-ordering them as the numbers move would make the row
+        // unreadable at a glance, which is the only way it is ever read.
+        return listOf(
+            consistency(days, today),
+            debt(days, today),
+            stressTime(days, stressMinutesByDay, today),
+        )
     }
 
     /**
-     * Bed at a consistent hour.
+     * Sleep consistency at or above 80 %.
      *
-     * Measured against the wearer's OWN median onset over the window, not a clock time someone else
-     * chose: a shift worker with a rock-solid 03:00 bedtime is regular, and telling them otherwise
-     * would be the app imposing a lifestyle rather than reading one.
+     * The figure for a day is the spread of the [CONSISTENCY_WINDOW_NIGHTS] nights ENDING on it, which
+     * is how the level's own sleep term reads it - so the streak and the level cannot disagree about
+     * whether a stretch was regular. A day with fewer than three nights behind it is unmeasured rather
+     * than a failure: consistency over two nights is not a number.
      */
-    private fun regularity(
-        days: List<DailyMetric>,
-        onsetByDay: Map<String, Int>,
-        today: LocalDate,
-    ): Streak? {
-        // Three nights is the minimum from which "their usual bedtime" means anything. Below that the
-        // streak is not shown at all rather than shown as zero — a zero implies a rule was broken.
-        if (onsetByDay.size < 3) return null
-        val median = onsetByDay.values.sorted().let { it[it.size / 2] }
+    private fun consistency(days: List<DailyMetric>, today: LocalDate): Streak {
+        val index = days.withIndex().associate { (i, d) -> d.day to i }
         return countBack(days, today) { d ->
-            onsetByDay[d.day]?.let { clockDistance(it, median) <= REGULARITY_TOLERANCE_MIN }
-        }.let { (n, secured) -> Streak(StreakKind.SLEEP_REGULARITY, n, secured) }
+            val i = index[d.day]
+            if (i == null) {
+                null
+            } else {
+                val window = days.subList(maxOf(0, i - (CONSISTENCY_WINDOW_NIGHTS - 1)), i + 1)
+                    .mapNotNull { it.totalSleepMin?.div(60.0) }
+                VitalityEngine.sleepConsistency(window)?.let { it * 100.0 >= CONSISTENCY_TARGET_PCT }
+            }
+        }.let { (n, secured) -> Streak(StreakKind.SLEEP_CONSISTENCY, n, secured) }
     }
 
-    private fun duration(days: List<DailyMetric>, today: LocalDate): Streak =
-        countBack(days, today) { d ->
-            d.totalSleepMin?.let { it / 60.0 >= DURATION_TARGET_HOURS }
-        }.let { (n, secured) -> Streak(StreakKind.SLEEP_DURATION, n, secured) }
-
-    private fun movement(days: List<DailyMetric>, today: LocalDate): Streak =
-        countBack(days, today) { d ->
-            // Steps OR a logged effort: a two-hour ride puts up almost no steps and is obviously not a
-            // sedentary day, and a streak that says otherwise is a streak the wearer stops believing.
-            val stepped = d.steps?.let { it >= MOVEMENT_TARGET_STEPS }
-            val trained = d.strain?.let { it >= 8.0 }
-            when {
-                stepped == true || trained == true -> true
-                stepped == null && trained == null -> null
-                else -> false
+    /**
+     * Sleep debt under an hour.
+     *
+     * Read as the balance stood ON each day - the rolling shortfall of the fortnight before it, not
+     * today's balance applied backwards. A streak computed from one current figure would light or break
+     * every day at once, which is not a streak.
+     *
+     * Only the SHORTFALL counts. Surplus nights do not repay debt hour for hour in any model worth
+     * quoting, so a balance that nets positive reads as no debt rather than as credit.
+     */
+    private fun debt(days: List<DailyMetric>, today: LocalDate): Streak {
+        val index = days.withIndex().associate { (i, d) -> d.day to i }
+        return countBack(days, today) { d ->
+            val i = index[d.day]
+            if (i == null) {
+                null
+            } else {
+                val window = days.subList(maxOf(0, i - (SleepDebt.DEFAULT_WINDOW_NIGHTS - 1)), i + 1)
+                val slept = window.mapNotNull { n -> n.totalSleepMin?.takeIf { it > 0.0 } }
+                // Three nights is the fewest a rolling balance means anything over. Below that the day
+                // is unmeasured rather than debt-free, which would hand out a streak nobody earned.
+                if (slept.size < 3) {
+                    null
+                } else {
+                    val needMin = SLEEP_NEED_HOURS * 60.0
+                    val balance = slept.sumOf { it - needMin }
+                    (if (balance < 0.0) -balance else 0.0) < DEBT_LIMIT_MIN
+                }
             }
-        }.let { (n, secured) -> Streak(StreakKind.MOVEMENT, n, secured) }
+        }.let { (n, secured) -> Streak(StreakKind.SLEEP_DEBT, n, secured) }
+    }
+
+    /** Under six hours of high stress that was not exercise. */
+    private fun stressTime(
+        days: List<DailyMetric>,
+        stressMinutesByDay: Map<String, Double>,
+        today: LocalDate,
+    ): Streak = countBack(days, today) { d ->
+        stressMinutesByDay[d.day]?.let { it < STRESS_LIMIT_MIN }
+    }.let { (n, secured) -> Streak(StreakKind.STRESS_TIME, n, secured) }
 
     /**
      * Walk backwards from today counting days that satisfy [holds], stopping at the first that does not.
@@ -147,17 +202,4 @@ object Streaks {
     /** A year. Past this the number stops being motivating and starts being decoration. */
     private const val MAX_LOOKBACK_DAYS = 365
 
-    /**
-     * Distance between two minute-of-day values, THE SHORT WAY ROUND THE CLOCK.
-     *
-     * 23:50 and 00:10 are twenty minutes apart, not 1,420. Every naive version of this file gets that
-     * wrong, and it gets it wrong precisely for the people whose bedtime sits near midnight — which is
-     * most of them.
-     */
-    internal fun clockDistance(a: Int, b: Int): Double {
-        val raw = abs(a - b).toDouble()
-        return minOf(raw, MINUTES_PER_DAY - raw)
-    }
-
-    private const val MINUTES_PER_DAY = 1440.0
 }

@@ -1652,7 +1652,7 @@
     <string name="l10n_app_changelog_your_whoop_journal_in_insights_clearer_88f5e21b">Your WHOOP journal in Insights, clearer metric taps</string>
     <string name="l10n_app_root_this_section_is_on_the_way_ca7c4a32">This section is on the way.</string>
     <string name="l10n_app_root_updates_c76d1807">Updates</string>
-    <string name="l10n_coach_screen_coach_b32c9ad3">Coach</string>
+    <string name="l10n_coach_screen_coach_b32c9ad3">System</string>
     <string name="l10n_compare_screen_remove_title_ddb5361c">Remove %1$s</string>
     <string name="l10n_components_chunks_chunks_pulled_cec186cf">%1$s chunks pulled</string>
     <string name="l10n_components_decrease_accessibility_df5f1511">Decrease %1$s</string>
@@ -3064,4 +3064,53 @@
     <string name="muscle_model_scale_warming">Some groups are still shaded relative to your heaviest — a muscle needs a month of history before its own normal is known.</string>
     <string name="health_connect_category_nutrition">Nutrition</string>
     <string name="health_connect_category_nutrition_detail">"Calories, protein, carbohydrate and fat from your food log"</string>
+    <string name="coach_sender_you">You</string>
+    <string name="coach_sender_system">System</string>
+    <string name="level_driver_sleep_score">"score"</string>
+    <string name="level_driver_consistency">"consistency"</string>
+    <string name="level_driver_hrv">"hrv"</string>
+    <string name="level_driver_rhr">"rhr"</string>
+    <string name="level_driver_vo2max">"vo₂max"</string>
+    <string name="level_driver_resp_rate">"resp. rate"</string>
+    <string name="level_driver_volume">"volume"</string>
+    <string name="level_driver_stress">"stress"</string>
+    <string name="level_driver_meditation">"meditation"</string>
+    <string name="level_span_week">"7d"</string>
+    <string name="level_span_month">"30d"</string>
+    <string name="level_span_quarter">"90d"</string>
+    <string name="level_timeline_title">"Level over time"</string>
+    <string name="level_timeline_close">"Close"</string>
+    <string name="level_timeline_loading">"Working it out…"</string>
+    <string name="level_timeline_thin">"Not enough scored days yet."</string>
+    <string name="level_timeline_low">"low"</string>
+    <string name="level_timeline_mean">"mean"</string>
+    <string name="level_timeline_high">"high"</string>
+    <string name="focus_subtitle">"Your meditation log, and the autonomic load underneath it"</string>
+    <string name="meditation_total_label">"Meditated altogether"</string>
+    <string name="meditation_minutes_unit">"min"</string>
+    <string name="meditation_start">"Start meditating"</string>
+    <string name="meditation_stop">"Stop and log this session"</string>
+    <string name="meditation_delete">"Delete today's session"</string>
+    <string name="meditation_running">"Sitting. Stop when you are done and it will be logged."</string>
+    <string name="meditation_done_today">"Logged for today. Bin it to sit again."</string>
+    <string name="meditation_window_hint">"Three days count toward Focus. The oldest frees up as it falls out."</string>
+    <string name="meditation_too_short">"Too short to log — sit for at least %1$d seconds."</string>
+    <string name="meditation_failed">"That session could not be saved. Try again."</string>
+    <string name="hero_strain">"Strain"</string>
+    <string name="hero_recovery">"Recovery"</string>
+    <string name="hero_sleep">"Sleep"</string>
+    <string name="streak_sleep_consistency" formatted="false">consistency &gt; 80%</string>
+    <string name="streak_sleep_debt" formatted="false">debt &lt; 1h</string>
+    <string name="streak_stress_time" formatted="false">stress &lt; 6h</string>
+    <string name="level_span_year">"1y"</string>
+    <string name="level_span_all">"All"</string>
+    <string name="whoop_cloud_connected">"Connected to WHOOP. Pull down on Today to sync."</string>
+    <string name="whoop_cloud_connect_failed">"Could not connect to WHOOP. Try again."</string>
+    <string name="whoop_cloud_title">"WHOOP cloud"</string>
+    <string name="whoop_cloud_subtitle">"WHOOP's own recovery, day strain and sleep performance — the scores their app shows. Read over the internet from your WHOOP account, and kept in their own source so they never overwrite what this phone measured itself."</string>
+    <string name="whoop_cloud_connect">"Connect WHOOP account"</string>
+    <string name="whoop_cloud_disconnect">"Disconnect"</string>
+    <string name="whoop_cloud_state_on">"Connected"</string>
+    <string name="whoop_cloud_state_off">"Not connected"</string>
+    <string name="today_stress_day_score">"Today's score, from resting HR and HRV"</string>
 </resources>

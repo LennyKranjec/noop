@@ -80,13 +80,7 @@ object MuscleAttribution {
      * Kept separate from [rules] because a rule must name at least one group. An entry here is the
      * deliberate absence of one, which is a different statement from "not recognised".
      */
-    internal val unattributable: List<String> = listOf(
-        "neck",
-        // German: adductors. The thirteen groups have no adductor, and the medial thigh is not the
-        // quadriceps — placing it there would light the wrong muscle on the body view for thirty
-        // sessions. A blank invites a look; a wrong muscle does not.
-        "adduktor",
-    )
+    internal val unattributable: List<String> = listOf("neck")
 
     /**
      * The primary movers for a logged exercise name, or an empty list when it cannot be placed.
@@ -123,6 +117,17 @@ object MuscleAttribution {
         "beinpresse" to listOf(MuscleGroup.QUADRICEPS, MuscleGroup.GLUTES),
         "kniebeugen" to listOf(MuscleGroup.QUADRICEPS, MuscleGroup.GLUTES),
         "wallsit" to listOf(MuscleGroup.QUADRICEPS),
+        // THE TWO SIDES OF THE HIP, and they are not the same muscles.
+        //
+        // Abduction takes the leg AWAY from the midline: gluteus medius and minimus, so the glutes.
+        // Adduction pulls it BACK: the medial thigh — adductor magnus, longus, brevis, gracilis.
+        //
+        // The magnus is the largest of those and is a powerful HIP EXTENSOR, which is the hamstrings'
+        // own job and why anatomy texts routinely group it with them. That makes hamstrings the honest
+        // home for the adductor machine among these thirteen groups. It is NOT the quadriceps: the
+        // quadriceps extend the knee and take no part in adduction, and filing it there would light the
+        // front of the thigh for work the front of the thigh did not do.
+        "adduktor" to listOf(MuscleGroup.HAMSTRINGS),
         "abduktor" to listOf(MuscleGroup.GLUTES),
         // Back and the hinge. "Hyperextension" is spelled the same in both languages and is already in
         // the English section below, so it is deliberately NOT repeated here: a second copy would be
@@ -162,6 +167,10 @@ object MuscleAttribution {
         "lunge" to listOf(MuscleGroup.QUADRICEPS, MuscleGroup.GLUTES),
         "leg press" to listOf(MuscleGroup.QUADRICEPS, MuscleGroup.GLUTES),
         "squat" to listOf(MuscleGroup.QUADRICEPS, MuscleGroup.GLUTES),
+        "hip adduction" to listOf(MuscleGroup.HAMSTRINGS),
+        "hip abduction" to listOf(MuscleGroup.GLUTES),
+        "adductor" to listOf(MuscleGroup.HAMSTRINGS),
+        "abductor" to listOf(MuscleGroup.GLUTES),
         "hip thrust" to listOf(MuscleGroup.GLUTES),
         "glute bridge" to listOf(MuscleGroup.GLUTES),
         "calf raise" to listOf(MuscleGroup.CALVES),

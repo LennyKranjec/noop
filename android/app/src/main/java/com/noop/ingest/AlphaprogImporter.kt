@@ -32,6 +32,25 @@ import java.util.Locale
 // that was planned and not done. Both are parsed here rather than pushed onto the shared lifting
 // parser, because they are this exporter's conventions and not lifting's.
 //
+// A SESSION HEADER HAS THREE DURATION FORMS AND A ONE- OR TWO-DIGIT CLOCK. "53 Min.", "1:19 Std."
+// and "45 s" all appear, and a session that started at "5:18 Uhr" writes one digit. The first cut of
+// this parser accepted only `HH:MM` and `N Min.` — so it matched 26 of the file's 96 sessions, and the
+// other 70 sessions' exercises were appended to whichever session HAD matched. The result was a single
+// fabricated 190-exercise day holding most of a year's training, which is exactly the kind of failure
+// that looks like data rather than like a bug: the totals were plausible, the days were not. Every form
+// the export actually writes is matched here, and a test asserts the session COUNT against the real file.
+//
+// THE SET GRID COMES IN THREE FLAVOURS, and only one of them is volume load:
+//
+//   #;KG;WDH   weight × repetitions  → volume load, the figure the muscle view reads
+//   #;KG;SEK   weight × seconds      → a loaded hold; the second column is TIME, not reps
+//   #;MIN.     minutes               → a timed effort with no external load at all
+//
+// Only the first contributes kilograms. Multiplying 30 kg by 45 SECONDS would produce "1,350 kg" of
+// volume from a 45-second hold, which is not a smaller or larger number than the truth — it is a
+// different quantity wearing the same unit. The other two are counted as sets that happened and
+// contribute no volume, which is the honest reading of what the file says.
+//
 // AN UNPERFORMED SET IS NOT A ZERO. "3;-;-" is a row the app printed and the wearer left empty; it
 // contributes no volume and is not counted as a set. Treating it as 0 kg × 0 reps would be the same
 // arithmetic and a different claim — it would say they did a set of nothing.
@@ -53,24 +72,69 @@ object AlphaprogImporter {
     /** Big enough for years of logging; small enough that a wrong file cannot exhaust memory. */
     private const val MAX_BYTES = 32 * 1024 * 1024
 
-    /** The session header: title, date, time, minutes. */
-    private val SESSION = Regex("""^"([^"]*)";"(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2})[^"]*";"(\d+)\s*Min""")
+    /**
+     * The session header: title, date, clock, duration.
+     *
+     * The duration is captured whole and read by [durationMinutes] rather than pattern-matched here —
+     * there are three forms of it, and a regex that tries to hold them all is a regex nobody can check
+     * against the file.
+     */
+    private val SESSION =
+        Regex("""^"([^"]*)";"(\d{4}-\d{2}-\d{2}) (\d{1,2}:\d{2})[^"]*";"([^"]*)"""")
 
     /** An exercise title line: `"3. Brustpresse · Maschine · 10 Wdh"`. */
     private val EXERCISE = Regex("""^"\d+\.\s*(.+?)"$""")
 
-    /** The set grid's own header, which carries no data. */
-    private const val SET_HEADER = "#;KG;WDH"
+    /** `1:19 Std.` — hours and minutes. */
+    private val DURATION_HM = Regex("""^(\d+):(\d{2})\s*Std""")
+
+    /** `53 Min.` */
+    private val DURATION_MIN = Regex("""^(\d+)\s*Min""")
+
+    /** `45 s` — a session so short the exporter gives it in seconds. */
+    private val DURATION_SEC = Regex("""^(\d+)\s*s\b""")
+
+    /**
+     * Which grid the rows below a header belong to.
+     *
+     * Carried as state through the parse because a row `1;30;45` is identical in every grid; only the
+     * header two lines above says whether the 45 is repetitions or seconds.
+     */
+    private enum class Grid { REPS, SECONDS, MINUTES, UNKNOWN }
+
+    /** The set grid's own header, which carries no data but names the grid. */
+    private fun gridOf(line: String): Grid? = when (line) {
+        "#;KG;WDH" -> Grid.REPS
+        "#;KG;SEK" -> Grid.SECONDS
+        "#;MIN." -> Grid.MINUTES
+        else -> if (line.startsWith("#;")) Grid.UNKNOWN else null
+    }
 
     /** One performed set: index, weight, reps. */
     private val SET = Regex("""^(\d+);([^;]*);([^;]*)$""")
 
+    /** A two-column row, used by the minutes grid: index, minutes. */
+    private val SET_2COL = Regex("""^(\d+);([^;]*)$""")
+
     /** One exercise inside a session, with only the sets that were actually done. */
     data class Exercise(val name: String, val sets: List<Set>)
 
-    /** One performed set. */
-    data class Set(val weightKg: Double, val reps: Int) {
-        val volumeKg: Double get() = weightKg * reps
+    /**
+     * One performed set.
+     *
+     * [reps] is repetitions and nothing else. A loaded hold's seconds and a timed effort's minutes are
+     * real work and are recorded as [holdSeconds] / [minutes], but they never become reps: the whole
+     * point of the distinction is that `weight × seconds` is not a mass, and calling it one would put a
+     * fabricated figure into the muscle view under the same unit as a real one.
+     */
+    data class Set(
+        val weightKg: Double,
+        val reps: Int,
+        val holdSeconds: Int = 0,
+        val minutes: Double = 0.0,
+    ) {
+        /** Kilograms of volume load. Zero for anything that was not weight × repetitions. */
+        val volumeKg: Double get() = if (reps > 0) weightKg * reps else 0.0
     }
 
     /** One parsed session, before it is turned into the shared [LiftingImporter.Session]. */
@@ -115,8 +179,8 @@ object AlphaprogImporter {
     /**
      * Parse the whole export.
      *
-     * Never throws on a malformed line: a log the wearer spent months filling in should import the 25
-     * sessions it can read rather than fail on the 26th. Lines that match nothing are skipped in
+     * Never throws on a malformed line: a log the wearer spent months filling in should import the
+     * sessions it can read rather than fail on one of them. Lines that match nothing are skipped in
      * silence — the format has blank lines, a BOM and section spacing that carry no data.
      */
     fun parse(text: String, zone: ZoneId = ZoneId.systemDefault()): Parsed {
@@ -129,6 +193,9 @@ object AlphaprogImporter {
         var exercises = ArrayList<Exercise>()
         var exerciseName: String? = null
         var sets = ArrayList<Set>()
+        // Defaults to REPS: every grid in the file but two is weight × repetitions, and a row arriving
+        // before any header at all is far likelier to be a stray than an isometric.
+        var grid = Grid.REPS
 
         fun closeExercise() {
             val name = exerciseName ?: return
@@ -155,7 +222,8 @@ object AlphaprogImporter {
                 title = m.groupValues[1].trim()
                 val begin = parseStart(m.groupValues[2], m.groupValues[3], zone)
                 start = begin
-                end = begin + m.groupValues[4].toLong() * 60L
+                end = begin + durationMinutes(m.groupValues[4]) * 60L
+                grid = Grid.REPS
                 return@forEach
             }
             EXERCISE.find(line)?.let { m ->
@@ -165,12 +233,33 @@ object AlphaprogImporter {
                 exerciseName = m.groupValues[1].substringBefore('·').trim()
                 return@forEach
             }
-            if (line == SET_HEADER) return@forEach
-            SET.find(line)?.let { m ->
-                val weight = germanNumber(m.groupValues[2])
-                val reps = m.groupValues[3].trim().toIntOrNull()
-                // A dash in either column is a set that was printed and not done.
-                if (weight != null && reps != null && reps > 0) sets.add(Set(weight, reps))
+            gridOf(line)?.let { grid = it; return@forEach }
+
+            when (grid) {
+                Grid.REPS -> SET.find(line)?.let { m ->
+                    val weight = germanNumber(m.groupValues[2])
+                    val reps = m.groupValues[3].trim().toIntOrNull()
+                    // A dash in either column is a set that was printed and not done.
+                    if (weight != null && reps != null && reps > 0) sets.add(Set(weight, reps))
+                }
+                // A loaded hold. The weight is real and the seconds are real; their PRODUCT is not a
+                // mass, so it is kept out of volume rather than converted into one.
+                Grid.SECONDS -> SET.find(line)?.let { m ->
+                    val weight = germanNumber(m.groupValues[2])
+                    val seconds = m.groupValues[3].trim().toIntOrNull()
+                    if (weight != null && seconds != null && seconds > 0) {
+                        sets.add(Set(weightKg = weight, reps = 0, holdSeconds = seconds))
+                    }
+                }
+                Grid.MINUTES -> SET_2COL.find(line)?.let { m ->
+                    germanNumber(m.groupValues[2])?.takeIf { it > 0.0 }?.let {
+                        sets.add(Set(weightKg = 0.0, reps = 0, minutes = it))
+                    }
+                }
+                // A grid this parser has never seen. Its rows are skipped rather than guessed at, and
+                // the exercise is still recorded — "they did this, with no figure I can read" is true,
+                // where reading its second column as reps would be a number I invented.
+                Grid.UNKNOWN -> Unit
             }
         }
         closeWorkout()
@@ -185,10 +274,29 @@ object AlphaprogImporter {
         return t.replace(".", "").replace(',', '.').toDoubleOrNull()
     }
 
+    /**
+     * `53 Min.`, `1:19 Std.` or `45 s`, in whole minutes.
+     *
+     * Zero for a form this does not recognise, which makes the session a zero-length one rather than
+     * dropping it: the exercises are the data, and a session with an unreadable duration still happened.
+     */
+    internal fun durationMinutes(raw: String): Long {
+        val t = raw.trim()
+        DURATION_HM.find(t)?.let { m ->
+            return m.groupValues[1].toLong() * 60L + m.groupValues[2].toLong()
+        }
+        DURATION_MIN.find(t)?.let { return it.groupValues[1].toLong() }
+        // Rounded DOWN to the minute, so a 45-second session is a zero-length one rather than being
+        // rounded up into a minute it did not last.
+        DURATION_SEC.find(t)?.let { return it.groupValues[1].toLong() / 60L }
+        return 0L
+    }
+
+    /** `HH:mm` or `H:mm` — the exporter writes a single-digit hour before ten. */
     private fun parseStart(date: String, time: String, zone: ZoneId): Long =
         runCatching {
             LocalDateTime.parse(
-                "$date $time",
+                "$date ${time.padStart(5, '0')}",
                 DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm", Locale.US),
             ).atZone(zone).toEpochSecond()
         }.getOrDefault(0L)
@@ -302,5 +410,8 @@ object AlphaprogImporter {
     }
 
     private fun dayOf(ts: Long): String =
-        LocalDate.ofInstant(Instant.ofEpochSecond(ts), ZoneId.systemDefault()).toString()
+        // API-26-safe: LocalDate.ofInstant is an API 34 overload, and this app has no desugaring —
+        // it threw NoSuchMethodError AFTER the import had already written every row, so the wearer saw
+        // a failure over a completed import.
+        Instant.ofEpochSecond(ts).atZone(ZoneId.systemDefault()).toLocalDate().toString()
 }

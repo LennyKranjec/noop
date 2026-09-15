@@ -1167,7 +1167,10 @@ fun TodayScreen(
             // screen uses (`selectedDay.toString()`), NOT the 04:00 logical-day remap: these compare
             // against row keys, and remapping them would shift the boundary by a few hours.
             fun dayKey(ts: Long?) =
-                ts?.let { LocalDate.ofInstant(Instant.ofEpochSecond(it), ZoneId.systemDefault()).toString() }
+                // API-26-safe: LocalDate.ofInstant needs 34, which this app does not require.
+                ts?.let {
+                    Instant.ofEpochSecond(it).atZone(ZoneId.systemDefault()).toLocalDate().toString()
+                }
             whoop5StrictRr = viewModel.repo.isWhoop5RrSource(owner)
             firstRecordedRrDay = dayKey(viewModel.repo.firstRecordedRrTs(owner))
             firstScorableRrDay = dayKey(viewModel.repo.firstScorableWhoop5RrTs(owner))
@@ -1219,6 +1222,78 @@ fun TodayScreen(
         )
     }
     val heroSourceLabel = heroSourceParts.takeIf { it.isNotEmpty() }?.localizedSourceList()
+
+    // WHOOP'S OWN SCORES for the selected day, read from the cloud source directly.
+    //
+    // NOT through `daysMerged`, deliberately. That union resolves to the strap's canonical id alone
+    // (`importedSourceIdsFor`), so a cloud row is invisible to it — which is exactly why the rings sat
+    // empty after a sync that had in fact stored twenty-six days. Widening that union would change
+    // which source wins on every screen in the app, for every metric, to fix three numbers on one
+    // tile; reading the source here changes precisely the tile that was asked for.
+    //
+    // WHERE BOTH EXIST, THE CLOUD WINS ON THIS TILE. These three figures are WHOOP's own proprietary
+    // scores — the ones their app shows — and nothing on this phone reproduces them. Everywhere else in
+    // the app the locally derived figures still stand.
+    // OPENING TODAY IS ENOUGH. Until now only a manual pull ran the cloud sync, so connecting the
+    // account and then opening the app showed nothing at all and gave no way to tell whether the
+    // connection had worked. Rate-limited to once every half hour by a stored timestamp — see
+    // [WhoopCloudSync.syncIfStale] — so this is not a request per launch.
+    var cloudSyncTick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            runCatching { com.noop.ingest.WhoopCloudSync.syncIfStale(context, viewModel.repo) }
+        }
+        cloudSyncTick++
+    }
+
+    var cloudDay by remember { mutableStateOf<com.noop.data.DailyMetric?>(null) }
+    // True when the row on the tile is NOT the day that is selected — see the fallback below.
+    var cloudIsCarried by remember { mutableStateOf(false) }
+    // WHOOP'S OWN sleep score for whichever day the tile is showing, read from the series the sync
+    // banks it in. Not this app's RestScorer: the ring is labelled as WHOOP's, and re-scoring the night
+    // here produced a number their app does not show.
+    var cloudSleepScore by remember { mutableStateOf<Double?>(null) }
+    // KEYED ON THE SYNC TOO, not only on which day is shown. The launch sync writes this series AFTER
+    // the first read, and on an unchanged day the key would not move — so the score sat blank until the
+    // next launch, which is exactly the "sleep is empty" this was meant to fix.
+    LaunchedEffect(cloudDay?.day, cloudSyncTick) {
+        cloudSleepScore = cloudDay?.day?.let { day ->
+            withContext(Dispatchers.IO) {
+                runCatching { com.noop.ingest.WhoopCloudSync.sleepScore(viewModel.repo, day) }.getOrNull()
+            }
+        }
+    }
+    LaunchedEffect(selectedDayKey, viewModel.activeStrapId, cloudSyncTick) {
+        val resolved = withContext(Dispatchers.IO) {
+            runCatching {
+                val all = viewModel.repo.days(com.noop.ingest.WhoopCloudSync.SOURCE_ID)
+                val exact = all.lastOrNull { it.day == selectedDayKey }
+                // THE LATEST SCORED DAY, when TODAY has none of its own.
+                //
+                // WHOOP scores a cycle after it closes, and a wearer who has not synced their strap for
+                // two days has nothing for today at all — which is what left three dashes on a tile
+                // over an account holding twenty-six days. Showing the newest day WHOOP does have is
+                // the useful answer, and it is only honest because the footer carries that day's OWN
+                // date: the tile never claims a figure belongs to a day it does not.
+                //
+                // Only on TODAY. Navigating to a past day shows that day or nothing, because there the
+                // wearer has asked for a specific day and substituting another would be a lie.
+                // A SCORED CYCLE, not merely the newest row. Sleep is filed on the day it ends and a
+                // cycle is scored after it closes, so the newest row is routinely a night with no
+                // recovery and no strain behind it yet — carrying that filled one ring and left two
+                // dashes, which is the state this fallback exists to avoid. Recovery or strain means
+                // WHOOP has finished with the day, and a finished day carries its sleep too.
+                val carried = if (exact == null && selectedDayOffset == 0) {
+                    all.lastOrNull { it.recovery != null || it.strain != null }
+                } else {
+                    null
+                }
+                (exact ?: carried) to (exact == null && carried != null)
+            }.getOrNull() ?: (null to false)
+        }
+        cloudDay = resolved.first
+        cloudIsCarried = resolved.second
+    }
 
     // 14-day trailing calendar window ending on the phone's actual local day.
     // Old imports stay in history, but they do not fill the Today trend tiles.
@@ -1300,24 +1375,24 @@ fun TodayScreen(
             onHorizontalDrag = { _, dragAmount -> accumulatedX += dragAmount },
         )
     }
-    val canPullToSync =
-        todayPullToSyncEnabled(liveSnap.connected, liveSnap.bonded, liveSnap.backfilling, liveSnap.historyReady)
-    // material3 1.2.1's rememberPullToRefreshState CAPTURES the `enabled` lambda ONCE (rememberSaveable,
-    // no rememberUpdatedState), so `{ canPullToSync }` would freeze the plain Boolean from the FIRST
-    // composition — and Today usually first composes before the strap has (re)connected, leaving the
-    // gesture permanently disabled for the session. Read the stable `liveSnap` State live inside the lambda
-    // instead, so each gesture check sees the current connected/bonded/backfilling. (syncNow is triple-gated
-    // anyway; this just makes the gesture actually enable once the strap is ready.)
-    val pullToSyncState = rememberPullToRefreshState(
-        enabled = {
-            todayPullToSyncEnabled(
-                liveSnap.connected, liveSnap.bonded, liveSnap.backfilling, liveSnap.historyReady,
-            )
-        },
-    )
-    LaunchedEffect(pullToSyncState.isRefreshing, canPullToSync) {
+    // ALWAYS ENABLED. The gesture used to be gated on the strap being connected, bonded and handshaken,
+    // so it disappeared exactly when somebody was pulling to find out why their data had not arrived —
+    // and even when it did fire it only asked the strap, while every other source in the app was
+    // refreshed by opening the screen that read it. One pull now runs every source this device can reach
+    // (see [refreshAllSources]), and there is always at least one of those.
+    //
+    // THE STRAP KEEPS ITS OWN PRECONDITIONS. They moved INTO the refresh rather than onto the gesture:
+    // asking a strap that is not there for an offload does nothing, which is the right amount of nothing.
+    val pullToSyncState = rememberPullToRefreshState(enabled = { true })
+    LaunchedEffect(pullToSyncState.isRefreshing) {
         if (pullToSyncState.isRefreshing) {
-            if (canPullToSync) viewModel.syncNow()
+            refreshAllSources(
+                context = context,
+                viewModel = viewModel,
+                strapReady = todayPullToSyncEnabled(
+                    liveSnap.connected, liveSnap.bonded, liveSnap.backfilling, liveSnap.historyReady,
+                ),
+            )
             // Historical offloads can run for a while; the existing sync chip/note owns ongoing progress.
             pullToSyncState.endRefresh()
         }
@@ -1652,6 +1727,11 @@ fun TodayScreen(
                             modifier = Modifier.fillMaxWidth(),
                             verticalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
+                            // THE MISSION, as a running line directly above the scores. Today only: a
+                            // mission is a thing to do now, and one hanging over a past day's numbers
+                            // would be an instruction for a day that is already over.
+                            if (selectedDayOffset == 0) MissionMarquee()
+
                             // The liquid hero CARD: a translucent near-black that floats over the day-of-sky
                             // so the vessels + white count-up numbers stay crisp. A rounded 26 corner + a
                             // faint white hairline give it the frosted-glass edge of the iOS liquid heroCard
@@ -1666,25 +1746,80 @@ fun TodayScreen(
                                     .border(1.dp, Palette.heroBorder.copy(alpha = Palette.heroBorder.alpha * CardAppearance.opacity), RoundedCornerShape(LIQUID_HERO_RADIUS))
                                     .staggeredAppear(stagger),
                             ) {
-                                ScoreHeroRow(
-                                    day = displayMetric,
-                                    restScore = restScoreForDay,
-                                    recoveryCalibration = recoveryCalibration,
-                                    lastScoredCharge = lastScoredCharge,
-                                    effortScale = effortScale,
-                                    liveTodayStrain = if (selectedDayOffset == 0) liveTodayStrain else null,
-                                    heroSourceLabel = heroSourceLabel,
-                                    onScoreInfo = openGuide,
-                                    onChargeTap = { showChargeBreakdown = true },
-                                    // #1164: today's Rest is provisional while the strap has banked records
-                                    // not yet offloaded — show "Pending sync" instead of a number that moves.
-                                    restPendingSync = restPendingSync(
-                                        restScore = restScoreForDay,
-                                        backfilling = live.backfilling,
-                                        historyPendingSync = live.historyPendingSync,
-                                        isTodaySelected = selectedDayOffset == 0,
+                                // THE THREE SCORES AS RINGS (the reference design). The previous
+                                // vessel row is gone; what it showed, this shows, on the geometry the
+                                // wearer asked for. See [TodayTrioHero] for the one place it departs
+                                // from the reference and why.
+                                TodayTrioHero(
+                                    scores = listOf(
+                                        HeroScore(
+                                            labelRes = R.string.hero_sleep,
+                                            text = heroPercent(cloudSleepScore),
+                                            fraction = heroFraction(cloudSleepScore),
+                                            tint = Palette.restBright,
+                                        ),
+                                        HeroScore(
+                                            labelRes = R.string.hero_recovery,
+                                            text = heroPercent(cloudDay?.recovery ?: displayMetric?.recovery),
+                                            fraction = heroFraction(cloudDay?.recovery ?: displayMetric?.recovery),
+                                            tint = Palette.statusPositive,
+                                        ),
+                                        // STRAIN ON WHOOP'S OWN 0-21 SCALE, always, and never as a
+                                        // percentage. This tile shows WHOOP's figures under WHOOP's
+                                        // name, and 14.9 is what their app says — rendering it as
+                                        // "71%" would be this app restating their number in units they
+                                        // do not use, on a tile that credits them for it.
+                                        //
+                                        // The cloud value is ALREADY 0-21; only a locally derived
+                                        // fallback needs converting, which is what the scale argument
+                                        // is for.
+                                        HeroScore(
+                                            labelRes = R.string.hero_strain,
+                                            text = heroStrain21(cloudDay?.strain, effortForDay)
+                                                ?.let { String.format(Locale.getDefault(), "%.1f", it) }
+                                                ?: "–",
+                                            fraction = heroFraction(
+                                                heroStrain21(cloudDay?.strain, effortForDay),
+                                                max = WHOOP_STRAIN_MAX,
+                                            ),
+                                            // THE DAY'S OPTIMAL STRAIN, always drawn. The same
+                                            // recovery-banded range the Coupled view uses, so the two
+                                            // screens cannot name different targets for one day.
+                                            mark = heroFraction(
+                                                optimalStrainRange(
+                                                    cloudDay?.recovery ?: displayMetric?.recovery,
+                                                )?.high?.toDouble(),
+                                                max = WHOOP_STRAIN_MAX,
+                                            ),
+                                            tint = Palette.metricAmber,
+                                        ),
                                     ),
-                                    onOpenMetric = onOpenMetric,
+                                    // The day the FIGURES are from, which on a carried row is not the
+                                    // selected day. This label is the entire reason the fallback above
+                                    // is honest rather than a substitution nobody was told about.
+                                    dateLabel = (cloudDay?.day?.takeIf { cloudIsCarried } ?: selectedDayKey)
+                                        .let { key ->
+                                            runCatching {
+                                                LocalDate.parse(key).format(
+                                                    DateTimeFormatter.ofPattern("d. MMM", Locale.getDefault()),
+                                                )
+                                            }.getOrDefault(key)
+                                        },
+                                    // Says WHOOP when the numbers came from WHOOP's own cloud, rather
+                                    // than crediting a source that did not produce them.
+                                    sourceLabel = if (cloudDay != null) "WHOOP" else heroSourceLabel,
+                                    // EACH RING OPENS ITS OWN THING. Every ring used to land on the
+                                    // same guide page except the middle one, so tapping Sleep explained
+                                    // Charge — the panel that opened had nothing to do with the number
+                                    // that was pressed. The order here is Sleep, Recovery, Strain, and
+                                    // these are the three destinations the old hero vessels opened.
+                                    onTapScore = { i ->
+                                        when (i) {
+                                            0 -> onOpenSleep()
+                                            1 -> showChargeBreakdown = true
+                                            else -> onOpenMetric("strain")
+                                        }
+                                    },
                                 )
                             }
                             // Honest "why is Effort 0?" caption — only when today's Effort is a real
@@ -1842,12 +1977,11 @@ fun TodayScreen(
                             isToday = selectedDayOffset == 0,
                             onOpenStress = onOpenStress,
                         )
-                        // TODAY'S MISSION, written at 06:45. Only on today: a mission is a thing to do
-                        // now, and showing yesterday's above yesterday's numbers would invite claiming
-                        // XP for a day that is over.
-                        TodaySection.DAILY_MISSION -> if (selectedDayOffset == 0) {
-                            DailyMissionCardWithGenerate()
-                        }
+                        // TODAY'S MISSION no longer has a section of its own: it is one sentence, and
+                        // it now runs as a line above the three scores (see [MissionMarquee]). The slot
+                        // stays in the enum so a saved section order from an older install still loads;
+                        // it simply renders nothing.
+                        TodaySection.DAILY_MISSION -> Unit
                         // THE QUESTS BEING CARRIED. Today only, and only for today: a quest has a clock
                         // on it, and showing one above a past day's numbers would invite completing it
                         // for a day that is over.
@@ -4440,7 +4574,7 @@ private fun dashboardCardValue(
             // "<total> / <goal> L" in litres to 1 dp, e.g. "1.2 / 3.2 L". Always shows a value (a fresh
             // day reads "0.0 / 3.2 L"), since the goal is always derivable from the profile.
             String.format(
-                Locale.getDefault(), "%.1f / %.1f L",
+                Locale.getDefault(), "%.2f / %.2f L",
                 hydrationTotalMl / 1000.0, hydrationGoalMl / 1000.0,
             )
         DashboardCard.COUPLED ->

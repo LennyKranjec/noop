@@ -13,6 +13,22 @@ val keystorePropsFile = rootProject.file("keystore.properties")
 val keystoreProps = Properties().apply {
     if (keystorePropsFile.exists()) keystorePropsFile.inputStream().use { load(it) }
 }
+/**
+ * WHOOP developer-API credentials, from `local.properties` (git-ignored, never committed).
+ *
+ * ABSENT IS A VALID STATE and the default one: a clone, or CI, builds fine with empty strings and the
+ * app simply does not offer the cloud sign-in. The secret is read at BUILD time into BuildConfig rather
+ * than being checked in, which is the least-bad option for a client that WHOOP requires a secret from —
+ * see the note in WhoopAuth: a secret shipped inside an APK is extractable, and that is a property of
+ * their OAuth flow, not something this app can fix.
+ */
+val whoopPropsFile = rootProject.file("local.properties")
+val whoopProps = Properties().apply {
+    if (whoopPropsFile.exists()) whoopPropsFile.inputStream().use { load(it) }
+}
+val whoopClientId: String = whoopProps.getProperty("WHOOP_CLIENT_ID", "")
+val whoopClientSecret: String = whoopProps.getProperty("WHOOP_CLIENT_SECRET", "")
+
 val isStagingRelease = project.hasProperty("stagingRelease")
 val requestedReleaseBuild = gradle.startParameter.taskNames.any {
     it.contains("Release", ignoreCase = true)
@@ -101,6 +117,16 @@ android {
     //   • demo → "NOOP Demo"  (com.noop.whoop.demo) — preloaded with 120 days of synthetic data and
     //                          a visible DEMO badge, so anyone can explore every screen with no strap.
     // Build e.g. ./gradlew assembleFullRelease assembleDemoRelease.
+    defaultConfig {
+        buildConfigField("String", "WHOOP_CLIENT_ID", "\"$whoopClientId\"")
+        buildConfigField("String", "WHOOP_CLIENT_SECRET", "\"$whoopClientSecret\"")
+        // The redirect the WHOOP app registration must carry, byte for byte. Held here so the manifest
+        // placeholder, the BuildConfig constant and the registration cannot drift apart.
+        buildConfigField("String", "WHOOP_REDIRECT_URI", "\"noop://whoop-oauth\"")
+        manifestPlaceholders["whoopAuthScheme"] = "noop"
+        manifestPlaceholders["whoopAuthHost"] = "whoop-oauth"
+    }
+
     flavorDimensions += "tier"
     productFlavors {
         create("full") {

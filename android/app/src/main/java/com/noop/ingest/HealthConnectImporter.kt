@@ -1273,7 +1273,9 @@ object HealthConnectImporter {
      * differ only in which rules resolve the instant.
      */
     internal fun localDayKey(instant: Instant, offset: ZoneOffset?, zone: ZoneId): String =
-        LocalDate.ofInstant(instant, offset ?: zone).toString()
+        // `atZone(...).toLocalDate()` rather than `LocalDate.ofInstant(...)`: the latter is API 34
+        // and this app runs from 26 with no core-library desugaring. Same rules, same answer.
+        instant.atZone(offset ?: zone).toLocalDate().toString()
 
     /**
      * #589 de-overlap for a per-source step map: SUM is already folded WITHIN each source by the read

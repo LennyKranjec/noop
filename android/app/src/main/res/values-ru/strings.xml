@@ -1352,7 +1352,7 @@
     <string name="l10n_app_changelog_your_whoop_journal_in_insights_clearer_88f5e21b">Ваш журнал WHOOP в Выводах, понятнее нажатия на метрики</string>
     <string name="l10n_app_root_this_section_is_on_the_way_ca7c4a32">Этот раздел скоро появится.</string>
     <string name="l10n_app_root_updates_c76d1807">Обновления</string>
-    <string name="l10n_coach_screen_coach_b32c9ad3">ИИ-тренер</string>
+    <string name="l10n_coach_screen_coach_b32c9ad3">System</string>
     <!-- K5: scheduled Coach morning-brief notification. -->
     <string name="coach_brief_channel_name">Утренний брифинг тренера</string>
     <string name="coach_brief_channel_desc">Сегодняшний брифинг тренера, генерируется на устройстве в выбранное время.</string>

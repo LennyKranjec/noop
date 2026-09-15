@@ -180,12 +180,12 @@ class MuscleGroupsTest {
      */
     @Test
     fun theRuleTableMatchesTheSwiftSourceOfTruth() {
-        assertEquals(86, MuscleAttribution.rules.size)
+        assertEquals(91, MuscleAttribution.rules.size)
         // The German block leads the table — see the note there on why specificity puts it first.
         assertEquals("wadenheben", MuscleAttribution.rules.first().first)
-        assertEquals("leg curl", MuscleAttribution.rules[20].first)
+        assertEquals("leg curl", MuscleAttribution.rules[21].first)
         assertEquals("russian twist", MuscleAttribution.rules.last().first)
-        assertEquals(listOf("neck", "adduktor"), MuscleAttribution.unattributable)
+        assertEquals(listOf("neck"), MuscleAttribution.unattributable)
         val order = MuscleAttribution.rules.map { it.first }
         for ((specific, generic) in listOf(
             "leg curl" to "curl", "wrist" to "curl", "nordic curl" to "curl",

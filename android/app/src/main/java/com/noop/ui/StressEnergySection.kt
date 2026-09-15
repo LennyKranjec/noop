@@ -65,20 +65,31 @@ import kotlin.math.sin
 //     ([StressWidgetProducer]), so this card, the widget and the Stress screen cannot
 //     disagree about the day. Highest / Lowest / Average are taken across the SCORED hours
 //     only; an hour the motion gate masked or that had too little signal carries a null
-//     level and is skipped rather than counted as calm. With nothing scored yet every
-//     figure reads "–" and the dial shows its bare scale — the honest state, not a zero.
+//     level and is skipped rather than counted as calm.
 //
-//   · THE ENERGY BAR is charge minus effort, drawn over the charge it started from:
+//     WITH NO HOUR SCORED IT FALLS BACK TO NOOP'S OWN DAILY STRESS — the same 0-3 proxy the
+//     Stress screen's headline shows, derived from resting HR and HRV against the wearer's own
+//     baseline ([StressModel]). The intraday curve needs a day of worn heart rate and R-R, so on
+//     a phone that has not been worn since midnight it is legitimately empty — and the card then
+//     said "no reading" over an app that had in fact scored the day. The daily figure is a real
+//     reading of a coarser grain, and it is LABELLED as the day's rather than as right now:
+//     the dial takes it, the "last updated" line is replaced by the day's own caption, and the
+//     hour-by-hour Highest / Lowest / Average stay blank, because those genuinely need hours.
 //
-//        backing (lighter grey) = today's charge           (recovery, 0–100)
-//        fill    (yellow)       = charge − effort, floored at 0
+//   · THE ENERGY BAR is the day's REMAINING STRAIN BUDGET — the optimal strain for today's
+//     recovery, less the strain already spent:
 //
-//     so at zero effort the yellow reaches the full charge, and once effort has matched the
-//     charge the yellow is gone. THE OPTIMUM IS THE DAY'S OWN CHARGE, which is the only
-//     figure in this app that can play that part without a new number being invented for it:
-//     both scales are already 0–100 ([StrainScorer.maxStrain]), and a charge of 62 spent by
-//     an effort of 62 is exactly the day this bar is meant to describe. It is a READ-OUT of
-//     two existing scores, not a training recommendation, and nothing downstream consumes it.
+//        backing (lighter grey) = the day's optimal strain  (0–21, banded by recovery)
+//        fill    (yellow)       = optimal − strain, floored at 0
+//
+//     so a fresh day shows a full bar and it empties as the session is earned. It used to be
+//     charge minus effort on the 0–100 scale, which answered "how much recovery is left"
+//     rather than "how much training is left in today" — and the second is the question a bar
+//     beside the strain ring is read as answering.
+//
+//     THE OPTIMUM IS [optimalStrainRange]'s upper bound, the same banded target the Coupled
+//     view names, so the two surfaces cannot disagree about the day. It is a READ-OUT of two
+//     existing figures, not a new recommendation, and nothing downstream consumes it.
 
 /** Stress is scored 0–3 ([DaytimeStress]); the dial and the ramp both work in that domain. */
 private const val STRESS_MAX = 3.0
@@ -166,10 +177,30 @@ internal fun StressEnergySection(
         }
     }
 
-    val stress = remember(curve) { StressToday.from(curve) }
+    val intraday = remember(curve) { StressToday.from(curve) }
 
+    // NOOP'S OWN DAILY STRESS, read only when the intraday curve has nothing — it is the coarser
+    // answer to the same question and must never override the finer one.
+    var dailyStress by remember { mutableStateOf<Double?>(null) }
+    LaunchedEffect(intraday.hasAny, viewModel.activeStrapId, isToday) {
+        dailyStress = if (intraday.hasAny || !isToday) {
+            null
+        } else {
+            withContext(Dispatchers.IO) {
+                runCatching {
+                    val days = viewModel.repo.daysMerged(viewModel.activeStrapId)
+                    val stored = viewModel.repo
+                        .metricSeries("my-whoop", "stress", "0000-01-01", "9999-12-31")
+                        .associate { it.day to it.value.coerceIn(0.0, 3.0) }
+                    StressModel.build(days, stored)?.score
+                }.getOrNull()
+            }
+        }
+    }
+
+    val stress = intraday
     Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
-        TodayStressCard(stress = stress, onOpen = onOpenStress)
+        TodayStressCard(stress = stress, dailyFallback = dailyStress, onOpen = onOpenStress)
         EnergyBalanceBar(charge = day?.recovery, effort = day?.strain)
     }
 }
@@ -177,7 +208,15 @@ internal fun StressEnergySection(
 // MARK: - The stress card
 
 @Composable
-private fun TodayStressCard(stress: StressToday, onOpen: () -> Unit) {
+private fun TodayStressCard(
+    stress: StressToday,
+    /** NOOP's whole-day 0-3 score, used only when no hour has been scored. */
+    dailyFallback: Double?,
+    onOpen: () -> Unit,
+) {
+    // What the dial and the dot read. The intraday hour wins wherever there is one.
+    val shown = stress.latest ?: dailyFallback
+    val hasReading = stress.hasAny || dailyFallback != null
     NoopCard(modifier = Modifier.clickable(onClick = onOpen)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Column(
@@ -190,7 +229,7 @@ private fun TodayStressCard(stress: StressToday, onOpen: () -> Unit) {
                             .size(Metrics.space8)
                             .clip(RoundedCornerShape(Metrics.cornerPill))
                             .background(
-                                if (stress.hasAny) StressRamp.color(stress.latest ?: 0.0)
+                                if (hasReading) StressRamp.color(shown ?: 0.0)
                                 else Palette.textTertiary,
                             ),
                     )
@@ -202,12 +241,16 @@ private fun TodayStressCard(stress: StressToday, onOpen: () -> Unit) {
                     )
                 }
                 Text(
+                    // The caption says WHICH reading is on the dial. A whole-day figure captioned
+                    // "updated 14:32" would claim a precision it does not have.
                     stress.latestTs?.let {
                         uiString(
                             R.string.today_stress_last_updated,
                             stressUpdatedFmt.format(Instant.ofEpochSecond(it)),
                         )
-                    } ?: uiString(R.string.today_stress_no_reading),
+                    }
+                        ?: dailyFallback?.let { uiString(R.string.today_stress_day_score) }
+                        ?: uiString(R.string.today_stress_no_reading),
                     style = NoopType.footnote,
                     color = Palette.textTertiary,
                 )
@@ -228,7 +271,7 @@ private fun TodayStressCard(stress: StressToday, onOpen: () -> Unit) {
                     tint = Palette.textTertiary,
                     modifier = Modifier.size(Metrics.iconSmall),
                 )
-                StressTickDial(level = stress.latest, diameter = 96.dp)
+                StressTickDial(level = shown, diameter = 96.dp)
             }
         }
     }
@@ -317,11 +360,17 @@ private fun StressTickDial(level: Double?, diameter: Dp) {
  */
 @Composable
 private fun EnergyBalanceBar(charge: Double?, effort: Double?) {
-    val chargeFrac = charge?.let { (it / 100.0).coerceIn(0.0, 1.0) }
-    // Effort is only ever subtractive here, and only down to zero: a day that spent more than its
-    // charge is an empty bar, never a negative one.
-    val remaining = if (charge == null) null else (charge - (effort ?: 0.0)).coerceIn(0.0, charge)
-    val remainingFrac = remaining?.let { (it / 100.0).coerceIn(0.0, 1.0) }
+    // The target is banded by RECOVERY, which is what `charge` carries here. With no recovery scored
+    // there is no target, so the bar draws its empty track rather than inventing one.
+    val optimal = optimalStrainRange(charge)?.high?.toDouble()
+    // Strain on WHOOP's own 0-21 scale, which is the scale the target is expressed on. Mixing the two
+    // would draw a 0-100 effort against a 0-21 ceiling and peg the bar full on every day.
+    val spent = effort?.let { UnitFormatter.effortValue(it, EffortScale.WHOOP).toDouble() }
+    val optimalFrac = optimal?.let { (it / WHOOP_STRAIN_MAX).coerceIn(0.0, 1.0) }
+    // Strain is only ever subtractive here, and only down to zero: a day that has already passed its
+    // optimum is an empty bar, never a negative one.
+    val remaining = if (optimal == null) null else (optimal - (spent ?: 0.0)).coerceIn(0.0, optimal)
+    val remainingFrac = remaining?.let { (it / WHOOP_STRAIN_MAX).coerceIn(0.0, 1.0) }
 
     NoopCard(padding = Metrics.space12) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -333,13 +382,15 @@ private fun EnergyBalanceBar(charge: Double?, effort: Double?) {
             )
             Spacer(Modifier.width(Metrics.space10))
             EnergyTicks(
-                backing = chargeFrac?.toFloat() ?: 0f,
+                backing = optimalFrac?.toFloat() ?: 0f,
                 fill = remainingFrac?.toFloat() ?: 0f,
                 modifier = Modifier.weight(1f),
             )
             Spacer(Modifier.width(Metrics.space10))
             Text(
-                remaining?.let { "${it.toInt()}%" } ?: EM_DASH,
+                // One decimal on WHOOP's scale, as everywhere else strain is shown. No percent sign:
+                // this is strain, and 21 is its ceiling.
+                remaining?.let { String.format(Locale.getDefault(), "%.1f", it) } ?: EM_DASH,
                 style = NoopType.bodyNumber,
                 color = if (remaining == null) Palette.textTertiary else Palette.textPrimary,
             )

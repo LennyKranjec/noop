@@ -70,10 +70,7 @@ public enum MuscleAttribution {
     ///
     /// Kept separate from `rules` because a rule must name at least one group. An entry here is the
     /// deliberate absence of one, which is a different statement from "not recognised".
-    ///
-    /// "Adduktoren" is the German log's own such case: the medial thigh is not the quadriceps, and
-    /// placing it there would light the wrong muscle on the body view for thirty sessions.
-    static let unattributable: [String] = ["neck", "adduktor"]
+    static let unattributable: [String] = ["neck"]
 
     /// The primary movers for a logged exercise name, or an empty array when it cannot be placed.
     ///
@@ -108,6 +105,17 @@ public enum MuscleAttribution {
         ("beinpresse", [.quadriceps, .glutes]),
         ("kniebeugen", [.quadriceps, .glutes]),
         ("wallsit", [.quadriceps]),
+        // THE TWO SIDES OF THE HIP, and they are not the same muscles.
+        //
+        // Abduction takes the leg AWAY from the midline: gluteus medius and minimus, so the glutes.
+        // Adduction pulls it BACK: the medial thigh — adductor magnus, longus, brevis, gracilis.
+        //
+        // The magnus is the largest of those and is a powerful HIP EXTENSOR, which is the hamstrings'
+        // own job and why anatomy texts routinely group it with them. That makes hamstrings the honest
+        // home for the adductor machine among these thirteen groups. It is NOT the quadriceps: the
+        // quadriceps extend the knee and take no part in adduction, and filing it there would light the
+        // front of the thigh for work the front of the thigh did not do.
+        ("adduktor", [.hamstrings]),
         ("abduktor", [.glutes]),
         // Back and the hinge. "Hyperextension" is spelled the same in both languages and is already in
         // the English section below, so it is deliberately NOT repeated here: a second copy would be
@@ -147,6 +155,10 @@ public enum MuscleAttribution {
         ("lunge", [.quadriceps, .glutes]),
         ("leg press", [.quadriceps, .glutes]),
         ("squat", [.quadriceps, .glutes]),
+        ("hip adduction", [.hamstrings]),
+        ("hip abduction", [.glutes]),
+        ("adductor", [.hamstrings]),
+        ("abductor", [.glutes]),
         ("hip thrust", [.glutes]),
         ("glute bridge", [.glutes]),
         ("calf raise", [.calves]),

@@ -36,6 +36,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.compositeOver
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -69,8 +71,34 @@ import kotlinx.coroutines.delay
 /** How long between letters. ~25/s: fast enough not to be a wait, slow enough to read as typing. */
 private const val TYPE_INTERVAL_MS = 38L
 
-/** Margins. The card is nearly the whole screen, as asked — a few dozen dp of breathing room. */
-private val SCREEN_MARGIN = 20.dp
+/**
+ * Margins. Wide enough that the screen behind stays legible around the card.
+ *
+ * The first cut filled the display edge to edge over a 97 %-opaque scrim, which made the quest read as a
+ * separate app rather than as the system speaking over this one. It still cannot be scrolled past — the
+ * decision is the mechanism — but it no longer pretends the rest of the app stopped existing.
+ */
+private val SCREEN_MARGIN = 30.dp
+
+/**
+ * How much of the screen behind shows through.
+ *
+ * Enough to place yourself, not enough to read by: the card is still the only thing with contrast, so
+ * attention lands where it should while the app underneath stays visible.
+ */
+private const val SCRIM_ALPHA = 0.62f
+
+/**
+ * The quest world's blue.
+ *
+ * `metricPurple` is this palette's WHOOP-Effort BLUE (#4A90E2 dark, #3A80D6 light) — the token's name
+ * is a leftover and its value is not purple in either theme. Aliased here so this file reads as what it
+ * draws, and so a future rename has one place to land.
+ */
+private val questBlue: Color @Composable get() = Palette.metricPurple
+
+/** The glow's reach. A soft blue bloom off every corner, which is what makes it read as summoned. */
+private val GLOW_ELEVATION = 28.dp
 
 @Composable
 internal fun QuestPopup(
@@ -109,31 +137,43 @@ internal fun QuestPopup(
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Palette.surfaceBase.copy(alpha = 0.97f))
+            .background(Palette.surfaceBase.copy(alpha = SCRIM_ALPHA))
             // Tap anywhere to finish the typing early; once finished, taps do nothing (the button is
             // the only way out, because this is a decision and not a toast).
             .clickable(enabled = !done) { typed = full.length }
             .padding(SCREEN_MARGIN),
         contentAlignment = Alignment.Center,
     ) {
+        // WRAPS ITS CONTENT rather than filling the screen, so the card is only as tall as the quest
+        // actually is and the app stays visible above and below it.
+        //
+        // THE GLOW IS A COLOURED SHADOW, cast in the quest's own blue and clipped to the card's rounded
+        // shape — so it blooms off all four corners rather than being a border that happens to be thick.
+        // `clip = false` lets it spill past the card's own bounds, which is the entire effect.
+        val shape = RoundedCornerShape(Metrics.cardRadius)
         Column(
             modifier = Modifier
-                .fillMaxSize()
-                .clip(RoundedCornerShape(Metrics.cardRadius))
-                .border(
-                    BorderStroke(1.dp, Palette.accent.copy(alpha = 0.55f)),
-                    RoundedCornerShape(Metrics.cardRadius),
+                .fillMaxWidth()
+                .shadow(
+                    elevation = GLOW_ELEVATION,
+                    shape = shape,
+                    clip = false,
+                    ambientColor = questBlue,
+                    spotColor = questBlue,
                 )
+                .clip(shape)
+                .border(BorderStroke(1.dp, questBlue.copy(alpha = 0.70f)), shape)
                 .background(
                     Brush.verticalGradient(
                         listOf(
-                            Palette.surfaceRaised,
+                            // A blue-lifted top so the card itself carries the colour, not just its edge.
+                            questBlue.copy(alpha = 0.16f).compositeOver(Palette.surfaceRaised),
                             Palette.surfaceBase,
                         ),
                     ),
                 )
-                .padding(Metrics.space18),
-            verticalArrangement = Arrangement.spacedBy(Metrics.space16),
+                .padding(Metrics.space16),
+            verticalArrangement = Arrangement.spacedBy(Metrics.space12),
         ) {
             QuestHeader()
 
@@ -141,26 +181,25 @@ internal fun QuestPopup(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .weight(1f)
                     .clip(RoundedCornerShape(Metrics.cornerSm))
                     .border(
-                        BorderStroke(1.dp, Palette.hairline),
+                        BorderStroke(1.dp, questBlue.copy(alpha = 0.35f)),
                         RoundedCornerShape(Metrics.cornerSm),
                     )
-                    .padding(Metrics.space16),
+                    .padding(Metrics.space14),
                 verticalArrangement = Arrangement.Center,
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
                 Text(
                     quest.title.uppercase(),
-                    style = NoopType.title1,
+                    style = NoopType.title2,
                     color = Palette.textPrimary,
                     textAlign = TextAlign.Center,
                     letterSpacing = 2.sp,
                 )
-                Spacer(Modifier.size(Metrics.space16))
+                Spacer(Modifier.size(Metrics.space12))
                 TypedLine(text = full, shown = typed)
-                Spacer(Modifier.size(Metrics.space18))
+                Spacer(Modifier.size(Metrics.space14))
                 Text(
                     quest.target,
                     style = NoopType.headline,
@@ -185,7 +224,7 @@ internal fun QuestPopup(
                     color = Palette.statusWarning,
                     textAlign = TextAlign.Center,
                 )
-                QuestCountdown(quest = quest, fontSize = 22.sp)
+                QuestCountdown(quest = quest, fontSize = 20.sp)
             }
 
             AcceptButton(
@@ -219,7 +258,7 @@ private fun QuestHeader() {
         Icon(
             Icons.Filled.WarningAmber,
             contentDescription = null,
-            tint = Palette.textPrimary,
+            tint = questBlue,
             modifier = Modifier.size(Metrics.iconSmall),
         )
         Spacer(Modifier.size(Metrics.space12))

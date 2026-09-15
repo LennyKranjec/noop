@@ -2,139 +2,195 @@ package com.noop.analytics
 
 import com.noop.data.DailyMetric
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.time.LocalDate
 
 /**
- * Streaks.
+ * The three streaks.
  *
- * Two rules carry the whole file, and both are the kind that are easy to get wrong in a way nobody
- * notices until a real user complains:
+ * WHAT MATTERS HERE IS THE GAP RULE. A day with no data neither breaks a streak nor extends it — the
+ * strap comes off, a sync fails, the phone dies. Counting a missing day as a failure punishes the wearer
+ * for the app's own gaps; counting it as a success invents a day nobody measured. Nearly every bug this
+ * file could have is a variation on getting that wrong, so most of these are about absence.
  *
- *   · A DAY WITH NO DATA neither breaks nor extends. The strap comes off; that is the app's gap, not
- *     the wearer's failure, and it is also not a day that can be credited.
- *   · MIDNIGHT IS NOT A WALL. 23:50 and 00:10 are twenty minutes apart. Get that wrong and the
- *     regularity streak breaks nightly for exactly the people whose bedtime sits near midnight.
+ * The second thing is that TODAY IS NOT YET A FAILURE. A streak that reads zero every morning until the
+ * day is secured is a streak that feels broken all day, so an unsatisfied today is simply not counted,
+ * and `todaySecured` is what says whether it is banked.
  */
 class StreaksTest {
 
     private val today = LocalDate.of(2026, 9, 15)
 
-    private fun day(
-        date: LocalDate,
-        sleepMin: Double? = null,
-        steps: Int? = null,
-        strain: Double? = null,
-    ) = DailyMetric(
-        deviceId = "d",
-        day = date.toString(),
-        totalSleepMin = sleepMin,
-        steps = steps,
-        strain = strain,
-    )
+    private fun day(date: LocalDate, sleepMin: Double?) =
+        DailyMetric(deviceId = "d", day = date.toString(), totalSleepMin = sleepMin)
 
-    private fun run(vararg days: DailyMetric) = Streaks.evaluate(days.toList(), today = today)
+    /** [n] days ending today, every night the same length. */
+    private fun steady(n: Int, hours: Double): List<DailyMetric> =
+        (n - 1 downTo 0).map { back -> day(today.minusDays(back.toLong()), hours * 60.0) }
 
-    private fun of(kind: StreakKind, vararg days: DailyMetric): Streak =
-        run(*days).single { it.kind == kind }
+    private fun kinds(streaks: List<Streak>) = streaks.map { it.kind }
+
+    private fun of(streaks: List<Streak>, kind: StreakKind) = streaks.first { it.kind == kind }
+
+    // --- what is offered at all ---
 
     @Test
-    fun midnightIsNotAWall() {
-        // 23:50 = 1430, 00:10 = 10. Twenty minutes apart, not 1,420.
-        assertEquals(20.0, Streaks.clockDistance(1430, 10), 0.001)
-        assertEquals(20.0, Streaks.clockDistance(10, 1430), 0.001)
-        assertEquals(0.0, Streaks.clockDistance(600, 600), 0.001)
-        // The furthest two clock times can be is twelve hours.
-        assertEquals(720.0, Streaks.clockDistance(0, 720), 0.001)
-    }
-
-    @Test
-    fun consecutiveGoodNightsCount() {
-        val days = (0..4).map { day(today.minusDays(it.toLong()), sleepMin = 8 * 60.0) }
-        val streak = Streaks.evaluate(days, today = today).single { it.kind == StreakKind.SLEEP_DURATION }
-        assertEquals(5, streak.days)
-        assertTrue(streak.todaySecured)
-    }
-
-    @Test
-    fun aShortNightEndsIt() {
-        val days = listOf(
-            day(today, sleepMin = 8 * 60.0),
-            day(today.minusDays(1), sleepMin = 8 * 60.0),
-            day(today.minusDays(2), sleepMin = 5 * 60.0),   // the break
-            day(today.minusDays(3), sleepMin = 8 * 60.0),
+    fun exactlyTheThreeRulesAreOfferedAndAlwaysInTheSameOrder() {
+        // The strip is three fixed columns and the wearer learns which flame is which by POSITION.
+        // Sorting by length — which the previous cut did — makes the row unreadable at a glance, which
+        // is the only way it is ever read.
+        val expected = listOf(
+            StreakKind.SLEEP_CONSISTENCY,
+            StreakKind.SLEEP_DEBT,
+            StreakKind.STRESS_TIME,
         )
-        assertEquals(2, Streaks.evaluate(days, today = today).single { it.kind == StreakKind.SLEEP_DURATION }.days)
+        assertEquals(expected, kinds(Streaks.evaluate(steady(30, 8.0), today = today)))
+        assertEquals(expected, kinds(Streaks.evaluate(steady(3, 4.0), today = today)))
     }
 
     @Test
-    fun aDayWithNoDataIsSpannedRatherThanCountedEitherWay() {
-        val days = listOf(
-            day(today, sleepMin = 8 * 60.0),
-            day(today.minusDays(1)),                        // strap was off: no reading at all
-            day(today.minusDays(2), sleepMin = 8 * 60.0),
-        )
-        // Two measured nights, and the gap between them did not reset the count.
-        assertEquals(2, Streaks.evaluate(days, today = today).single { it.kind == StreakKind.SLEEP_DURATION }.days)
-    }
-
-    @Test
-    fun todayNotBeingDoneYetDoesNotReadAsABrokenStreak() {
-        // At 09:00 nobody has hit their step count. A streak that reads zero every morning is a streak
-        // that feels broken all day, so an unfinished today is excluded rather than failed.
-        val days = listOf(
-            day(today, steps = 200),
-            day(today.minusDays(1), steps = 9_000),
-            day(today.minusDays(2), steps = 9_000),
-        )
-        val streak = Streaks.evaluate(days, today = today).single { it.kind == StreakKind.MOVEMENT }
-        assertEquals(2, streak.days)
-        // …but it is honest about today not being banked.
-        assertTrue(!streak.todaySecured)
-    }
-
-    @Test
-    fun aHardSessionCountsAsMovementEvenWithAlmostNoSteps() {
-        // Two hours on a bike puts up no steps. A movement streak that breaks on a ride is one the
-        // wearer stops believing.
-        val days = listOf(
-            day(today, steps = 400, strain = 15.0),
-            day(today.minusDays(1), steps = 9_000),
-        )
-        assertEquals(2, Streaks.evaluate(days, today = today).single { it.kind == StreakKind.MOVEMENT }.days)
-    }
-
-    @Test
-    fun regularityIsMeasuredAgainstTheirOwnMedianBedtime() {
-        val days = (0..4).map { day(today.minusDays(it.toLong()), sleepMin = 7.5 * 60) }
-        // A rock-solid 03:00 sleeper is REGULAR. Judging them against a bedtime someone else picked
-        // would be the app imposing a lifestyle rather than reading one.
-        val onsets = days.associate { it.day to 3 * 60 }
-        val streak = Streaks.evaluate(days, onsets, today).single { it.kind == StreakKind.SLEEP_REGULARITY }
-        assertEquals(5, streak.days)
-    }
-
-    @Test
-    fun regularityIsNotOfferedWithoutEnoughNightsToHaveAUsualBedtime() {
-        val days = (0..4).map { day(today.minusDays(it.toLong()), sleepMin = 7.5 * 60) }
-        // Two nights is not a habit. Showing a zero would imply a rule was broken; showing nothing is
-        // the honest state.
-        val onsets = mapOf(days[0].day to 1380, days[1].day to 1380)
-        assertTrue(Streaks.evaluate(days, onsets, today).none { it.kind == StreakKind.SLEEP_REGULARITY })
-    }
-
-    @Test
-    fun aWildlyDifferentNightBreaksRegularity() {
-        val days = (0..4).map { day(today.minusDays(it.toLong()), sleepMin = 7.5 * 60) }
-        val onsets = days.associate { it.day to 1380 }.toMutableMap()   // 23:00 every night
-        onsets[days[2].day] = 240                                        // except one 04:00
-        val streak = Streaks.evaluate(days, onsets, today).single { it.kind == StreakKind.SLEEP_REGULARITY }
-        assertEquals(2, streak.days)
-    }
-
-    @Test
-    fun noDaysMeansNoStreaks() {
+    fun noDaysAtAllOffersNothing() {
         assertTrue(Streaks.evaluate(emptyList(), today = today).isEmpty())
+    }
+
+    // --- sleep consistency > 80 % ---
+
+    @Test
+    fun steadyNightsHoldTheConsistencyStreak() {
+        val s = of(Streaks.evaluate(steady(30, 8.0), today = today), StreakKind.SLEEP_CONSISTENCY)
+        assertTrue("a month of identical nights must be a streak", s.days >= 20)
+        assertTrue(s.todaySecured)
+    }
+
+    @Test
+    fun wildlyVaryingNightsHoldNothing() {
+        val erratic = (29 downTo 0).map { back ->
+            day(today.minusDays(back.toLong()), if (back % 2 == 0) 3.0 * 60 else 10.0 * 60)
+        }
+        val s = of(Streaks.evaluate(erratic, today = today), StreakKind.SLEEP_CONSISTENCY)
+        assertEquals(0, s.days)
+        assertFalse(s.todaySecured)
+    }
+
+    @Test
+    fun twoNightsAreNotAConsistencyReading() {
+        // Consistency over two nights is not a number, so those days are UNMEASURED rather than
+        // failures — the engine's floor is three. A streak awarded on two nights would be one nobody
+        // earned; a streak broken on two would punish somebody for having just installed the app.
+        val s = of(Streaks.evaluate(steady(2, 8.0), today = today), StreakKind.SLEEP_CONSISTENCY)
+        assertEquals(0, s.days)
+        assertFalse(s.todaySecured)
+    }
+
+    // --- sleep debt < 1h ---
+
+    @Test
+    fun sleepingTheNeedEveryNightKeepsTheDebtStreakLit() {
+        val s = of(
+            Streaks.evaluate(steady(20, Streaks.SLEEP_NEED_HOURS), today = today),
+            StreakKind.SLEEP_DEBT,
+        )
+        assertTrue(s.days >= 15)
+        assertTrue(s.todaySecured)
+    }
+
+    @Test
+    fun aFortnightOfShortNightsBreaksTheDebtStreak() {
+        // Six hours against a seven-hour need is an hour a night: the balance passes the limit on the
+        // second night and never comes back.
+        val s = of(Streaks.evaluate(steady(20, 6.0), today = today), StreakKind.SLEEP_DEBT)
+        assertEquals(0, s.days)
+        assertFalse(s.todaySecured)
+    }
+
+    @Test
+    fun aSurplusIsNotCredit() {
+        // Ten-hour nights do not bank hours against a future short one in any model worth quoting, so a
+        // net-positive balance reads as NO DEBT rather than as a buffer.
+        val s = of(Streaks.evaluate(steady(20, 10.0), today = today), StreakKind.SLEEP_DEBT)
+        assertTrue(s.days >= 15)
+    }
+
+    @Test
+    fun oneHalfHourShortfallIsInsideTheHour() {
+        val nights = steady(20, Streaks.SLEEP_NEED_HOURS).toMutableList()
+        nights[nights.size - 3] = day(today.minusDays(2), (Streaks.SLEEP_NEED_HOURS - 0.5) * 60.0)
+        val s = of(Streaks.evaluate(nights, today = today), StreakKind.SLEEP_DEBT)
+        assertTrue("a single half-hour shortfall is under the limit", s.days >= 3)
+    }
+
+    // --- non-activity stress < 6h ---
+
+    @Test
+    fun calmDaysHoldTheStressStreak() {
+        val days = steady(10, 8.0)
+        val stress = days.associate { it.day to 60.0 }
+        val s = of(
+            Streaks.evaluate(days, stressMinutesByDay = stress, today = today),
+            StreakKind.STRESS_TIME,
+        )
+        assertEquals(10, s.days)
+        assertTrue(s.todaySecured)
+    }
+
+    @Test
+    fun aDayOverTheLimitBreaksIt() {
+        val days = steady(10, 8.0)
+        val stress = days.associate { it.day to 60.0 }.toMutableMap()
+        stress[today.minusDays(3).toString()] = Streaks.STRESS_LIMIT_MIN + 1
+        val s = of(
+            Streaks.evaluate(days, stressMinutesByDay = stress, today = today),
+            StreakKind.STRESS_TIME,
+        )
+        assertEquals(3, s.days)
+    }
+
+    @Test
+    fun exactlyTheLimitIsOverIt() {
+        // The rule the wearer stated is "under six hours". Six hours is not under six hours, and a
+        // boundary that quietly rounds in the wearer's favour is a boundary that means nothing.
+        val days = steady(4, 8.0)
+        val stress = days.associate { it.day to Streaks.STRESS_LIMIT_MIN }
+        val s = of(
+            Streaks.evaluate(days, stressMinutesByDay = stress, today = today),
+            StreakKind.STRESS_TIME,
+        )
+        assertEquals(0, s.days)
+    }
+
+    @Test
+    fun daysWithNoBankedStressNeitherBreakNorExtend() {
+        // THE GAP DOCTRINE, on the streak most exposed to it: the figure is only banked on days the
+        // stress read actually ran, so most history has no row at all. Those days must SPAN, not fail —
+        // otherwise the streak reads zero forever for a wearer who has simply not opened that screen.
+        val days = steady(10, 8.0)
+        val stress = mapOf(
+            today.toString() to 30.0,
+            today.minusDays(9).toString() to 30.0,
+        )
+        val s = of(
+            Streaks.evaluate(days, stressMinutesByDay = stress, today = today),
+            StreakKind.STRESS_TIME,
+        )
+        assertEquals("both measured days count, the eight unmeasured ones span", 2, s.days)
+        assertTrue(s.todaySecured)
+    }
+
+    // --- today is not yet a failure ---
+
+    @Test
+    fun anUnsecuredTodayDoesNotBreakYesterdaysStreak() {
+        val days = steady(6, 8.0)
+        val stress = days.associate { it.day to 30.0 }.toMutableMap()
+        // Today has already blown the budget; the days before it stand.
+        stress[today.toString()] = Streaks.STRESS_LIMIT_MIN + 120
+        val s = of(
+            Streaks.evaluate(days, stressMinutesByDay = stress, today = today),
+            StreakKind.STRESS_TIME,
+        )
+        assertEquals(5, s.days)
+        assertFalse("today is not banked", s.todaySecured)
     }
 }

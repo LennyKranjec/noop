@@ -1316,7 +1316,7 @@
     <string name="l10n_app_changelog_your_whoop_journal_in_insights_clearer_88f5e21b">将 WHOOP 日记融入数据洞察分析，提供更清晰的指标指引</string>
     <string name="l10n_app_root_this_section_is_on_the_way_ca7c4a32">这个版块还在紧锣密鼓地开发中。</string>
     <string name="l10n_app_root_updates_c76d1807">消息更新</string>
-    <string name="l10n_coach_screen_coach_b32c9ad3">AI 教练</string>
+    <string name="l10n_coach_screen_coach_b32c9ad3">System</string>
     <string name="l10n_compare_screen_remove_title_ddb5361c">移除 %1$s</string>
     <string name="l10n_components_chunks_chunks_pulled_cec186cf">已拉取 %1$s 块数据</string>
     <string name="l10n_components_decrease_accessibility_df5f1511">减少 %1$s</string>

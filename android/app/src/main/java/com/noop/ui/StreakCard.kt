@@ -9,6 +9,10 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.ui.unit.dp
+import com.noop.analytics.StressDailyStore
+import androidx.compose.foundation.layout.padding
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
@@ -57,18 +61,22 @@ internal fun StreakCard(viewModel: AppViewModel) {
 
     if (streaks.isEmpty()) return
 
-    NoopCard {
-        Column(verticalArrangement = Arrangement.spacedBy(Metrics.space12)) {
-            SectionHeader(uiString(R.string.streak_title))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-            ) {
-                streaks.forEach { streak -> StreakFlame(streak) }
-            }
+    // NO SECTION HEADER, and the card is as short as three flames allow. A heading reading "Streaks"
+    // over three flames labelled with their own rules is a label for a label, and it cost the strip
+    // more height than the content it introduced.
+    NoopCard(padding = STRIP_PADDING) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            streaks.forEach { streak -> StreakFlame(streak) }
         }
     }
 }
+
+/** The strip's own inset. Tight: the flames are the content, and the card is a frame around them. */
+private val STRIP_PADDING = 10.dp
 
 @Composable
 private fun StreakFlame(streak: Streak) {
@@ -92,9 +100,11 @@ private fun StreakFlame(streak: Streak) {
 
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(Metrics.space4),
+        verticalArrangement = Arrangement.spacedBy(1.dp),
     ) {
-        Box(contentAlignment = Alignment.Center) {
+        // The flame and the count sit on ONE line. Stacked they cost three rows of height for two
+        // figures, and the strip is meant to be glanced at rather than read.
+        Row(verticalAlignment = Alignment.CenterVertically) {
             Icon(
                 Icons.Filled.LocalFireDepartment,
                 contentDescription = null,
@@ -104,21 +114,27 @@ private fun StreakFlame(streak: Streak) {
                     else -> Palette.textTertiary.copy(alpha = 0.35f)
                 },
                 modifier = Modifier
-                    .size(Metrics.iconButton)
+                    .size(Metrics.iconSmall)
                     .scale(scale)
                     .alpha(if (lit) 1f else 0.6f),
             )
+            Text(
+                if (lit) uiString(R.string.streak_days, streak.days) else "-",
+                style = NoopType.footnote,
+                color = if (lit) Palette.textPrimary else Palette.textTertiary,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(start = 3.dp),
+                maxLines = 1,
+            )
         }
-        Text(
-            if (lit) uiString(R.string.streak_days, streak.days) else "–",
-            style = NoopType.headline,
-            color = if (lit) Palette.textPrimary else Palette.textTertiary,
-        )
+        // THE RULE, not the metric's name. "Sleep" says which number; "sleep consistency > 80%" says
+        // what holds the flame lit, which is the only thing a streak label has to answer.
         Text(
             streakLabel(streak.kind),
-            style = NoopType.footnote,
+            style = NoopType.overline,
             color = Palette.textTertiary,
             textAlign = TextAlign.Center,
+            maxLines = 1,
         )
     }
 }
@@ -126,34 +142,29 @@ private fun StreakFlame(streak: Streak) {
 @Composable
 private fun streakLabel(kind: StreakKind): String = uiString(
     when (kind) {
-        StreakKind.SLEEP_REGULARITY -> R.string.streak_sleep_regularity
-        StreakKind.SLEEP_DURATION -> R.string.streak_sleep_duration
-        StreakKind.MOVEMENT -> R.string.streak_movement
+        StreakKind.SLEEP_CONSISTENCY -> R.string.streak_sleep_consistency
+        StreakKind.SLEEP_DEBT -> R.string.streak_sleep_debt
+        StreakKind.STRESS_TIME -> R.string.streak_stress_time
     },
 )
 
 /**
- * Read the days and the sleep onsets, and evaluate.
+ * Read the days and the banked stress minutes, and evaluate.
  *
- * The onsets are the reason this is not a one-liner: [com.noop.data.DailyMetric] stores sleep DURATION
- * and not when it began, so the regularity streak needs the sleep sessions as well. Mapped to the local
- * day the night is credited to, which is the day the session ENDS on — a night that starts at 23:40 on
- * Tuesday belongs to Wednesday's row everywhere else in the app, and a streak that disagreed with the
- * rest of the app would just look broken.
+ * The consistency and debt rules are derived from the daily rows themselves, so they need nothing
+ * extra. The stress rule cannot be: its figure costs a whole day of heart rate and R-R to compute, so
+ * it is read from what the stress screen banked rather than recomputed here. See [StressDailyStore].
  */
 private suspend fun readStreaks(viewModel: AppViewModel): List<Streak> {
     val id = viewModel.activeStrapId
     val days = viewModel.repo.daysMerged(id)
     if (days.isEmpty()) return emptyList()
 
-    val now = System.currentTimeMillis() / 1000L
-    val from = now - 45L * 86_400L
-    val sessions = runCatching { viewModel.repo.sleepSessionsMerged(id, from, now) }.getOrDefault(emptyList())
-    val zone = ZoneId.systemDefault()
-    val onsetByDay = sessions.associate { session ->
-        val start = Instant.ofEpochSecond(session.startTs).atZone(zone)
-        val creditedDay = Instant.ofEpochSecond(session.endTs).atZone(zone).toLocalDate()
-        creditedDay.toString() to (start.hour * 60 + start.minute)
-    }
-    return Streaks.evaluate(days = days, onsetByDay = onsetByDay)
+    val today = java.time.LocalDate.now()
+    val stress = StressDailyStore.range(
+        viewModel.repo,
+        from = today.minusDays(400).toString(),
+        to = today.toString(),
+    )
+    return Streaks.evaluate(days = days, stressMinutesByDay = stress)
 }

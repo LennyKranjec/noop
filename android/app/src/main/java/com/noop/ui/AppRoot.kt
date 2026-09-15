@@ -22,6 +22,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.fillMaxSize
+import kotlinx.coroutines.delay
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -524,6 +528,10 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
     // no per-screen wiring — scrollable children dispatch their deltas up to it. onPreScroll only flips a
     // Boolean, and only on a movement past the threshold, so a fingertip tremor cannot flicker the bar.
     var scrollingDown by remember { mutableStateOf(false) }
+    // ONE VALUE FOR THE LIFE OF THE SHELL. The level's count-up is keyed on it, so the slot animation
+    // runs on the app opening and never again — keyed on anything recomposition touches, the header
+    // would re-spin every time the wearer changed tab.
+    val levelCountUpKey = remember { System.nanoTime() }
     val reduceMotion = rememberReduceMotion()
     // THE SYSTEM TAB KEEPS ITS BAR. Everywhere else, sliding it away on scroll buys back a strip of
     // screen for content that is scrolling past anyway. The chat is not like that: its composer is
@@ -570,11 +578,25 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
     Box(Modifier.fillMaxSize().nestedScroll(autoHideScroll)) {
         Scaffold(
             containerColor = Palette.surfaceBase,
-            // The XP strip belongs to the SHELL, not to a screen: it rides above every destination,
-            // including the drill-ins the same NavHost pushes, so it is a topBar rather than
-            // something each screen has to remember to draw. Screens already lay out under the
-            // Scaffold's `inner` padding, so nothing had to move to make room for it.
-            topBar = { LevelOverlayBar(viewModel) },
+            // The level strip belongs to the SHELL, not to a screen: it rides above every destination,
+            // including the drill-ins the same NavHost pushes. What sits HERE is only the ROOM it takes
+            // — the strip itself is drawn as an overlay below, because its radar overhangs the bar's
+            // bottom edge and a Scaffold slot cannot paint outside its own bounds. Reserving the space
+            // here and drawing it there keeps every screen laying out under `inner` exactly as before,
+            // and keeps the overhang above the NavHost instead of under it.
+            // ONLY THE STRIP'S OWN HEIGHT IS RESERVED, not the radar's overhang. Reserving both made the
+            // overhang invisible: the extra band showed the Scaffold's container colour, which is the
+            // same surface the strip paints, so the radar appeared to sit inside a taller bar instead of
+            // hanging past it. Screens now begin directly under the strip and the radar's lower third
+            // floats over them — which is what "a permanent overlay, like the bar" means.
+            topBar = {
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .statusBarsPadding()
+                        .height(LevelBarHeight),
+                )
+            },
             bottomBar = {
                 // One unified "glass" bar: four evenly-spaced tabs — Today · Trends · Sleep · More
                 // (matches the iOS FloatingTabBar). The quick-action "+" lives in the Today header's
@@ -718,7 +740,10 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
                     )
                 }
                 composable(Destination.Mindfulness.route) {
-                    MindfulnessScreen(onOpenBreathe = { nav.navigateTopLevel(Destination.Breathe.route) })
+                    MindfulnessScreen(
+                        vm = viewModel,
+                        onOpenBreathe = { nav.navigateTopLevel(Destination.Breathe.route) },
+                    )
                 }
                 composable(Destination.Insights.route) { InsightsScreen(viewModel, onOpenInsightsHub = { nav.navigateTopLevel(Destination.InsightsHub.route) }) }
                 composable(Destination.Compare.route) { CompareScreen(viewModel) }
@@ -957,6 +982,19 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
                     BottomBarStyleStore.barHeight = with(density) { it.height.toDp() }
                 },
         )
+
+        // THE LEVEL STRIP, drawn last so it is the topmost thing in the shell. The Scaffold reserved its
+        // room above; here it can paint the radar's overhang over whatever screen is beneath, which is
+        // the whole reason it is not a topBar any more.
+        //
+        // The count-up key is remembered by the SHELL and never changes for the life of the process, so
+        // the slot animation runs once when the app opens rather than every time a tab is switched or a
+        // theme flips — which would make the header twitch on every navigation.
+        LevelOverlayBar(
+            viewModel = viewModel,
+            countUpKey = levelCountUpKey,
+            modifier = Modifier.align(Alignment.TopCenter),
+        )
     }
     }
 }
@@ -1115,7 +1153,10 @@ internal data class BarTab(val dest: Destination, val icon: ImageVector, @String
  *  the other things a day is made of, rather than behind a tab of their own. iOS parity here is a
  *  UI-shape question, not a data one: the CLAUDE.md contract covers analytics and stored values. */
 internal val barLeadingTabs = listOf(
-    BarTab(Destination.Today, Icons.Outlined.GridView, R.string.nav_today),
+    // A SUN, not a grid. Today is the day you are in, and a grid glyph says "a page of tiles" — which
+    // is what the screen is made of, not what it is for. The sun also pairs with the moon the Sleep and
+    // level surfaces already use, so the two halves of a day read as a pair in the bar.
+    BarTab(Destination.Today, Icons.Filled.WbSunny, R.string.nav_today),
     // chart.line.uptrend.xyaxis on iOS — the rising-trend glyph, not a flat bar chart. Labelled
     // Health here; the route and the screen behind it are still Trends.
     BarTab(Destination.Trends, Icons.AutoMirrored.Filled.TrendingUp, R.string.nav_health_tab),
@@ -1142,6 +1183,9 @@ private fun GlassBottomBar(
         if (dest != current) SystemHaptics.play(hapticContext, SystemHaptics.Cue.SELECT)
         onTabSelected(dest)
     }
+    // The engine's own lane flag — every generation passes through it, so this cannot drift from what
+    // the model is actually doing. See LocalCoachEngine.busy.
+    val aiBusy by com.noop.ai.LocalCoachEngine.busy.collectAsStateWithLifecycle()
     val barShape = RoundedCornerShape(50)
     Box(
         modifier = modifier
@@ -1191,7 +1235,11 @@ private fun GlassBottomBar(
                     )
                 }
                 barTrailingTabs.forEach { tab ->
+                    val isSystem = tab.dest == Destination.Coach
                     BarSlot(
+                        busy = isSystem && aiBusy,
+                        // Only when the wearer is NOT on System: there the reply is already on screen.
+                        popsOnFinish = isSystem && current != Destination.Coach,
                         icon = tab.icon,
                         label = stringResource(tab.labelRes),
                         active = current == tab.dest,
@@ -1221,15 +1269,43 @@ private fun GlassBottomBar(
 
 /** One nav slot: an icon over a small label. Active = gold accent (semibold), inactive = textSecondary.
  *  No selection pill, no glow — just the colour swap, matching the iOS bar. */
+/** How long the finished glyph stays enlarged. Long enough to catch the eye, short enough not to nag. */
+private const val POP_MILLIS = 420L
+
 @Composable
 private fun BarSlot(
     icon: ImageVector,
     label: String,
     active: Boolean,
     modifier: Modifier = Modifier,
+    /** True while the model is generating. Only the System slot passes it. */
+    busy: Boolean = false,
+    /** True when finishing should make the glyph pop — i.e. the wearer is looking somewhere else. */
+    popsOnFinish: Boolean = false,
     onClick: () -> Unit,
 ) {
     val tint = if (active) Palette.accent else Palette.textSecondary
+    val iconSize = Metrics.iconSmall * BottomBarStyleStore.scale
+
+    // THE POP IS A NOTIFICATION, and it only fires for somebody who cannot see the answer arrive. On the
+    // System tab itself the reply is right there filling the screen, and a bouncing tab icon underneath
+    // it would be telling you something you are already reading.
+    var pop by remember { mutableStateOf(false) }
+    LaunchedEffect(busy) {
+        // The EDGE, not the level: this runs when busy goes false having been true, which is the moment
+        // the generation ended. Keyed on the flag alone, a recomposition could not re-trigger it.
+        if (!busy && popsOnFinish) {
+            pop = true
+            delay(POP_MILLIS)
+            pop = false
+        }
+    }
+    val popScale by animateFloatAsState(
+        targetValue = if (pop) 1.35f else 1f,
+        animationSpec = tween(durationMillis = (POP_MILLIS / 2).toInt()),
+        label = "barSlotPop",
+    )
+
     Column(
         modifier = modifier
             .clip(RoundedCornerShape(14.dp))
@@ -1245,8 +1321,26 @@ private fun BarSlot(
     ) {
         // Icon and label scale together with the padding above, so the slot grows as one piece rather
         // than a bigger box around the same small glyph.
-        Icon(icon, contentDescription = null, tint = tint,
-             modifier = Modifier.size(Metrics.iconSmall * BottomBarStyleStore.scale))
+        //
+        // THE SPINNER TAKES THE GLYPH'S PLACE rather than sitting beside it: the slot's width is a fifth
+        // of the bar and a badge next to the icon would push the label out of its one line. Same box,
+        // same size, so nothing in the bar moves when the model starts or stops.
+        if (busy) {
+            CircularProgressIndicator(
+                color = tint,
+                strokeWidth = 2.dp,
+                modifier = Modifier.size(iconSize),
+            )
+        } else {
+            Icon(
+                icon,
+                contentDescription = null,
+                tint = tint,
+                modifier = Modifier
+                    .size(iconSize)
+                    .graphicsLayer { scaleX = popScale; scaleY = popScale },
+            )
+        }
         Text(
             label,
             style = NoopType.footnote.copy(

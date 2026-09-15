@@ -222,25 +222,28 @@ private val BAR_WIDTH = 10.dp
 private val BAR_HEIGHT = 56.dp
 
 /**
- * Better or worse than the three-day mean three days ago.
+ * Better or worse than the three-day mean three days ago, and BY HOW MANY POINTS.
  *
- * A move under one point is drawn flat: on a 0–100 score that is rounding, and an arrow would have the
- * wearer reading a trend into noise.
+ * The number is the point, exactly as in the header's own trend chips: an arrow alone answers "better
+ * or worse" and leaves the size of it to the imagination, and on a 0–100 score the difference between
+ * +1 and +9 is the difference between noise and a week that worked.
+ *
+ * A move under one point is still drawn flat: on this scale that is rounding, and an arrow would have
+ * the wearer reading a trend into it.
  */
 @Composable
 private fun TrendArrow(now: Double?, then: Double?) {
     val delta = if (now != null && then != null) now - then else null
-    val flat = delta == null || abs(delta) < 1.0
-    val icon: ImageVector = when {
-        flat -> Icons.Filled.Remove
-        delta!! > 0 -> Icons.Filled.ArrowUpward
-        else -> Icons.Filled.ArrowDownward
-    }
-    val tint = when {
-        flat -> Palette.textTertiary
-        delta!! > 0 -> Palette.statusPositive
-        else -> Palette.statusCritical
-    }
+    // NOTHING WHEN NOTHING MOVED, the same rule the header's own trend chips follow. A move under one
+    // point is rounding on this scale, and a flat dash beside a "0" fills the row with the news that
+    // there is no news. A tile that has not moved simply shows its figure.
+    if (delta == null || abs(delta) < 1.0) return
+    val points = delta.roundToInt()
+    if (points == 0) return
+
+    val icon: ImageVector =
+        if (delta > 0) Icons.Filled.ArrowUpward else Icons.Filled.ArrowDownward
+    val tint = if (delta > 0) Palette.statusPositive else Palette.statusCritical
     Icon(
         icon,
         contentDescription = null,
@@ -248,5 +251,14 @@ private fun TrendArrow(now: Double?, then: Double?) {
         modifier = Modifier
             .padding(start = Metrics.space4)
             .size(Metrics.iconTiny),
+    )
+    // SIGNED, because an unsigned "4" beside a down arrow states the same thing twice and invites the
+    // reader to work out which of the two is the right way round.
+    Text(
+        text = if (points > 0) "+$points" else "$points",
+        style = NoopType.caption,
+        color = tint,
+        modifier = Modifier.padding(start = 1.dp),
+        maxLines = 1,
     )
 }

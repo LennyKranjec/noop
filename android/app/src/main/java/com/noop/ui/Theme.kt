@@ -23,6 +23,8 @@ import androidx.compose.ui.platform.LocalView
 import androidx.core.view.WindowCompat
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
+import com.noop.R
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -468,6 +470,25 @@ object NoopType {
     // no res/font/helvetica_neue asset is bundled, per the v3 type spec.
     private val sans = FontFamily.SansSerif
     private val monoFamily = FontFamily.Monospace
+
+    /**
+     * Chakra Petch — the SYSTEM's own face, bundled, and used for the LEVEL and nothing else.
+     *
+     * Squared terminals and flat-sided digits: it reads as a machine reporting a figure rather than as
+     * an app displaying one, which is the whole identity of the level. Deliberately NOT applied across
+     * the type scale — a display face used for body text is a design that shouts, and everything else
+     * here stays on the platform grotesque.
+     *
+     * BUNDLED RATHER THAN SYSTEM, so the iOS twin renders the same glyphs: SF has no equivalent, and a
+     * level that looks like a readout on one platform and like a label on the other is two products.
+     * Static instances, not the variable file — SwiftUI's weight-axis support is patchy, and shipping
+     * the two weights actually used avoids depending on it. SIL Open Font License; see
+     * app/licenses/chakra_petch_OFL.txt.
+     */
+    val display1 = FontFamily(
+        Font(R.font.chakra_petch_bold, FontWeight.Bold),
+        Font(R.font.chakra_petch_semibold, FontWeight.SemiBold),
+    )
 
     /** Display 64–80 / Bold — the recovery ring number. Tight tracking (≈ -0.04em),
      *  tabular figures so a changing value never reflows. Mirrors StrandFont.display. */

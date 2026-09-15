@@ -201,6 +201,33 @@
           Both target MainActivity and carry the MAIN/LAUNCHER filter, so whichever is enabled is the
           one home-screen entry point. Toggling them is what re-paints the launcher icon at runtime.
         -->
+        <!--
+          THE WHOOP OAUTH REDIRECT. No UI: it receives `noop://whoop-oauth?code=…`, hands it to
+          WhoopCloudAuth and finishes. `exported` because the BROWSER is what launches it — that is the
+          whole point of a redirect — and the scheme/host come from one place in build.gradle.kts so the
+          manifest, BuildConfig and the WHOOP app registration cannot drift apart.
+
+          `taskAffinity=""` + `excludeFromRecents` keep it out of the recents list: it is a hand-off,
+          not a screen anybody returns to.
+        -->
+        <activity
+            android:name="com.noop.ingest.WhoopOAuthActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="${whoopAuthScheme}"
+                    android:host="${whoopAuthHost}" />
+            </intent-filter>
+        </activity>
+
         <activity-alias
             android:name="com.noop.IconDefault"
             android:targetActivity="com.noop.ui.MainActivity"

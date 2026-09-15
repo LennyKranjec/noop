@@ -1,6 +1,13 @@
 package com.noop.ui
 
 import androidx.compose.foundation.Canvas
+import com.noop.ai.MuscleCoachNote
+import androidx.compose.ui.draw.clip
+import androidx.compose.material3.Icon
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.Icons
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.background
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -13,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -130,12 +138,16 @@ internal fun MuscleModelCard(viewModel: AppViewModel) {
                 )
             }
 
-            // THE FIGURE GETS ITS OWN HEIGHT, and the legend is centred beside whatever that height
-            // turns out to be. Before this the two shared a row and the figure took the height the
-            // LEGEND forced — thirteen legend rows are taller than a 0.33-aspect body at this width, so
-            // the head and the feet were pushed under the title above and the line below. Fixing the
-            // height here means the body is never clipped by text, whichever way it is facing.
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // THE FIGURE GETS ITS OWN HEIGHT, and the column beside it takes the same one. Before this
+            // the two shared a row and the figure took the height the LEGEND forced — nine legend rows
+            // are taller than a 0.33-aspect body at this width, so the head and the feet were pushed
+            // under the title above and the line below. Fixing the height here means the body is never
+            // clipped by text, whichever way it is facing.
+            //
+            // THE LEGEND IS PINNED TO THE TOP of that column rather than centred in it, which is what
+            // opens the space in the bottom right for the system's own reading of the chart. Centring
+            // left a band of nothing above and below the rows and nowhere to put a sentence.
+            Row(verticalAlignment = Alignment.Top) {
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -146,13 +158,32 @@ internal fun MuscleModelCard(viewModel: AppViewModel) {
                 }
                 Spacer(Modifier.width(Metrics.space12))
                 Column(
-                    modifier = Modifier.weight(1.1f),
+                    modifier = Modifier
+                        .weight(1.1f)
+                        .height(FIGURE_HEIGHT),
                     verticalArrangement = Arrangement.spacedBy(Metrics.space4),
                 ) {
+                    // RANKED BY VOLUME, heaviest first, on both sides. The mask order is an ANATOMICAL
+                    // order — it is how the drawing is layered — and reading it as a ranking was the
+                    // natural mistake to make: the eye takes the top row for the biggest number. Sorting
+                    // makes the list say what it looks like it says.
+                    //
+                    // A group with no volume sorts last rather than being dropped, so the side's full
+                    // vocabulary is still visible and an untrained muscle is a visible blank.
                     val groups = masksFor(side).map { it.first }
+                        .sortedByDescending { data?.get(it) ?: -1.0 }
                     groups.forEach { group ->
                         MuscleLegendRow(group = group, kg = data?.get(group), scale = scale)
                     }
+                    // The note TAKES the rest of the column rather than being pushed to its floor: the
+                    // legend is nine rows and the figure beside it is tall, so the leftover is most of
+                    // the card's right-hand side. Giving the panel that space is what lets the system
+                    // write a reading rather than a caption.
+                    SystemNotePanel(
+                        viewModel = viewModel,
+                        loaded = loaded,
+                        modifier = Modifier.weight(1f),
+                    )
                 }
             }
 
@@ -172,6 +203,70 @@ internal fun MuscleModelCard(viewModel: AppViewModel) {
                 )
             }
         }
+    }
+}
+
+/**
+ * The system's own reading of the chart, in the corner the legend no longer fills.
+ *
+ * ITS OWN SURFACE, one step down from the card's, so it reads as something laid IN the panel rather
+ * than as another line of the legend — the wearer should be able to tell at a glance which numbers the
+ * app measured and which sentence a model wrote about them.
+ *
+ * WRITTEN WHEN THE DATA MOVES. [MuscleCoachNote] keys the note to a fingerprint of the loads, so this
+ * costs a preference read on every open and a model run only when the figures actually changed — which
+ * is exactly what a fresh Alphaprog import does to all thirteen at once.
+ *
+ * ABSENT RATHER THAN EMPTY when there is no note: no consent, no model installed, or the engine busy
+ * with the wearer's own conversation. A placeholder would be a promise the card cannot keep.
+ */
+@Composable
+private fun SystemNotePanel(
+    viewModel: AppViewModel,
+    loaded: MuscleLoads?,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    var note by remember { mutableStateOf<String?>(null) }
+
+    val loads = loaded?.thisWeek
+    LaunchedEffect(loads) {
+        val current = loads ?: return@LaunchedEffect
+        if (current.isEmpty()) return@LaunchedEffect
+        // The stored note first, on the main path, so an unchanged week paints immediately; only a
+        // changed fingerprint reaches the model, and that happens off the main thread.
+        note = MuscleCoachNote.stored(context, MuscleCoachNote.fingerprint(current))
+        if (note == null) {
+            note = withContext(Dispatchers.IO) {
+                runCatching {
+                    MuscleCoachNote.forLoads(context, current, loaded.baselines)
+                }.getOrNull()
+            }
+        }
+    }
+
+    val text = note ?: return
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(top = Metrics.space8)
+            .clip(RoundedCornerShape(Metrics.cornerSm))
+            .background(Palette.surfaceInset)
+            .padding(Metrics.space10),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Icon(
+            Icons.Filled.AutoAwesome,
+            contentDescription = null,
+            tint = Palette.accent,
+            modifier = Modifier
+                .padding(end = Metrics.space6, top = 1.dp)
+                .size(Metrics.iconTiny),
+        )
+        // MARKDOWN, like every other line the model writes in this app. It is told not to use it, but
+        // a model told not to use markdown still emits the occasional **bold**, and raw asterisks on
+        // screen read as a bug rather than as emphasis.
+        CoachMarkdown(text = text, color = Palette.textSecondary)
     }
 }
 
@@ -306,12 +401,16 @@ private const val BODY_ASPECT = 695f / 2100f
 /**
  * How tall the figure is drawn.
  *
- * A fixed height rather than an aspect on the width: the legend beside it is thirteen rows on the front
- * view, and letting the taller of the two decide left the body either clipped by the text above and
- * below or stretched to fill space it did not need. This is the height at which a full figure sits
- * clear of both, and the canvas keeps its own proportions inside it.
+ * A fixed height rather than an aspect on the width: the legend beside it is nine rows, and letting the
+ * taller of the two decide left the body either clipped by the text above and below or stretched to fill
+ * space it did not need. This is the height at which a full figure sits clear of both, and the canvas
+ * keeps its own proportions inside it.
+ *
+ * GROWN to make room for the system's note under the legend. The column beside the figure takes this
+ * same height, so the height IS the note's ceiling: raising the note's character cap without raising
+ * this would have produced text the panel then cut off.
  */
-private val FIGURE_HEIGHT = 300.dp
+private val FIGURE_HEIGHT = 372.dp
 
 @Composable
 private fun BodyCanvas(side: BodySide, loads: Map<MuscleGroup, Double>, scale: LoadScale) {
@@ -396,7 +495,7 @@ private suspend fun readMuscleLoads(context: Context, viewModel: AppViewModel): 
     }
 
     var baselines = MuscleBaselineStore.read(context)
-    if (baselines.size < MuscleGroup.entries.size) {
+    if (MuscleBaselineStore.needsDerivation(context)) {
         val historyFrom = today.minusDays(HISTORY_DAYS).toString()
         val history = LinkedHashMap<MuscleGroup, List<Double>>()
         for (group in MuscleGroup.entries) {

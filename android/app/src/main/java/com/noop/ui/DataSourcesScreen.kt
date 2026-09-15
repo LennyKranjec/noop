@@ -69,6 +69,11 @@ import com.noop.ingest.HealthConnectWriter
 import com.noop.ingest.ActivityFileImporter
 import com.noop.ingest.AlphaprogImporter
 import com.noop.ingest.LiftingImporter
+import androidx.compose.material.icons.filled.LinkOff
+import androidx.compose.material.icons.filled.Link
+import androidx.compose.material.icons.filled.Cloud
+import com.noop.ingest.WhoopCloudAuth
+import com.noop.ingest.WhoopCloudSync
 import com.noop.ingest.NutritionCsvImporter
 import com.noop.ingest.XiaomiBandImporter
 import com.noop.ingest.WhoopCsvImporter
@@ -702,6 +707,61 @@ fun DataSourcesScreen(vm: AppViewModel) {
                 modifier = Modifier.fillMaxWidth(),
             ) { xiaomiImportLauncher.launch(arrayOf("*/*")) }
         }
+        }
+
+        // --- WHOOP cloud (their own scores, over the internet) ---
+        //
+        // Only offered when the build actually carries credentials. A clone without them shows nothing
+        // here rather than a button that cannot work — see WhoopCloudAuth.isConfigured.
+        if (WhoopCloudAuth.isConfigured) {
+            item {
+                var connected by remember { mutableStateOf(WhoopCloudAuth.isConnected(context)) }
+                SourceCard(
+                    title = uiString(R.string.whoop_cloud_title),
+                    icon = Icons.Filled.Cloud,
+                    tint = Palette.accent,
+                    subtitle = uiString(R.string.whoop_cloud_subtitle),
+                ) {
+                    StatePill(
+                        title = uiString(
+                            if (connected) R.string.whoop_cloud_state_on else R.string.whoop_cloud_state_off,
+                        ),
+                        tone = if (connected) StrandTone.Accent else StrandTone.Neutral,
+                        showsDot = true,
+                    )
+                    // WHAT THE LAST SYNC ACTUALLY GOT, per endpoint. Without this a scope the wearer
+                    // never granted returns 403, the records come back empty, and the only thing on
+                    // screen is three dashes — indistinguishable from an account with no data.
+                    WhoopCloudSync.lastNote(context)?.let { note ->
+                        CountLine(primary = note, secondary = "last sync")
+                    }
+                    BackupButton(
+                        label = uiString(
+                            if (connected) R.string.whoop_cloud_disconnect else R.string.whoop_cloud_connect,
+                        ),
+                        icon = if (connected) Icons.Filled.LinkOff else Icons.Filled.Link,
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        if (connected) {
+                            WhoopCloudAuth.disconnect(context)
+                            connected = false
+                        } else {
+                            // Handed to the BROWSER, deliberately: an OAuth screen inside a WebView the
+                            // app controls is a password box the app could read, which is exactly what a
+                            // wearer cannot check. The redirect comes back to WhoopOAuthActivity.
+                            runCatching {
+                                context.startActivity(
+                                    android.content.Intent(
+                                        android.content.Intent.ACTION_VIEW,
+                                        android.net.Uri.parse(WhoopCloudAuth.authorizeUrl(context)),
+                                    ),
+                                )
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // --- Lifting log (Hevy CSV / Liftosaur JSON) ---

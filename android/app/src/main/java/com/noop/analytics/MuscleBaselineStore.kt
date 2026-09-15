@@ -17,8 +17,39 @@ import org.json.JSONObject
 
 object MuscleBaselineStore {
 
-    private const val KEY = "muscle.baselines"
+    /**
+     * Version 2 of the key, and the reason is the one case where a frozen scale MUST be thrown away.
+     *
+     * The first scales were derived from an Alphaprog parse that found 26 of the file's 96 sessions and
+     * piled the other seventy into one fabricated day. The distribution behind those numbers never
+     * existed, so every group sat five to eleven SD above its "normal" and the whole body painted one
+     * colour. A scale is frozen so that a colour keeps its meaning — not so that a wrong one does.
+     */
+    private const val KEY = "muscle.baselines.v2"
     private const val KEY_FROZEN_AT = "muscle.baselinesFrozenAt"
+    private const val KEY_LAST_ATTEMPT_DAY = "muscle.baselinesAttemptedOn"
+
+    /**
+     * Whether it is worth reading the whole lifting history again to look for a group to freeze.
+     *
+     * ONCE A DAY, at most. A group that has never been trained can never be frozen (there is nothing to
+     * be a deviation from), so "are all thirteen frozen yet" is a question that stays FALSE forever for
+     * most wearers — and using it as the guard meant re-reading five years of series on every open of
+     * Today. The windows are daily, so a group can become freezable at most once a day; asking more
+     * often than that cannot find anything.
+     */
+    private fun shouldAttempt(context: Context, today: String): Boolean =
+        prefs(context).getString(KEY_LAST_ATTEMPT_DAY, null) != today
+
+    /**
+     * Whether a caller should pay for the history read at all.
+     *
+     * Exposed because the read is a suspending one and [resolve] takes a plain lambda: without this the
+     * caller would gather five years of series and then be told they were not needed.
+     */
+    fun needsDerivation(context: Context): Boolean =
+        read(context).size < MuscleGroup.entries.size &&
+            shouldAttempt(context, java.time.LocalDate.now().toString())
 
     /**
      * The frozen per-group scales, freezing any group that has become derivable since the last call.
@@ -33,6 +64,9 @@ object MuscleBaselineStore {
     ): Map<MuscleGroup, MuscleBaseline> {
         val stored = read(context)
         if (stored.size == MuscleGroup.entries.size) return stored
+        val today = java.time.LocalDate.now().toString()
+        if (!shouldAttempt(context, today)) return stored
+        prefs(context).edit().putString(KEY_LAST_ATTEMPT_DAY, today).apply()
         val derived = MuscleBaselines.deriveAll(history())
         // Stored LAST so it wins: a group already frozen keeps the scale it was frozen with, whatever
         // the freshly derived numbers say. This is the whole contract in one line.

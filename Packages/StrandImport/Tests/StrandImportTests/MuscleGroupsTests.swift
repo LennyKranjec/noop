@@ -83,9 +83,13 @@ final class MuscleGroupsTests: XCTestCase {
         // `normalise` keeps letters as they are, so an ASCII-only rule never matches the real word.
         XCTAssertEqual(MuscleAttribution.muscles(for: "Trizepsdrücken mit dem Seil"), [.triceps])
         XCTAssertEqual(MuscleAttribution.muscles(for: "Rückenstrecken"), [.lowerBack])
-        // The medial thigh is not the quadriceps, so it is a deliberate blank rather than a guess.
-        XCTAssertTrue(MuscleAttribution.muscles(for: "Adduktoren").isEmpty)
+        // The two sides of the hip are different muscles: abduction is the glutes, adduction the medial
+        // thigh, whose magnus is a hip extensor and belongs with the hamstrings. Neither is the
+        // quadriceps, which take no part in either movement.
+        XCTAssertEqual(MuscleAttribution.muscles(for: "Adduktoren"), [.hamstrings])
         XCTAssertEqual(MuscleAttribution.muscles(for: "Abduktoren"), [.glutes])
+        XCTAssertEqual(MuscleAttribution.muscles(for: "Hip Adduction (Machine)"), [.hamstrings])
+        XCTAssertEqual(MuscleAttribution.muscles(for: "Hip Abduction (Machine)"), [.glutes])
     }
 
     /// Hevy writes it as one word. A rule that only matches the spaced spelling silently attributes

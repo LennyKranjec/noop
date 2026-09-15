@@ -99,8 +99,25 @@ import kotlinx.coroutines.withContext
 // Both the hero number and the full trend line share ONE baseline so the line is
 // internally comparable.
 
+/**
+ * The Stress monitor, and — with a different heading and one card prepended — the Focus tab.
+ *
+ * FOCUS IS THIS SCREEN, NOT A COPY OF IT. The wearer asked for Focus to be the stress tab with a
+ * meditation card on top, and the literal reading of that is 1,700 duplicated lines whose two copies
+ * drift apart the first time either is touched — a fix to the daytime timeline landing on one tab and
+ * not the other, silently. The three parameters below are the whole difference between them.
+ *
+ * Every default reproduces the Stress tab exactly as it was, so its own call site is untouched.
+ */
 @Composable
-fun StressScreen(vm: AppViewModel, onBreathe: () -> Unit = {}) {
+fun StressScreen(
+    vm: AppViewModel,
+    onBreathe: () -> Unit = {},
+    title: String? = null,
+    subtitle: String? = null,
+    /** Rows inserted ABOVE the stress content. Focus puts its meditation card here. */
+    leading: (androidx.compose.foundation.lazy.LazyListScope.() -> Unit)? = null,
+) {
     val days by vm.recentDays.collectAsStateWithLifecycle()
 
     // #698: the liquid day-of-sky backdrop is gated on the same "Day-cycle background" setting as Today,
@@ -166,6 +183,18 @@ fun StressScreen(vm: AppViewModel, onBreathe: () -> Unit = {}) {
                     val personal = NoopPrefs.stressPersonalBaseline(context)
                     val core = runCatching { loadDaytimeCore(vm, personal) }.getOrNull()
                     daytime = core?.daytime ?: DaytimeStress.Result.EMPTY
+                    // BANK THE DAY'S FIGURE while it is computed anyway. The non-activity high-stress
+                    // streak reads this series rather than recomputing a day of heart rate and R-R per
+                    // day of history, which is not something a card can do. See StressDailyStore.
+                    core?.daytime?.takeIf { it.hours.isNotEmpty() }?.let { result ->
+                        runCatching {
+                            com.noop.analytics.StressDailyStore.write(
+                                repo = vm.repo,
+                                day = LocalDate.now(ZoneId.systemDefault()).toString(),
+                                minutes = result.highStressMinutes,
+                            )
+                        }
+                    }
                     val beats = core?.rr.orEmpty()
                     val lenses = if (beats.isEmpty()) null else runCatching {
                         withContext(Dispatchers.Default) {
@@ -185,8 +214,8 @@ fun StressScreen(vm: AppViewModel, onBreathe: () -> Unit = {}) {
     val model = remember(days, stored) { StressModel.build(days, stored) }
 
     LazyScreenScaffold(
-        title = uiString(R.string.l10n_stress_screen_stress_bad33342),
-        subtitle = "Autonomic load from HRV and resting heart rate",
+        title = title ?: uiString(R.string.l10n_stress_screen_stress_bad33342),
+        subtitle = subtitle ?: "Autonomic load from HRV and resting heart rate",
         // LIQUID SKY BACKDROP (the pilot pattern — LiquidScreenSky.kt): the time-of-day liquid sky settles
         // into the theme canvas behind the header + hero vessel, full-bleed (full-width, up behind the
         // status bar via the scaffold's topBackground plumbing), and the cards float OVER it on the flat
@@ -197,6 +226,9 @@ fun StressScreen(vm: AppViewModel, onBreathe: () -> Unit = {}) {
         // down (Today / Trends / Sleep / metric-detail parity - same two prefs, same two behaviours).
         fullBleedBackground = screenBackdropFullBleed(showDayCycleBackground, skyBehindCards),
     ) {
+        // ABOVE the stress content and outside the `when`: the meditation card is the wearer's own log
+        // and is there to be used, so it must not disappear on a day the strap recorded nothing to score.
+        leading?.invoke(this)
         when {
             model != null -> StressContent(model, daytime, stressIndex, freqHrv, onBreathe)
             !storedLoaded -> item { StressLoading() }

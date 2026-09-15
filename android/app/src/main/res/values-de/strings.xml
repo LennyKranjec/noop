@@ -1546,7 +1546,7 @@
     <string name="l10n_app_changelog_your_whoop_journal_in_insights_clearer_88f5e21b">Dein WHOOP-Journal in Insights, klarere metrische Taps</string>
     <string name="l10n_app_root_this_section_is_on_the_way_ca7c4a32">Dieser Abschnitt ist auf dem Weg.</string>
     <string name="l10n_app_root_updates_c76d1807">Updates</string>
-    <string name="l10n_coach_screen_coach_b32c9ad3">Coach</string>
+    <string name="l10n_coach_screen_coach_b32c9ad3">System</string>
     <string name="l10n_compare_screen_remove_title_ddb5361c">%1$s entfernen</string>
     <string name="l10n_components_chunks_chunks_pulled_cec186cf">%1$s Brocken gezogen</string>
     <string name="l10n_components_decrease_accessibility_df5f1511">Verringere %1$s</string>
@@ -3036,4 +3036,53 @@
     <string name="muscle_model_scale_warming">Einige Gruppen werden noch relativ zur stärksten eingefärbt – ein Muskel braucht einen Monat Verlauf, bis sein eigener Normalwert feststeht.</string>
     <string name="health_connect_category_nutrition">Ernährung</string>
     <string name="health_connect_category_nutrition_detail">"Kalorien, Eiweiß, Kohlenhydrate und Fett aus deinem Ernährungstagebuch"</string>
+    <string name="coach_sender_you">Du</string>
+    <string name="coach_sender_system">System</string>
+    <string name="level_driver_sleep_score">"Score"</string>
+    <string name="level_driver_consistency">"Rhythmus"</string>
+    <string name="level_driver_hrv">"HRV"</string>
+    <string name="level_driver_rhr">"RHF"</string>
+    <string name="level_driver_vo2max">"VO₂max"</string>
+    <string name="level_driver_resp_rate">"Atemfreq."</string>
+    <string name="level_driver_volume">"Volumen"</string>
+    <string name="level_driver_stress">"Stress"</string>
+    <string name="level_driver_meditation">"Meditation"</string>
+    <string name="level_span_week">"7T"</string>
+    <string name="level_span_month">"30T"</string>
+    <string name="level_span_quarter">"90T"</string>
+    <string name="level_timeline_title">"Level im Verlauf"</string>
+    <string name="level_timeline_close">"Schließen"</string>
+    <string name="level_timeline_loading">"Wird berechnet …"</string>
+    <string name="level_timeline_thin">"Noch zu wenige bewertete Tage."</string>
+    <string name="level_timeline_low">"min"</string>
+    <string name="level_timeline_mean">"Mittel"</string>
+    <string name="level_timeline_high">"max"</string>
+    <string name="focus_subtitle">"Dein Meditations-Log und die autonome Last darunter"</string>
+    <string name="meditation_total_label">"Insgesamt meditiert"</string>
+    <string name="meditation_minutes_unit">"Min."</string>
+    <string name="meditation_start">"Meditation starten"</string>
+    <string name="meditation_stop">"Stoppen und Sitzung speichern"</string>
+    <string name="meditation_delete">"Heutige Sitzung löschen"</string>
+    <string name="meditation_running">"Läuft. Stoppen, wenn du fertig bist – dann wird gespeichert."</string>
+    <string name="meditation_done_today">"Für heute gespeichert. Zum erneuten Sitzen löschen."</string>
+    <string name="meditation_window_hint">"Drei Tage zählen für Fokus. Der älteste wird wieder frei."</string>
+    <string name="meditation_too_short">"Zu kurz zum Speichern – sitze mindestens %1$d Sekunden."</string>
+    <string name="meditation_failed">"Diese Sitzung konnte nicht gespeichert werden. Versuch es nochmal."</string>
+    <string name="hero_strain">"Belastung"</string>
+    <string name="hero_recovery">"Erholung"</string>
+    <string name="hero_sleep">"Schlaf"</string>
+    <string name="streak_sleep_consistency" formatted="false">Rhythmus &gt; 80%</string>
+    <string name="streak_sleep_debt" formatted="false">Defizit &lt; 1h</string>
+    <string name="streak_stress_time" formatted="false">Stress &lt; 6h</string>
+    <string name="level_span_year">"1J"</string>
+    <string name="level_span_all">"Alle"</string>
+    <string name="whoop_cloud_connected">"Mit WHOOP verbunden. Zum Synchronisieren auf Today nach unten ziehen."</string>
+    <string name="whoop_cloud_connect_failed">"Verbindung zu WHOOP fehlgeschlagen. Nochmal versuchen."</string>
+    <string name="whoop_cloud_title">"WHOOP Cloud"</string>
+    <string name="whoop_cloud_subtitle">"WHOOPs eigene Werte für Erholung, Tagesbelastung und Schlafleistung — die Scores aus deren App. Über das Internet aus deinem WHOOP-Konto geladen und in einer eigenen Quelle gehalten, damit sie nie überschreiben, was dieses Handy selbst gemessen hat."</string>
+    <string name="whoop_cloud_connect">"WHOOP-Konto verbinden"</string>
+    <string name="whoop_cloud_disconnect">"Trennen"</string>
+    <string name="whoop_cloud_state_on">"Verbunden"</string>
+    <string name="whoop_cloud_state_off">"Nicht verbunden"</string>
+    <string name="today_stress_day_score">"Tageswert, aus Ruhepuls und HRV"</string>
 </resources>

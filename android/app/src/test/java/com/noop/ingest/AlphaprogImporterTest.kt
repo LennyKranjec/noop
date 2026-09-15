@@ -9,15 +9,16 @@ import java.time.ZoneId
 /**
  * The Alphaprog export, read against the wearer's REAL file.
  *
- * The fixture is their actual log — 26 sessions, 23 distinct exercises, a year of training. A
+ * The fixture is their actual log — 96 sessions across nine months. A
  * hand-written sample would have proved the parser reads what I imagined the format to be; this proves
  * it reads what the exporter writes, including the blank lines, the BOM, the German decimals and the
  * dashes for sets that were printed and never done.
  *
- * THE ATTRIBUTION COVERAGE TEST IS THE IMPORTANT ONE. An exercise the table cannot place contributes
- * nothing, silently — the body view simply stays dark for that muscle. Asserting that every exercise in
- * the file is either placed or deliberately listed as unplaceable is what stops a future rename from
- * quietly halving somebody's training volume.
+ * TWO OF THESE ARE THE IMPORTANT ONES, and both guard failures that look like data rather than like
+ * bugs. The SESSION COUNT: a header form the regex missed did not fail, it appended that session's
+ * exercises to the previous one, and a quarter-matched file produced one fabricated 190-exercise day.
+ * The ATTRIBUTION COVERAGE: an exercise the table cannot place contributes nothing, silently, and the
+ * body view simply stays dark for that muscle.
  */
 class AlphaprogImporterTest {
 
@@ -31,7 +32,69 @@ class AlphaprogImporterTest {
 
     @Test
     fun everySessionInTheFileIsFound() {
-        assertEquals(26, parsed().workouts.size)
+        // 96, NOT the 26 the first cut of the parser found. The duration column has three forms and the
+        // clock has one or two digits; a regex that accepted only `HH:MM` + `N Min.` matched a quarter of
+        // the headers, and the other seventy sessions' exercises were silently appended to whichever
+        // session HAD matched — producing one 190-exercise day holding most of a year. The count is
+        // asserted rather than the shape, because that failure had a plausible shape.
+        assertEquals(96, parsed().workouts.size)
+    }
+
+    @Test
+    fun allThreeDurationFormsAreRead() {
+        assertEquals(53L, AlphaprogImporter.durationMinutes("53 Min."))
+        assertEquals(79L, AlphaprogImporter.durationMinutes("1:19 Std."))
+        assertEquals(127L, AlphaprogImporter.durationMinutes("2:07 Std."))
+        // Rounded DOWN: a 45-second session did not last a minute.
+        assertEquals(0L, AlphaprogImporter.durationMinutes("45 s"))
+        assertEquals(0L, AlphaprogImporter.durationMinutes("something else"))
+    }
+
+    @Test
+    fun aSessionThatStartedBeforeTenIsStillFound() {
+        // "2026-09-02 5:18 Uhr" — one digit. Every session on this day starts before ten.
+        val early = parsed().workouts.filter {
+            java.time.Instant.ofEpochSecond(it.startTs).atZone(zone).hour < 10
+        }
+        assertTrue("single-digit clock hours must parse", early.size >= 10)
+        assertTrue("and must carry a real timestamp", early.all { it.startTs > 0 })
+    }
+
+    @Test
+    fun aLoadedHoldIsNotWeightTimesReps() {
+        // `#;KG;SEK` is weight x SECONDS. Reading the second column as reps would turn a 45-second hold
+        // into 1,350 kg of volume load: not a wrong magnitude, a different quantity in the same unit.
+        //
+        // WRITTEN BY HAND, not read off the fixture, because the wearer's own file has exactly one such
+        // grid and every row in it is a dash — the format is there, a PERFORMED hold is not. A test that
+        // waited for one would have passed today by asserting nothing.
+        val text = listOf(
+            "\"Lower A (Di)\";\"2026-07-19 19:01 Uhr\";\"2 Min.\"",
+            "\"1. Wallsit · Körpergewicht\"",
+            "#;KG;SEK",
+            "1;30;45",
+        ).joinToString("\n")
+        val set = AlphaprogImporter.parse(text, zone).workouts.single().exercises.single().sets.single()
+        assertEquals(45, set.holdSeconds)
+        assertEquals(0, set.reps)
+        assertEquals(0.0, set.volumeKg, 1e-9)
+        assertEquals(30.0, set.weightKg, 1e-9)
+    }
+
+    @Test
+    fun theFixturesOwnUnperformedHoldContributesNothing() {
+        // The real `#;KG;SEK` grid is "1;-;-" three times: printed, never done.
+        val wallsit = parsed().workouts.flatMap { it.exercises }.filter { it.name == "Wallsit" }
+        assertTrue("the fixture carries the Wallsit", wallsit.isNotEmpty())
+        assertTrue(wallsit.all { ex -> ex.sets.isEmpty() })
+    }
+
+    @Test
+    fun aTimedEffortCarriesMinutesAndNoLoad() {
+        val timed = parsed().workouts.flatMap { it.exercises }.flatMap { it.sets }
+            .filter { it.minutes > 0.0 }
+        assertTrue("the fixture carries at least one timed effort", timed.isNotEmpty())
+        assertTrue(timed.all { it.volumeKg == 0.0 && it.weightKg == 0.0 })
     }
 
     @Test
@@ -59,8 +122,13 @@ class AlphaprogImporterTest {
         // "4;-;-" is a row the app printed and the wearer left empty. Counting it as 0 kg x 0 reps is
         // the same arithmetic and a different claim: it would say they did a set of nothing.
         assertNull(AlphaprogImporter.germanNumber("-"))
+        // Every set that carries REPETITIONS carries at least one. A set with zero reps is a timed one
+        // (a plank's minutes, a hold's seconds) and must carry that figure instead of being empty.
         val sets = parsed().workouts.flatMap { it.exercises }.flatMap { it.sets }
-        assertTrue("no set may have zero reps", sets.none { it.reps <= 0 })
+        assertTrue(
+            "a set is either reps, or seconds, or minutes — never nothing at all",
+            sets.all { it.reps > 0 || it.holdSeconds > 0 || it.minutes > 0.0 },
+        )
     }
 
     @Test
@@ -77,12 +145,12 @@ class AlphaprogImporterTest {
     fun everyExerciseInTheFileIsEitherPlacedOrKnowinglyUnplaceable() {
         val p = parsed()
         val names = p.workouts.flatMap { it.exercises }.map { it.name }.toSet()
-        // Adductors are the one deliberate blank: the thirteen groups have no adductor, and the medial
-        // thigh is not the quadriceps. Anything ELSE unplaced is a gap in the table.
-        val unexpected = p.unattributed.filterNot { it.contains("Adduktoren", ignoreCase = true) }
+        // NOTHING in this file is allowed to go unplaced any more. Adductors used to be the one
+        // deliberate blank; they are the medial thigh, which the hamstrings' own hip-extension group is
+        // the honest home for, and leaving them blank lost thirty sessions of leg work off the figure.
         assertTrue(
-            "these exercises attribute nothing and would silently lose their volume: $unexpected",
-            unexpected.isEmpty(),
+            "these exercises attribute nothing and would silently lose their volume: ${p.unattributed}",
+            p.unattributed.isEmpty(),
         )
         assertTrue("the fixture should carry the wearer's whole vocabulary", names.size >= 20)
     }
@@ -96,6 +164,22 @@ class AlphaprogImporterTest {
             MuscleAttribution.muscles("Butterfly Reverse weit"),
         )
         assertEquals(listOf(MuscleGroup.CHEST), MuscleAttribution.muscles("Butterfly weit"))
+    }
+
+    @Test
+    fun theTwoSidesOfTheHipAreDifferentMuscles() {
+        // Abduction takes the leg away from the midline (glutes); adduction pulls it back (medial
+        // thigh, whose magnus is a hip extensor and belongs with the hamstrings). Filing both on the
+        // same group would say the two machines train the same thing, which is the opposite of true.
+        assertEquals(listOf(MuscleGroup.HAMSTRINGS), MuscleAttribution.muscles("Adduktoren"))
+        assertEquals(listOf(MuscleGroup.GLUTES), MuscleAttribution.muscles("Abduktoren"))
+        assertEquals(listOf(MuscleGroup.HAMSTRINGS), MuscleAttribution.muscles("Hip Adduction (Machine)"))
+        assertEquals(listOf(MuscleGroup.GLUTES), MuscleAttribution.muscles("Hip Abduction (Machine)"))
+        // And neither is the quadriceps, which take no part in either movement.
+        assertTrue(
+            MuscleGroup.QUADRICEPS !in MuscleAttribution.muscles("Adduktoren") &&
+                MuscleGroup.QUADRICEPS !in MuscleAttribution.muscles("Abduktoren"),
+        )
     }
 
     @Test
@@ -127,7 +211,7 @@ class AlphaprogImporterTest {
     @Test
     fun theWholeFileConvertsToStorableSessions() {
         val sessions = AlphaprogImporter.toSessions(parsed())
-        assertEquals(26, sessions.size)
+        assertEquals(96, sessions.size)
         assertTrue(sessions.all { it.startTs > 0 })
         assertTrue(sessions.all { it.volumeLoadKg >= 0 })
         assertTrue("at least one session must attribute muscle volume",

@@ -664,7 +664,9 @@ private fun ChatBubble(msg: ChatMsg, vm: CoachViewModel) {
         ) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Overline(
-                    if (isUser) "You" else "Coach",
+                    // The tab is called System, so the voice in it is System. A reply bylined "Coach"
+                    // while the tab says System reads as two different correspondents.
+                    if (isUser) uiString(R.string.coach_sender_you) else uiString(R.string.coach_sender_system),
                     color = if (isUser) Palette.accentHover else Palette.textTertiary,
                 )
                 if (isUser) {

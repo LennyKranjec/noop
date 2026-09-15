@@ -53,8 +53,26 @@ object LocalCoachEngine {
      */
     private val lane = Mutex()
 
+    /**
+     * True while ANY generation holds the lane — a chat turn, the daily mission, a quest, the muscle
+     * note.
+     *
+     * The lane is the one chokepoint every one of them passes through, so raising the flag here is the
+     * only way to be sure the UI's "thinking" state cannot drift from what the engine is actually
+     * doing. A per-caller flag would have to be set and cleared in five places and would be wrong the
+     * first time somebody added a sixth.
+     */
+    val busy = kotlinx.coroutines.flow.MutableStateFlow(false)
+
     /** Run [block] with exclusive use of the engine, waiting for anything already running. */
-    suspend fun <T> inLane(block: suspend () -> T): T = lane.withLock { block() }
+    suspend fun <T> inLane(block: suspend () -> T): T = lane.withLock {
+        busy.value = true
+        try {
+            block()
+        } finally {
+            busy.value = false
+        }
+    }
 
     /**
      * Run [block] only if the engine is free right now; null when it is not.
@@ -65,9 +83,11 @@ object LocalCoachEngine {
      */
     suspend fun <T> tryInLane(block: suspend () -> T): T? {
         if (!lane.tryLock()) return null
+        busy.value = true
         return try {
             block()
         } finally {
+            busy.value = false
             lane.unlock()
         }
     }
@@ -177,7 +197,21 @@ object LocalCoachEngine {
      * An empty flow when nothing is loaded rather than an exception: a coach screen that has not
      * finished loading should render nothing yet, not crash mid-composition.
      */
-    fun ask(message: String): Flow<String> = engine?.sendUserPrompt(message) ?: emptyFlow()
+    fun ask(message: String, nPredict: Int = ANSWER_TOKEN_BUDGET): Flow<String> =
+        engine?.sendUserPrompt(message, nPredict) ?: emptyFlow()
+
+    /**
+     * How many tokens one answer may take.
+     *
+     * The engine's own default is 1024, which a hybrid-reasoning model can spend entirely on its working
+     * and never reach a reply — the wearer waits a minute and is handed the deliberation instead of the
+     * answer. Thinking is switched off in the system prompt, so this is the SAFETY NET rather than the
+     * fix: a model that reasons anyway now has room to finish, and a late answer beats no answer.
+     *
+     * Not larger, because the budget also bounds the worst case. At roughly ten tokens a second on this
+     * hardware, 2048 is the longest wait that is still a wait rather than a hang.
+     */
+    const val ANSWER_TOKEN_BUDGET = 2048
 
     /**
      * Give up the resident model. Safe to call when nothing is loaded.

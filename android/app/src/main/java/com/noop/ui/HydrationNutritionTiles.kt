@@ -288,7 +288,9 @@ private fun WaterFill(fraction: Float) {
 
 /** ml as the tile shows it: litres past a litre, plain millilitres below. */
 private fun formatMl(ml: Double): String =
-    if (ml >= 1000) String.format(Locale.US, "%.1f L", ml / 1000.0)
+    // TWO decimals. A glass is 250 ml, so at one decimal every second glass moves the figure by 0.2 or
+    // by 0.3 and two different day totals print the same number — the tile looked stuck after a tap.
+    if (ml >= 1000) String.format(Locale.US, "%.2f L", ml / 1000.0)
     else "${ml.toInt()} ml"
 
 // MARK: - Nutrition tile

@@ -102,6 +102,16 @@ private fun hypnogramSummary(stages: List<Pair<String, Float>>): String {
 
 // MARK: - Shared geometry helpers
 
+/**
+ * The vertical inset every line chart leaves so a 2.5px stroke is not clipped at the plot's edges.
+ *
+ * Shared rather than repeated because anything drawn ON a chart's scale — a reference rule, a labelled
+ * gridline — has to use the SAME inset or it sits at a plausible-looking wrong height, and nothing about
+ * the picture would say so.
+ */
+internal const val LINE_CHART_STROKE_PX = 2.5f
+internal const val LINE_CHART_V_PAD = LINE_CHART_STROKE_PX + 4f
+
 /** Map a list of values into evenly-spaced points within [bounds], scaling y to the
  *  value range. A flat series (min == max) is centered vertically. Returns an empty
  *  list when there are fewer than two finite points. */
@@ -478,9 +488,9 @@ fun LineChart(
             modifier = Modifier
                 .fillMaxSize()
                 .drawWithCache {
-                    val strokePx = 2.5f
-                    val topPad = strokePx + 4f
-                    val bottomPad = strokePx + 4f
+                    val strokePx = LINE_CHART_STROKE_PX
+                    val topPad = LINE_CHART_V_PAD
+                    val bottomPad = LINE_CHART_V_PAD
                     val pts = pointsFor(cleanValues, size.width, size.height, topPad, bottomPad, yDomain, cleanTimestamps)
                     // Same bounds as the series, through the same helper, so the rule cannot end up at a
                     // plausible-looking wrong height if either scale ever changes.
