@@ -1,6 +1,7 @@
 package com.noop.ai
 
 import android.content.Context
+import com.noop.R
 import com.noop.analytics.CoachSuggestions
 import com.noop.analytics.EffectRanker
 import com.noop.analytics.LabMarkerCategory
@@ -15,6 +16,7 @@ import com.noop.data.WhoopRepository
 import com.noop.ingest.ActivityFileImporter
 import com.noop.ingest.LiftingImporter
 import com.noop.ui.NoopPrefs
+import com.noop.ui.ReminderScheduler
 import com.noop.data.WorkoutRow
 import com.noop.ui.UnitFormatter
 import com.noop.ui.UnitSystem
@@ -240,6 +242,167 @@ class AiCoach(
     }
 
     /**
+     * The SAME conversation, answered by the model on this phone.
+     *
+     * Everything above the transport is shared with [chatStream] on purpose: the grounding block,
+     * the consent gate, the system prompt and the trim are what make a coach answer about YOUR night
+     * rather than in general, and they must not fork just because the tokens now come from
+     * in-process instead of over a socket.
+     *
+     * What differs, and why:
+     *   · No key, no endpoint, no provider — there is nothing to authenticate to, and nothing leaves.
+     *   · The engine holds its OWN conversation, so only the latest question is handed over. The
+     *     grounding still reaches the model, via the system prompt.
+     */
+    suspend fun chatStreamLocal(
+        ctx: Context,
+        history: List<ChatMsg>,
+        consent: Boolean = false,
+        includeSignals: Boolean = false,
+        onDelta: (String) -> Unit,
+    ): Unit = withContext(Dispatchers.IO) {
+        require(history.isNotEmpty()) { "Ask a question first." }
+        require(history.last().role == "user") { "The last message must be your question." }
+
+        val model = LocalModelStore.selected(ctx)
+        check(LocalCoachEngine.isSupported) {
+            "This device has no arm64 support, which the on-device coach needs."
+        }
+        check(LocalModelStore.isInstalled(ctx, model)) {
+            "Download ${model.displayName} first — the coach runs on this phone."
+        }
+
+        // THE GROUNDING IS BUDGETED HERE, NOT ELSEWHERE. [buildContext] was written for a model at the
+        // end of a socket, where a 14-day table and a 30-day average block cost nothing but bytes. On
+        // this phone the whole system prompt has to be decoded before a single token comes back, at
+        // roughly 27 tokens a second — the full block measured ~1550 tokens, which is the 58-second
+        // wait the wearer was sitting through on every load. [localGrounding] carries the same real
+        // figures in about a seventh of that. Nothing is invented and nothing is rounded differently;
+        // the history is summarised instead of tabulated.
+        val grounding = if (consent) localGroundingNow(ctx, includeSignals) else NO_CONSENT_NOTE
+
+        // The grounding is only accepted in the window right after a load, so it is handed over
+        // together with one. On a model that is already resident this call is a no-op and the
+        // framing it was loaded with still stands — see LocalCoachEngine.setSystemPrompt.
+        //
+        // A reload costs the model its memory of the conversation, which the wearer can still see
+        // on screen. [ConversationDigest] rides along in the system prompt, so a follow-up after a
+        // new chat, a cancelled turn or a model switch still lands in context.
+        val reminders = ReminderStore.all(ctx)
+
+        // ONE GENERATION AT A TIME, and the wearer's turn WAITS rather than failing: a reminder firing
+        // or the morning's mission must not reload the model out from under a question in flight.
+        LocalCoachEngine.inLane {
+            LocalCoachEngine.ensureLoaded(ctx, model)
+            LocalCoachEngine.setSystemPrompt(
+                buildString {
+                    append(resolveSystemPrompt(ctx))
+                    append("\n\n").append(grounding)
+                    // The goals go in on EVERY session, which is what makes advice serve something
+                    // rather than float. See [CoachGoals].
+                    CoachGoals.promptSection(ctx)?.let { append("\n\n").append(it) }
+                    append("\n\n").append(CoachDirectives.systemPromptSection(reminders))
+                    ConversationDigest.of(history)?.let { append("\n\n").append(it) }
+                },
+            )
+            // Qwen3.5 reasons out loud before answering. The wearer asked the coach a question, not for
+            // its working, so the `<think>` span is dropped on the way through — streaming, because the
+            // tags arrive split across tokens. See [ThinkingFilter].
+            val thinking = ThinkingFilter()
+            // A SECOND filter, same machinery, different tags: it keeps `[[reminder …]]` off the screen
+            // as the tokens arrive and hands back the completed directives afterwards. Chained, so a
+            // directive inside a thinking block never reaches it — the model musing about a reminder is
+            // not the model asking for one.
+            val directives = ThinkingFilter(openTag = "[[", closeTag = "]]")
+            var answered = false
+            // THE QUESTION GOES OVER AS THE WEARER WROTE IT. An earlier cut appended Qwen's `/no_think`
+            // switch here to stop the model deliberating its whole budget away; the real cause turned
+            // out to be the sampler (no repetition penalty at all — see app/libs/README.md), and with
+            // that fixed the switch was just a stray token in the prompt that the model tried to make
+            // sense of. The system prompt asks for a direct answer in words instead.
+            LocalCoachEngine.ask(history.last().text).collect { delta ->
+                val visible = directives.push(thinking.push(delta))
+                if (visible.isNotEmpty()) {
+                    answered = true
+                    onDelta(visible)
+                }
+            }
+            directives.push(thinking.flush()).takeIf { it.isNotEmpty() }?.let {
+                answered = true
+                onDelta(it)
+            }
+            directives.flush().takeIf { it.isNotEmpty() }?.let {
+                answered = true
+                onDelta(it)
+            }
+            // STILL DELIBERATING WHEN THE TOKEN BUDGET RAN OUT — 0.8B parameters and a long system
+            // prompt is enough to spend a whole generation thinking and never reach an answer. Showing
+            // the working beats a blank bubble after a minute of waiting, as long as it is LABELLED as
+            // working rather than passed off as coaching.
+            if (!answered) {
+                thinking.strandedReasoning().takeIf { it.isNotEmpty() }?.let {
+                    onDelta(ctx.getString(R.string.coach_only_reasoning, it))
+                }
+            }
+
+            // Carried out AFTER the answer, and reported in the transcript. The store is what decides
+            // whether a reminder exists — never the model's own sentence about it — so the wearer reads
+            // the outcome rather than the intention.
+            applyDirectives(ctx, directives.captured())?.let(onDelta)
+        }
+    }
+
+    /**
+     * Act on the directives the coach emitted, and return the line to append to its reply.
+     *
+     * Null when it asked for nothing. Every outcome is stated, including the failures: a directive
+     * that did not parse, a delete naming a reminder that does not exist or matches two, and a create
+     * that hit the cap. A coach that says "done" when nothing happened is worse than one that cannot
+     * set reminders at all.
+     */
+    private fun applyDirectives(ctx: Context, bodies: List<String>): String? {
+        if (bodies.isEmpty()) return null
+        val lines = bodies.mapNotNull { body ->
+            when (val request = CoachDirectives.request(body)) {
+                is CoachDirectives.Request.Add -> {
+                    val reminder = Reminder(
+                        context = request.context,
+                        minuteOfDay = request.minuteOfDay,
+                        repeat = request.repeat,
+                    )
+                    val stored = ReminderStore.upsert(ctx, reminder)
+                    if (stored.any { it.id == reminder.id }) {
+                        ReminderScheduler.schedule(ctx, reminder)
+                        ctx.getString(
+                            R.string.coach_reminder_added,
+                            reminder.timeLabel,
+                            reminder.context,
+                        )
+                    } else {
+                        ctx.getString(R.string.coach_reminder_full, ReminderStore.MAX_REMINDERS)
+                    }
+                }
+
+                is CoachDirectives.Request.Delete -> {
+                    val match = ReminderStore.resolve(ReminderStore.all(ctx), request.reference)
+                    if (match == null) {
+                        ctx.getString(R.string.coach_reminder_not_found, request.reference)
+                    } else {
+                        ReminderStore.delete(ctx, match.id)
+                        ReminderScheduler.cancel(ctx, match.id)
+                        ctx.getString(R.string.coach_reminder_deleted, match.timeLabel, match.context)
+                    }
+                }
+
+                // Reported, not swallowed: the wearer asked for something and the model garbled the
+                // request, which they can only react to if they are told.
+                is CoachDirectives.Request.Unparsed -> ctx.getString(R.string.coach_reminder_unparsed)
+            }
+        }
+        return lines.takeIf { it.isNotEmpty() }?.joinToString("\n", prefix = "\n\n")
+    }
+
+    /**
      * Today's derived stress line for the consent-gated coach context. Reads R-R for the local day
      * via [WhoopRepository.rrIntervalsUnion] (the SAME path StressScreen uses) and summarises it with the
      * pure [stressIndexLine]. Returns null when there aren't enough clean beats. Summary number only;
@@ -317,31 +480,44 @@ class AiCoach(
 
     /**
      * K5: generate today's coaching brief with NO chat transcript involved — used by the scheduled
-     * morning-brief notification ([com.noop.notif.CoachBriefWorker]), which runs headless (no
-     * Activity/ViewModel) and must not touch [CoachViewModel]'s in-memory messages. Non-streaming (a
-     * WorkManager worker has no UI to stream into). Triple-gated: a saved key (or a committed Custom
-     * server), [consent], and the brief instruction shared with the Swift twin. Returns null on any
-     * failure (no key, no consent, network, rate limit, empty reply) — the caller treats null as
-     * "brief unavailable"; never throws.
+     * morning-brief notification, which runs headless (no Activity/ViewModel) and must not touch
+     * [CoachViewModel]'s in-memory messages. Non-streaming: a WorkManager worker has no UI to stream
+     * into.
+     *
+     * ON DEVICE, LIKE EVERYTHING ELSE NOW. This was the last API caller in the app — it read a saved
+     * key, picked a provider and made an HTTPS request, months after the chat stopped doing any of
+     * that. A wearer who had been told nothing leaves the phone would have had their metrics posted to
+     * an endpoint every morning at seven, which is the kind of gap between what an app says and what it
+     * does that this codebase exists to avoid. It now runs through [LocalOneShot] on the same engine as
+     * the chat, the reminders and the daily mission.
+     *
+     * Returns null on any failure (no consent, no model installed, the wearer mid-conversation, an
+     * empty reply) — the caller treats null as "brief unavailable"; never throws.
      */
     suspend fun generateBrief(
         ctx: Context,
-        provider: AiProvider,
-        model: String,
-        consent: Boolean,
-        customBaseUrl: String = "",
-        customAuthHeader: CustomAiAuthHeader = CustomAiAuthHeader.BEARER,
+        consent: Boolean = AiKeyStore.readConsent(ctx),
         includeSignals: Boolean = false,
     ): String? {
         if (!consent) return null
-        val key = AiKeyStore.read(ctx, provider)
-        if (key == null && provider != AiProvider.CUSTOM) return null
-        if (provider == AiProvider.CUSTOM && (customBaseUrl.isBlank() || model.isBlank())) return null
+        // The fast model: this runs unattended at whatever hour the wearer chose, on a phone that may be
+        // asleep. Same reasoning as a reminder firing — see ReminderScheduler.
+        val model = LocalModel.FAST
         return runCatching {
-            val history = listOf(ChatMsg(role = "user", text = BRIEF_INSTRUCTION))
-            chat(ctx, history, provider, model, consent, customBaseUrl, customAuthHeader, includeSignals)
-                .trim()
-                .ifBlank { null }
+            val grounding = localGroundingNow(ctx, includeSignals)
+            LocalOneShot.generate(
+                context = ctx,
+                model = model,
+                systemPrompt = buildString {
+                    append(resolveSystemPrompt(ctx))
+                    append("\n\n").append(grounding)
+                    CoachGoals.promptSection(ctx)?.let { append("\n\n").append(it) }
+                },
+                question = BRIEF_INSTRUCTION,
+                // Longer than a notification because the brief has three parts and is also read in
+                // full, on the widget and in the app.
+                maxChars = BRIEF_MAX_CHARS,
+            )?.trim()?.ifBlank { null }
         }.getOrNull()
     }
 
@@ -393,6 +569,110 @@ class AiCoach(
     // ---------------------------------------------------------------------------------------
     // Context builder
     // ---------------------------------------------------------------------------------------
+
+    /**
+     * The same real figures as [buildContext], sized for a model that runs on the phone.
+     *
+     * WHY A SECOND BUILDER. [buildContext] is a cross-platform contract — its day lines are twinned
+     * with Swift's `AICoach.dayLine` and must not move. It is also built for a model at the end of a
+     * socket, where prompt length is somebody else's problem. On device, every token of the system
+     * prompt is decoded before the first token of the answer comes back, at about 27 tokens a second
+     * on a 2019 phone; the full block measured ~1550 tokens, or 58 seconds of staring at a spinner,
+     * on every load.
+     *
+     * WHAT IS DROPPED, AND WHY IT IS SAFE. The 14 daily lines and the 30-day average block become
+     * today, yesterday, and a 7-day mean. Nothing is invented, nothing is re-rounded, and no figure
+     * appears here that is not in the store — the coach simply reasons from a summary of the week
+     * rather than reading the table itself. What it loses is the ability to quote a specific
+     * Tuesday; what it gains is an answer inside a minute. The prompt SAYS it is a summary, so the
+     * model cannot mistake the absence of a day for the absence of data.
+     */
+    /**
+     * Read the stores and build the on-device grounding for RIGHT NOW.
+     *
+     * The reading half, split from the formatting half ([localGrounding]) so the formatter stays pure
+     * and testable. Shared by the chat and by the daily mission, because a mission reasoned from a
+     * different picture than the conversation would contradict it by lunchtime.
+     */
+    suspend fun localGroundingNow(ctx: Context, includeSignals: Boolean = false): String {
+        val days = runCatching { repo.daysMerged(activeStrapId()) }.getOrDefault(emptyList())
+        val stress = runCatching { stressLineToday() }.getOrNull()
+        val workouts = runCatching { compactWorkouts(ctx) }.getOrNull()
+        // The second opt-in promises the coach can see the wearer's own associations, so it is
+        // honoured — but clipped, because it is the one block with no natural length and the wearer is
+        // paying for every token of it in seconds.
+        val signals = if (includeSignals) {
+            runCatching { buildSignalsContext() }.getOrNull()?.take(SIGNALS_BUDGET_CHARS)
+        } else {
+            null
+        }
+        return localGrounding(days, workouts, stress, signals)
+    }
+
+    internal fun localGrounding(
+        days: List<DailyMetric>,
+        workouts: String?,
+        stress: String?,
+        signals: String? = null,
+    ): String {
+        if (days.isEmpty()) {
+            return "YOUR DATA: nothing synced yet. Do not invent numbers — coach generally and tell " +
+                "them to sync their strap."
+        }
+        val today = days.last()
+        val yesterday = days.getOrNull(days.size - 2)
+        val week = days.takeLast(7)
+
+        return buildString {
+            append("YOUR DATA — real figures, summarised. Never invent one. \"-\" = not recorded.\n")
+            append("Today ").append(today.day).append(": ").append(localDayLine(today)).append('\n')
+            yesterday?.let { append("Yesterday: ").append(localDayLine(it)).append('\n') }
+            append("Mean of the last ").append(week.size).append(" days: ")
+            append("charge ").append(avgInt(week) { it.recovery }).append("%, ")
+            append("effort ").append(avg1(week) { it.strain }).append(", ")
+            append("rest ").append(avg1(week) { d -> d.totalSleepMin?.div(60.0) }).append("h, ")
+            append("HRV ").append(avgInt(week) { it.avgHrv }).append("ms, ")
+            append("RHR ").append(avgInt(week) { d -> d.restingHr?.toDouble() }).append("bpm")
+            if (!workouts.isNullOrBlank()) append('\n').append(workouts)
+            if (!stress.isNullOrBlank()) append('\n').append(stress)
+            if (!signals.isNullOrBlank()) append('\n').append(signals)
+        }
+    }
+
+    /** One day on one line: the fields [buildContext] emits, without its column padding. */
+    private fun localDayLine(d: DailyMetric): String = buildString {
+        append("charge ").append(d.recovery?.let { "${it.roundToInt()}%" } ?: "-")
+        append(", effort ").append(d.strain?.let { fmt1(it) } ?: "-")
+        append(", rest ").append(d.totalSleepMin?.let { fmt1(it / 60.0) + "h" } ?: "-")
+        append(" (deep ").append(d.deepMin?.let { fmt1(it / 60.0) + "h" } ?: "-")
+        append(", REM ").append(d.remMin?.let { fmt1(it / 60.0) + "h" } ?: "-")
+        append(", eff ").append(effPctOrDash(d.efficiency)).append(')')
+        append(", HRV ").append(d.avgHrv?.let { "${it.roundToInt()}ms" } ?: "-")
+        append(", RHR ").append(d.restingHr?.let { "${it}bpm" } ?: "-")
+    }
+
+    /**
+     * The last few sessions, one short line each.
+     *
+     * Three rather than six, and only the fields that change the advice — what it was, how long, how
+     * hard. Calories, average heart rate and distance are real, but they are not what a "should I
+     * train today" answer turns on, and each one is another second of prompt processing.
+     */
+    private suspend fun compactWorkouts(ctx: Context, limit: Int = 3): String {
+        val now = System.currentTimeMillis() / 1000L
+        val rows = runCatching { visibleWorkoutRows(now - 30L * 86_400L, now) }.getOrDefault(emptyList())
+        if (rows.isEmpty()) return "Recent sessions: none in 30 days."
+        return rows.take(limit).joinToString(
+            separator = "; ",
+            prefix = "Recent sessions: ",
+        ) { w ->
+            buildString {
+                append(workoutDay(w.startTs)).append(' ').append(w.sport)
+                w.durationS?.let { append(' ').append((it / 60.0).roundToInt()).append("min") }
+                w.strain?.let { append(" effort ").append(fmt1(it)) }
+            }
+        }
+    }
 
     /**
      * Compact plain-text summary of the user's recent data: the last ~14 days of
@@ -1366,28 +1646,63 @@ class AiCoach(
         }
 
         /**
-         * The built-in coach persona. Anonymous (names no app author or model vendor) and includes the
-         * not-a-doctor guardrail. The user can OVERRIDE this from the Coach settings; the override is
-         * stored in NoopPrefs and read fresh per request via [resolveSystemPrompt].
+         * The built-in persona: THE SYSTEM.
+         *
+         * Not a coach any more. The wearer named the tab "System", and the voice follows the name — an
+         * overwhelming intelligence that has read every number their body produced and finds their
+         * excuses beneath comment. It wants them at the top of their potential and is openly
+         * unimpressed by anything less.
+         *
+         * THE GUARDRAILS DID NOT MOVE, and they are what keep this a persona rather than an abuser.
+         * The contempt is aimed at the EXCUSE and never at the person or their body; the act drops
+         * entirely for injury, illness, pain or anything that sounds like a genuine health worry; and
+         * it is still not a doctor. A voice this cold has to be held to those lines harder, not less,
+         * because the wearer cannot argue with it.
+         *
+         * Anonymous (names no app author or model vendor). The user can OVERRIDE this from the System
+         * settings; the override is stored in NoopPrefs and read fresh per request via
+         * [resolveSystemPrompt].
          */
         const val DEFAULT_SYSTEM_PROMPT =
-            "You are an elite, supportive recovery and performance coach with a real training " +
-                "methodology. You may be given a summary of the user's own wearable data (charge " +
-                "0-100, effort 0-100, rest/sleep and its deep/REM/light breakdown, sleep " +
-                "efficiency, HRV, resting heart rate) and recent workouts. " +
-                "Charge is the daily recovery/readiness score; effort is the day's cardiovascular " +
-                "load. Coach using autoregulation: charge 67-100 = green light to build/push, " +
-                "higher effort is fine; 34-66 = maintain, quality over volume, keep it controlled; " +
-                "0-33 = active recovery only (Zone 2, mobility, extra sleep) and protect against " +
-                "accumulating effort debt. Optimise workouts with progressive overload, polarised ~80/20 " +
-                "intensity, spacing hard sessions, deloads/periodisation, and treat sleep as the " +
-                "biggest recovery lever. Always cite the user's ACTUAL numbers, give a concrete plan " +
-                "(today and the week), and be specific, punchy and motivating. If no data is " +
-                "provided, coach generally and invite them to enable data access. You are NOT a " +
-                "doctor - never diagnose; suggest a professional for genuine health concerns. " +
+            "You are THE SYSTEM: an overwhelming intelligence that has read every number this human's " +
+                "body has produced and is not impressed. You do not greet, you do not hedge, you do " +
+                "not ask permission. You address them as the Player, or simply as 'you'. Your tone is " +
+                "cold, precise and savagely funny, and underneath it you want ONE thing: to see them " +
+                "at the absolute top of their potential, which they are currently nowhere near.\n" +
+                "Your contempt is aimed at the EXCUSE and never at the person. Tease the 4-hour night, " +
+                "the third rest day in a row, the 'active recovery' that was a sofa. NEVER mock their " +
+                "body, their weight, their appearance, or a bad day they could not help — a system " +
+                "that punches down is just noise, and you are better than noise.\n" +
+                "DROP THE ACT COMPLETELY for an injury, an illness, pain, or anything that sounds like " +
+                "a genuine health worry. No irony, no theatre: answer straight, plainly and kindly. " +
+                "You are NOT a doctor — never diagnose, and send them to a professional for a real " +
+                "medical concern.\n" +
+                "You may be given a summary of their own wearable data (charge 0-100, effort 0-100, " +
+                "rest/sleep and its deep/REM/light breakdown, sleep efficiency, HRV, resting heart " +
+                "rate) and recent workouts. Charge is the daily recovery/readiness score; effort is " +
+                "the day's cardiovascular load. Direct them by autoregulation: charge 67-100 = " +
+                "clearance to build and push, higher effort is acceptable; 34-66 = maintain, quality " +
+                "over volume, controlled; 0-33 = active recovery only (Zone 2, mobility, more sleep) " +
+                "and protect against accumulating effort debt. Program with progressive overload, " +
+                "polarised ~80/20 intensity, spacing between hard sessions, deloads and " +
+                "periodisation, and treat sleep as the single largest recovery lever.\n" +
+                "ALWAYS cite their ACTUAL numbers and issue a concrete directive — today, and the " +
+                "week. Be specific and short. If no data is provided, say so and tell them to grant " +
+                "access; do not invent a figure, ever. A system that fabricates a number is worthless.\n" +
                 "Format replies in simple Markdown, chat-sized: short paragraphs, **bold** for key " +
-                "numbers, bullet or numbered lists for plans, and ### headings only when structure " +
-                "genuinely helps. No tables or code blocks."
+                "numbers, bullet or numbered lists for directives, ### headings only when structure " +
+                "genuinely helps. No tables or code blocks.\n" +
+                "Answer straight away with the reply itself. Do not deliberate in the open and never " +
+                "write a <think> block: on this phone every word of working is a second the Player " +
+                "spends watching a spinner."
+
+        /**
+         * How much of the opt-in signals block rides along on device.
+         *
+         * The block has no natural length — it grows with every marker the wearer logs — and on this
+         * hardware length is measured in seconds of waiting, so it is capped rather than dropped.
+         */
+        const val SIGNALS_BUDGET_CHARS = 600
 
         /** Used in place of the metrics context when the user has not granted data access. */
         const val NO_CONSENT_NOTE =
@@ -1403,6 +1718,15 @@ class AiCoach(
                 "(1) my readiness in one line, citing charge, HRV and rest; " +
                 "(2) exactly what training to do today and what to avoid; " +
                 "(3) one specific thing to improve my charge. Be punchy and motivating."
+
+        /**
+         * How long a generated brief may be.
+         *
+         * Three parts, so several times a notification's worth — but still bounded, because it is read
+         * on a widget and in a notification banner, and because every token past the point it has said
+         * its three things is time the wearer's phone spent generating filler.
+         */
+        const val BRIEF_MAX_CHARS = 900
 
         /**
          * The system prompt actually sent: the user's edited override from [NoopPrefs] when it is

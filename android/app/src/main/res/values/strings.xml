@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">NOOP</string>
+    <string name="app_name">system</string>
     <string name="widget_description">Today\'s Rest, Charge and Effort, with live heart rate and strap battery at a glance.</string>
     <string name="widget_hr_name">NOOP Heart Rate</string>
     <string name="widget_hr_description">Live heart rate with the last three hours as a trace.</string>
@@ -32,7 +32,7 @@
     <string name="nav_stress">Stress</string>
     <string name="nav_workouts">Workouts</string>
     <string name="nav_trends">Trends</string>
-    <string name="nav_coach">Coach</string>
+    <string name="nav_coach">System</string>
     <string name="nav_insights_hub">What Moves You</string>
     <string name="nav_insights">Insights</string>
     <string name="nav_explore">Explore</string>
@@ -56,6 +56,189 @@
     <string name="nav_test_centre">Test Centre</string>
     <string name="nav_self_hosted_push">Self-hosted push</string>
     <string name="nav_more">More</string>
+    <!-- Bottom-bar label for the trends tab. Separate from nav_trends (the screen's own name in
+         the More list) and from nav_health (the vitals screen), so the three can be relabelled
+         independently. -->
+    <string name="nav_health_tab">Health</string>
+    <string name="nav_nutrition">Nutrition</string>
+    <string name="nav_mindfulness">Focus</string>
+
+    <!-- Health tab: the Sleep door that replaced Sleep's own bottom-bar slot. -->
+    <string name="health_open_sleep_sub">Last night, its stages, and the whole night in detail</string>
+
+    <!-- Account level + XP -->
+    <string name="level_badge_prefix">Level</string>
+    <string name="xp_bar_level">Lv %1$d</string>
+    <string name="xp_bar_to_next">%1$d XP to Lv %2$d</string>
+
+    <!-- Health · organs -->
+    <string name="organs_title">Organs</string>
+    <string name="organs_subtitle">What last night measured, by system</string>
+    <string name="organ_heart">Heart</string>
+    <string name="organ_lungs">Lungs</string>
+    <string name="organ_brain">Brain</string>
+    <string name="organ_metric_hrv">HRV</string>
+    <string name="organ_metric_rhr">Resting HR</string>
+    <string name="organ_metric_vo2">VO₂max</string>
+    <string name="organ_metric_resp">Respiratory rate</string>
+    <string name="organ_metric_rem">REM sleep</string>
+    <string name="organ_metric_deep">Deep sleep</string>
+    <string name="organs_absent">Nothing scored for this system last night.</string>
+
+    <!-- Coach · the offline (on-device) models -->
+    <string name="coach_local_title">Offline coach</string>
+    <string name="coach_local_body">The coach runs on this phone. Pick a model and download it once; after that your question and your numbers never leave the device, and there is no API key to store.</string>
+    <string name="coach_local_unsupported">This device has no arm64 support, which the on-device engine needs. Nothing to download here.</string>
+    <string name="coach_local_experimental">Experimental</string>
+    <string name="coach_local_deep_note">Needs well over a gigabyte of memory. On an older phone, use a short context.</string>
+    <string name="coach_local_download">Download</string>
+    <string name="coach_local_cancel">Cancel</string>
+    <string name="coach_local_remove">Remove</string>
+    <string name="coach_local_use">Use</string>
+    <string name="coach_local_privacy_note">The download is the only time this screen uses the network.</string>
+    <string name="coach_subtitle_local">Ask about your recovery, strain, sleep and HRV — answered on this phone, from your own numbers.</string>
+    <string name="coach_stop_generating">Stop generating</string>
+    <string name="coach_menu">Coach settings</string>
+    <string name="coach_new_chat">New chat</string>
+    <string name="coach_model_fast">Fast</string>
+    <string name="coach_model_deep">Deep</string>
+
+    <!-- Today · hydration + nutrition tiles -->
+    <string name="today_section_hydration_nutrition">Hydration &amp; Nutrition</string>
+    <string name="hydration_tile_amount">%1$s / %2$s</string>
+    <string name="hydration_tile_add">Add a glass</string>
+    <string name="hydration_tile_remove">Remove a glass</string>
+    <string name="nutrition_tile_no_import">No nutrition log imported yet — import a CSV under Data Sources and these fill in.</string>
+    <string name="macro_fat">Fat</string>
+    <string name="macro_carbs">Carbs</string>
+    <string name="macro_protein">Protein</string>
+
+    <!-- Health tab · muscle model -->
+    <string name="muscle_model_title">Muscle load</string>
+    <string name="muscle_model_subtitle">Volume load, last 7 days</string>
+    <string name="muscle_model_front">Front</string>
+    <string name="muscle_model_back">Back</string>
+    <string name="muscle_model_no_lifting">No lifting log imported, so nothing can say which muscles did the work. Import a Hevy or Liftosaur export under Data Sources.</string>
+    <string name="muscle_chest">Chest</string>
+    <string name="muscle_upper_back">Upper back</string>
+    <string name="muscle_lats">Lats</string>
+    <string name="muscle_shoulders">Shoulders</string>
+    <string name="muscle_biceps">Biceps</string>
+    <string name="muscle_triceps">Triceps</string>
+    <string name="muscle_forearms">Forearms</string>
+    <string name="muscle_abs">Abs</string>
+    <string name="muscle_lower_back">Lower back</string>
+    <string name="muscle_glutes">Glutes</string>
+    <string name="muscle_quadriceps">Quads</string>
+    <string name="muscle_hamstrings">Hamstrings</string>
+    <string name="muscle_calves">Calves</string>
+
+    <!-- Today · Stress &amp; Energy -->
+    <string name="today_section_stress_energy">Stress &amp; Energy</string>
+    <string name="today_stress_title">Today\'s stress</string>
+    <string name="today_stress_last_updated">Last updated at %1$s</string>
+    <string name="today_stress_no_reading">No hour scored yet today</string>
+    <string name="today_stress_highest">Highest</string>
+    <string name="today_stress_lowest">Lowest</string>
+    <string name="today_stress_average">Average</string>
+
+    <!-- Nutrition (layout preview: the screen is built, nothing behind it reads your data yet) -->
+    <string name="nutrition_subtitle">What you ate, and what it cost</string>
+    <string name="nutrition_preview_note">Layout preview — none of these figures are yours yet.</string>
+    <string name="nutrition_tab_today">Today</string>
+    <string name="nutrition_tab_week">Week</string>
+    <string name="nutrition_tab_goals">Goals</string>
+    <string name="nutrition_eaten_today">Eaten today</string>
+    <string name="nutrition_at_least">At least</string>
+    <string name="nutrition_kcal">kcal</string>
+    <string name="nutrition_occasions_suffix">· 3 occasions</string>
+    <string name="nutrition_burned">Burned</string>
+    <string name="nutrition_balance">Balance</string>
+    <string name="nutrition_occasions">Occasions</string>
+    <string name="nutrition_add">Add</string>
+    <string name="nutrition_breakfast">Breakfast</string>
+    <string name="nutrition_lunch">Lunch</string>
+    <string name="nutrition_dinner">Dinner</string>
+    <string name="nutrition_snacks">Snacks</string>
+    <string name="nutrition_not_logged">Not logged</string>
+    <string name="nutrition_water">Water</string>
+    <string name="nutrition_water_hint">Tap − or + to change</string>
+    <string name="nutrition_floor_title">Today\'s energy is a floor, not a total</string>
+    <string name="nutrition_floor_body">One occasion was logged without an energy figure, so the day reads as at least this much.</string>
+    <string name="nutrition_days_logged_label">Days with something logged</string>
+    <string name="nutrition_energy_day_by_day">Energy, day by day</string>
+    <string name="nutrition_energy_logged">Energy logged</string>
+    <string name="nutrition_seven_day_average">Seven-day average</string>
+    <string name="nutrition_mean_of_complete_days">Mean of 5 complete days</string>
+    <string name="nutrition_energy">Energy</string>
+    <string name="nutrition_protein">Protein</string>
+    <string name="nutrition_carbs">Carbs</string>
+    <string name="nutrition_fat">Fat</string>
+    <string name="nutrition_fibre">Fibre</string>
+    <string name="nutrition_energy_balance">Energy balance</string>
+    <string name="nutrition_eaten">Eaten</string>
+    <string name="nutrition_balance_caption">Eaten is the mean of five complete days. Burned is today only.</string>
+    <string name="nutrition_your_targets">Your targets</string>
+    <string name="nutrition_edit">Edit</string>
+    <string name="nutrition_daily_energy">Daily energy</string>
+    <string name="nutrition_daily_protein">Daily protein</string>
+    <string name="nutrition_energy_rate">200 kcal/day below · mean of five complete days</string>
+    <string name="nutrition_protein_rate">18 g/day below · mean of five complete days</string>
+    <string name="nutrition_spent_today">What your body spent today</string>
+    <string name="nutrition_estimated_expenditure">Estimated expenditure</string>
+    <string name="nutrition_expenditure_caption">Today, from heart rate and your profile</string>
+
+    <!-- Mindfulness (layout preview: the screen is built, nothing behind it reads your data yet) -->
+    <string name="mindfulness_subtitle">Mind, recovery, and the habits around them</string>
+    <string name="mindfulness_preview_note">Layout preview — none of these figures are yours yet.</string>
+    <string name="mindfulness_tab_mind">Mind</string>
+    <string name="mindfulness_tab_recovery">Recovery</string>
+    <string name="mindfulness_tab_habits">Habits</string>
+    <string name="mindfulness_tab_medication">Medication</string>
+    <string name="mindfulness_tab_cycle">Cycle</string>
+    <string name="mindfulness_start_a_sitting">Start a sitting</string>
+    <string name="mindfulness_exercises">exercises</string>
+    <string name="mindfulness_pick_one">Pick one and go · Last: 5 min</string>
+    <string name="mindfulness_begin">Begin</string>
+    <string name="mindfulness_how_are_you">How are you feeling?</string>
+    <string name="mindfulness_not_answered">Not answered yet</string>
+    <string name="mindfulness_write_the_day">Write the day down</string>
+    <string name="mindfulness_write_the_day_sub">Mood, energy, soreness, and a note</string>
+    <string name="mindfulness_open">Open</string>
+    <string name="mindfulness_stress_last_night">Stress last night</string>
+    <string name="mindfulness_autonomic_tension">Autonomic tension</string>
+    <string name="mindfulness_level_normal">Normal</string>
+    <string name="mindfulness_turn_in_by">Turn in by 22:45</string>
+    <string name="mindfulness_turn_in_body">You are 1h 20m down against your own need, and tonight\'s is 7h 45m.</string>
+    <string name="mindfulness_see_what_cost">See what last night cost you</string>
+    <string name="mindfulness_drivers">What charged and drained you</string>
+    <string name="mindfulness_what_helped">What helped</string>
+    <string name="mindfulness_what_held_back">What held you back</string>
+    <string name="mindfulness_driver_consistency">Sleep consistency</string>
+    <string name="mindfulness_driver_resting_hr">Resting heart rate</string>
+    <string name="mindfulness_driver_sleep_debt">Sleep debt</string>
+    <string name="mindfulness_driver_late_strain">Late strain</string>
+    <string name="mindfulness_sleep_need_tonight">Sleep need tonight</string>
+    <string name="mindfulness_tonights_need">Tonight\'s need</string>
+    <string name="mindfulness_added_for_strain">Added for strain</string>
+    <string name="mindfulness_credited_from_naps">Credited from naps</string>
+    <string name="mindfulness_target_bedtime">Target bedtime</string>
+    <string name="mindfulness_target_wake">Target wake</string>
+    <string name="mindfulness_habit_meditate">Meditate</string>
+    <string name="mindfulness_habit_no_screens">No screens after 22:00</string>
+    <string name="mindfulness_days_you_did_it">Days you did it</string>
+    <string name="mindfulness_add_a_habit">Add a habit</string>
+    <string name="mindfulness_what_you_log">What you log, against your numbers</string>
+    <string name="mindfulness_what_you_log_sub">Dose, habit difference, and the day of the week</string>
+    <string name="mindfulness_med_magnesium">Magnesium</string>
+    <string name="mindfulness_med_vitamin_d">Vitamin D</string>
+    <string name="mindfulness_med_magnesium_sub">400 mg · 22:00 · taken</string>
+    <string name="mindfulness_med_vitamin_d_sub">2000 IU · 08:00 · due later</string>
+    <string name="mindfulness_adherence">Adherence</string>
+    <string name="mindfulness_adherence_label">Taken, of those scheduled in the last seven days.</string>
+    <string name="mindfulness_add_a_medication">Add a medication</string>
+    <string name="mindfulness_cycle_title">Cycle tracking</string>
+    <string name="mindfulness_cycle_body">Not set up. Cycle logging lives here once it is turned on.</string>
 
     <string name="push_title">Self-hosted push</string>
     <string name="push_subtitle">Experimental · Android</string>
@@ -2766,6 +2949,10 @@
     <string name="coach_generate_now">Generate now</string>
     <string name="coach_status_suffix">: %1$s</string>
     <string name="coach_no_reply">(no reply)</string>
+    <string name="coach_thinking_seconds">%1$ds</string>
+    <string name="coach_only_reasoning">_The coach ran out of room before it reached an answer. Its working so far:_
+
+%1$s</string>
     <string name="coach_stream_interrupted">%1$s\n\n*(stream interrupted)*</string>
     <string name="coach_today_brief_format">Today\'s brief\n\n%1$s</string>
     <string name="coach_brief_widget_title">✦ Coach Brief</string>
@@ -2803,4 +2990,64 @@
     <string name="l10n_today_screen_scan_and_connect_40157030">Scan and connect</string>
     <string name="l10n_health_screen_fitness_age_stops_here_vo_max_383d989a">Fitness Age stops here. VO₂max keeps moving.</string>
     <string name="l10n_app_changelog_a_stress_screen_that_keeps_up_f7ec3f36">A stress screen that keeps up, WHOOP 5 readings in the units the strap sends, and a ring that stops repeating itself</string>
+    <string name="nav_reminders">Reminders</string>
+    <string name="nav_goals">Goals</string>
+    <string name="reminders_title">Reminders</string>
+    <string name="reminders_subtitle">Nudges the coach writes for you</string>
+    <string name="reminders_add">New reminder</string>
+    <string name="reminders_delete">Delete reminder</string>
+    <string name="reminders_empty">No reminders yet. Add one here, or just ask the coach — “remind me to go to bed at 22:00”.</string>
+    <string name="reminders_hour">Hour</string>
+    <string name="reminders_minute">Minute</string>
+    <string name="reminders_context_label">Why</string>
+    <string name="reminders_context_hint">Bedtime — I want eight hours</string>
+    <string name="reminders_save">Add reminder</string>
+    <string name="reminders_repeat_daily">Daily</string>
+    <string name="reminders_repeat_weekdays">Weekdays</string>
+    <string name="reminders_repeat_weekends">Weekends</string>
+    <string name="reminders_repeat_weekly">Weekly</string>
+    <string name="reminder_notification_title">Coach</string>
+    <string name="reminder_channel_name">Coach reminders</string>
+    <string name="reminder_channel_desc">Reminders you or the coach set up, written on this phone.</string>
+    <string name="coach_reminder_added">Reminder set for %1$s — %2$s</string>
+    <string name="coach_reminder_deleted">Reminder deleted: %1$s — %2$s</string>
+    <string name="coach_reminder_not_found">No single reminder matches “%1$s”, so nothing was deleted.</string>
+    <string name="coach_reminder_full">You already have %1$d reminders, which is the limit. Delete one first.</string>
+    <string name="coach_reminder_unparsed">The coach tried to change a reminder and got the format wrong, so nothing changed.</string>
+    <string name="goals_title">Goals</string>
+    <string name="goals_subtitle">What the coach is aiming you at</string>
+    <string name="goals_explainer">In your own words. The coach reads this at the start of every conversation, and your daily mission is written from it.</string>
+    <string name="goals_hint">Back under 20 minutes for 5k without wrecking my sleep. Stop skipping legs.</string>
+    <string name="goals_counter">%1$d / %2$d characters</string>
+    <string name="mission_title">Today’s mission</string>
+    <string name="mission_xp">%1$d XP</string>
+    <string name="mission_claim">Done — claim it</string>
+    <string name="mission_claimed">Claimed. Same time tomorrow.</string>
+    <string name="mission_none_yet">Your mission is written each morning at 06:45. There is none for today yet.</string>
+    <string name="mission_failed">The mission could not be written — check that a model is installed and that the coach may use your data.</string>
+    <string name="mission_write_now">Write one now</string>
+    <string name="mission_writing">Writing…</string>
+    <string name="mission_notification_title">Today’s mission · %1$d XP</string>
+    <string name="mission_channel_name">Daily mission</string>
+    <string name="mission_channel_desc">The one thing to do today, written on this phone at 06:45.</string>
+    <string name="quest_header">SYSTEM NOTIFICATION</string>
+    <string name="quest_accept">ACCEPT</string>
+    <string name="quest_decline">Not today</string>
+    <string name="quest_rewards">Rewards</string>
+    <string name="quest_complete">Mark as done</string>
+    <string name="quest_abandon">Abandon this quest</string>
+    <string name="quest_reward_heart">Heart</string>
+    <string name="quest_reward_lungs">Lungs</string>
+    <string name="quest_reward_brain">Mind</string>
+    <string name="quest_reward_muscle">Muscle</string>
+    <string name="quest_reward_sleep">Sleep</string>
+    <string name="quest_reward_stress">Stress</string>
+    <string name="streak_title">Streaks</string>
+    <string name="streak_sleep_regularity">Bed on time</string>
+    <string name="streak_sleep_duration">Seven hours</string>
+    <string name="streak_movement">Moved</string>
+    <string name="streak_days">%1$d d</string>
+    <string name="streak_none">No streak yet</string>
+    <string name="quest_deadline_warning">WARNING! — the reward expires when the clock does.</string>
+    <string name="quests_section">Quests</string>
 </resources>

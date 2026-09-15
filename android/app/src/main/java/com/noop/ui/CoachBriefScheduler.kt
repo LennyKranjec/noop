@@ -27,11 +27,14 @@ import java.util.concurrent.TimeUnit
  * PRD-K5: the scheduled Coach morning brief (Android twin of Swift `CoachBriefScheduler`).
  *
  * A user-armed, LOCAL notification carrying today's coaching brief (readiness + training plan),
- * generated on-device via the user's already-configured Coach provider, once a day at a chosen
- * time. Tap opens the app (same convention every other NOOP notification uses — see
- * [BatteryAlertNotifier]); the full brief is stored for [CoachViewModel]/[CoachScreen] to surface.
- * No push server, no cloud — the network call is the SAME bring-your-own-key request Coach already
- * makes on every send, just user-armed on a daily WorkManager job instead of triggered by a tap.
+ * written by the model ON THIS PHONE, once a day at a chosen time. Tap opens the app (same convention
+ * every other NOOP notification uses — see [BatteryAlertNotifier]); the full brief is stored for
+ * [CoachViewModel]/[CoachScreen] to surface.
+ *
+ * NO NETWORK AT ALL, not even a bring-your-own-key one. This was written when the coach talked to an
+ * API and was the last caller left on that path after the chat moved on-device — so until now, an app
+ * that says nothing leaves the phone was posting the wearer's metrics to an endpoint every morning.
+ * It goes through the same local engine as the chat, the reminders and the daily mission.
  * Default OFF, like every NOOP automation.
  *
  * SCHEDULING — WorkManager (mirrors [DebugExportScheduler]), not AlarmManager: a brief sliding a few
@@ -96,15 +99,15 @@ object CoachBriefScheduler {
      * The explicit "Generate now" button: always generates and stores, ignoring the once-per-day
      * dedup. Does NOT post a notification (the user is already looking at Coach) and does NOT touch
      * `lastRunDayKey`, so today's scheduled slot still fires normally. Returns the brief text, or
-     * null on failure (no key/consent/network) — the caller surfaces that.
+     * null on failure (no consent, no model installed, the engine busy) — the caller surfaces that.
      */
     suspend fun generateNow(context: Context): String? {
         val ctx = context.applicationContext
-        val provider = AiKeyStore.readProvider(ctx)
-        val model = AiKeyStore.readModel(ctx, provider)
+        // THE PROVIDER, MODEL NAME, KEY, BASE URL AND AUTH HEADER ARE ALL GONE. This was the last place
+        // in the app that read them — the brief is written by the model on this phone now, so there is
+        // nothing to authenticate to and nothing to send. Consent still gates it, because the brief is
+        // written FROM the wearer's metrics.
         val consent = AiKeyStore.readConsent(ctx)
-        val customUrl = AiKeyStore.readCustomBaseUrl(ctx)
-        val customHeader = AiKeyStore.readCustomAuthHeader(ctx)
         val includeSignals = consent && NoopPrefs.coachSignals(ctx)
         // #1304/#512 parity with CoachViewModel: thread the ACTIVE strap id so a headless generation
         // reasons off the same strap the user sees in the app, not a hardcoded canonical fallback.
@@ -112,7 +115,7 @@ object CoachBriefScheduler {
             WhoopRepository(WhoopDatabase.get(ctx)),
             activeStrapId = { (ctx as? com.noop.NoopApplication)?.activeDeviceId ?: WhoopRepository.WHOOP_SOURCE },
         )
-        return aiCoach.generateBrief(ctx, provider, model, consent, customUrl, customHeader, includeSignals)
+        return aiCoach.generateBrief(ctx, consent, includeSignals)
     }
 
     /** yyyy-MM-dd local-day key for the once-per-day dedup. Locale-fixed so the key is stable. */
@@ -231,7 +234,7 @@ object CoachBriefScheduler {
 
     /**
      * The worker that runs one scheduled brief generation: dedupes on the local day (WorkManager can
-     * retry/redeliver), calls [AiCoach.generateBrief] under the persisted key/provider/consent, and
+     * retry/redeliver), calls [AiCoach.generateBrief] on the resident local model under consent, and
      * either posts the brief notification + stores it for the Coach screen, or posts a low-key
      * "unavailable, tap to retry" notification WITHOUT marking the day done (so the next periodic
      * run retries). Always returns success so a failed generation doesn't poison the daily chain —

@@ -60,6 +60,70 @@ class LiftingImporterTest {
         assertEquals("Push Day", s.title)
     }
 
+    // MARK: - Per-muscle volume (the Health tab's muscle model reads these)
+
+    @Test
+    fun hevyAttributesVolumeToTheMusclesThatMovedIt() {
+        val r = hevy(
+            """
+            title,start_time,exercise_title,set_type,weight_kg,reps
+            Push Day,2026-06-01 18:00:00,Bench Press,warmup,40,10
+            Push Day,2026-06-01 18:00:00,Bench Press,normal,100,5
+            Push Day,2026-06-01 18:00:00,Bench Press,normal,100,5
+            Push Day,2026-06-01 18:00:00,Bicep Curl,normal,60,8
+            """
+        )
+        val m = r.sessions.single().muscleVolumeKg
+        // Bench is chest AND triceps, so 1000 kg counts toward each — an exposure figure per muscle,
+        // never a split of the 1480 kg session total. The warm-up is excluded here exactly as it is
+        // from volumeLoadKg, because both are summed from the same set.
+        assertEquals(1000.0, m[MuscleGroup.CHEST]!!, 1e-6)
+        assertEquals(1000.0, m[MuscleGroup.TRICEPS]!!, 1e-6)
+        assertEquals(480.0, m[MuscleGroup.BICEPS]!!, 1e-6)
+        assertEquals(1480.0, r.sessions.single().volumeLoadKg, 1e-6)
+    }
+
+    @Test
+    fun unplaceableExerciseIsLeftUnattributedRatherThanGuessed() {
+        val r = hevy(
+            """
+            title,start_time,exercise_title,set_type,weight_kg,reps
+            Odd Day,2026-06-01 18:00:00,Widget Hoist 9000,normal,50,10
+            """
+        )
+        val s = r.sessions.single()
+        assertEquals(500.0, s.volumeLoadKg, 1e-6)   // the work still counts as volume
+        assertTrue(s.muscleVolumeKg.isEmpty())      // it is simply not attributed to a muscle
+    }
+
+    @Test
+    fun muscleSeriesRowsSumPerLocalDayAndCarryTheKeyVocabulary() {
+        val zone = ZoneId.of("Europe/Berlin")
+        // A morning and an evening session on the SAME local day must fold into one row per muscle.
+        // Built from explicit local times so the case cannot quietly straddle midnight.
+        fun at(hour: Int): Long =
+            java.time.LocalDate.of(2026, 6, 1).atTime(hour, 0).atZone(zone).toEpochSecond()
+        val sessions = listOf(
+            LiftingImporter.Session(
+                startTs = at(9), endTs = at(10), volumeLoadKg = 1000.0,
+                setCount = 4, exerciseCount = 1, totalReps = 20, topSetKg = 100.0, title = "AM",
+                muscleVolumeKg = mapOf(MuscleGroup.CHEST to 1000.0),
+            ),
+            LiftingImporter.Session(
+                startTs = at(19), endTs = at(20), volumeLoadKg = 400.0,
+                setCount = 2, exerciseCount = 1, totalReps = 10, topSetKg = 40.0, title = "PM",
+                muscleVolumeKg = mapOf(MuscleGroup.CHEST to 400.0, MuscleGroup.BICEPS to 200.0),
+            ),
+        )
+        val rows = LiftingImporter.muscleSeriesRows(sessions, "lifting", zone)
+        val day = "2026-06-01"
+        val chest = rows.single { it.key == "muscle_volume_chest" }
+        assertEquals(day, chest.day)
+        assertEquals("lifting", chest.deviceId)
+        assertEquals(1400.0, chest.value, 1e-6)
+        assertEquals(200.0, rows.single { it.key == "muscle_volume_biceps" }.value, 1e-6)
+    }
+
     @Test
     fun hevySplitsDistinctWorkoutsAndConvertsPounds() {
         val r = hevy(

@@ -121,6 +121,12 @@ class MainActivity : ComponentActivity() {
         // K5: self-heal the scheduled Coach morning-brief job (no-op when off / already scheduled).
         runCatching { CoachBriefScheduler.reschedule(applicationContext) }
 
+        // The coach's reminders and the 06:45 mission, re-armed for the same reason: WorkManager loses
+        // nothing across a reboot, but a reminder created before an app UPDATE has no job until someone
+        // asks for one. Both are cheap no-ops when already scheduled.
+        runCatching { ReminderScheduler.rescheduleAll(applicationContext) }
+        runCatching { DailyMissionScheduler.schedule(applicationContext) }
+
         // Backup & Sync (#791): self-heal the daily auto-backup schedule (no-op when off / no folder),
         // and run a DEFERRED on-launch catch-up backup. Must-fix #4: the catch-up is gated on the toggle
         // being ON, runs fully off the main thread on Dispatchers.IO, and is launched AFTER the

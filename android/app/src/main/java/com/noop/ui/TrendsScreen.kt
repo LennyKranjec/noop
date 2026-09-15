@@ -2,6 +2,7 @@ package com.noop.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material.icons.Icons
@@ -27,6 +29,7 @@ import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalView
 import kotlinx.coroutines.launch
+import androidx.compose.material.icons.filled.Bedtime
 import androidx.compose.material.icons.filled.ChevronLeft
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material3.HorizontalDivider
@@ -93,7 +96,7 @@ import kotlin.math.roundToInt
 private val LIQUID_HERO_RADIUS: Dp = 26.dp
 
 @Composable
-fun TrendsScreen(vm: AppViewModel) {
+fun TrendsScreen(vm: AppViewModel, onOpenSleep: () -> Unit = {}) {
     // Reactive cache (oldest → newest) as the immediate backing.
     val reactiveDays by vm.recentDays.collectAsStateWithLifecycle()
 
@@ -163,7 +166,9 @@ fun TrendsScreen(vm: AppViewModel) {
     } ?: stringResource(R.string.trends_all_history)
 
     LazyScreenScaffold(
-        title = stringResource(R.string.nav_trends),
+        // Labelled Health: this screen is the Health tab now (the route stays "trends", so every
+        // saved back-stack entry and deep link is untouched).
+        title = stringResource(R.string.nav_health_tab),
         subtitle = stringResource(R.string.trends_subtitle),
         // LIQUID SKY BACKDROP (the pilot pattern — LiquidScreenSky.kt): the time-of-day liquid sky settles
         // into the theme canvas behind the header + top rows, full-bleed via the scaffold's topBackground
@@ -174,6 +179,21 @@ fun TrendsScreen(vm: AppViewModel) {
         // (Today / metric-detail parity — the same two prefs drive the same two behaviours everywhere).
         fullBleedBackground = screenBackdropFullBleed(showDayCycleBackground, skyBehindCards),
     ) {
+        // The muscle model heads the Health tab: where the week's lifting volume landed, by group.
+        // Above the empty check with the Sleep door, for the same reason — it reads a different
+        // store (the lifting import) than the strap days this screen's charts need, so an install
+        // with no derived days can still have a full week of lifting to show.
+        item { MuscleModelCard(vm) }
+
+        // The organ tiles sit directly under the muscle model and BEFORE the Sleep door: they read
+        // the same night the Sleep screen details, so they belong on the way to it, not after it.
+        item { OrganCards(days = days, viewModel = vm) }
+
+        // The Sleep door. Above the empty check on purpose: an install with no derived days yet is
+        // exactly the one where the wearer goes looking for last night, and the old bottom-bar slot
+        // that used to take them there is gone.
+        item { SleepDoorCard(onOpenSleep) }
+
         if (days.isEmpty()) {
             item { EmptyTrends() }
             return@LazyScreenScaffold
@@ -1172,6 +1192,48 @@ private fun EmptyTrends() {
         title = stringResource(R.string.trends_empty_title),
         body = stringResource(R.string.trends_empty_body),
     )
+}
+
+/** The Health tab's door to the Sleep screen — what the bottom bar's Sleep slot used to be. */
+@Composable
+private fun SleepDoorCard(onOpen: () -> Unit) {
+    NoopCard(modifier = Modifier.clickable(onClick = onOpen), tint = Palette.sleepDeep) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(36.dp)
+                    .clip(RoundedCornerShape(Metrics.cornerSm))
+                    .background(Palette.sleepDeep.copy(alpha = 0.16f)),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Filled.Bedtime,
+                    contentDescription = null,
+                    tint = Palette.sleepDeep,
+                    modifier = Modifier.size(Metrics.iconSmall),
+                )
+            }
+            Spacer(Modifier.width(Metrics.space12))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    stringResource(R.string.nav_sleep),
+                    style = NoopType.headline,
+                    color = Palette.textPrimary,
+                )
+                Text(
+                    stringResource(R.string.health_open_sleep_sub),
+                    style = NoopType.footnote,
+                    color = Palette.textTertiary,
+                )
+            }
+            Icon(
+                Icons.Filled.ChevronRight,
+                contentDescription = null,
+                tint = Palette.textTertiary,
+                modifier = Modifier.size(Metrics.iconSmall),
+            )
+        }
+    }
 }
 
 // MARK: - Small numeric helpers

@@ -1570,7 +1570,9 @@ internal enum class StressBand(val title: String, val tone: StrandTone) {
 // bar and the trend all sample this SAME ramp, so the colour language is identical across the
 // screen. Never the gold or red→green recovery ramp.
 
-private object StressRamp {
+// `internal` rather than private: Today's "Stress & Energy" card reads the SAME 0–3 domain and has
+// to be tinted by the same ramp, or the two surfaces would disagree about what an amber hour is.
+internal object StressRamp {
     val CALM = Palette.accent           // calm WHOOP blue — low
     val STEADY = Palette.statusPositive // balanced WHOOP green — baseline
     val TENSE = Palette.statusWarning   // high WHOOP amber — high

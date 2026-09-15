@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.clickable
@@ -177,13 +178,20 @@ fun NoopButton(
     if (appearance.fill != null) box = box.background(appearance.fill, shape)
     if (appearance.border != null) box = box.border(BorderStroke(1.dp, appearance.border), shape)
 
+    // THE APP-WIDE HAPTIC LIVES HERE, on the one control every screen already uses, rather than at a
+    // hundred call sites that would each have to remember it. See [SystemHaptics] on why the vocabulary
+    // is five cues and not "vibrate on everything".
+    val hapticContext = LocalContext.current
     box = box
         .clickable(
             interactionSource = interaction,
             indication = null,
             enabled = enabled,
             role = Role.Button,
-            onClick = onClick,
+            onClick = {
+                SystemHaptics.play(hapticContext, SystemHaptics.Cue.TAP)
+                onClick()
+            },
         )
         .padding(horizontal = NoopButtonMetrics.hPadding)
 

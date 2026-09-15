@@ -45,10 +45,17 @@ import androidx.compose.material.icons.filled.Hexagon
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Insights
 import androidx.compose.material.icons.filled.MonitorHeart
+import androidx.compose.material.icons.filled.Accessibility
+import androidx.compose.material.icons.filled.Flag
 import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.Public
+import androidx.compose.material.icons.filled.WbSunny
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Restaurant
 import androidx.compose.material.icons.automirrored.filled.Rule
+import androidx.compose.material.icons.filled.SelfImprovement
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.BatteryStd
 import androidx.compose.material.icons.filled.Settings
@@ -134,7 +141,7 @@ internal enum class Destination(
     val icon: ImageVector,
 ) {
     // Group: Today
-    Today("today", R.string.nav_today, Icons.Filled.Home),
+    Today("today", R.string.nav_today, Icons.Filled.WbSunny),
     Intelligence("intelligence", R.string.nav_intelligence, Icons.Filled.Psychology),
     // Optional, default-OFF (task #43): the Coupled view (WHOOP-style day read). Reached ONLY via the
     // Today dashboard "Coupled view" card tap-through, so it is deliberately NOT in any [DrawerGroup].
@@ -153,15 +160,27 @@ internal enum class Destination(
     Workouts("workouts", R.string.nav_workouts, Icons.Filled.FitnessCenter),
     Trends("trends", R.string.nav_trends, Icons.AutoMirrored.Filled.TrendingUp),
 
+    // The Nutrition TAB is gone: its water and macro tiles moved to Today, where they read the
+    // hydration store and the nutrition-CSV lane instead of standing over a fixture. Mindfulness
+    // remains a LAYOUT PREVIEW — built in NOOP's design system, nothing behind it reads the
+    // repository yet — which is why it is absent from [drawerGroups]: a More row onto a fixture
+    // would read as a feature.
+    Mindfulness("mindfulness", R.string.nav_mindfulness, Icons.Filled.SelfImprovement),
+
     // Group: Insight
-    Coach("coach", R.string.nav_coach, Icons.Filled.AutoAwesome),
+    Coach("coach", R.string.nav_coach, Icons.Filled.Public),
+    // The two coach-adjacent surfaces the model reads and writes: what the wearer is training FOR, and
+    // the nudges it has set up for them. Under Insights rather than App because neither is a setting —
+    // the goal is content the coach reads on every session, and a reminder is something it produced.
+    Goals("goals", R.string.nav_goals, Icons.Filled.Flag),
+    Reminders("reminders", R.string.nav_reminders, Icons.Filled.NotificationsActive),
     InsightsHub("insights_hub", R.string.nav_insights_hub, Icons.Filled.Insights),
     Insights("insights", R.string.nav_insights, Icons.Filled.Insights),
     Explore("explore", R.string.nav_explore, Icons.Filled.Explore),
     Compare("compare", R.string.nav_compare, Icons.AutoMirrored.Filled.CompareArrows),
 
     // Group: Health
-    Health("health", R.string.nav_health, Icons.Filled.MonitorHeart),
+    Health("health", R.string.nav_health, Icons.Filled.Accessibility),
     Hydration("hydration", R.string.nav_hydration, Icons.Filled.WaterDrop),
     VitalSigns("vital_signs", R.string.nav_vital_signs, Icons.Filled.HealthAndSafety),
     VitalSignsDetail("vital_detail/{key}", R.string.nav_vital_signs, Icons.Filled.HealthAndSafety),
@@ -235,9 +254,15 @@ internal val drawerGroups: List<DrawerGroup> = listOf(
         // same destination in two places at once, which is the duplication the note above says this
         // list exists to avoid. (#2218)
         Destination.InsightsHub, Destination.Intelligence,
+        Destination.Goals, Destination.Reminders,
         Destination.Insights, Destination.Explore, Destination.Compare,
     ), defaultExpanded = true),
     DrawerGroup("Body", R.string.more_group_body, listOf(
+        // Sleep is listed here BECAUSE it gave up its bottom-bar slot: the note above ("bar tabs are
+        // not listed") is what keeps a destination from appearing twice, and Sleep is no longer one.
+        // The Health tab's Sleep card is the primary door; this is the one that survives a user who
+        // navigates by the More list.
+        Destination.Sleep,
         Destination.Live, Destination.Workouts, Destination.Health, Destination.VitalSigns,
         Destination.LabBook, Destination.Stress, Destination.Breathe, Destination.Intervals,
         Destination.Rhythm,
@@ -500,8 +525,17 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
     // Boolean, and only on a movement past the threshold, so a fingertip tremor cannot flicker the bar.
     var scrollingDown by remember { mutableStateOf(false) }
     val reduceMotion = rememberReduceMotion()
-    val hidden = shouldHideBar(BottomBarStyleStore.autoHide, BottomBarStyleStore.overlay, scrollingDown,
-                               pinned = BottomBarStyleStore.previewPinned)
+    // THE SYSTEM TAB KEEPS ITS BAR. Everywhere else, sliding it away on scroll buys back a strip of
+    // screen for content that is scrolling past anyway. The chat is not like that: its composer is
+    // pinned to the bottom, so a bar that comes and goes directly underneath one that does not is a
+    // moving target beside a fixed one, and reading back through a long answer makes it flicker the
+    // whole way up.
+    val hidden = shouldHideBar(
+        BottomBarStyleStore.autoHide,
+        BottomBarStyleStore.overlay,
+        scrollingDown,
+        pinned = BottomBarStyleStore.previewPinned || current == Destination.Coach,
+    )
     val collapseTarget = barCollapseFraction(hidden, reduceMotion)
     // The transform is a graphicsLayer only — GPU, per frame, NO relayout — so content never reflows as
     // the bar comes and goes and scrolling stays smooth. (The approach #90 got right.)
@@ -529,9 +563,18 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
             }
         }
     }
+    // THE SYSTEM'S OWN LAYER, over the whole shell. A quest pop-up has to cover the bottom bar and the
+    // XP strip as well as the screen — it is the system interrupting, not a sheet a screen put up — so
+    // it wraps everything rather than living inside the Scaffold.
+    QuestHost(viewModel = viewModel) {
     Box(Modifier.fillMaxSize().nestedScroll(autoHideScroll)) {
         Scaffold(
             containerColor = Palette.surfaceBase,
+            // The XP strip belongs to the SHELL, not to a screen: it rides above every destination,
+            // including the drill-ins the same NavHost pushes, so it is a topBar rather than
+            // something each screen has to remember to draw. Screens already lay out under the
+            // Scaffold's `inner` padding, so nothing had to move to make room for it.
+            topBar = { XpOverlayBar() },
             bottomBar = {
                 // One unified "glass" bar: four evenly-spaced tabs — Today · Trends · Sleep · More
                 // (matches the iOS FloatingTabBar). The quick-action "+" lives in the Today header's
@@ -666,7 +709,17 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
                         onBreathe = { nav.navigateTopLevel(Destination.Breathe.route) },
                     )
                 }
-                composable(Destination.Trends.route) { TrendsScreen(viewModel) }
+                composable(Destination.Trends.route) {
+                    TrendsScreen(
+                        vm = viewModel,
+                        // Sleep gave up its own bar slot to the OpenStrap-shaped tab set, so the
+                        // Health tab carries the door to it. The destination is unchanged.
+                        onOpenSleep = { nav.navigateTopLevel(Destination.Sleep.route) },
+                    )
+                }
+                composable(Destination.Mindfulness.route) {
+                    MindfulnessScreen(onOpenBreathe = { nav.navigateTopLevel(Destination.Breathe.route) })
+                }
                 composable(Destination.Insights.route) { InsightsScreen(viewModel, onOpenInsightsHub = { nav.navigateTopLevel(Destination.InsightsHub.route) }) }
                 composable(Destination.Compare.route) { CompareScreen(viewModel) }
                 composable(Destination.Health.route) {
@@ -748,6 +801,8 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
                 composable(Destination.More.route) {
                     MoreScreen(onNavigate = { nav.navigate(it) })
                 }
+                composable(Destination.Goals.route) { GoalsScreen() }
+                composable(Destination.Reminders.route) { RemindersScreen() }
             }
         }
 
@@ -903,6 +958,7 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
                 },
         )
     }
+    }
 }
 
 // MARK: - More page
@@ -1050,15 +1106,22 @@ private fun MoreRow(dest: Destination, onClick: () -> Unit) {
 /** A single bottom-bar nav slot: the destination it switches to, plus the bar-specific icon/label. */
 internal data class BarTab(val dest: Destination, val icon: ImageVector, @StringRes val labelRes: Int)
 
-/** The nav slots in iOS order: Today · Trends · Sleep · Coach · More.
- *  More is special-cased (it opens the sheet rather than a route), so it is appended at the call site. */
+/** The nav slots: Today · Health · Mindfulness · Coach · More.
+ *  More is special-cased (it opens the sheet rather than a route), so it is appended at the call site.
+ *
+ *  THIS BAR NO LONGER MIRRORS iOS. It follows the OpenStrap tab set instead: Trends wears the Health
+ *  label, and Sleep handed its slot over (reached from the Health tab, plus its own More row).
+ *  NUTRITION HAD A SLOT HERE AND GAVE IT BACK — its water and macro tiles live on Today now, beside
+ *  the other things a day is made of, rather than behind a tab of their own. iOS parity here is a
+ *  UI-shape question, not a data one: the CLAUDE.md contract covers analytics and stored values. */
 internal val barLeadingTabs = listOf(
     BarTab(Destination.Today, Icons.Outlined.GridView, R.string.nav_today),
-    // chart.line.uptrend.xyaxis on iOS — the rising-trend glyph, not a flat bar chart.
-    BarTab(Destination.Trends, Icons.AutoMirrored.Filled.TrendingUp, R.string.nav_trends),
+    // chart.line.uptrend.xyaxis on iOS — the rising-trend glyph, not a flat bar chart. Labelled
+    // Health here; the route and the screen behind it are still Trends.
+    BarTab(Destination.Trends, Icons.AutoMirrored.Filled.TrendingUp, R.string.nav_health_tab),
 )
 internal val barTrailingTabs = listOf(
-    BarTab(Destination.Sleep, Icons.Filled.Bedtime, R.string.nav_sleep),
+    BarTab(Destination.Mindfulness, Icons.Filled.SelfImprovement, R.string.nav_mindfulness),
     // #2218: Coach was promoted to a top-level tab on iOS and this side did not follow, so it sat in
     // the More list while the comment above claimed the two bars matched. AutoAwesome is the sparkles
     // glyph iOS uses, and the same one the More row already shows, so the entry a wearer has learned
@@ -1072,6 +1135,13 @@ private fun GlassBottomBar(
     onTabSelected: (Destination) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    // Changing tab is a SELECT, one step firmer than a button's tap: it moves you somewhere, and the
+    // hand should be able to tell that apart from pressing a control on the screen you are already on.
+    val hapticContext = androidx.compose.ui.platform.LocalContext.current
+    val selectTab: (Destination) -> Unit = { dest ->
+        if (dest != current) SystemHaptics.play(hapticContext, SystemHaptics.Cue.SELECT)
+        onTabSelected(dest)
+    }
     val barShape = RoundedCornerShape(50)
     Box(
         modifier = modifier
@@ -1117,7 +1187,7 @@ private fun GlassBottomBar(
                         label = stringResource(tab.labelRes),
                         active = current == tab.dest,
                         modifier = Modifier.weight(1f),
-                        onClick = { onTabSelected(tab.dest) },
+                        onClick = { selectTab(tab.dest) },
                     )
                 }
                 barTrailingTabs.forEach { tab ->
@@ -1126,7 +1196,7 @@ private fun GlassBottomBar(
                         label = stringResource(tab.labelRes),
                         active = current == tab.dest,
                         modifier = Modifier.weight(1f),
-                        onClick = { onTabSelected(tab.dest) },
+                        onClick = { selectTab(tab.dest) },
                     )
                 }
                 BarSlot(
@@ -1142,7 +1212,7 @@ private fun GlassBottomBar(
                     active = barLeadingTabs.none { it.dest == current } &&
                         barTrailingTabs.none { it.dest == current },
                     modifier = Modifier.weight(1f),
-                    onClick = { onTabSelected(Destination.More) },
+                    onClick = { selectTab(Destination.More) },
                 )
             }
         }

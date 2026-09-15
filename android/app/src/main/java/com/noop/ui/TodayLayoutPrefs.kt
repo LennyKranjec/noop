@@ -30,6 +30,16 @@ enum class TodaySection(val raw: String, @StringRes val titleRes: Int) {
     WORKOUTS("workouts", R.string.today_section_workouts),
     HEART_RATE("heartRate", R.string.today_section_heart_rate),
     RECOVERY_VITALS("recoveryVitals", R.string.today_section_recovery_vitals),
+    /** Today's intraday stress read plus the charge-minus-effort bar — see [StressEnergySection]. */
+    STRESS_ENERGY("stressEnergy", R.string.today_section_stress_energy),
+    /** The water tile and the macro tile, which replaced the Nutrition tab (see [HydrationTile]). */
+    HYDRATION_NUTRITION("hydrationNutrition", R.string.today_section_hydration_nutrition),
+    /** The one thing to do today, written at 06:45 and worth XP — see [DailyMissionCard]. */
+    DAILY_MISSION("dailyMission", R.string.mission_title),
+    /** The quests currently being carried, as chips — see [QuestStrip]. */
+    QUESTS("quests", R.string.quests_section),
+    /** How many days in a row the good habits have held — see [StreakCard]. */
+    STREAKS("streaks", R.string.streak_title),
     YOUR_CARDS("yourCards", R.string.today_section_your_cards),
     MENSTRUAL_CYCLE("menstrualCycle", R.string.today_section_menstrual_cycle),
     JOURNAL("journal", R.string.today_section_journal),
@@ -45,7 +55,14 @@ enum class TodaySection(val raw: String, @StringRes val titleRes: Int) {
         /** The original, hard-coded section order — the default when the layout isn't customised. The
          *  journal widget (#656) is last by default, where it was first added, above the data-sources card. */
         val defaultOrder: List<TodaySection> = listOf(
-            HERO, LIVE_SESSION, SYNTHESIS, KEY_METRICS, WORKOUTS, HEART_RATE, RECOVERY_VITALS, YOUR_CARDS,
+            // The mission sits high on purpose: it is the one thing on Today that asks for an action
+            // rather than reporting a number, and below the fold it would be read after the day is
+            // already planned.
+            // Quests sit at the very top, above even the hero: they are the only thing on Today that
+            // is a commitment with a clock on it, and a commitment below the fold is one you remember
+            // in the evening. Streaks follow the mission, where the flames read as the reward for it.
+            QUESTS, HERO, DAILY_MISSION, STREAKS, LIVE_SESSION, SYNTHESIS, KEY_METRICS, WORKOUTS,
+            HEART_RATE, RECOVERY_VITALS, STRESS_ENERGY, HYDRATION_NUTRITION, YOUR_CARDS,
             MENSTRUAL_CYCLE, JOURNAL, ADDED_CARDS,
         )
     }

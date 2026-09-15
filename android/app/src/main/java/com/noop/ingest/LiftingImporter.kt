@@ -3,6 +3,7 @@ package com.noop.ingest
 import android.content.Context
 import android.net.Uri
 import com.noop.data.ImportSummary
+import com.noop.data.MetricSeriesRow
 import com.noop.data.WhoopRepository
 import com.noop.data.WorkoutRow
 import org.json.JSONArray
@@ -66,6 +67,20 @@ object LiftingImporter {
         val totalReps: Int,
         val topSetKg: Double?,
         val title: String?,
+        /**
+         * Σ(weight_kg × reps) split by the muscles that moved it, via [MuscleAttribution].
+         *
+         * A set whose exercise the table cannot place is ABSENT rather than pooled into an "other"
+         * bucket — the attribution table's own rule, and what lets the muscle view say "nothing
+         * attributed" instead of lighting a body from exercises it did not understand.
+         *
+         * A set with two primary movers (a row moves lats AND upper back) counts its FULL volume
+         * toward each. Splitting it evenly would claim a per-muscle share the log cannot support:
+         * nothing in a set of rows says the lats took half. So this sums to MORE than
+         * [volumeLoadKg] on a multi-mover day — it is a per-muscle exposure figure, not a partition
+         * of the session's volume, and the screen reading it must not present it as one.
+         */
+        val muscleVolumeKg: Map<MuscleGroup, Double> = emptyMap(),
     ) {
         /** Duration in seconds, or null when start == end. */
         val durationS: Double? get() = (endTs - startTs).takeIf { it > 0 }?.toDouble()
@@ -139,6 +154,7 @@ object LiftingImporter {
 
         repo.upsertDevice(deviceId, name = "Lifting log")
         repo.upsertWorkouts(rows)
+        repo.upsertMetricSeries(muscleSeriesRows(result.sessions, deviceId))
 
         val totalVolume = result.sessions.sumOf { it.volumeLoadKg }
         return ImportSummary(
@@ -309,6 +325,7 @@ object LiftingImporter {
         var reps = 0
         var top: Double? = null
         val exercises = HashSet<String>()
+        val muscleVolume = HashMap<MuscleGroup, Double>()
 
         /**
          * Count a set. Warm-up sets are excluded from the working-volume figure (Hevy marks them
@@ -322,7 +339,15 @@ object LiftingImporter {
             if (reps != null && reps > 0) this.reps += reps
             if (weightKg != null && weightKg > 0) {
                 top = maxOf(top ?: 0.0, weightKg)
-                if (reps != null && reps > 0) volume += weightKg * reps
+                if (reps != null && reps > 0) {
+                    val setVolume = weightKg * reps
+                    volume += setVolume
+                    // Attributed from the SAME set that fed `volume`, so the two can never describe
+                    // different work. An unplaceable exercise adds nothing and is simply not counted.
+                    for (m in MuscleAttribution.muscles(exercise)) {
+                        muscleVolume[m] = (muscleVolume[m] ?: 0.0) + setVolume
+                    }
+                }
             }
         }
 
@@ -338,6 +363,7 @@ object LiftingImporter {
                 totalReps = reps,
                 topSetKg = top,
                 title = title,
+                muscleVolumeKg = muscleVolume.toMap(),
             )
         }
     }
@@ -378,12 +404,14 @@ object LiftingImporter {
         var reps = 0
         var top: Double? = null
         var exercises = 0
+        val muscleVolume = HashMap<MuscleGroup, Double>()
 
         val entries = record.optJSONArray("entries") ?: JSONArray()
         for (e in 0 until entries.length()) {
             val entry = entries.optJSONObject(e) ?: continue
             exercises++
             val entryUnit = entry.optString("unit", "").lowercase().ifEmpty { null }
+            val exerciseName = liftosaurExerciseName(entry)
             val setList = entry.optJSONArray("sets") ?: continue
             for (s in 0 until setList.length()) {
                 val set = setList.optJSONObject(s) ?: continue
@@ -395,7 +423,13 @@ object LiftingImporter {
                 val w = liftosaurWeightKg(set, entryUnit)
                 if (w != null && w > 0) {
                     top = maxOf(top ?: 0.0, w)
-                    volume += w * r
+                    val setVolume = w * r
+                    volume += setVolume
+                    if (exerciseName != null) {
+                        for (m in MuscleAttribution.muscles(exerciseName)) {
+                            muscleVolume[m] = (muscleVolume[m] ?: 0.0) + setVolume
+                        }
+                    }
                 }
             }
         }
@@ -410,7 +444,27 @@ object LiftingImporter {
             totalReps = reps,
             topSetKg = top,
             title = record.optString("programName", "").ifEmpty { record.optString("dayName", "").ifEmpty { null } },
+            muscleVolumeKg = muscleVolume.toMap(),
         )
+    }
+
+    /**
+     * The exercise name on a Liftosaur history entry, for muscle attribution only.
+     *
+     * Liftosaur nests it as `exercise: { id, equipment }` in current exports and has shipped flatter
+     * shapes before, so three spellings are tried and a miss returns null — an entry whose exercise
+     * cannot be named contributes no attribution rather than a guessed one. The equipment word is
+     * appended when present because the attribution table uses it to tell a "curl (barbell)" from a
+     * "leg curl".
+     */
+    private fun liftosaurExerciseName(entry: JSONObject): String? {
+        val nested = entry.optJSONObject("exercise")
+        val id = nested?.optString("id", "")?.ifEmpty { null }
+            ?: entry.optString("exerciseName", "").ifEmpty { null }
+            ?: entry.optString("name", "").ifEmpty { null }
+            ?: return null
+        val equipment = nested?.optString("equipment", "")?.ifEmpty { null }
+        return if (equipment == null) id else "$id ($equipment)"
     }
 
     /**
@@ -539,6 +593,48 @@ object LiftingImporter {
     /** Group an integer-kg figure with thousands separators (e.g. 12400 → "12,400"). */
     internal fun groupedKg(kg: Double): String =
         NumberFormat.getIntegerInstance(Locale.US).format(Math.round(kg))
+
+    // MARK: - Per-muscle volume, as metricSeries rows
+    //
+    // Stored in `metricSeries` rather than the `liftSet` table the schema already carries. That table
+    // is per-SET and hangs off a `liftSession` row, and this importer writes neither — filling it
+    // would mean standing up both lanes to answer a question that is a daily total. metricSeries is
+    // the same store the nutrition lane writes and the same one the charts and the coach already
+    // read, so one key vocabulary covers this too.
+    //
+    // ANDROID-ONLY FOR NOW: the Swift lifting importer does not write these keys yet. Nothing breaks
+    // on the other side (a key it never reads), but the two lanes are not yet twins — see the note in
+    // CLAUDE.md's parity contract, and add the Swift half before calling this cross-platform.
+
+    /** metricSeries key for one muscle group's daily volume load, e.g. `muscle_volume_chest`. */
+    internal fun muscleVolumeKey(group: MuscleGroup): String =
+        "muscle_volume_" + group.name.lowercase()
+
+    /**
+     * One row per (local day × muscle), summing every session that landed on that day.
+     *
+     * The day is the session's LOCAL date, matching how the rest of this importer files a workout —
+     * an evening session must not roll into tomorrow because UTC already has.
+     */
+    internal fun muscleSeriesRows(
+        sessions: List<Session>,
+        deviceId: String,
+        zone: ZoneId = ZoneId.systemDefault(),
+    ): List<MetricSeriesRow> {
+        val byDayMuscle = LinkedHashMap<Pair<String, MuscleGroup>, Double>()
+        for (s in sessions) {
+            if (s.muscleVolumeKg.isEmpty()) continue
+            val day = Instant.ofEpochSecond(s.startTs).atZone(zone).toLocalDate().toString()
+            for ((muscle, kg) in s.muscleVolumeKg) {
+                if (kg <= 0) continue
+                val key = day to muscle
+                byDayMuscle[key] = (byDayMuscle[key] ?: 0.0) + kg
+            }
+        }
+        return byDayMuscle.map { (key, kg) ->
+            MetricSeriesRow(deviceId, key.first, muscleVolumeKey(key.second), kg)
+        }
+    }
 }
 
 // MARK: - Stream helper (file-private; the twin in NutritionCsvImporter.kt is not visible here)

@@ -1460,7 +1460,9 @@ fun TodayScreen(
                     }
                 }
                 Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    LiquidWordmark()
+                    // The wordmark gave this slot up to the account level. Same centred gutter, so
+                    // nothing about the header layout moved.
+                    LevelWordmark()
                 }
                 CustomizeDisc(onClick = { showLayoutEditor = true })
             }
@@ -1832,6 +1834,54 @@ fun TodayScreen(
                         // persists). Per-field carried-day fallbacks (#543) stop rollover "No Data" blanks.
                         // The today/non-empty gate lives at the loop level (sectionVisible) so a gated-off
                         // section emits no item; visibleDashboardCards is the loop-level filtered list.
+                        // Today's intraday stress read + the charge-minus-effort bar. Its own section
+                        // (rather than a "Your cards" tile) because the bar is a second row under the
+                        // card, and because both halves are always-on reads rather than an opt-in tile.
+                        TodaySection.STRESS_ENERGY -> StressEnergySection(
+                            viewModel = viewModel,
+                            day = stepResolvedDisplayMetric,
+                            isToday = selectedDayOffset == 0,
+                            onOpenStress = onOpenStress,
+                        )
+                        // TODAY'S MISSION, written at 06:45. Only on today: a mission is a thing to do
+                        // now, and showing yesterday's above yesterday's numbers would invite claiming
+                        // XP for a day that is over.
+                        TodaySection.DAILY_MISSION -> if (selectedDayOffset == 0) {
+                            DailyMissionCardWithGenerate()
+                        }
+                        // THE QUESTS BEING CARRIED. Today only, and only for today: a quest has a clock
+                        // on it, and showing one above a past day's numbers would invite completing it
+                        // for a day that is over.
+                        TodaySection.QUESTS -> if (selectedDayOffset == 0) {
+                            QuestStrip(
+                                quests = ActiveQuests.current(),
+                                onOpen = { ActiveQuests.open(it) },
+                            )
+                        }
+                        TodaySection.STREAKS -> if (selectedDayOffset == 0) {
+                            StreakCard(viewModel = viewModel)
+                        }
+                        // The water tile + the macro tile. These are what the Nutrition TAB used to
+                        // be: it was a layout preview over nothing, while both of these read stores
+                        // that already exist (HydrationStore, the nutrition-CSV metricSeries lane).
+                        TodaySection.HYDRATION_NUTRITION -> Column(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(Metrics.gap),
+                        ) {
+                            HydrationTile(
+                                viewModel = viewModel,
+                                // UNGATED goal, unlike `hydrationGoalMl`: that one is zero until the
+                                // hydration-tracking preference is on, and a zero denominator is a
+                                // water level that can never rise. The tile turns the preference on
+                                // itself the first time a glass is logged.
+                                goalMl = HydrationGoal.dailyGoalMl(
+                                    profileStore.sex,
+                                    stepResolvedDisplayMetric?.strain,
+                                ),
+                                onOpen = onOpenHydration,
+                            )
+                            NutritionTile(viewModel = viewModel)
+                        }
                         TodaySection.YOUR_CARDS -> YourCardsSection(
                             cards = visibleDashboardCards,
                             day = stepResolvedDisplayMetric,

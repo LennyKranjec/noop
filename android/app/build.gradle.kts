@@ -248,6 +248,19 @@ dependencyLocking {
 }
 
 dependencies {
+    // --- On-device inference (the offline coach) ---
+    //
+    // llama.cpp's own Android library module, built from source at a pinned upstream commit and
+    // checked in under libs/ — see libs/README.md for the provenance, the five build edits, and how
+    // to reproduce it. A LOCAL FILE dependency on purpose: there is no llama.cpp AAR on Maven
+    // Central, and a file dependency resolves from disk, so it never enters gradle.lockfile or
+    // gradle/verification-metadata.xml and cannot be substituted by a repository.
+    //
+    // arm64-v8a ONLY. An x86_64 device (an emulator) gets no native library and must not reach the
+    // engine — LocalCoachEngine.isSupported is the gate that keeps that an honest "not supported"
+    // rather than an UnsatisfiedLinkError.
+    implementation(files("libs/llama-android-1bc7a5a-noop2.aar"))
+
     // --- Compose (BOM pins all Compose artifact versions in lockstep) ---
     val composeBom = platform("androidx.compose:compose-bom:2024.06.00")
     implementation(composeBom)

@@ -3,6 +3,8 @@ package com.noop.ui
 import com.noop.R
 import androidx.compose.ui.res.stringResource
 import androidx.compose.foundation.background
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -12,6 +14,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -48,8 +51,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.input.KeyboardType
@@ -59,7 +65,27 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.noop.ai.AiProvider
 import com.noop.ai.ChatMsg
+import com.noop.ai.LocalCoachEngine
+import com.noop.ai.LocalModelStore
 import com.noop.ai.CustomAiAuthHeader
+
+/**
+ * The bottom padding the transcript starts with, before the composer has been laid out and measured.
+ *
+ * A GUESS IS ONLY GOOD FOR THE FIRST FRAME. The composer's real height moves with what is in it — the
+ * Fast/Deep switch, the token-estimate row that appears while typing, the nav bar's height on this
+ * particular phone — and a fixed number that is too small leaves the last messages sitting UNDER the
+ * switch with no way to scroll them out. So this is the seed value; [CoachChat] replaces it with the
+ * measured height on the first layout pass. Erring high would have been the safer guess, but it would
+ * also have left a permanent band of dead space above the composer.
+ */
+private val FLOATING_COMPOSER_CLEARANCE = 168.dp
+
+/** Breathing room between the last message and the top of the composer's fade. */
+private val COMPOSER_BREATHING_ROOM = 12.dp
+
+/** The room the floating title row takes at the top, and the transcript's matching top padding. */
+private val FLOATING_HEADER_CLEARANCE = 84.dp
 
 /**
  * AI Coach, the single opt-in, bring-your-own-key feature.
@@ -73,6 +99,7 @@ import com.noop.ai.CustomAiAuthHeader
  * Everything is composed from the locked design system (ScreenScaffold / NoopCard / NoopType /
  * Palette / StatePill / SegmentedPillControl), dark Material3.
  */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
 fun CoachScreen(vm: CoachViewModel = viewModel()) {
     val context = LocalContext.current
@@ -93,170 +120,130 @@ fun CoachScreen(vm: CoachViewModel = viewModel()) {
     val showDayCycleBackground = remember { NoopPrefs.showDayCycleBackground(context) }
     val skyBehindCards = remember { NoopPrefs.skyBehindCards(context) }
 
-    ScreenScaffold(
-        title = uiString(R.string.l10n_coach_screen_coach_b32c9ad3),
-        subtitle = "Ask about your recovery, strain, sleep and HRV, grounded in your own numbers.",
-        // LIQUID SKY BACKDROP (the pilot pattern — LiquidScreenSky.kt): the liquid sky sits behind the
-        // header and the cards float over the flat canvas below. Reuses the shared LiquidScreenSky() slot
-        // verbatim; when the day-cycle background is off, the scaffold paints the plain surface instead.
-        topBackground = screenBackdropSlot(showDayCycleBackground, skyBehindCards),
-        // Sky-behind-cards fills the viewport so the transparent cards reveal the sky the whole way
-        // down (Today / Trends / Sleep / metric-detail parity - same two prefs, same two behaviours).
-        fullBleedBackground = screenBackdropFullBleed(showDayCycleBackground, skyBehindCards),
-    ) {
-        if (!configured) {
-            CoachSetup(vm = vm)
-        } else {
+    // The header's two buttons and the sheet they open. Hoisted here because the scaffold owns the
+    // trailing slot while the settings they toggle belong to the chat below it.
+    var showMenu by remember { mutableStateOf(false) }
+
+    // THE GATE IS A FILE ON DISK NOW, not a saved credential: the coach is ready when the selected
+    // model is installed and this device can run it. There is no provider to pick and no key to
+    // enter, because nothing is sent anywhere.
+    val localReady = LocalCoachEngine.isSupported &&
+        LocalModelStore.isInstalled(context, LocalModelStore.selected(context))
+
+    val actions: @Composable () -> Unit = {
+        CoachHeaderActions(
+            onMenu = { showMenu = true },
+            onNewChat = {
+                vm.clearConversation()
+                // The engine is holding the old thread too; without this the "new" chat would
+                // answer with the previous one still in its context.
+                LocalCoachEngine.resetConversation()
+            },
+        )
+    }
+
+    if (localReady) {
+        // THE CHAT DOES NOT USE ScreenScaffold. That scaffold puts its content in a vertical scroll,
+        // which hands children an unbounded height — and a docked composer needs the opposite: a
+        // known viewport to sit at the bottom of. So the chat lays itself out, with its own compact
+        // header, and CoachChat weights the transcript against the input row.
+        // THE HEADER FLOATS TOO. Stacked in a Column it was a solid block the conversation stopped
+        // underneath; as an overlay the transcript runs the full height of the screen and scrolls
+        // BEHIND both the title row and the composer, which is what makes the chat feel like the
+        // whole screen rather than a panel between two bars. CoachChat pads its scroll by exactly
+        // what each overlay takes, so nothing is permanently hidden — it can all be scrolled clear.
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Palette.surfaceBase),
+        ) {
             CoachChat(vm = vm)
+
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopCenter)
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(
+                                Palette.surfaceBase,
+                                Palette.surfaceBase.copy(alpha = 0.92f),
+                                Color.Transparent,
+                            ),
+                        ),
+                    )
+                    .padding(horizontal = 28.dp)
+                    .padding(top = 20.dp, bottom = 18.dp),
+                verticalAlignment = Alignment.Top,
+            ) {
+                // Title only. The subtitle explained the screen to someone who had already opened
+                // it, on every visit, and took a line the conversation wanted.
+                Text(
+                    uiString(R.string.l10n_coach_screen_coach_b32c9ad3),
+                    style = NoopType.title1,
+                    color = Palette.textPrimary,
+                    modifier = Modifier.weight(1f),
+                )
+                actions()
+            }
         }
+    } else {
+        ScreenScaffold(
+            title = uiString(R.string.l10n_coach_screen_coach_b32c9ad3),
+            subtitle = uiString(R.string.coach_subtitle_local),
+            trailing = actions,
+            topBackground = screenBackdropSlot(showDayCycleBackground, skyBehindCards),
+            fullBleedBackground = screenBackdropFullBleed(showDayCycleBackground, skyBehindCards),
+        ) {
+            LocalCoachSetup()
+        }
+    }
+
+    if (showMenu) {
+        CoachMenuSheet(vm = vm, onDismiss = { showMenu = false })
     }
 }
 
-// MARK: - Setup (no key saved)
-
+/**
+ * Everything that used to sit above the transcript: consent, the editable instructions, and the
+ * morning brief. One sheet, opened from the header, so the chat screen is a chat screen.
+ */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-private fun CoachSetup(vm: CoachViewModel) {
+private fun CoachMenuSheet(vm: CoachViewModel, onDismiss: () -> Unit) {
     val context = LocalContext.current
-    val provider by vm.provider.collectAsStateWithLifecycle()
-    val model by vm.model.collectAsStateWithLifecycle()
-    val availableModels by vm.availableModels.collectAsStateWithLifecycle()
-    val refreshingModels by vm.refreshingModels.collectAsStateWithLifecycle()
-    val customBaseUrl by vm.customBaseUrl.collectAsStateWithLifecycle()
-    val customAuthHeader by vm.customAuthHeader.collectAsStateWithLifecycle()
-    // The setup card had no error line at all, so every way this screen can fail before a key is
-    // committed failed silently: a Refresh the provider turned away, a Connect to a server that wants
-    // auth. The wearer saw a button do nothing. The chat has had one since the beginning; this is the
-    // half that was missing.
-    val error by vm.error.collectAsStateWithLifecycle()
-    var keyInput by remember { mutableStateOf("") }
-    val isCustom = provider == AiProvider.CUSTOM
-
-    NoopCard(padding = 20.dp) {
-        Column(verticalArrangement = Arrangement.spacedBy(18.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Icon(Icons.Filled.Lock, contentDescription = null, tint = Palette.accent, modifier = Modifier.size(18.dp))
-                Text(uiString(R.string.l10n_coach_screen_connect_a_provider_6967f288), style = NoopType.headline, color = Palette.textPrimary)
-            }
-            Text(
-                if (isCustom)
-                    "Point the coach at any OpenAI-compatible server: a local model (Ollama, LM " +
-                        "Studio, llama.cpp) keeps everything on your device; an API key is optional."
-                else
-                    "Bring your own API key. It is stored encrypted on this device and only used to " +
-                        "send your question plus a short summary of your metrics to the provider you pick.",
-                style = NoopType.subhead, color = Palette.textSecondary,
-            )
-
-            // Provider choice.
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Overline("Provider")
-                SegmentedPillControl(
-                    items = AiProvider.entries,
-                    selection = provider,
-                    label = { it.displayName },
-                    onSelect = { vm.selectProvider(context, it) },
-                )
-            }
-
-            // Server URL, Custom (local LLM) only.
-            if (isCustom) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Overline("Server URL")
-                    OutlinedTextField(
-                        value = customBaseUrl,
-                        onValueChange = { vm.setCustomBaseUrl(context, it) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .semantics { contentDescription = uiString(R.string.l10n_coach_screen_server_url_1d5d1eff) },
-                        placeholder = { Text("http://localhost:11434/v1", style = NoopType.body, color = Palette.textTertiary) },
-                        textStyle = NoopType.mono(13f),
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
-                        colors = coachFieldColors(),
-                        shape = RoundedCornerShape(14.dp),
-                    )
-                }
-
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Overline(uiString(R.string.l10n_coach_screen_key_header_3f2a9b10))
-                    SegmentedPillControl(
-                        items = CustomAiAuthHeader.entries,
-                        selection = customAuthHeader,
-                        label = { it.displayName },
-                        onSelect = { vm.setCustomAuthHeader(context, it) },
-                    )
-                    Text(
-                        uiString(R.string.l10n_coach_screen_use_bearer_for_most_local_servers_4429ab64),
-                        style = NoopType.footnote,
-                        color = Palette.textSecondary,
-                    )
-                }
-            }
-
-            // Model dropdown + live-list refresh.
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    val consent by vm.consent.collectAsStateWithLifecycle()
+    androidx.compose.material3.ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        containerColor = Palette.surfaceRaised,
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            NoopCard(padding = 14.dp, tint = Palette.chargeColor) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Overline("Model")
-                    Spacer(Modifier.weight(1f))
-                    RefreshModelsButton(
-                        refreshing = refreshingModels,
-                        // Cloud providers need a saved key to fetch; a local server just needs a URL.
-                        enabled = if (isCustom) customBaseUrl.isNotBlank() else vm.hasKey(context),
-                        onClick = { vm.refreshModels(context) },
+                    Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Text(
+                            uiString(R.string.l10n_coach_screen_let_the_coach_use_my_data_405d1188),
+                            style = NoopType.subhead, color = Palette.textPrimary,
+                        )
+                        Text(
+                            if (consent) uiString(R.string.coach_consent_on) else uiString(R.string.coach_consent_off),
+                            style = NoopType.footnote, color = Palette.textTertiary,
+                        )
+                    }
+                    androidx.compose.material3.Switch(
+                        checked = consent,
+                        onCheckedChange = { vm.setConsent(context, it) },
                     )
                 }
-                ModelDropdown(
-                    models = availableModels,
-                    selected = model,
-                    onSelect = { vm.selectModel(context, it) },
-                )
             }
-
-            // Masked key field, optional for a local Custom server.
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Overline(if (isCustom) "API Key (optional)" else "API Key")
-                CoachKeyField(
-                    value = keyInput,
-                    onValueChange = { keyInput = it },
-                    placeholder = if (isCustom) "Only if your server requires one"
-                                  else "Paste your ${provider.displayName} key",
-                )
-            }
-
-            // Connect (Custom) / Save key (cloud).
-            if (isCustom) {
-                CoachPrimaryButton(
-                    label = uiString(R.string.l10n_coach_screen_connect_b65463cb),
-                    enabled = customBaseUrl.isNotBlank(),
-                    onClick = {
-                        if (keyInput.isNotBlank()) vm.saveKey(context, keyInput)
-                        vm.connectCustom(context)
-                    },
-                )
-            } else {
-                CoachPrimaryButton(
-                    label = uiString(R.string.l10n_coach_screen_save_key_f5216b3a),
-                    enabled = keyInput.isNotBlank(),
-                    onClick = { vm.saveKey(context, keyInput) },
-                )
-            }
-
-            // Whatever the last attempt from THIS card ran into. No repair affordance beside it:
-            // unlike the chat, the key field is already on screen, which is the whole point of the card.
-            val errorMsg = error
-            if (errorMsg != null) {
-                Text(
-                    errorMsg,
-                    style = NoopType.subhead,
-                    color = Palette.statusCritical,
-                    modifier = Modifier.semantics {
-                        contentDescription = uiString(R.string.l10n_coach_screen_coach_error_error_ad9c8c46, errorMsg)
-                    },
-                )
-            }
-
-            // Privacy note, one line, always visible.
-            PrivacyNote(local = isCustom)
+            CoachInstructions(vm = vm)
+            MorningBriefCard(vm = vm)
         }
     }
 }
@@ -268,6 +255,7 @@ private fun CoachChat(vm: CoachViewModel) {
     val context = LocalContext.current
     val messages by vm.messages.collectAsStateWithLifecycle()
     val sending by vm.sending.collectAsStateWithLifecycle()
+    val sendStartedAtMs by vm.sendStartedAtMs.collectAsStateWithLifecycle()
     val error by vm.error.collectAsStateWithLifecycle()
     // Only ever read inside the error branch below — see CoachViewModel.keyRejected.
     val keyRejected by vm.keyRejected.collectAsStateWithLifecycle()
@@ -319,35 +307,45 @@ private fun CoachChat(vm: CoachViewModel) {
         vm.consumeScheduledBriefIfAny(context)
     }
 
-    Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    // THE COMPOSER IS DOCKED, the transcript scrolls under it. Everything above the switch sits in
+    // a weighted, independently scrolling column; the switch and the input row are siblings OUTSIDE
+    // it, so they hold the bottom of the screen however long the conversation gets. Before this the
+    // whole screen was one scroll and the input line drifted off the bottom as soon as a couple of
+    // answers landed.
+    // THE COMPOSER FLOATS OVER THE CONVERSATION. A Box, not a Column: stacked, the input row and
+    // the model switch took a solid band off the bottom of the screen and the transcript ended above
+    // it. Floating, the chat runs the full height and scrolls UNDER a translucent composer, which is
+    // the arrangement every messaging app settled on for the same reason.
+    //
+    // The scroll gets bottom padding the height of what floats over it, so the last message can
+    // always be scrolled clear — floating must not mean permanently covered.
+    // MEASURED, NOT ASSUMED. The composer's height is whatever its contents add up to, and the
+    // transcript's bottom padding has to match it exactly or the conversation is either permanently
+    // covered (too little) or floating above a dead band (too much). It was too little: the Fast/Deep
+    // switch sat on top of the last messages.
+    val density = LocalDensity.current
+    var composerHeight by remember { mutableStateOf(FLOATING_COMPOSER_CLEARANCE) }
 
-        // Active-provider strip + reset-key affordance.
-        NoopCard(padding = 14.dp, tint = Palette.chargeColor) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                // The pill takes the flexible space (ellipsizing a long model id); the Disconnect keeps
-                // its intrinsic single-line width so it can never be squeezed into a vertical stack (#1074).
-                StatePill(
-                    title = uiString(R.string.l10n_coach_screen_provider_displayname_model_8b39f761, provider.displayName, model),
-                    tone = StrandTone.Accent, showsDot = true,
-                    modifier = Modifier.weight(1f),
-                )
-                Spacer(Modifier.width(8.dp))
-                val disconnectInteraction = remember { MutableInteractionSource() }
-                Text(
-                    uiString(R.string.l10n_coach_screen_disconnect_ed28e068),
-                    style = NoopType.caption,
-                    color = Palette.textSecondary,
-                    maxLines = 1,
-                    softWrap = false,
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(50))
-                        .liquidPress(disconnectInteraction)
-                        .clickable(interactionSource = disconnectInteraction, indication = null) { vm.disconnect(context) }
-                        .padding(horizontal = 10.dp, vertical = 6.dp)
-                        .semantics { contentDescription = uiString(R.string.l10n_coach_screen_disconnect_provider_fa13625c) },
-                )
-            }
-        }
+    Box(modifier = Modifier.fillMaxSize()) {
+      Column(
+          modifier = Modifier
+              .fillMaxSize()
+              .verticalScroll(rememberScrollState())
+              // The scroll runs edge to edge; the padding is what lets the FIRST and LAST message be
+              // scrolled out from under the two overlays. Side padding lives here rather than on the
+              // parent so the fades above and below reach the screen edges.
+              .padding(horizontal = 28.dp)
+              .padding(
+                  top = FLOATING_HEADER_CLEARANCE,
+                  bottom = composerHeight + COMPOSER_BREATHING_ROOM,
+              ),
+          verticalArrangement = Arrangement.spacedBy(16.dp),
+      ) {
+
+        // The provider strip, the model pill and Disconnect were removed with the API lane: there
+        // is no provider to name and no key to disconnect from. What used to live here (consent, the
+        // system prompt, the morning brief) moved into the header menu so the transcript gets the
+        // room — see CoachMenuSheet.
 
         if (showClearConfirm) {
             AlertDialog(
@@ -365,38 +363,9 @@ private fun CoachChat(vm: CoachViewModel) {
             )
         }
 
-        // Data-access consent, off by default; no metrics are sent until this is on.
-        //
-        // The ON line NAMES what a session carries, rather than saying "workouts" and leaving the
-        // reader to guess how much that is. It used to mean a count and an effort figure; since #2033
-        // it means the sport, how long, how far and how hard, per session. That is a materially
-        // different disclosure and the toggle is the only place someone is asked to agree to it, so it
-        // says so instead of making them read a PR to find out. Localised rather than inline, which the
-        // i18n baseline also wanted: an English literal here reached every locale untranslated.
-        val consent by vm.consent.collectAsStateWithLifecycle()
-        NoopCard(padding = 14.dp, tint = Palette.chargeColor) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                    Text(uiString(R.string.l10n_coach_screen_let_the_coach_use_my_data_405d1188), style = NoopType.subhead, color = Palette.textPrimary)
-                    Text(
-                        if (consent) uiString(R.string.coach_consent_on)
-                        else uiString(R.string.coach_consent_off),
-                        style = NoopType.footnote, color = Palette.textTertiary,
-                    )
-                }
-                androidx.compose.material3.Switch(
-                    checked = consent,
-                    onCheckedChange = { vm.setConsent(context, it) },
-                )
-            }
-        }
-
-        // Editable system prompt, inline in the settings, collapsed by default. Edits persist and
-        // take effect on the next message (the engine reads the stored prompt fresh per send).
-        CoachInstructions(vm = vm)
-
-        // K5: the scheduled morning-brief notification.
-        MorningBriefCard(vm = vm)
+        // Consent, the editable instructions and the morning brief all moved into the header menu
+        // (the â‹¯ button): each was a full-width card the wearer scrolled past on every visit to reach
+        // the conversation, and the conversation is what this screen is for.
 
         // Transcript or empty-state with suggested prompts.
         if (messages.isEmpty()) {
@@ -412,7 +381,7 @@ private fun CoachChat(vm: CoachViewModel) {
         } else {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 messages.forEach { msg -> ChatBubble(msg, vm) }
-                if (sending) ThinkingBubble()
+                if (sending) ThinkingBubble(startedAtMs = sendStartedAtMs)
                 // K7: follow-up suggestion chips after each assistant reply (when not mid-send).
                 if (!sending && messages.isNotEmpty() && messages.last().role == "assistant") {
                     SuggestedPrompts(prompts = vm.followUpSuggestions, onPick = { input = it })
@@ -433,33 +402,35 @@ private fun CoachChat(vm: CoachViewModel) {
                 color = Palette.statusCritical,
                 modifier = Modifier.semantics { contentDescription = uiString(R.string.l10n_coach_screen_coach_error_error_ad9c8c46, errorMsg) },
             )
-            // A rejected key is the one failure the wearer can act on from here, and the message
-            // already tells them to: "Check the key and try again". Until this, the screen offered
-            // nowhere to check it. The field is rendered INSIDE the error branch, never on its own
-            // flag, so it cannot outlive the message that justifies it.
-            if (keyRejected) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        uiString(R.string.coach_key_rejected_hint),
-                        style = NoopType.footnote,
-                        color = Palette.textSecondary,
-                    )
-                    CoachKeyField(
-                        value = keyFix,
-                        onValueChange = { keyFix = it },
-                        placeholder = uiString(R.string.coach_key_rejected_placeholder, provider.displayName),
-                    )
-                    CoachPrimaryButton(
-                        label = uiString(R.string.coach_key_rejected_action),
-                        enabled = keyFix.isNotBlank(),
-                        onClick = {
-                            vm.saveKey(context, keyFix)
-                            keyFix = ""
-                        },
-                    )
-                }
-            }
         }
+
+      }
+
+      // The floating half: model switch + composer, over a soft fade so text scrolling underneath
+      // does not collide with the input.
+      Column(
+          modifier = Modifier
+              .align(Alignment.BottomCenter)
+              .fillMaxWidth()
+              // What the transcript has to clear. Reported on every layout, so the padding follows the
+              // token-estimate row appearing and the keyboard changing the composer's height.
+              .onSizeChanged { composerHeight = with(density) { it.height.toDp() } }
+              .background(
+                  Brush.verticalGradient(
+                      listOf(Color.Transparent, Palette.surfaceBase.copy(alpha = 0.92f), Palette.surfaceBase),
+                  ),
+              )
+              .padding(horizontal = 28.dp)
+              .padding(
+                  top = Metrics.space16,
+                  // Clear the shell's floating nav bar, or the composer sits behind it.
+                  bottom = Metrics.space8 + BottomBarStyleStore.barHeightForContent(),
+              ),
+          verticalArrangement = Arrangement.spacedBy(Metrics.space8),
+      ) {
+        // Which model answers, left-aligned directly above the composer: the choice belongs next to
+        // the thing it changes, and it is two words rather than a settings trip.
+        LocalModelSwitch()
 
         // Input row + Send, a frosted overlay surface so the composer reads as a docked input bar.
         // K4: the mic button (on-device voice input) sits between the text field and Send.
@@ -472,6 +443,7 @@ private fun CoachChat(vm: CoachViewModel) {
                 if (error != null) vm.clearError()
             },
             sending = sending,
+            onStop = { vm.stopGenerating() },
             onSend = {
                 vm.send(context, input)
                 input = ""
@@ -511,8 +483,10 @@ private fun CoachChat(vm: CoachViewModel) {
             }
         }
 
-        // Privacy note repeated under the input so it's always on screen.
-        PrivacyNote(local = provider == AiProvider.CUSTOM)
+        // The old privacy line described the API lane ("only your question and a short metrics
+        // summary are sent", "talks only to the server URL you set"). Neither is true any more:
+        // nothing is sent anywhere, so the note that qualified the sending went with it.
+      }
     }
 }
 
@@ -738,7 +712,25 @@ private fun ChatBubble(msg: ChatMsg, vm: CoachViewModel) {
 }
 
 @Composable
-private fun ThinkingBubble() {
+private fun ThinkingBubble(startedAtMs: Long) {
+    // THE WAIT IS COUNTED OUT LOUD. On this phone an answer takes tens of seconds, and a spinner with
+    // no number cannot tell "working" apart from "hung" — the wearer reasonably reads the second one
+    // and reaches for the stop button. A ticking figure says the model is still moving, and it makes
+    // the cost of a question visible instead of mysterious.
+    //
+    // [startedAtMs] comes from the ViewModel rather than from a `remember` here: this composable is
+    // destroyed when the wearer leaves the Coach tab, and a locally remembered start time restarted the
+    // count at zero every time they came back — understating exactly the wait they left because of.
+    var seconds by remember { mutableStateOf(0) }
+    LaunchedEffect(startedAtMs) {
+        while (true) {
+            // Wall clock, not a count of sleeps: a coroutine that misses a tick under load would
+            // otherwise report a wait shorter than the one the wearer is sitting through.
+            seconds = ((System.currentTimeMillis() - startedAtMs) / 1000L).toInt().coerceAtLeast(0)
+            kotlinx.coroutines.delay(250)
+        }
+    }
+
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
         Row(
             modifier = Modifier
@@ -749,12 +741,15 @@ private fun ThinkingBubble() {
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(16.dp),
-                strokeWidth = 2.dp,
-                color = Palette.accent,
-            )
+            // A calm ring, not Material's 1.3 s sweep-and-spin: this reports a model that takes
+            // tens of seconds, and a frantic indicator misstates that pace.
+            CalmSpinner(size = 16.dp)
             Text(uiString(R.string.l10n_coach_screen_thinking_a60d9c9c), style = NoopType.subhead, color = Palette.textSecondary)
+            Text(
+                uiString(R.string.coach_thinking_seconds, seconds),
+                style = NoopType.captionNumber,
+                color = Palette.textTertiary,
+            )
         }
     }
 }
@@ -1034,6 +1029,7 @@ private fun MicComposerRow(
     onInputChange: (String) -> Unit,
     sending: Boolean,
     onSend: () -> Unit,
+    onStop: () -> Unit,
 ) {
     val context = LocalContext.current
     var isRecording by remember { mutableStateOf(false) }
@@ -1126,10 +1122,13 @@ private fun MicComposerRow(
             )
         }
 
+        // ONE BUTTON, TWO JOBS. While the model is working, the thing you want in that corner is
+        // the way out of it — a disabled send glyph offers nothing, and an answer that takes tens of
+        // seconds needs an exit that is where the thumb already is.
         SendButton(
-            enabled = input.isNotBlank() && !sending,
+            enabled = sending || input.isNotBlank(),
             sending = sending,
-            onClick = onSend,
+            onClick = { if (sending) onStop() else onSend() },
         )
     }
 
@@ -1184,7 +1183,12 @@ private fun MicButton(
 
 @Composable
 private fun SendButton(enabled: Boolean, sending: Boolean, onClick: () -> Unit) {
-    val bg = if (enabled) Palette.accent else Palette.surfaceInset
+    val stopLabel = uiString(R.string.coach_stop_generating)
+    val bg = when {
+        sending -> Palette.statusWarning
+        enabled -> Palette.accent
+        else -> Palette.surfaceInset
+    }
     val interaction = remember { MutableInteractionSource() }
     Box(
         modifier = Modifier
@@ -1199,49 +1203,31 @@ private fun SendButton(enabled: Boolean, sending: Boolean, onClick: () -> Unit) 
                         .clickable(interactionSource = interaction, indication = null, onClick = onClick)
                 else it
             }
-            .semantics { contentDescription = uiString(R.string.l10n_coach_screen_send_message_c70a890d) },
+            .semantics {
+                contentDescription =
+                    if (sending) stopLabel else uiString(R.string.l10n_coach_screen_send_message_c70a890d)
+            },
         contentAlignment = Alignment.Center,
     ) {
-        if (sending) {
-            CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp, color = Palette.accent)
-        } else {
-            Icon(
-                Icons.AutoMirrored.Filled.Send,
-                contentDescription = null,
-                tint = if (enabled) Palette.surfaceBase else Palette.textTertiary,
-                modifier = Modifier.size(20.dp),
-            )
-        }
+        // NO SECOND SPINNER. The "Thinking" bubble in the transcript already reports the wait, and
+        // two rings turning at once on one screen read as two separate things happening. The send
+        // glyph simply dims while a question is in flight.
+        Icon(
+            if (sending) Icons.Filled.Stop else Icons.AutoMirrored.Filled.Send,
+            contentDescription = null,
+            tint = if (enabled) Palette.surfaceBase else Palette.textTertiary,
+            modifier = Modifier.size(20.dp),
+        )
     }
 }
 
 // MARK: - Privacy note (one line)
 
-@Composable
-private fun PrivacyNote(local: Boolean = false) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        Icon(Icons.Filled.Lock, contentDescription = null, tint = Palette.textTertiary, modifier = Modifier.size(13.dp))
-        Text(
-            if (local)
-                "The coach talks only to the server URL you set. Point it at a local model to " +
-                    "keep everything on your device. Nothing is sent until you ask."
-            else
-                "Private by default: only your question and a short metrics summary are sent, " +
-                    "and only after you set a key.",
-            style = NoopType.footnote,
-            color = Palette.textTertiary,
-        )
-    }
-}
 
 // MARK: - Shared field colors (dark, design-system tinted)
 
 @Composable
-private fun coachFieldColors() = OutlinedTextFieldDefaults.colors(
+internal fun coachFieldColors() = OutlinedTextFieldDefaults.colors(
     focusedTextColor = Palette.textPrimary,
     unfocusedTextColor = Palette.textPrimary,
     disabledTextColor = Palette.textTertiary,

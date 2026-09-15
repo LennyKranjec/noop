@@ -7,6 +7,15 @@
 build/
 captures/
 
+# …except the ONE checked-in AAR, which is a DEPENDENCY rather than a build output.
+#
+# `app/libs/llama-android-*.aar` is llama.cpp's Android library, built from source and committed on
+# purpose — app/libs/README.md is the whole argument for why — and app/build.gradle.kts consumes it as
+# a local file dependency. The blanket `*.aar` rule above is about build output; without this exception
+# it silently swallows the app's inference engine, and a fresh clone or a CI checkout then fails with a
+# missing-file error that points at Gradle instead of at this line.
+!app/libs/*.aar
+
 # Local config — points at your machine's Android SDK; never commit.
 local.properties
 

@@ -1573,7 +1573,7 @@
     <string name="today_load_ratio">carga %1$s</string>
 
     <!-- #453 base-catalog locale completion -->
-    <string name="app_name">NOOP</string>
+    <string name="app_name">system</string>
     <string name="widget_description">Hoy \'s Descanso, carga y esfuerzo, con frecuencia cardíaca viva y batería de correa a un vistazo.</string>
     <string name="widget_compact_name">NOOP Compacto</string>
     <string name="widget_compact_description">Resto compacto, carga y effort widget, con frecuencia cardíaca viva y batería de correa.</string>
@@ -1588,7 +1588,7 @@
     <string name="nav_stress">Estrés</string>
     <string name="nav_workouts">Entrenamientos</string>
     <string name="nav_trends">Tendencias</string>
-    <string name="nav_coach">Entrenador</string>
+    <string name="nav_coach">System</string>
     <string name="nav_insights_hub">Lo que te mueve</string>
     <string name="nav_insights">Análisis</string>
     <string name="nav_explore">Explorar</string>
@@ -2730,6 +2730,10 @@
     <string name="coach_generate_now">Generar ahora</string>
     <string name="coach_status_suffix">: %1$s</string>
     <string name="coach_no_reply">(sin respuesta)</string>
+    <string name="coach_thinking_seconds">%1$ds</string>
+    <string name="coach_only_reasoning">_El coach se quedó sin espacio antes de llegar a una respuesta. Su razonamiento hasta ahora:_
+
+%1$s</string>
     <string name="coach_stream_interrupted">%1$s\n\n*(transmisión interrumpida)*</string>
     <string name="coach_today_brief_format">Resumen de hoy\n\n%1$s</string>
     <string name="coach_brief_widget_title">✦ Resumen del Coach</string>
@@ -2774,4 +2778,64 @@
     <string name="l10n_today_screen_scan_and_connect_40157030">Buscar y conectar</string>
     <string name="l10n_health_screen_fitness_age_stops_here_vo_max_383d989a">La edad de forma física se detiene aquí. El VO₂máx no.</string>
     <string name="l10n_app_changelog_a_stress_screen_that_keeps_up_f7ec3f36">Una pantalla de estrés que no se queda atrás, lecturas del WHOOP 5 en las unidades que envía la banda, y un anillo que deja de repetirse</string>
+    <string name="nav_reminders">Recordatorios</string>
+    <string name="nav_goals">Objetivos</string>
+    <string name="reminders_title">Recordatorios</string>
+    <string name="reminders_subtitle">Avisos que el coach escribe para ti</string>
+    <string name="reminders_add">Nuevo recordatorio</string>
+    <string name="reminders_delete">Eliminar recordatorio</string>
+    <string name="reminders_empty">Aún no hay recordatorios. Añade uno aquí o pídeselo al coach: «recuérdame acostarme a las 22:00».</string>
+    <string name="reminders_hour">Hora</string>
+    <string name="reminders_minute">Minuto</string>
+    <string name="reminders_context_label">Para qué</string>
+    <string name="reminders_context_hint">Hora de dormir: quiero ocho horas</string>
+    <string name="reminders_save">Añadir recordatorio</string>
+    <string name="reminders_repeat_daily">A diario</string>
+    <string name="reminders_repeat_weekdays">Días laborables</string>
+    <string name="reminders_repeat_weekends">Fines de semana</string>
+    <string name="reminders_repeat_weekly">Semanal</string>
+    <string name="reminder_notification_title">Coach</string>
+    <string name="reminder_channel_name">Recordatorios del coach</string>
+    <string name="reminder_channel_desc">Recordatorios que tú o el coach habéis configurado, escritos en este teléfono.</string>
+    <string name="coach_reminder_added">Recordatorio fijado para las %1$s: %2$s</string>
+    <string name="coach_reminder_deleted">Recordatorio eliminado: %1$s — %2$s</string>
+    <string name="coach_reminder_not_found">Ningún recordatorio concreto coincide con «%1$s», así que no se eliminó nada.</string>
+    <string name="coach_reminder_full">Ya tienes %1$d recordatorios, que es el límite. Elimina uno primero.</string>
+    <string name="coach_reminder_unparsed">El coach intentó cambiar un recordatorio y se equivocó con el formato, así que nada cambió.</string>
+    <string name="goals_title">Objetivos</string>
+    <string name="goals_subtitle">Hacia dónde te dirige el coach</string>
+    <string name="goals_explainer">Con tus propias palabras. El coach lo lee al empezar cada conversación, y tu misión diaria se escribe a partir de esto.</string>
+    <string name="goals_hint">Volver a bajar de 20 minutos en 5 km sin arruinar mi sueño. Dejar de saltarme el día de piernas.</string>
+    <string name="goals_counter">%1$d / %2$d caracteres</string>
+    <string name="mission_title">Misión de hoy</string>
+    <string name="mission_xp">%1$d PX</string>
+    <string name="mission_claim">Hecho: reclamar</string>
+    <string name="mission_claimed">Reclamada. Mañana a la misma hora.</string>
+    <string name="mission_none_yet">Tu misión se escribe cada mañana a las 06:45. Todavía no hay ninguna para hoy.</string>
+    <string name="mission_failed">No se pudo escribir la misión: comprueba que haya un modelo instalado y que el coach pueda usar tus datos.</string>
+    <string name="mission_write_now">Escribir una ahora</string>
+    <string name="mission_writing">Escribiendo…</string>
+    <string name="mission_notification_title">Misión de hoy · %1$d PX</string>
+    <string name="mission_channel_name">Misión diaria</string>
+    <string name="mission_channel_desc">Lo único que hay que hacer hoy, escrito en este teléfono a las 06:45.</string>
+    <string name="quest_header">NOTIFICACIÓN DEL SISTEMA</string>
+    <string name="quest_accept">ACEPTAR</string>
+    <string name="quest_decline">Hoy no</string>
+    <string name="quest_rewards">Recompensas</string>
+    <string name="quest_complete">Marcar como hecha</string>
+    <string name="quest_abandon">Abandonar esta misión</string>
+    <string name="quest_reward_heart">Corazón</string>
+    <string name="quest_reward_lungs">Pulmones</string>
+    <string name="quest_reward_brain">Mente</string>
+    <string name="quest_reward_muscle">Músculo</string>
+    <string name="quest_reward_sleep">Sueño</string>
+    <string name="quest_reward_stress">Estrés</string>
+    <string name="streak_title">Rachas</string>
+    <string name="streak_sleep_regularity">En la cama a tiempo</string>
+    <string name="streak_sleep_duration">Siete horas</string>
+    <string name="streak_movement">En movimiento</string>
+    <string name="streak_days">%1$d d</string>
+    <string name="streak_none">Aún sin racha</string>
+    <string name="quest_deadline_warning">¡AVISO! — la recompensa caduca cuando lo hace el reloj.</string>
+    <string name="quests_section">Misiones</string>
 </resources>
