@@ -22,7 +22,6 @@ data class QuestTrigger(
     /** The directive, with its number already in it. Never model-written. */
     val target: String,
     val rewards: List<QuestReward>,
-    val xp: Int,
 )
 
 object QuestTriggers {
@@ -65,7 +64,6 @@ object QuestTriggers {
                         "${charge.roundToInt()}%, which is training into a hole.",
                     target = "20 minutes of Zone 2 or mobility only — nothing hard, and in bed early",
                     rewards = listOf(QuestReward.HEART, QuestReward.MUSCLE, QuestReward.SLEEP),
-                    xp = 60,
                 ),
             )
         }
@@ -79,7 +77,6 @@ object QuestTriggers {
                     observation = "They slept ${fmt(sleepHours)} hours, which is under six.",
                     target = "Lights out 45 minutes earlier than last night. No screen in bed",
                     rewards = listOf(QuestReward.SLEEP, QuestReward.BRAIN),
-                    xp = 50,
                 ),
             )
         }
@@ -95,7 +92,6 @@ object QuestTriggers {
                     observation = "They have taken $steps steps today, which is essentially none.",
                     target = "$STEPS_TARGET steps before the day is out",
                     rewards = listOf(QuestReward.HEART, QuestReward.LUNGS),
-                    xp = 40,
                 ),
             )
         }
@@ -109,7 +105,6 @@ object QuestTriggers {
                     observation = "Nothing above light effort has been recorded in four days.",
                     target = "One 30-minute session today. Anything that raises your heart rate",
                     rewards = listOf(QuestReward.HEART, QuestReward.MUSCLE),
-                    xp = 55,
                 ),
             )
         }
@@ -126,7 +121,6 @@ object QuestTriggers {
                         "${baseline.roundToInt()}ms — a fifth below normal for them.",
                     target = "10 minutes of slow breathing or meditation before this evening",
                     rewards = listOf(QuestReward.BRAIN, QuestReward.STRESS, QuestReward.HEART),
-                    xp = 45,
                 ),
             )
         }

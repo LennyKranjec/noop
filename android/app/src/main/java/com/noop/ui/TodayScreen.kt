@@ -1459,11 +1459,10 @@ fun TodayScreen(
                         }
                     }
                 }
-                Box(modifier = Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    // The wordmark gave this slot up to the account level. Same centred gutter, so
-                    // nothing about the header layout moved.
-                    LevelWordmark()
-                }
+                // The centred gutter stays EMPTY. It held a wordmark, then the account level; the
+                // level now rides in the shell's strip above every screen, and repeating it here would
+                // put the same number on screen twice, eight dp apart.
+                Spacer(modifier = Modifier.weight(1f))
                 CustomizeDisc(onClick = { showLayoutEditor = true })
             }
             // The reply to a tap that went nowhere. Wording comes from the BLE layer, the same text

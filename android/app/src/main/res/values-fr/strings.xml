@@ -2807,14 +2807,13 @@
     <string name="goals_hint">Repasser sous 20 minutes au 5 km sans saborder mon sommeil. Arrêter de sauter les jambes.</string>
     <string name="goals_counter">%1$d / %2$d caractères</string>
     <string name="mission_title">Mission du jour</string>
-    <string name="mission_xp">%1$d XP</string>
     <string name="mission_claim">Fait — encaisser</string>
     <string name="mission_claimed">Encaissée. Demain, même heure.</string>
     <string name="mission_none_yet">Votre mission est rédigée chaque matin à 06:45. Il n’y en a pas encore pour aujourd’hui.</string>
     <string name="mission_failed">La mission n’a pas pu être rédigée — vérifiez qu’un modèle est installé et que le coach peut utiliser vos données.</string>
     <string name="mission_write_now">En rédiger une maintenant</string>
     <string name="mission_writing">Rédaction…</string>
-    <string name="mission_notification_title">Mission du jour · %1$d XP</string>
+    <string name="mission_notification_title">Mission du jour</string>
     <string name="mission_channel_name">Mission quotidienne</string>
     <string name="mission_channel_desc">La seule chose à faire aujourd’hui, rédigée sur ce téléphone à 06:45.</string>
     <string name="quest_header">NOTIFICATION SYSTÈME</string>
@@ -2837,4 +2836,17 @@
     <string name="streak_none">Pas encore de série</string>
     <string name="quest_deadline_warning">AVERTISSEMENT ! — la récompense expire avec le chrono.</string>
     <string name="quests_section">Quêtes</string>
+    <string name="level_span_3d">3j</string>
+    <string name="level_span_1mo">1mo</string>
+    <string name="level_trend_a11y">Variation du niveau sur %1$s : %2$d points</string>
+    <string name="level_lever_a11y">%1$s a le plus de marge : %2$d points de niveau</string>
+    <string name="level_part_sleep">Sommeil</string>
+    <string name="level_part_heart">Cœur</string>
+    <string name="level_part_lungs">Poumons</string>
+    <string name="level_part_muscle">Muscle</string>
+    <string name="level_part_focus">Focus</string>
+    <string name="level_metric_share">%1$d%% du niveau</string>
+    <string name="level_metric_lvl">niv. %1$d</string>
+    <string name="level_no_data">Aucune donnée</string>
+    <string name="level_days_a11y">Moyenne des %1$d derniers jours</string>
 </resources>

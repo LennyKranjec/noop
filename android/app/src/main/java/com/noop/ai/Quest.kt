@@ -12,8 +12,9 @@ import java.util.UUID
 // something is wrong in a way the wearer can fix today — no steps at all, a week of hammering with no
 // recovery, a night that undid the last three.
 //
-// WHAT MAKES IT A QUEST AND NOT A NOTIFICATION: it is concrete, it is bounded, it has a price on it,
-// and it has to be ACCEPTED. A push that says "consider stretching" is ignorable in a way that a card
+// WHAT MAKES IT A QUEST AND NOT A NOTIFICATION: it is concrete, it is bounded, and it has to be
+// ACCEPTED. It carries no points: the level is measured from the body, not awarded for tapping, so a
+// quest's worth is the body system it helps — which is what its reward icons say. A push that says "consider stretching" is ignorable in a way that a card
 // demanding an answer is not, and accepting is the wearer choosing, which is the only reason any of
 // this works.
 //
@@ -77,7 +78,6 @@ data class Quest(
     val taunt: String,
     val target: String,
     val rewards: List<QuestReward>,
-    val xp: Int,
     val state: QuestState = QuestState.OFFERED,
     val dayKey: String = LocalDate.now().toString(),
     val createdAtMs: Long = System.currentTimeMillis(),
@@ -90,9 +90,6 @@ data class Quest(
      */
     val expiresAtMs: Long = System.currentTimeMillis() + DEFAULT_WINDOW_MS,
 ) {
-    /** The ledger key, so one quest pays out exactly once however many times the button is tapped. */
-    val claimKey: String get() = "quest-$id"
-
     /** Milliseconds left, floored at zero. */
     fun remainingMs(nowMs: Long = System.currentTimeMillis()): Long =
         (expiresAtMs - nowMs).coerceAtLeast(0L)
@@ -123,10 +120,6 @@ object QuestStore {
 
     /** How many are kept. Enough for a week of history; the list is read on every Today render. */
     const val MAX_KEPT = 40
-
-    /** The XP a quest may be worth, whatever a model suggests. */
-    const val MIN_XP = 10
-    const val MAX_XP = 150
 
     fun all(context: Context): List<Quest> {
         val raw = prefs(context).getString(KEY, null) ?: return emptyList()
@@ -188,7 +181,6 @@ object QuestStore {
                     .put("taunt", q.taunt)
                     .put("target", q.target)
                     .put("rewards", JSONArray(q.rewards.map { it.name }))
-                    .put("xp", q.xp)
                     .put("state", q.state.name)
                     .put("day", q.dayKey)
                     .put("createdAt", q.createdAtMs)
@@ -219,8 +211,6 @@ object QuestStore {
                     taunt = o.optString("taunt"),
                     target = target,
                     rewards = rewards,
-                    // Clamped, not trusted: part of this record came from a language model.
-                    xp = o.optInt("xp", MIN_XP).coerceIn(MIN_XP, MAX_XP),
                     state = QuestState.entries.firstOrNull { it.name == o.optString("state") }
                         ?: QuestState.OFFERED,
                     dayKey = o.optString("day").ifBlank { LocalDate.now().toString() },

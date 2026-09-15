@@ -169,7 +169,7 @@ internal fun QuestPopup(
                 )
             }
 
-            RewardRow(rewards = quest.rewards, xp = quest.xp)
+            RewardRow(rewards = quest.rewards)
 
             // THE CLOCK, and what runs out with it. The warning is plain rather than threatening: the
             // only thing that actually expires is the XP, and saying so is more honest than implying a
@@ -264,7 +264,7 @@ private fun TypedLine(text: String, shown: Int) {
  * only number here, and it is the one the app actually controls.
  */
 @Composable
-private fun RewardRow(rewards: List<QuestReward>, xp: Int) {
+private fun RewardRow(rewards: List<QuestReward>) {
     Column(verticalArrangement = Arrangement.spacedBy(Metrics.space8)) {
         Overline(uiString(R.string.quest_rewards))
         Row(
@@ -287,20 +287,6 @@ private fun RewardRow(rewards: List<QuestReward>, xp: Int) {
                         modifier = Modifier.size(Metrics.iconSmall),
                     )
                 }
-            }
-            Spacer(Modifier.weight(1f))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(
-                    Icons.Filled.Bolt,
-                    contentDescription = null,
-                    tint = Palette.accent,
-                    modifier = Modifier.size(Metrics.iconSmall),
-                )
-                Text(
-                    uiString(R.string.mission_xp, xp),
-                    style = NoopType.headline,
-                    color = Palette.accent,
-                )
             }
         }
     }

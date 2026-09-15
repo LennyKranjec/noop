@@ -2800,14 +2800,13 @@
     <string name="goals_hint">Voltar aos menos de 20 minutos nos 5 km sem arruinar o meu sono. Deixar de faltar ao treino de pernas.</string>
     <string name="goals_counter">%1$d / %2$d caracteres</string>
     <string name="mission_title">Missão de hoje</string>
-    <string name="mission_xp">%1$d XP</string>
     <string name="mission_claim">Feito — resgatar</string>
     <string name="mission_claimed">Resgatada. Amanhã à mesma hora.</string>
     <string name="mission_none_yet">A tua missão é escrita todas as manhãs às 06:45. Ainda não há nenhuma para hoje.</string>
     <string name="mission_failed">Não foi possível escrever a missão — confirma que há um modelo instalado e que o treinador pode usar os teus dados.</string>
     <string name="mission_write_now">Escrever uma agora</string>
     <string name="mission_writing">A escrever…</string>
-    <string name="mission_notification_title">Missão de hoje · %1$d XP</string>
+    <string name="mission_notification_title">Missão de hoje</string>
     <string name="mission_channel_name">Missão diária</string>
     <string name="mission_channel_desc">A única coisa a fazer hoje, escrita neste telefone às 06:45.</string>
     <string name="quest_header">NOTIFICAÇÃO DO SISTEMA</string>
@@ -2830,4 +2829,17 @@
     <string name="streak_none">Ainda sem sequência</string>
     <string name="quest_deadline_warning">AVISO! — a recompensa expira quando o relógio chegar ao fim.</string>
     <string name="quests_section">Missões</string>
+    <string name="level_span_3d">3d</string>
+    <string name="level_span_1mo">1mês</string>
+    <string name="level_trend_a11y">Variação de nível em %1$s: %2$d pontos</string>
+    <string name="level_lever_a11y">%1$s tem mais margem: %2$d pontos de nível</string>
+    <string name="level_part_sleep">Sono</string>
+    <string name="level_part_heart">Coração</string>
+    <string name="level_part_lungs">Pulmões</string>
+    <string name="level_part_muscle">Músculo</string>
+    <string name="level_part_focus">Foco</string>
+    <string name="level_metric_share">%1$d%% do nível</string>
+    <string name="level_metric_lvl">nív. %1$d</string>
+    <string name="level_no_data">Sem dados</string>
+    <string name="level_days_a11y">Média dos últimos %1$d dias</string>
 </resources>

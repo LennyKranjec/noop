@@ -2,63 +2,61 @@ package com.noop.ai
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
  * Reading a mission out of what the model actually wrote.
  *
- * The model is told to answer in two parts and will sometimes do something else. The rule these pin:
- * the MISSION is the valuable half and survives almost anything; the XP is the disposable half and
- * falls back rather than taking the mission down with it.
+ * The model is now asked for one thing — the mission itself. An earlier version also asked it to price
+ * the mission in XP; the currency is gone, so most of what these pin is TOLERANCE: a model that saw
+ * thousands of "XP: 40" lines in training still volunteers one occasionally, and it must not reach the
+ * card just because nothing asks for it any more.
  */
 class DailyMissionTest {
 
+    private val day = "2026-09-15"
+
     @Test
-    fun theStatedShapeIsRead() {
+    fun theMissionIsReadAsWritten() {
         val mission = DailyMissionWriter.parse(
-            "XP: 40\nBed by 22:30. Your HRV has been filing complaints.",
-            "2026-09-15",
+            "Bed by 22:30. Your HRV has been filing complaints.",
+            day,
         )!!
-        assertEquals(40, mission.xp)
         assertEquals("Bed by 22:30. Your HRV has been filing complaints.", mission.text)
-        assertEquals("2026-09-15", mission.dayKey)
+        assertEquals(day, mission.dayKey)
     }
 
     @Test
-    fun aMissingXpLineStillYieldsTheMission() {
-        val mission = DailyMissionWriter.parse("Walk for 30 minutes. Outside. Yes, really.", "2026-09-15")!!
-        assertEquals(DailyMissionStore.DEFAULT_XP, mission.xp)
-        assertTrue(mission.text.startsWith("Walk"))
+    fun aVolunteeredScoreLineIsStrippedRatherThanShown() {
+        val answer = listOf("XP: 40", "Swim.").joinToString("\n")
+        assertEquals("Swim.", DailyMissionWriter.parse(answer, day)!!.text)
     }
 
     @Test
-    fun anAbsurdXpIsClampedNotObeyed() {
-        // The figure comes from a language model, and 99999 XP would end the level system in one tap.
-        val mission = DailyMissionWriter.parse("XP: 99999\nDo a thing.", "2026-09-15")!!
-        assertEquals(DailyMissionStore.MAX_XP, mission.xp)
+    fun aMarkdownWrappedScoreLineIsStrippedToo() {
+        val answer = listOf("**XP: 55**", "Swim.").joinToString("\n")
+        assertEquals("Swim.", DailyMissionWriter.parse(answer, day)!!.text)
     }
 
     @Test
-    fun theXpLineIsNotLeftInTheTextTheWearerReads() {
-        val mission = DailyMissionWriter.parse("**XP: 55**\nSwim.", "2026-09-15")!!
-        assertEquals(55, mission.xp)
-        assertEquals("Swim.", mission.text)
+    fun aScoreMentionedMidSentenceIsLeftAlone() {
+        // Only a line that IS the score is dropped. A sentence that happens to contain a number is
+        // prose, and cutting it would take a mission's words out of its mouth.
+        val answer = "Worth it: 40 minutes of walking."
+        assertEquals(answer, DailyMissionWriter.parse(answer, day)!!.text)
     }
 
     @Test
     fun anAnswerWithNoProseIsNoMission() {
-        // An XP line and nothing else is not a mission, and storing one would put an empty card on Today.
-        assertNull(DailyMissionWriter.parse("XP: 40", "2026-09-15"))
-        assertNull(DailyMissionWriter.parse("   \n  ", "2026-09-15"))
+        // A score line and nothing else is not a mission, and storing one would put an empty card on
+        // Today.
+        assertNull(DailyMissionWriter.parse("XP: 40", day))
+        assertNull(DailyMissionWriter.parse("   \n  ", day))
+        assertNull(DailyMissionWriter.parse("", day))
     }
 
     @Test
-    fun theClaimKeyIsPerDaySoOneDayIsClaimedOnce() {
-        assertEquals("mission-2026-09-15", DailyMission("2026-09-15", "x", 10).claimKey)
-        assertTrue(
-            DailyMission("2026-09-15", "x", 10).claimKey !=
-                DailyMission("2026-09-16", "x", 10).claimKey,
-        )
+    fun theMissionIsKeyedToItsDaySoYesterdaysIsNotShownAsTodays() {
+        assertEquals(day, DailyMissionWriter.parse("Walk.", day)!!.dayKey)
     }
 }

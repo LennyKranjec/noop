@@ -15,13 +15,12 @@ import org.junit.Test
  */
 class QuestTest {
 
-    private fun quest(xp: Int = 40, expiresInMs: Long = 3_600_000) = Quest(
+    private fun quest(expiresInMs: Long = 3_600_000) = Quest(
         kind = QuestKind.SIDE,
         title = "Proof of Life",
         taunt = "The step counter checked twice.",
         target = "8000 steps",
         rewards = listOf(QuestReward.HEART),
-        xp = xp,
         expiresAtMs = System.currentTimeMillis() + expiresInMs,
     )
 
@@ -48,7 +47,7 @@ class QuestTest {
         val q = Quest(
             kind = QuestKind.DAILY,
             title = "t", taunt = "x", target = "y",
-            rewards = emptyList(), xp = 10,
+            rewards = emptyList(),
         )
         assertTrue(q.expiresAtMs > System.currentTimeMillis())
         assertTrue(q.remainingMs() <= Quest.DEFAULT_WINDOW_MS)
@@ -61,7 +60,6 @@ class QuestTest {
         assertEquals(q.id, back.id)
         assertEquals(q.target, back.target)
         assertEquals(q.rewards, back.rewards)
-        assertEquals(q.xp, back.xp)
         assertEquals(q.expiresAtMs, back.expiresAtMs)
     }
 
@@ -75,11 +73,6 @@ class QuestTest {
         assertEquals(created + Quest.DEFAULT_WINDOW_MS, back.expiresAtMs)
     }
 
-    @Test
-    fun anXpFigureFromAModelIsClampedOnTheWayIn() {
-        val raw = """[{"id":"a","kind":"SIDE","title":"t","taunt":"x","target":"y","xp":99999}]"""
-        assertEquals(QuestStore.MAX_XP, QuestStore.decode(raw).single().xp)
-    }
 
     // --- Triggers: what the DATA is allowed to decide -------------------------------------------
 

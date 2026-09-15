@@ -42,7 +42,6 @@ object QuestGenerator {
             taunt = written?.taunt ?: fallbackTaunt(trigger.id),
             target = trigger.target,
             rewards = trigger.rewards,
-            xp = trigger.xp.coerceIn(QuestStore.MIN_XP, QuestStore.MAX_XP),
         )
     }
 
@@ -66,7 +65,6 @@ object QuestGenerator {
             taunt = mission.text.take(MAX_TAUNT_CHARS),
             target = mission.text,
             rewards = rewardsForText(mission.text),
-            xp = mission.xp.coerceIn(QuestStore.MIN_XP, QuestStore.MAX_XP),
             dayKey = mission.dayKey,
         )
     }

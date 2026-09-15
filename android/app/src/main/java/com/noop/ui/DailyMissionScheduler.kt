@@ -112,7 +112,7 @@ object DailyMissionScheduler {
             val body = CoachBriefScheduler.oneLineSummary(mission.text)
             val n = NotificationCompat.Builder(context, CHANNEL_ID)
                 .setSmallIcon(R.drawable.ic_stat_heart)
-                .setContentTitle(context.getString(R.string.mission_notification_title, mission.xp))
+                .setContentTitle(context.getString(R.string.mission_notification_title))
                 .setContentText(body)
                 .setStyle(NotificationCompat.BigTextStyle().bigText(mission.text))
                 .setContentIntent(

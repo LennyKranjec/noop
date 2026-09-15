@@ -20,7 +20,6 @@ import com.noop.ai.QuestGenerator
 import com.noop.ai.QuestKind
 import com.noop.ai.QuestState
 import com.noop.ai.QuestStore
-import com.noop.gamify.XpLedger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -92,9 +91,8 @@ internal fun QuestHost(viewModel: AppViewModel, content: @Composable () -> Unit)
             QuestReviewCard(
                 quest = quest,
                 onComplete = {
-                    // The ledger decides whether XP is actually paid — a quest completed twice pays
-                    // once, however the UI got there.
-                    XpLedger.award(context, quest.claimKey, quest.xp)
+                    // Finishing records the state and nothing else. There is no payout: the level is
+                    // measured from the body, so a quest that worked shows up in tomorrow's metrics.
                     QuestStore.setState(context, quest.id, QuestState.COMPLETED)
                     reviewing = null
                     refresh()

@@ -126,11 +126,6 @@ internal fun QuestReviewCard(
                     color = Palette.textPrimary,
                     modifier = Modifier.weight(1f),
                 )
-                StatePill(
-                    title = uiString(R.string.mission_xp, quest.xp),
-                    tone = StrandTone.Accent,
-                    showsDot = false,
-                )
             }
             Text(quest.taunt, style = NoopType.subhead, color = Palette.textTertiary)
             Text(quest.target, style = NoopType.body, color = Palette.textPrimary)

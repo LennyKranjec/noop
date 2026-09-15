@@ -8,8 +8,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Text
@@ -109,11 +111,16 @@ internal fun MuscleModelCard(viewModel: AppViewModel) {
                 )
             }
 
+            // THE FIGURE GETS ITS OWN HEIGHT, and the legend is centred beside whatever that height
+            // turns out to be. Before this the two shared a row and the figure took the height the
+            // LEGEND forced — thirteen legend rows are taller than a 0.33-aspect body at this width, so
+            // the head and the feet were pushed under the title above and the line below. Fixing the
+            // height here means the body is never clipped by text, whichever way it is facing.
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Box(
                     modifier = Modifier
                         .weight(1f)
-                        .aspectRatio(0.46f),
+                        .height(FIGURE_HEIGHT),
                     contentAlignment = Alignment.Center,
                 ) {
                     BodyCanvas(side = side, loads = data.orEmpty(), peak = peak)
@@ -247,6 +254,16 @@ private fun masksFor(side: BodySide): List<Pair<MuscleGroup, Int>> = when (side)
  */
 private const val BODY_ASPECT = 695f / 2100f
 
+/**
+ * How tall the figure is drawn.
+ *
+ * A fixed height rather than an aspect on the width: the legend beside it is thirteen rows on the front
+ * view, and letting the taller of the two decide left the body either clipped by the text above and
+ * below or stretched to fill space it did not need. This is the height at which a full figure sits
+ * clear of both, and the canvas keeps its own proportions inside it.
+ */
+private val FIGURE_HEIGHT = 300.dp
+
 @Composable
 private fun BodyCanvas(side: BodySide, loads: Map<MuscleGroup, Double>, peak: Double) {
     val masks = masksFor(side)
@@ -255,7 +272,7 @@ private fun BodyCanvas(side: BodySide, loads: Map<MuscleGroup, Double>, peak: Do
     val bodyTint = Palette.textSecondary.copy(alpha = 0.55f)
 
     Box(
-        modifier = Modifier.fillMaxWidth().aspectRatio(BODY_ASPECT),
+        modifier = Modifier.fillMaxHeight().aspectRatio(BODY_ASPECT),
         contentAlignment = Alignment.Center,
     ) {
         // THE LOAD GOES UNDER THE LINE ART. Painted on top, the colour swallows the very contours it is

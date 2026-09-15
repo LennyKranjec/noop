@@ -68,8 +68,6 @@
 
     <!-- Account level + XP -->
     <string name="level_badge_prefix">Level</string>
-    <string name="xp_bar_level">Lv %1$d</string>
-    <string name="xp_bar_to_next">%1$d XP to Lv %2$d</string>
 
     <!-- Health · organs -->
     <string name="organs_title">Organs</string>
@@ -3020,14 +3018,13 @@
     <string name="goals_hint">Back under 20 minutes for 5k without wrecking my sleep. Stop skipping legs.</string>
     <string name="goals_counter">%1$d / %2$d characters</string>
     <string name="mission_title">Today’s mission</string>
-    <string name="mission_xp">%1$d XP</string>
     <string name="mission_claim">Done — claim it</string>
     <string name="mission_claimed">Claimed. Same time tomorrow.</string>
     <string name="mission_none_yet">Your mission is written each morning at 06:45. There is none for today yet.</string>
     <string name="mission_failed">The mission could not be written — check that a model is installed and that the coach may use your data.</string>
     <string name="mission_write_now">Write one now</string>
     <string name="mission_writing">Writing…</string>
-    <string name="mission_notification_title">Today’s mission · %1$d XP</string>
+    <string name="mission_notification_title">Today’s mission</string>
     <string name="mission_channel_name">Daily mission</string>
     <string name="mission_channel_desc">The one thing to do today, written on this phone at 06:45.</string>
     <string name="quest_header">SYSTEM NOTIFICATION</string>
@@ -3050,4 +3047,17 @@
     <string name="streak_none">No streak yet</string>
     <string name="quest_deadline_warning">WARNING! — the reward expires when the clock does.</string>
     <string name="quests_section">Quests</string>
+    <string name="level_span_3d">3d</string>
+    <string name="level_span_1mo">1mo</string>
+    <string name="level_trend_a11y">Level change over %1$s: %2$d points</string>
+    <string name="level_lever_a11y">%1$s has the most room: %2$d points of level</string>
+    <string name="level_part_sleep">Sleep</string>
+    <string name="level_part_heart">Heart</string>
+    <string name="level_part_lungs">Lungs</string>
+    <string name="level_part_muscle">Muscle</string>
+    <string name="level_part_focus">Focus</string>
+    <string name="level_metric_share">%1$d%% of level</string>
+    <string name="level_metric_lvl">lvl. %1$d</string>
+    <string name="level_no_data">No data</string>
+    <string name="level_days_a11y">Mean of the last %1$d days</string>
 </resources>

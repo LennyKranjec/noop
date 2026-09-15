@@ -185,14 +185,12 @@ fun TrendsScreen(vm: AppViewModel, onOpenSleep: () -> Unit = {}) {
         // with no derived days can still have a full week of lifting to show.
         item { MuscleModelCard(vm) }
 
-        // The organ tiles sit directly under the muscle model and BEFORE the Sleep door: they read
-        // the same night the Sleep screen details, so they belong on the way to it, not after it.
-        item { OrganCards(days = days, viewModel = vm) }
-
-        // The Sleep door. Above the empty check on purpose: an install with no derived days yet is
-        // exactly the one where the wearer goes looking for last night, and the old bottom-bar slot
-        // that used to take them there is gone.
-        item { SleepDoorCard(onOpenSleep) }
+        // Heart, lungs and sleep, directly under the muscle model. No heading of their own: the figure
+        // above already says what this part of the screen is, and a title here would label a label.
+        //
+        // The third tile IS the Sleep door. A full-width button whose only job was to open the thing
+        // shown directly above it has been removed — it could have been the thing itself, and now is.
+        item { VitalTrioCard(viewModel = vm, onOpenSleep = onOpenSleep) }
 
         if (days.isEmpty()) {
             item { EmptyTrends() }
@@ -1194,47 +1192,6 @@ private fun EmptyTrends() {
     )
 }
 
-/** The Health tab's door to the Sleep screen — what the bottom bar's Sleep slot used to be. */
-@Composable
-private fun SleepDoorCard(onOpen: () -> Unit) {
-    NoopCard(modifier = Modifier.clickable(onClick = onOpen), tint = Palette.sleepDeep) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Box(
-                modifier = Modifier
-                    .size(36.dp)
-                    .clip(RoundedCornerShape(Metrics.cornerSm))
-                    .background(Palette.sleepDeep.copy(alpha = 0.16f)),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    Icons.Filled.Bedtime,
-                    contentDescription = null,
-                    tint = Palette.sleepDeep,
-                    modifier = Modifier.size(Metrics.iconSmall),
-                )
-            }
-            Spacer(Modifier.width(Metrics.space12))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    stringResource(R.string.nav_sleep),
-                    style = NoopType.headline,
-                    color = Palette.textPrimary,
-                )
-                Text(
-                    stringResource(R.string.health_open_sleep_sub),
-                    style = NoopType.footnote,
-                    color = Palette.textTertiary,
-                )
-            }
-            Icon(
-                Icons.Filled.ChevronRight,
-                contentDescription = null,
-                tint = Palette.textTertiary,
-                modifier = Modifier.size(Metrics.iconSmall),
-            )
-        }
-    }
-}
 
 // MARK: - Small numeric helpers
 

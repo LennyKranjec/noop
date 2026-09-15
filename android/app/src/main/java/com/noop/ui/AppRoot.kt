@@ -574,7 +574,7 @@ fun AppRoot(viewModel: AppViewModel = viewModel()) {
             // including the drill-ins the same NavHost pushes, so it is a topBar rather than
             // something each screen has to remember to draw. Screens already lay out under the
             // Scaffold's `inner` padding, so nothing had to move to make room for it.
-            topBar = { XpOverlayBar() },
+            topBar = { LevelOverlayBar(viewModel) },
             bottomBar = {
                 // One unified "glass" bar: four evenly-spaced tabs — Today · Trends · Sleep · More
                 // (matches the iOS FloatingTabBar). The quick-action "+" lives in the Today header's

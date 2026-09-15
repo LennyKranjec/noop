@@ -55,8 +55,6 @@
     <string name="health_open_sleep_sub">Letzte Nacht, ihre Phasen und die ganze Nacht im Detail</string>
 
     <string name="level_badge_prefix">Level</string>
-    <string name="xp_bar_level">Lv %1$d</string>
-    <string name="xp_bar_to_next">%1$d XP bis Lv %2$d</string>
 
     <string name="organs_title">Organe</string>
     <string name="organs_subtitle">Was letzte Nacht gemessen hat, nach System</string>
@@ -2992,14 +2990,13 @@
     <string name="goals_hint">Wieder unter 20 Minuten auf 5 km, ohne meinen Schlaf zu ruinieren. Keinen Beintag mehr ausfallen lassen.</string>
     <string name="goals_counter">%1$d / %2$d Zeichen</string>
     <string name="mission_title">Mission des Tages</string>
-    <string name="mission_xp">%1$d XP</string>
     <string name="mission_claim">Erledigt — einlösen</string>
     <string name="mission_claimed">Eingelöst. Morgen zur gleichen Zeit.</string>
     <string name="mission_none_yet">Deine Mission wird jeden Morgen um 06:45 geschrieben. Für heute gibt es noch keine.</string>
     <string name="mission_failed">Die Mission konnte nicht geschrieben werden — prüfe, ob ein Modell installiert ist und der Coach deine Daten nutzen darf.</string>
     <string name="mission_write_now">Jetzt eine schreiben</string>
     <string name="mission_writing">Schreibt…</string>
-    <string name="mission_notification_title">Mission des Tages · %1$d XP</string>
+    <string name="mission_notification_title">Mission des Tages</string>
     <string name="mission_channel_name">Tagesmission</string>
     <string name="mission_channel_desc">Die eine Sache für heute, um 06:45 auf diesem Handy geschrieben.</string>
     <string name="quest_header">SYSTEMMELDUNG</string>
@@ -3022,4 +3019,17 @@
     <string name="streak_none">Noch keine Serie</string>
     <string name="quest_deadline_warning">WARNUNG! — Mit der Uhr verfällt die Belohnung.</string>
     <string name="quests_section">Quests</string>
+    <string name="level_span_3d">3T</string>
+    <string name="level_span_1mo">1M</string>
+    <string name="level_trend_a11y">Level-Änderung über %1$s: %2$d Punkte</string>
+    <string name="level_lever_a11y">%1$s hat den meisten Spielraum: %2$d Level-Punkte</string>
+    <string name="level_part_sleep">Schlaf</string>
+    <string name="level_part_heart">Herz</string>
+    <string name="level_part_lungs">Lunge</string>
+    <string name="level_part_muscle">Muskel</string>
+    <string name="level_part_focus">Fokus</string>
+    <string name="level_metric_share">%1$d%% des Levels</string>
+    <string name="level_metric_lvl">Lvl. %1$d</string>
+    <string name="level_no_data">Keine Daten</string>
+    <string name="level_days_a11y">Mittel der letzten %1$d Tage</string>
 </resources>
