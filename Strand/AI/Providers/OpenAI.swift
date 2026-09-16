@@ -51,6 +51,11 @@ struct OpenAIClient: AIProviderClient {
         var body: [String: Any] = ["model": model, "messages": wire, "stream": true]
         body["temperature"] = 0.6
         body["max_tokens"] = 4096
+        // ASK FOR THE BILL. A streamed turn reports no usage at all unless this is set, and the daily
+        // allowance the coach runs on is metered in tokens — without it the budget reading would count
+        // only the handful of turns that happen not to stream and then look comfortable right up to the
+        // 429. Providers that do not know the option ignore it; it adds one final chunk, not a round trip.
+        body["stream_options"] = ["include_usage": true]
 
         var req = URLRequest(url: provider.endpoint)
         req.httpMethod = "POST"
@@ -58,11 +63,18 @@ struct OpenAIClient: AIProviderClient {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
+        // A streamed turn's cost arrives in the LAST chunk, which carries no delta — so it is banked
+        // here and the turn is only marked unmetered if no chunk ever carried one.
+        var metered: Int?
         try await performStreamingRequest(req, session: session) { payload in
             if let delta = SseDeltas.openAiDelta(payload) {
                 onDelta(delta)
             }
+            if let tokens = AITokenBudget.totalTokens(inStreamPayload: payload) {
+                metered = tokens
+            }
         }
+        AITokenBudget.record(model: model, tokens: metered)
     }
 
     func fetchModels(key: String, session: URLSession) async throws -> [String] {
@@ -109,6 +121,9 @@ struct OpenAIClient: AIProviderClient {
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
         let json = try await performRequest(req, session: session)
+        // BEFORE the content check. A 200 with no assistant text still spent the prompt, and not
+        // counting it would make an empty-reply loop the cheapest-looking thing in the app.
+        AITokenBudget.record(model: model, tokens: AITokenBudget.totalTokens(in: json))
         guard let choices = json["choices"] as? [[String: Any]],
               let first = choices.first,
               let message = first["message"] as? [String: Any],

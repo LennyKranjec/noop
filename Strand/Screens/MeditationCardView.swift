@@ -29,6 +29,12 @@ private let roundButtonSize: CGFloat = 40
 struct MeditationCardView: View {
     @EnvironmentObject var repo: Repository
 
+    /// The breathing ring is decoration, and decoration stills on request. `poseStill` is the composed
+    /// gate — Reduce Motion, Low Power Mode and the app's own quiet-motion toggle — not the OS flag
+    /// alone, so a wearer who asked for a still screen in any of the three ways gets one.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var motion = NoopMotionState.shared
+
     @State private var lifetime: Double = 0
     @State private var window: [Double] = Array(repeating: 0, count: MeditationLog.windowDays)
     @State private var runningSince: Date?
@@ -57,7 +63,7 @@ struct MeditationCardView: View {
         .overlay(
             RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous)
                 .strokeBorder(StrandPalette.statusPositive.opacity(running ? 0.55 : 0), lineWidth: 1.5)
-                .animation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true), value: running)
+                .animation(StrandMotion.breathe(reduced: motion.poseStill(reduceMotion)), value: running)
                 .allowsHitTesting(false)
         )
         .task(id: repo.refreshSeq) { await reload() }

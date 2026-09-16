@@ -48,6 +48,9 @@ struct CoachView: View {
     @State private var briefStatus: String?
     /// K2: confirmation gate for the destructive "Clear conversation" toolbar action.
     @State private var showClearConfirm = false
+    /// Today's spend on the current model. Held rather than computed in `body`: it lives in
+    /// preferences, so nothing publishes a change and the view has to be told when to re-read.
+    @State private var budget: AITokenBudget.Reading?
     /// The ⋯ sheet holding consent, instructions, the brief and the connection.
     @State private var showCoachMenu = false
 
@@ -724,7 +727,80 @@ struct CoachView: View {
             }
             .accessibilityLabel("Model")
             Spacer(minLength: 0)
+            budgetPill
         }
+        // Re-read after every turn, and whenever the model changes — the reading lives in preferences
+        // rather than on the engine, so nothing publishes it. `sending` is the trigger that matters:
+        // it goes false exactly once a turn has been paid for.
+        .onAppear { budget = AITokenBudget.reading(model: coach.model) }
+        .onChangeCompat(of: coach.sending) { _ in budget = AITokenBudget.reading(model: coach.model) }
+        .onChangeCompat(of: coach.model) { _ in budget = AITokenBudget.reading(model: coach.model) }
+    }
+
+    /// TODAY'S ALLOWANCE, beside the model it belongs to.
+    ///
+    /// The free tier is metered per model per day, and running out looks from the inside exactly like
+    /// the app breaking: the coach stops answering, mid-conversation, with nothing said about why. A bar
+    /// that fills as the day goes on is the difference between a cliff and a slope you can see.
+    ///
+    /// It says nothing at all until the model has been used today. An empty meter on a fresh morning is
+    /// a number with no information in it, sitting next to the control it could be mistaken for part of.
+    @ViewBuilder
+    private var budgetPill: some View {
+        if let budget, !budget.isUntouched {
+            Menu {
+                Text(budget.used.formatted() + " of " + budget.limit.formatted()
+                     + " tokens used today on " + budget.model)
+                if budget.unmetered > 0 {
+                    // SAID OUT LOUD. Those turns cost something the provider did not report, so the
+                    // figure above is a floor. A budget that quietly under-counts is worse than none.
+                    Text("\(budget.unmetered) turn(s) today reported no usage, so this is a floor.")
+                }
+                Text("Counted on this device, and it resets at your own midnight — the provider's own "
+                     + "window may roll at a different hour.")
+                Divider()
+                Button {
+                    AITokenBudget.reset(model: coach.model)
+                    self.budget = AITokenBudget.reading(model: coach.model)
+                } label: {
+                    Label("Reset today's count", systemImage: "arrow.counterclockwise")
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    // A two-point bar rather than a percentage: the question is "how much is left",
+                    // which is a length, and a length is read without being parsed.
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(StrandPalette.textTertiary.opacity(0.25))
+                            .frame(width: 34, height: 3)
+                        Capsule()
+                            .fill(budget.isWarning ? StrandPalette.statusWarning : StrandPalette.accent)
+                            .frame(width: max(2, 34 * CGFloat(budget.fraction)), height: 3)
+                    }
+                    Text(budgetLabel(budget))
+                        .font(StrandFont.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(budget.isWarning
+                                         ? StrandPalette.statusWarning : StrandPalette.textTertiary)
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(StrandPalette.surfaceInset, in: Capsule())
+            }
+            .accessibilityLabel(Text("Token budget"))
+            .accessibilityValue(Text("\(budget.used) of \(budget.limit) tokens used today"))
+        }
+    }
+
+    /// "12.4k / 200k". Thousands, because the exact token count of a conversation is not a number
+    /// anybody acts on and six digits beside a model name is just noise; the precise figure is one tap
+    /// away in the menu.
+    private func budgetLabel(_ r: AITokenBudget.Reading) -> String {
+        func k(_ n: Int) -> String {
+            n >= 100_000 ? "\(n / 1000)k"
+                : (n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)")
+        }
+        return k(r.used) + " / " + k(r.limit)
     }
 
     /// One round header button. Three of them sit in the title row and they must not drift apart.

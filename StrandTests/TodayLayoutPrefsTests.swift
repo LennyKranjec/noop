@@ -11,13 +11,16 @@ final class TodayLayoutPrefsTests: XCTestCase {
         XCTAssertEqual(TodayLayoutPrefs.decodeOrder("   "), TodaySection.defaultOrder)
     }
 
+    /// EVERY section, deliberately. `decodeOrder` back-fills anything missing from a saved order, so a
+    /// partial list does not round-trip and never could — this pins the encoding, not the back-fill.
     func testEncodeDecodeRoundTripsAReorderedList() {
         let reordered: [TodaySection] = [
-            .heartRate, .hero, .yourCards, .liveSession, .synthesis, .keyMetrics, .workouts, .recoveryVitals,
+            .heartRate, .hero, .quests, .streaks, .dailyMission, .yourCards, .liveSession, .synthesis,
+            .keyMetrics, .workouts, .recoveryVitals, .stressEnergy, .hydrationNutrition,
             .journal, .menstrualCycle, .addedCards,
         ]
         let encoded = TodayLayoutPrefs.encode(reordered)
-        XCTAssertEqual(encoded, "heartRate,hero,yourCards,liveSession,synthesis,keyMetrics,workouts,recoveryVitals,journal,menstrualCycle,addedCards")
+        XCTAssertEqual(encoded, "heartRate,hero,quests,streaks,dailyMission,yourCards,liveSession,synthesis,keyMetrics,workouts,recoveryVitals,stressEnergy,hydrationNutrition,journal,menstrualCycle,addedCards")
         XCTAssertEqual(TodayLayoutPrefs.decodeOrder(encoded), reordered)
     }
 
@@ -28,16 +31,24 @@ final class TodayLayoutPrefsTests: XCTestCase {
         let firstCut = "synthesis,keyMetrics,workouts,heartRate,recoveryVitals,yourCards"
         XCTAssertEqual(
             TodayLayoutPrefs.decodeOrder(firstCut),
-            // journal(8) follows everything saved → appended; addedCards(10) is last, appended after it.
-            [.hero, .liveSession, .synthesis, .keyMetrics, .workouts, .heartRate, .recoveryVitals, .yourCards, .menstrualCycle, .journal, .addedCards]
+            // The saved six are already in their default relative order, so every section added since
+            // lands exactly where the default order puts it and the result IS the default order. That is
+            // the invariant worth pinning: a saved layout that never disagreed with the default must not
+            // start disagreeing with it just because the app grew sections.
+            TodaySection.defaultOrder
         )
     }
 
     func testInsertsAnyMissingSectionAtItsDefaultPositionRelativeToSaved() {
+        // heartRate is saved ABOVE synthesis, which is not where the default order has it — so the saved
+        // disagreement is kept and everything missing is threaded around it. workouts lands before
+        // heartRate (it precedes it by default), and the pair it separated stays split.
         let partial = "heartRate,synthesis,keyMetrics,recoveryVitals"
         XCTAssertEqual(
             TodayLayoutPrefs.decodeOrder(partial),
-            [.hero, .liveSession, .workouts, .heartRate, .synthesis, .keyMetrics, .recoveryVitals, .yourCards, .menstrualCycle, .journal, .addedCards]
+            [.quests, .hero, .dailyMission, .streaks, .liveSession, .workouts, .heartRate, .synthesis,
+             .keyMetrics, .recoveryVitals, .stressEnergy, .hydrationNutrition, .yourCards,
+             .menstrualCycle, .journal, .addedCards]
         )
     }
 
@@ -45,7 +56,9 @@ final class TodayLayoutPrefsTests: XCTestCase {
         let messy = "yourCards,BOGUS,yourCards,heartRate, ,heartRate"
         XCTAssertEqual(
             TodayLayoutPrefs.decodeOrder(messy),
-            [.hero, .liveSession, .synthesis, .keyMetrics, .workouts, .recoveryVitals, .yourCards, .heartRate, .menstrualCycle, .journal, .addedCards]
+            [.quests, .hero, .dailyMission, .streaks, .liveSession, .synthesis, .keyMetrics, .workouts,
+             .recoveryVitals, .stressEnergy, .hydrationNutrition, .yourCards, .heartRate,
+             .menstrualCycle, .journal, .addedCards]
         )
     }
 
@@ -63,11 +76,14 @@ final class TodayLayoutPrefsTests: XCTestCase {
         let order = "heartRate,hero,yourCards,liveSession,synthesis,keyMetrics,workouts,recoveryVitals,journal"
         XCTAssertEqual(
             TodayLayoutPrefs.visibleOrder(orderRaw: order, hiddenRaw: "hero,workouts"),
-            [.heartRate, .yourCards, .liveSession, .synthesis, .keyMetrics, .recoveryVitals, .menstrualCycle, .journal, .addedCards]
+            [.quests, .dailyMission, .streaks, .heartRate, .stressEnergy, .hydrationNutrition,
+             .yourCards, .liveSession, .synthesis, .keyMetrics, .recoveryVitals,
+             .menstrualCycle, .journal, .addedCards]
         )
         XCTAssertEqual(TodayLayoutPrefs.decodeOrder(order), [
-            .heartRate, .hero, .yourCards, .liveSession, .synthesis, .keyMetrics, .workouts,
-            .recoveryVitals, .menstrualCycle, .journal, .addedCards,
+            .quests, .dailyMission, .streaks, .heartRate, .hero, .stressEnergy, .hydrationNutrition,
+            .yourCards, .liveSession, .synthesis, .keyMetrics, .workouts, .recoveryVitals,
+            .menstrualCycle, .journal, .addedCards,
         ])
     }
 
@@ -93,7 +109,9 @@ final class TodayLayoutPrefsTests: XCTestCase {
         // Pin the exact wire strings — they must match the Android TodaySection byte-for-byte.
         XCTAssertEqual(
             raws,
-            ["hero", "liveSession", "synthesis", "keyMetrics", "workouts", "heartRate", "recoveryVitals", "yourCards", "menstrualCycle", "journal", "addedCards"]
+            ["hero", "liveSession", "synthesis", "keyMetrics", "workouts", "heartRate", "recoveryVitals",
+             "stressEnergy", "hydrationNutrition", "dailyMission", "quests", "streaks", "yourCards",
+             "menstrualCycle", "journal", "addedCards"]
         )
     }
 
