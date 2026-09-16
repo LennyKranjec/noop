@@ -1716,8 +1716,14 @@ struct LiquidTodayView: View {
                         Text(workoutSub(w)).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
                     }
                     Spacer()
-                    (Text(effortText(w.strain)).font(StrandFont.number(15))
-                        + Text(" EFFORT").font(StrandFont.overlineScaled(9)))
+                    // STRAIN, ON WHOOP'S 0–21, whatever the Effort toggle says — the same rule the hero
+                    // ring follows. The wearer reads this card against WHOOP's app, and a WHOOP session's
+                    // 11.4 printed as "54.3 EFFORT" is the same figure in a unit nobody recognises. The
+                    // stored value is still the app's 0–100 (see `WhoopCloudSync`); only this read-out
+                    // converts, through the shared formatter.
+                    (Text(w.strain.map { UnitFormatter.effortDisplay($0, scale: .whoop) } ?? Self.noValueDash)
+                        .font(StrandFont.number(15))
+                        + Text(" STRAIN").font(StrandFont.overlineScaled(9)))
                         .foregroundStyle(StrandPalette.textPrimary)
                 }
                 LiquidTube(frac: (w.strain ?? 0) / 100, tint: StrandPalette.effortColor, height: 12, animated: false)
@@ -1819,7 +1825,8 @@ struct LiquidTodayView: View {
         let stressByDay = await repo.bankedStressMinutes()
         streaks = Streaks.evaluate(days: repo.days,
                                    stressMinutesByDay: stressByDay,
-                                   journalDays: await repo.journalDays())
+                                   journalDays: await repo.journalDays(),
+                                   sleepTimesByDay: await repo.sleepTimingsByDay())
         await loadStateAndEnergy(stressByDay: stressByDay)
         dailyMission = await coach.ensureDailyMission()?.text
         // Whatever today has earned, at most one at a time. Safe on every appearance: it returns

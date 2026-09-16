@@ -182,7 +182,7 @@ struct RitualGrounding {
 
     private func streakName(_ kind: StreakKind) -> String {
         switch kind {
-        case .sleepConsistency: return "sleep consistency"
+        case .sleepConsistency: return "bed and wake time within 30 minutes of the night before"
         case .sleepDebt: return "sleep debt"
         case .stressTime: return "stress time"
         case .journal: return "journal"

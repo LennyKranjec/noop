@@ -54,6 +54,10 @@ public enum WhoopCloudApi {
         public var lightMin: Double?
         public var efficiency: Double?
         public var respRateBpm: Double?
+        /// When the night began and ended, as minutes past local midnight IN THE RECORD'S OWN ZONE.
+        /// Clock times rather than instants because the regularity streak compares them across dates.
+        public var sleepOnsetMin: Int?
+        public var wakeMin: Int?
 
         public init(
             day: String,
@@ -67,7 +71,9 @@ public enum WhoopCloudApi {
             remMin: Double? = nil,
             lightMin: Double? = nil,
             efficiency: Double? = nil,
-            respRateBpm: Double? = nil
+            respRateBpm: Double? = nil,
+            sleepOnsetMin: Int? = nil,
+            wakeMin: Int? = nil
         ) {
             self.day = day
             self.recovery = recovery
@@ -81,6 +87,8 @@ public enum WhoopCloudApi {
             self.lightMin = lightMin
             self.efficiency = efficiency
             self.respRateBpm = respRateBpm
+            self.sleepOnsetMin = sleepOnsetMin
+            self.wakeMin = wakeMin
         }
     }
 
@@ -116,14 +124,22 @@ public enum WhoopCloudApi {
     /// `GET /cycle` — day strain, and the day key every other endpoint is filed against.
     ///
     /// Returns the day per cycle id as well, because the recovery endpoint can only be placed through
-    /// it. A cycle spans a wake period rather than a calendar day, so the day it belongs to is the day
-    /// its START falls on, in the offset the record itself carries.
+    /// it.
+    ///
+    /// A WHOOP CYCLE STARTS WHEN YOU FALL ASLEEP, not when you wake. The cycle that carries today's
+    /// strain and this morning's recovery began at last night's sleep onset — 23:40 on the 15th for a
+    /// day that is the 16th in every sense the wearer means. Filing it under the day it STARTED put
+    /// today's strain and recovery on YESTERDAY's row, left today's row holding only the sleep (which
+    /// is filed by the day it ends), and sent the hero to its fallbacks: the app's own strain on the
+    /// Strain ring, and a "repeating yesterday" banner over what was in fact today's recovery.
+    ///
+    /// So a cycle is filed under the day it is mostly ABOUT — see `cycleDay`.
     public static func parseCycles(_ body: String) -> (byDay: [String: CloudDay], dayById: [String: String]) {
         var byDay: [String: CloudDay] = [:]
         var dayById: [String: String] = [:]
         for rec in records(body) {
             guard let id = idString(rec["id"]),
-                  let day = localDay(str(rec, "start"), offset: str(rec, "timezone_offset"))
+                  let day = cycleDay(start: str(rec, "start"), offset: str(rec, "timezone_offset"))
             else { continue }
             dayById[id] = day
             guard str(rec, "score_state") == scored_, let score = rec["score"] as? [String: Any] else { continue }
@@ -161,7 +177,9 @@ public enum WhoopCloudApi {
                 remMin: rem,
                 lightMin: light,
                 efficiency: num(score, "sleep_efficiency_percentage"),
-                respRateBpm: num(score, "respiratory_rate"))
+                respRateBpm: num(score, "respiratory_rate"),
+                sleepOnsetMin: minuteOfDay(str(rec, "start"), offset: str(rec, "timezone_offset")),
+                wakeMin: minuteOfDay(str(rec, "end"), offset: str(rec, "timezone_offset")))
         }
         return out
     }
@@ -286,6 +304,8 @@ public enum WhoopCloudApi {
                 cur.lightMin = cur.lightMin ?? d.lightMin
                 cur.efficiency = cur.efficiency ?? d.efficiency
                 cur.respRateBpm = cur.respRateBpm ?? d.respRateBpm
+                cur.sleepOnsetMin = cur.sleepOnsetMin ?? d.sleepOnsetMin
+                cur.wakeMin = cur.wakeMin ?? d.wakeMin
                 out[day] = cur
             }
         }
@@ -315,6 +335,37 @@ public enum WhoopCloudApi {
     ///
     /// Not the phone's current zone: a cycle recorded in Tokyo belongs to the Tokyo day it happened on,
     /// and re-bucketing it when the wearer flies home would silently shift a week of history by one.
+    /// The day a cycle belongs to: the local day of its start PLUS TWELVE HOURS.
+    ///
+    /// A cycle runs from one sleep onset to the next, so almost all of it is the waking day that
+    /// follows its start. Twelve hours lands inside that day for every ordinary pattern — asleep at
+    /// 23:40 files under the next day, asleep at 01:30 under the same one, and a start in the small
+    /// hours or the morning stays where it is — and it agrees with the sleep endpoint, which files a
+    /// night under the day it ENDS on, so a day's row gets its own night, its own recovery and its own
+    /// strain rather than three different days' worth.
+    ///
+    /// THE OFFSET IS THE RECORD'S OWN, for the same reason as everywhere else here: a travelled week
+    /// bucketed by the phone's current zone shifts by a day and looks exactly like missing data.
+    public static func cycleDay(start: String, offset: String) -> String? {
+        guard let date = parseInstant(start) else { return nil }
+        let midday = date.addingTimeInterval(12 * 3600)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone(from: offset) ?? TimeZone.current
+        let c = calendar.dateComponents([.year, .month, .day], from: midday)
+        guard let y = c.year, let m = c.month, let d = c.day else { return nil }
+        return String(format: "%04d-%02d-%02d", y, m, d)
+    }
+
+    /// Minutes past local midnight for an instant, in the record's own zone.
+    public static func minuteOfDay(_ instant: String, offset: String) -> Int? {
+        guard let date = parseInstant(instant) else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone(from: offset) ?? TimeZone.current
+        let c = calendar.dateComponents([.hour, .minute], from: date)
+        guard let h = c.hour, let m = c.minute else { return nil }
+        return h * 60 + m
+    }
+
     public static func localDay(_ instant: String, offset: String) -> String? {
         guard let date = parseInstant(instant) else { return nil }
         var calendar = Calendar(identifier: .gregorian)

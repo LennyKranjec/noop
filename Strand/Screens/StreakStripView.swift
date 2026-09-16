@@ -96,7 +96,9 @@ private struct StreakFlame: View {
     /// The rule, spelled the same way the Android strings are.
     private var label: String {
         switch streak.kind {
-        case .sleepConsistency: return "consistency > 80%"
+        // Says the rule itself, so the flame can be read without a legend: both ends of the night,
+        // each within half an hour of the night before.
+        case .sleepConsistency: return "bed & wake ±30m"
         case .sleepDebt: return "debt < 1h"
         case .stressTime: return "stress < 6h"
         case .journal: return "journal"

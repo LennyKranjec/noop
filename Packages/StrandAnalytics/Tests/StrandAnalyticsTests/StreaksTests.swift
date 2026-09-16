@@ -69,28 +69,69 @@ final class StreaksTests: XCTestCase {
         XCTAssertTrue(Streaks.evaluate(days: [], today: today, calendar: calendar).isEmpty)
     }
 
-    // MARK: - sleep consistency > 80 %
+    // MARK: - bed and wake within 30 min of the night before
 
-    func testSteadyNightsHoldTheConsistencyStreak() {
-        let s = of(Streaks.evaluate(days: steady(30, 8), today: today, calendar: calendar), .sleepConsistency)
-        XCTAssertGreaterThanOrEqual(s.days, 20, "a month of identical nights must be a streak")
+    private func timings(_ pairs: [(onset: Int, wake: Int)]) -> [String: SleepTiming] {
+        // pairs[0] is today, pairs[1] yesterday, and so on back.
+        var out: [String: SleepTiming] = [:]
+        for (back, p) in pairs.enumerated() {
+            out[key(back)] = SleepTiming(onsetMinute: p.onset, wakeMinute: p.wake)
+        }
+        return out
+    }
+
+    private func regularity(_ pairs: [(onset: Int, wake: Int)], days n: Int = 10) -> Streak {
+        of(Streaks.evaluate(days: steady(n, 8), sleepTimesByDay: timings(pairs),
+                            today: today, calendar: calendar), .sleepConsistency)
+    }
+
+    func testTheSameBedAndWakeTimeEveryNightHoldsTheStreak() {
+        let s = regularity(Array(repeating: (onset: 23 * 60, wake: 7 * 60), count: 6))
+        // Six nights of timing make five comparisons; the oldest has no night before it and is
+        // unmeasured rather than a failure.
+        XCTAssertEqual(s.days, 5)
         XCTAssertTrue(s.todaySecured)
     }
 
-    func testWildlyVaryingNightsHoldNothing() {
-        let erratic = (0..<30).reversed().map { back in
-            day(back, sleepMin: back % 2 == 0 ? 3 * 60 : 10 * 60)
-        }
-        let s = of(Streaks.evaluate(days: erratic, today: today, calendar: calendar), .sleepConsistency)
-        XCTAssertEqual(s.days, 0)
-        XCTAssertFalse(s.todaySecured)
+    func testThirtyMinutesEitherWayOnEitherEndStillHolds() {
+        let s = regularity([(onset: 23 * 60 + 30, wake: 6 * 60 + 30), (onset: 23 * 60, wake: 7 * 60)])
+        XCTAssertEqual(s.days, 1)
+        XCTAssertTrue(s.todaySecured)
     }
 
-    func testTwoNightsAreNotAConsistencyReading() {
-        // Consistency over two nights is not a number, so those days are UNMEASURED rather than
-        // failures — the engine's floor is three. A streak awarded on two nights would be one nobody
-        // earned; a streak broken on two would punish somebody for having just installed the app.
-        let s = of(Streaks.evaluate(days: steady(2, 8), today: today, calendar: calendar), .sleepConsistency)
+    func testADriftOnOnlyOneEndBreaksIt() {
+        // In bed on time and up two hours late is not a regular night — both ends are held.
+        let lateWake = regularity([(onset: 23 * 60, wake: 9 * 60), (onset: 23 * 60, wake: 7 * 60)])
+        XCTAssertEqual(lateWake.days, 0)
+        XCTAssertFalse(lateWake.todaySecured)
+
+        let lateBed = regularity([(onset: 0, wake: 7 * 60), (onset: 23 * 60, wake: 7 * 60)])
+        XCTAssertEqual(lateBed.days, 0)
+        XCTAssertFalse(lateBed.todaySecured)
+    }
+
+    func testMidnightIsTwentyMinutesFromTenToNotAWholeDay() {
+        // 23:50 and 00:10 are twenty minutes apart. A naive difference makes it 1,420 and breaks the
+        // streak of everybody whose bedtime sits near midnight.
+        let s = regularity([(onset: 10, wake: 7 * 60), (onset: 23 * 60 + 50, wake: 7 * 60)])
+        XCTAssertEqual(s.days, 1)
+    }
+
+    func testANightWithNoTimingIsUnmeasuredAndIsNotComparedAcrossTheGap() {
+        // Yesterday has no timing. Today is not compared with the day before yesterday — a two-night
+        // drift would otherwise be held to a one-night tolerance — so today is unmeasured, and the
+        // streak behind the gap still counts.
+        var t = timings([(onset: 23 * 60, wake: 7 * 60)])
+        t[key(2)] = SleepTiming(onsetMinute: 23 * 60, wakeMinute: 7 * 60)
+        t[key(3)] = SleepTiming(onsetMinute: 23 * 60, wakeMinute: 7 * 60)
+        let s = of(Streaks.evaluate(days: steady(10, 8), sleepTimesByDay: t,
+                                    today: today, calendar: calendar), .sleepConsistency)
+        XCTAssertFalse(s.todaySecured)
+        XCTAssertEqual(s.days, 1)
+    }
+
+    func testNoTimingsAtAllIsNoStreakRatherThanABrokenOne() {
+        let s = of(Streaks.evaluate(days: steady(30, 8), today: today, calendar: calendar), .sleepConsistency)
         XCTAssertEqual(s.days, 0)
         XCTAssertFalse(s.todaySecured)
     }

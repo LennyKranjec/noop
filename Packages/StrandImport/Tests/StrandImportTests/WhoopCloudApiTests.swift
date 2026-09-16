@@ -18,16 +18,43 @@ final class WhoopCloudApiTests: XCTestCase {
 
     // MARK: - Cycles
 
-    func testACycleIsFiledUnderTheDayItStartedOnInItsOwnZone() {
-        // 23:40 in +09:00 is still the 14th THERE, and that is the day the cycle belongs to — even
-        // though the same instant is the 14th at 14:40 UTC and could be the 14th or 15th elsewhere.
+    func testACycleThatStartsAtBedtimeIsFiledUnderTheDayItCovers() {
+        // A WHOOP cycle starts at SLEEP ONSET. 23:40 on the 14th in +09:00 is the start of the 15th's
+        // cycle — the strain in it is the 15th's, and so is the recovery scored the next morning.
+        // Filing it under the 14th is the bug this pins: today's strain landed on yesterday's row.
         let body = """
         {"records":[{"id":123,"start":"2026-09-14T14:40:00.000Z","timezone_offset":"+09:00",
         "score_state":"SCORED","score":{"strain":14.9}}]}
         """
         let parsed = WhoopCloudApi.parseCycles(body)
-        XCTAssertEqual(parsed.dayById["123"], "2026-09-14")
-        XCTAssertEqual(parsed.byDay["2026-09-14"]?.strain ?? 0, 14.9, accuracy: 0.0001)
+        XCTAssertEqual(parsed.dayById["123"], "2026-09-15")
+        XCTAssertEqual(parsed.byDay["2026-09-15"]?.strain ?? 0, 14.9, accuracy: 0.0001)
+        XCTAssertNil(parsed.byDay["2026-09-14"])
+    }
+
+    func testACycleThatStartsAfterMidnightStaysOnItsOwnDay() {
+        // Asleep at 01:30 on the 15th: already the 15th, and it stays there.
+        XCTAssertEqual(WhoopCloudApi.cycleDay(start: "2026-09-15T01:30:00Z", offset: "+00:00"),
+                       "2026-09-15")
+        // And the zone is the record's own: 22:00 UTC on the 14th is 00:00 on the 15th in +02:00.
+        XCTAssertEqual(WhoopCloudApi.cycleDay(start: "2026-09-14T22:00:00Z", offset: "+02:00"),
+                       "2026-09-15")
+    }
+
+    func testACyclesStrainAndItsNightLandOnTheSameDay() {
+        // The point of the whole rule: the cycle that began at last night's sleep onset and the sleep
+        // that ended this morning describe ONE day, and both must file under it.
+        let cycle = WhoopCloudApi.parseCycles("""
+        {"records":[{"id":"c1","start":"2026-09-15T21:40:00Z","timezone_offset":"+02:00",
+        "score_state":"SCORED","score":{"strain":8.2}}]}
+        """)
+        let sleep = WhoopCloudApi.parseSleep("""
+        {"records":[{"start":"2026-09-15T21:40:00Z","end":"2026-09-16T05:10:00Z",
+        "timezone_offset":"+02:00","nap":false,"score_state":"SCORED",
+        "score":{"sleep_performance_percentage":88,"stage_summary":{}}}]}
+        """)
+        XCTAssertEqual(cycle.dayById["c1"], "2026-09-16")
+        XCTAssertNotNil(sleep["2026-09-16"])
     }
 
     func testAnUnscoredCycleStillPlacesItsDayButCarriesNoStrain() {

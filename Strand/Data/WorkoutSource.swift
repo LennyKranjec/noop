@@ -179,6 +179,10 @@ enum WorkoutSource: Equatable {
     /// prefer the strap-native source (live/manual/detected/whoop carry the real trace) over a thin
     /// import (Apple Health / Health Connect); final tie → the longer session, then `a` (stable).
     static func preferred(_ a: WorkoutRow, _ b: WorkoutRow) -> WorkoutRow {
+        withCloudStrain(pickRicher(a, b), from: a, b)
+    }
+
+    private static func pickRicher(_ a: WorkoutRow, _ b: WorkoutRow) -> WorkoutRow {
         let ra = richness(a), rb = richness(b)
         if ra != rb { return ra > rb ? a : b }
         let ia = classify(a.source) == .apple, ib = classify(b.source) == .apple
@@ -186,6 +190,25 @@ enum WorkoutSource: Equatable {
         let da = a.endTs - a.startTs, db = b.endTs - b.startTs
         if da != db { return da > db ? a : b }
         return a
+    }
+
+    /// WHOOP'S OWN STRAIN SURVIVES THE MERGE, whichever row wins it.
+    ///
+    /// The richer row is kept for its HR, zones and route, and that is right. But when one side of the
+    /// pair is WHOOP's cloud copy of the session, its strain is WHOOP's scored figure, and the other
+    /// side's is this app's own estimate of the same session from a different model. Keeping the
+    /// winner's would show the wearer an effort for a WHOOP workout that WHOOP's app never gave it.
+    /// Only the strain is taken; nothing else about the winner changes.
+    private static func withCloudStrain(_ winner: WorkoutRow, from a: WorkoutRow, _ b: WorkoutRow) -> WorkoutRow {
+        guard winner.source != WhoopCloudSync.sourceId,
+              let cloud = [a, b].first(where: { $0.source == WhoopCloudSync.sourceId }),
+              let strain = cloud.strain, strain != winner.strain
+        else { return winner }
+        return WorkoutRow(startTs: winner.startTs, endTs: winner.endTs, sport: winner.sport,
+                          source: winner.source, durationS: winner.durationS,
+                          energyKcal: winner.energyKcal, avgHr: winner.avgHr, maxHr: winner.maxHr,
+                          strain: strain, distanceM: winner.distanceM, zonesJSON: winner.zonesJSON,
+                          notes: winner.notes, steps: winner.steps)
     }
 
     // MARK: - Detected-vs-real overlap collapse (#975)

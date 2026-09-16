@@ -8,9 +8,9 @@ import WhoopStore
 // contract). Reads only `DailyMetric` fields that already live on-device, plus a caller-supplied map
 // of banked stress minutes; no new egress.
 //
-// EVERY STREAK HERE IS COMPUTED FROM A MEASURED FIGURE, never from an intention. Consistency is the
-// spread of actual sleep onsets over four weeks; debt is the rolling ledger; stress time is minutes
-// the day read as autonomically loaded while the wearer was still. A streak the app awards for
+// EVERY STREAK HERE IS COMPUTED FROM A MEASURED FIGURE, never from an intention. Regularity is the
+// actual clock time of falling asleep and waking, night against night; debt is the rolling ledger;
+// stress time is minutes the day read as autonomically loaded while the wearer was still. A streak the app awards for
 // opening the app would look identical on screen and mean nothing.
 //
 // A DAY WITH NO DATA BREAKS NOTHING AND EXTENDS NOTHING. The strap comes off, the phone dies, a sync
@@ -27,7 +27,10 @@ import WhoopStore
 /// readable at a glance the strip has stopped doing its job, because a glance is the only way it is
 /// ever read.
 public enum StreakKind: String, Equatable, Codable, CaseIterable, Sendable {
-    /// Sleep CONSISTENCY at or above 80 %: the spread of four weeks of nights, not one night.
+    /// Went to sleep AND woke within half an hour of the night before.
+    ///
+    /// The raw value is still `sleepConsistency`: it is a persisted and cross-platform key, and the
+    /// flame keeps its column. What it MEASURES changed — see `regularity`.
     case sleepConsistency
     /// Sleep DEBT under an hour: the rolling ledger, not a single short night.
     case sleepDebt
@@ -39,6 +42,21 @@ public enum StreakKind: String, Equatable, Codable, CaseIterable, Sendable {
     /// opposite reason to the others: it is the only thing the app cannot see for itself. Everything
     /// else on this row is read off the body; this is the wearer telling it something.
     case journal
+}
+
+/// When one night began and ended, as minutes past local midnight.
+///
+/// Minutes of the day rather than instants, because the rule compares CLOCK TIMES across different
+/// dates — and minute 1,430 (23:50) against minute 10 (00:10) is twenty minutes, which is what
+/// `Streaks.clockDistance` measures the short way round.
+public struct SleepTiming: Equatable, Sendable {
+    public let onsetMinute: Int
+    public let wakeMinute: Int
+
+    public init(onsetMinute: Int, wakeMinute: Int) {
+        self.onsetMinute = onsetMinute
+        self.wakeMinute = wakeMinute
+    }
 }
 
 /// One streak: what it measures, how long it is running, and whether today is already secured.
@@ -57,11 +75,13 @@ public struct Streak: Equatable, Sendable {
 
 public enum Streaks {
 
-    /// Consistency at or above this holds the streak, on the 0–100 scale `VitalityEngine` produces.
-    public static let consistencyTargetPct: Double = 80
+    /// How far tonight's bedtime, and separately tomorrow's wake time, may drift from the night before
+    /// and still hold the regularity streak. Half an hour, each way, on each end.
+    public static let timingToleranceMin: Double = 30
 
-    /// How many nights the consistency figure is measured over. Four weeks, as everywhere else here.
-    public static let consistencyWindowNights = 28
+    /// The shortest sleep that counts as a NIGHT for the regularity streak. Below this a block is a
+    /// nap, and a nap's onset compared with a real bedtime would break the streak for sleeping twice.
+    public static let minNightMinutes: Double = 3 * 60
 
     /// Debt below this holds the streak. An hour is a late film, not a deficit worth acting on.
     public static let debtLimitMin: Double = 60
@@ -99,6 +119,8 @@ public enum Streaks {
     ///     not an option. A day with no banked row is unmeasured, which neither breaks nor extends.
     ///   - journalDays: the local days that carry a journal entry. Its own input rather than a field on
     ///     `DailyMetric`, for the reason given on the journal walk below.
+    ///   - sleepTimesByDay: when each night began and ended, keyed by the local day it ENDED on. Its own
+    ///     input because `DailyMetric` carries how long a night was and not when it was.
     ///   - today: the local day being judged.
     ///
     /// Not sorted by length: the strip is four fixed columns and the wearer learns which flame is
@@ -108,6 +130,7 @@ public enum Streaks {
         days: [DailyMetric],
         stressMinutesByDay: [String: Double] = [:],
         journalDays: Swift.Set<String> = [],
+        sleepTimesByDay: [String: SleepTiming] = [:],
         today: Date = Date(),
         calendar: Calendar = .current
     ) -> [Streak] {
@@ -118,7 +141,7 @@ public enum Streaks {
         for (i, d) in days.enumerated() { index[d.day] = i }
 
         return [
-            consistency(days: days, index: index, byDay: byDay, todayKey: todayKey, calendar: calendar),
+            regularity(byDay: byDay, sleepTimesByDay: sleepTimesByDay, todayKey: todayKey, calendar: calendar),
             debt(days: days, index: index, byDay: byDay, todayKey: todayKey, calendar: calendar),
             stressTime(byDay: byDay, stressMinutesByDay: stressMinutesByDay, todayKey: todayKey, calendar: calendar),
             journal(journalDays: journalDays, todayKey: todayKey, calendar: calendar),
@@ -152,25 +175,35 @@ public enum Streaks {
         return Streak(kind: .journal, days: count, todaySecured: todaySecured)
     }
 
-    /// Sleep consistency at or above 80 %.
+    /// Fell asleep AND woke within `timingToleranceMin` of the night before.
     ///
-    /// The figure for a day is the spread of the `consistencyWindowNights` nights ENDING on it, which
-    /// is how the level's own sleep term reads it — so the streak and the level cannot disagree about
-    /// whether a stretch was regular. A day with too few nights behind it is unmeasured rather than a
-    /// failure: consistency over two nights is not a number.
-    private static func consistency(
-        days: [DailyMetric],
-        index: [String: Int],
+    /// WHY THIS REPLACED "CONSISTENCY > 80 %". That figure is one minus the spread of four weeks of
+    /// sleep DURATIONS. It says nothing about WHEN: seven hours from 23:00 and seven hours from 03:00
+    /// are perfectly "consistent" by it, and a single ragged week moves a four-week figure so little
+    /// that the flame could not break when the wearer actually broke the habit. Nor could anyone act on
+    /// it — "raise your coefficient of variation" is not a thing a person does at bedtime.
+    ///
+    /// Bedtime and wake time are. Both ends are held separately, because either one drifting is the
+    /// habit going: in bed on time and up two hours late is not a regular night.
+    ///
+    /// Each day is judged against the CALENDAR day before, not the last night that happened to be
+    /// recorded. A night with no timing on either side is unmeasured, which neither breaks nor extends —
+    /// the same gap rule as every other streak here. Comparing across a gap would hold a two-night
+    /// drift to a one-night tolerance.
+    private static func regularity(
         byDay: [String: DailyMetric],
+        sleepTimesByDay: [String: SleepTiming],
         todayKey: String,
         calendar: Calendar
     ) -> Streak {
         let (count, secured) = countBack(byDay: byDay, todayKey: todayKey, calendar: calendar) { metric in
-            guard let i = index[metric.day] else { return nil }
-            let from = Swift.max(0, i - (consistencyWindowNights - 1))
-            let window = days[from...i].compactMap { $0.totalSleepMin.map { $0 / 60 } }
-            guard let c = VitalityEngine.sleepConsistency(nightlyHours: window) else { return nil }
-            return c * 100 >= consistencyTargetPct
+            guard let tonight = sleepTimesByDay[metric.day],
+                  let date = calendar.date(from: dayComponents(metric.day, calendar: calendar)),
+                  let previousDate = calendar.date(byAdding: .day, value: -1, to: date),
+                  let lastNight = sleepTimesByDay[dayKey(previousDate, calendar: calendar)]
+            else { return nil }
+            return clockDistance(tonight.onsetMinute, lastNight.onsetMinute) <= timingToleranceMin
+                && clockDistance(tonight.wakeMinute, lastNight.wakeMinute) <= timingToleranceMin
         }
         return Streak(kind: .sleepConsistency, days: count, todaySecured: secured)
     }

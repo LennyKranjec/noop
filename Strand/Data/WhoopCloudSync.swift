@@ -35,6 +35,12 @@ enum WhoopCloudSync {
     /// real figure is banked rather than approximated.
     static let sleepPerformanceKey = "sleep_performance"
 
+    /// When WHOOP says each night began and ended, as minutes past local midnight. Banked on the same
+    /// generic series seam as the sleep score, for the same reason: `DailyMetric` has no column for it,
+    /// and the regularity streak needs the clock time of a night, not just its length.
+    static let sleepOnsetKey = "sleep_onset_min"
+    static let sleepWakeKey = "sleep_wake_min"
+
     /// How far back a full sync reaches.
     ///
     /// A YEAR, not a month. The level timeline offers 1y and All, and the muscle and streak surfaces
@@ -56,11 +62,28 @@ enum WhoopCloudSync {
     /// one and falls back once.
     private static let tokenParams = ["nextToken", "next_token"]
 
-    /// How long a cloud sync stays fresh. WHOOP scores a cycle once; polling it harder buys nothing.
-    private static let staleAfter: TimeInterval = 30 * 60
+    /// How long the RECENT window stays fresh.
+    ///
+    /// Five minutes, not thirty. The open cycle's strain climbs all day, and the hero's Strain ring is
+    /// labelled as WHOOP's own figure — half an hour behind WHOOP's app is a number that visibly
+    /// disagrees with the app it is credited to. What makes a short interval affordable is that it
+    /// only walks the last few days; see `recentDays` and `fullSyncAfter`.
+    private static let staleAfter: TimeInterval = 5 * 60
+
+    /// The window a routine refresh reads: today, yesterday, and the day before, which is everything a
+    /// score can still change on.
+    private static let recentDays = 3
+
+    /// How often the whole year is walked again. Old cycles do not change; this is for the wearer who
+    /// connected yesterday, or whose account was re-scored.
+    private static let fullSyncAfter: TimeInterval = 6 * 3600
 
     private static let lastNoteKey = "whoop.cloud.lastNote"
-    private static let lastSyncAtKey = "whoop.cloud.lastSyncAt"
+    // v2: bumped when cycles moved to the day they cover (see `WhoopCloudApi.cycleDay`), so the first
+    // launch of that build rewrites every stored day immediately instead of waiting out the interval
+    // with strain filed a day early.
+    private static let lastSyncAtKey = "whoop.cloud.lastSyncAt.v2"
+    private static let lastFullSyncAtKey = "whoop.cloud.lastFullSyncAt.v2"
 
     /// What one sync managed, and what each endpoint actually said.
     struct Result {
@@ -97,7 +120,12 @@ enum WhoopCloudSync {
         let now = Date().timeIntervalSince1970
         guard now - last >= staleAfter else { return nil }
         UserDefaults.standard.set(now, forKey: lastSyncAtKey)
-        return await sync(repo: repo)
+        let lastFull = UserDefaults.standard.double(forKey: lastFullSyncAtKey)
+        if now - lastFull >= fullSyncAfter {
+            UserDefaults.standard.set(now, forKey: lastFullSyncAtKey)
+            return await sync(repo: repo)
+        }
+        return await sync(repo: repo, days: recentDays)
     }
 
     /// Pull the last `days` days and store them.
@@ -160,7 +188,11 @@ enum WhoopCloudSync {
                 energyKcal: w.energyKcal,
                 avgHr: w.averageHeartRate,
                 maxHr: w.maxHeartRate,
-                strain: w.strain,
+                // ONTO THE APP'S OWN 0–100 SCALE, which is what a workout row's strain is everywhere
+                // else — the export importer stores WHOOP's figure ×100/21 and every read-out converts
+                // back. Written raw, WHOOP's 11.4 read as an effort of 11.4 out of 100, and on the WHOOP
+                // display scale as 2.4. The same factor the importer uses, so the round trip is exact.
+                strain: w.strain.map { $0 * WhoopExportImporter.dayStrainToEffortScale },
                 distanceM: w.distanceMetre,
                 zonesJSON: nil,
                 notes: nil,
@@ -191,8 +223,14 @@ enum WhoopCloudSync {
                 exerciseCount: nil,
                 respRateBpm: d.respRateBpm)
         }
-        let sleepScoreRows = all.compactMap { d in
+        var sleepScoreRows = all.compactMap { d in
             d.sleepPerformance.map { MetricPoint(day: d.day, key: sleepPerformanceKey, value: $0) }
+        }
+        sleepScoreRows += all.compactMap { d in
+            d.sleepOnsetMin.map { MetricPoint(day: d.day, key: sleepOnsetKey, value: Double($0)) }
+        }
+        sleepScoreRows += all.compactMap { d in
+            d.wakeMin.map { MetricPoint(day: d.day, key: sleepWakeKey, value: Double($0)) }
         }
 
         let stored = await write(repo: repo, rows: rows, sleepScores: sleepScoreRows)

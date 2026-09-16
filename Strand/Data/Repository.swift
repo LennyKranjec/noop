@@ -1318,6 +1318,52 @@ final class Repository: ObservableObject {
         return bestClass
     }
 
+    /// When each night began and ended, keyed by the local day it ENDED on — the input the regularity
+    /// streak judges bedtime and wake time from.
+    ///
+    /// WHOOP'S OWN TIMES WIN where the cloud has them, and the strap's detected sessions fill every day
+    /// it does not. One night per day: the LONGEST block ending on it, and only if it is long enough to
+    /// be a night — a nap's onset compared with a real bedtime would break the streak for sleeping twice.
+    func sleepTimingsByDay(days: Int = 400) async -> [String: SleepTiming] {
+        var out: [String: SleepTiming] = [:]
+        let now = Int(Date().timeIntervalSince1970)
+        let lo = now - days * 86_400
+        var sessions = await sleepSessions(from: lo, to: now + 86_400, limit: 5000)
+        if sessions.isEmpty {
+            sessions = await computedSleepSessions(from: lo, to: now + 86_400, limit: 5000)
+        }
+        let calendar = Calendar.current
+        var longest: [String: Int] = [:]
+        for s in sessions {
+            let onset = s.effectiveStartTs
+            let length = s.endTs - onset
+            guard Double(length) >= Streaks.minNightMinutes * 60 else { continue }
+            let end = Date(timeIntervalSince1970: TimeInterval(s.endTs))
+            let key = Self.localDayKey(end)
+            guard length > (longest[key] ?? 0) else { continue }
+            let start = Date(timeIntervalSince1970: TimeInterval(onset))
+            let a = calendar.dateComponents([.hour, .minute], from: start)
+            let b = calendar.dateComponents([.hour, .minute], from: end)
+            guard let ah = a.hour, let am = a.minute, let bh = b.hour, let bm = b.minute else { continue }
+            longest[key] = length
+            out[key] = SleepTiming(onsetMinute: ah * 60 + am, wakeMinute: bh * 60 + bm)
+        }
+
+        let from = Self.localDayKey(Date(timeIntervalSince1970: TimeInterval(lo)))
+        let to = Self.localDayKey(Date())
+        let onsets = await series(key: WhoopCloudSync.sleepOnsetKey, source: WhoopCloudSync.sourceId,
+                                  from: from, to: to)
+        let wakes = Dictionary(
+            (await series(key: WhoopCloudSync.sleepWakeKey, source: WhoopCloudSync.sourceId,
+                          from: from, to: to)).map { ($0.day, $0.value) },
+            uniquingKeysWith: { _, last in last })
+        for o in onsets {
+            guard let w = wakes[o.day] else { continue }
+            out[o.day] = SleepTiming(onsetMinute: Int(o.value), wakeMinute: Int(w))
+        }
+        return out
+    }
+
     func sleepSessions(from: Int, to: Int, limit: Int = 100) async -> [CachedSleepSession] {
         guard let store = await ensureStore() else { return [] }
         return await unionSleepSessions(store: store, from: from, to: to, limit: limit)
