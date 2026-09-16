@@ -49,68 +49,75 @@ struct MissionMarqueeView: View {
     var body: some View {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
-            Group {
-                if overflows && !still {
+            // NOTHING IN THE LAYOUT MAY ASK FOR A WIDTH. The strip is a fixed-height, fully flexible
+            // box, and BOTH lines — the moving one and the measuring twin — hang off it as overlays.
+            //
+            // The moving line has to be laid out with `fixedSize`, or it wraps and there is nothing to
+            // scroll. Inside the stack, that made the strip's IDEAL width the width of an unwrapped
+            // sentence, and `.frame(maxWidth: .infinity)` does not take it back: under an ideal-width
+            // query a flexible frame reports its child's ideal. A vertical ScrollView sizes its column
+            // to the widest child, so the whole of Today took the width of whatever the coach had
+            // written that morning — and once the column was pinned to the viewport, the oversized
+            // content centred itself off both edges and Today rendered blank except for this one line.
+            //
+            // An overlay is measured against its parent and cannot change the parent's size. That is
+            // the single property this whole arrangement rests on.
+            Color.clear
+                .frame(height: lineHeight)
+                .frame(maxWidth: .infinity)
+                // The line itself. Scrolling when it has something to reveal and the app has not been
+                // asked to hold still; truncated and motionless otherwise, because motion with nothing
+                // to reveal is decoration.
+                .overlay(alignment: .leading) {
+                    if overflows && !still {
+                        Text(trimmed)
+                            .font(font)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .lineLimit(1)
+                            .fixedSize()
+                            .offset(x: offset)
+                    } else {
+                        Text(trimmed)
+                            .font(font)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                .clipped()
+                // The measuring twin. Laid out UNCONSTRAINED, or it reports the viewport's width back
+                // and "is the line wider than the strip" is never true — the bug the Android lane
+                // shipped first, which looks exactly like a marquee that has been asked not to move.
+                .overlay(alignment: .leading) {
                     Text(trimmed)
                         .font(font)
-                        .foregroundStyle(StrandPalette.textSecondary)
                         .lineLimit(1)
                         .fixedSize()
-                        .offset(x: offset)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    Text(trimmed)
-                        .font(font)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .lineLimit(1)
-                        .truncationMode(.tail)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(
+                            GeometryReader { geo in
+                                Color.clear
+                                    .onAppear { textWidth = geo.size.width }
+                                    .onChangeCompat(of: geo.size.width) { textWidth = $0 }
+                            }
+                        )
+                        .hidden()
+                        .allowsHitTesting(false)
                 }
-            }
-            .frame(height: lineHeight)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .clipped()
-            // THE MEASURING TWIN LIVES IN AN OVERLAY, and that is the whole point of it being here
-            // rather than in the stack above.
-            //
-            // It has to be laid out UNCONSTRAINED — `fixedSize` — or it reports the viewport's width
-            // back and "is the line wider than the strip" is never true, which is the bug the Android
-            // lane shipped first. But a `fixedSize` child INSIDE the layout demands its full width from
-            // the parent, and a mission is a long sentence: the whole Today column stretched to the
-            // width of the longest line the coach had written and every card on the screen was clipped
-            // at both edges.
-            //
-            // An overlay is measured against its parent and cannot change the parent's size, so the
-            // twin can be as wide as it likes and nothing above it notices.
-            .overlay(alignment: .leading) {
-                Text(trimmed)
-                    .font(font)
-                    .lineLimit(1)
-                    .fixedSize()
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear
-                                .onAppear { textWidth = geo.size.width }
-                                .onChangeCompat(of: geo.size.width) { textWidth = $0 }
-                        }
-                    )
-                    .hidden()
-                    .allowsHitTesting(false)
-            }
-            .background(
-                GeometryReader { geo in
-                    Color.clear
-                        .onAppear { viewportWidth = geo.size.width }
-                        .onChangeCompat(of: geo.size.width) { viewportWidth = $0 }
-                }
-            )
-            .padding(.horizontal, 4)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(Text(trimmed))
-            .onAppear { restart() }
-            .onChangeCompat(of: trimmed) { _ in restart() }
-            .onChangeCompat(of: overflows) { _ in restart() }
-            .onChangeCompat(of: still) { _ in restart() }
+                .background(
+                    GeometryReader { geo in
+                        Color.clear
+                            .onAppear { viewportWidth = geo.size.width }
+                            .onChangeCompat(of: geo.size.width) { viewportWidth = $0 }
+                    }
+                )
+                .padding(.horizontal, 4)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text(trimmed))
+                .onAppear { restart() }
+                .onChangeCompat(of: trimmed) { _ in restart() }
+                .onChangeCompat(of: overflows) { _ in restart() }
+                .onChangeCompat(of: still) { _ in restart() }
         }
     }
 

@@ -476,7 +476,11 @@ struct LiquidTodayView: View {
             }
             // See the note at the top of `body`. `width:`, not `maxWidth:` — a maximum still lets a
             // child propose more and win; a fixed width is the only form the child cannot argue with.
-            .frame(width: container.size.width)
+            // LEADING, not the default centre. A child that still insists on more width than this
+            // (see `MissionMarqueeView` for the one that did) is then clipped at the RIGHT edge with
+            // everything else where it belongs — rather than centred, which pushes the left half of
+            // every card off the screen and leaves Today looking empty.
+            .frame(width: container.size.width, alignment: .leading)
             #if os(macOS)
             // Keep the phone-shaped column readable + centred on the wide mac detail pane. The sky is a
             // ScrollView background (full-bleed), so constraining the content column here doesn't touch it.
@@ -2388,9 +2392,9 @@ private struct PullOffsetKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
-// MARK: - NOOP wordmark (centred, with a tap easter egg)
+// MARK: - TELOS wordmark (centred, with a tap easter egg)
 
-/// The subtle NOOP wordmark. Built as a row of letters (not `Text(...).tracking()`, which adds a
+/// The subtle TELOS wordmark. Built as a row of letters (not `Text(...).tracking()`, which adds a
 /// trailing gap after the last glyph and pushes the word off-centre), so it sits DEAD centre. Tap it
 /// for a little easter egg: it plays one of several random one-shot animations — wiggle, shake, flip,
 /// spin, bounce, or a jelly squash — with a light haptic.
@@ -2403,8 +2407,10 @@ private struct LiquidWordmark: View {
     @State private var token = 0      // drives the tap haptic
 
     var body: some View {
-        HStack(spacing: 14) {
-            ForEach(Array("NOOP".enumerated()), id: \.offset) { _, ch in
+        // 12, not 14: a fifth letter at the old spacing made the wordmark wide enough to crowd the
+        // controls either side of it.
+        HStack(spacing: 12) {
+            ForEach(Array("TELOS".enumerated()), id: \.offset) { _, ch in
                 Text(String(ch))
                     .font(StrandFont.rounded(16, weight: .bold))
                     .foregroundStyle(StrandPalette.textTertiary)

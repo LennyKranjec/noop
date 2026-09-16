@@ -36,8 +36,9 @@ let levelRadarDiameter: CGFloat = 86
 /// The drop used to be clearance for the notch, and once the strip itself was inset below the safe area
 /// any of it pushed the pentagon down a second time. At zero it still hung further into the screen than
 /// it needed to — the plate reads as part of the bar when its top edge is level with the bar's own, not
-/// when it starts where the bar starts.
-let levelRadarDrop: CGFloat = -6
+/// when it starts where the bar starts. -9 is as far as it goes before the pentagon's point starts to
+/// crop against the strip's own top edge.
+let levelRadarDrop: CGFloat = -9
 
 /// How much of the radar hangs below the strip, and therefore how far content must clear it.
 var levelRadarOverhang: CGFloat { levelRadarDiameter / 3 + levelRadarDrop }

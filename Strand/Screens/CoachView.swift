@@ -743,11 +743,13 @@ struct CoachView: View {
     /// the app breaking: the coach stops answering, mid-conversation, with nothing said about why. A bar
     /// that fills as the day goes on is the difference between a cliff and a slope you can see.
     ///
-    /// It says nothing at all until the model has been used today. An empty meter on a fresh morning is
-    /// a number with no information in it, sitting next to the control it could be mistaken for part of.
+    /// ALWAYS ON, including at zero on a fresh morning. The first cut hid it until the model had been
+    /// used, on the grounds that an empty meter carries no information — but the thing it is there to
+    /// answer is "how much have I got left", and a gauge that is absent exactly when the answer is "all
+    /// of it" is a gauge you cannot learn to trust. It reads 0 / 200k and stays put.
     @ViewBuilder
     private var budgetPill: some View {
-        if let budget, !budget.isUntouched {
+        if let budget {
             Menu {
                 Text(budget.used.formatted() + " of " + budget.limit.formatted()
                      + " tokens used today on " + budget.model)
