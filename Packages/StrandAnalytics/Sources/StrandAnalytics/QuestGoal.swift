@@ -238,7 +238,9 @@ extension QuestGoal {
         let trimmed = line.trimmingCharacters(in: .whitespaces)
             .trimmingCharacters(in: CharacterSet(charactersIn: "*_` "))
         guard trimmed.uppercased().hasPrefix("GOAL") else { return nil }
-        let body = trimmed.dropFirst(4).drop { $0 == ":" || $0 == " " }
+        // Markdown included: a model told to write `GOAL: STEPS 9000` will sometimes bold the label, and
+        // `**GOAL:** STEPS 9000` must read the same rather than silently leaving the quest without a goal.
+        let body = trimmed.dropFirst(4).drop { $0 == ":" || $0 == " " || $0 == "*" || $0 == "_" }
         let parts = body.split(separator: " ", maxSplits: 1).map(String.init)
         guard let first = parts.first, let metric = QuestMetric(rawValue: first.uppercased()) else {
             return nil
