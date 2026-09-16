@@ -22,6 +22,8 @@ final class LevelBarModel: ObservableObject {
     /// Every scored day over the span the timeline asked for, oldest first.
     @Published private(set) var history: [LevelPoint] = []
     @Published private(set) var loadingHistory = false
+    /// The best each part reached over the span the timeline last loaded. Empty until it has.
+    @Published private(set) var partBests: [LevelPart: Double] = [:]
 
     private var lastLoadedTick: Int = -1
 
@@ -102,12 +104,26 @@ final class LevelBarModel: ObservableObject {
             let key = LevelWiring.key(from: cursor, calendar: calendar)
             let inputs = LevelWiring.inputs(days: days, asOf: key, series: series, calendar: calendar)
             if let breakdown = LevelEngine.compute(inputs: inputs, baselines: baselines) {
-                out.append(LevelPoint(day: key, level: breakdown.level))
+                var parts: [LevelPart: Double] = [:]
+                for component in breakdown.components {
+                    if let score = component.score { parts[component.part] = score }
+                }
+                out.append(LevelPoint(day: key, level: breakdown.level, parts: parts))
             }
             guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
             cursor = next
         }
         history = out
+        // The best each part has reached over the span just walked. Taken from the SAME pass rather than
+        // from a separate read: a personal best that disagreed with the curve under it would be worse
+        // than no best at all.
+        var best: [LevelPart: Double] = [:]
+        for point in out {
+            for (part, score) in point.parts {
+                best[part] = Swift.max(best[part] ?? 0, score)
+            }
+        }
+        partBests = best
     }
 
     /// ONE READ PER SERIES, for the whole span — see the note in `LevelWiring`.

@@ -22,9 +22,14 @@ import WhoopStore
 // redistributes weight around absent components and a zero would be scored as a bad reading.
 
 /// One day's level, for the timeline.
+///
+/// The PARTS come with it, not as a second series read separately. The expandable breakdown graphs the
+/// same five components the level was computed from, and re-deriving them per part would walk the whole
+/// history five more times to arrive at numbers this pass already had in hand.
 struct LevelPoint: Equatable, Sendable {
     let day: String
     let level: Double
+    var parts: [LevelPart: Double] = [:]
 }
 
 /// Every per-day series the level needs, read once over a whole span.

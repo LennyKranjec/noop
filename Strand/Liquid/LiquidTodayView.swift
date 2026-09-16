@@ -74,6 +74,13 @@ struct LiquidTodayView: View {
     @State private var streaks: [Streak] = []
     /// A ring tap's destination, pushed as a value so a re-tap of the Today tab can pop it.
     @State private var heroTap: TabRoute?
+    /// The sky, on the hero's footer. Seeded from the last known reading so the row is not empty for the
+    /// duration of a request.
+    @State private var weather: WeatherNow? = WeatherService.lastKnown
+    /// What the day is measurably short of, worst first. Empty until the first read.
+    @State private var deficits: [DayDeficit] = []
+    /// The day's energy bank. Nil when there is no opening balance to draw one from.
+    @State private var energy: EnergyBalance?
 
     // async-loaded via the confirmed Repository accessors
     @State private var restScore: Double?          // sleep_performance, day-keyed
@@ -394,10 +401,13 @@ struct LiquidTodayView: View {
                         // section that used to be its card renders nothing. It is KEPT rather than
                         // deleted so a layout arranged on either platform round-trips unchanged.
                         case .dailyMission: EmptyView()
-                        // The intraday stress read lives on the Focus tab on this platform, so its
-                        // section keeps its slot in the saved order without drawing a second copy of a
-                        // surface that already exists.
-                        case .stressEnergy: EmptyView()
+                        // The intraday stress read lives on the Focus tab on this platform; what this
+                        // slot carries here is the ENERGY BANK, which is the half of the Android
+                        // section that had no home.
+                        case .stressEnergy:
+                            if selectedDayOffset == 0 {
+                                EnergyTileView(energy, onOpen: { heroTap = .stress })
+                            }
                         // The water tile and the macro tile — what the Nutrition TAB used to be on the
                         // Android lane. Both read stores that already exist, so neither invents a figure.
                         case .hydrationNutrition:
@@ -416,6 +426,10 @@ struct LiquidTodayView: View {
                         // reorderable section like the others — the Arrange sheet moves it. Today only;
                         // the card self-hides when the reminder toggle is off (an empty branch renders
                         // nothing yet keeps its slot). Twin of Android TodayScreen's JOURNAL arm.
+                        // NOT GATED ON THE REMINDER TOGGLE any more. The card self-hid when reminders
+                        // were off, which is a different question from whether the wearer wants the
+                        // journal on Today — and the section is already hideable in Customise, which is
+                        // where that choice belongs.
                         case .journal: if selectedDayOffset == 0 { JournalReminderCard() }
                         // #today-hosted-cards: cards the user pulled in from the Trends/Sleep tabs, in the
                         // order they arranged. Empty (renders nothing) until they add one in Customise.
@@ -761,6 +775,7 @@ struct LiquidTodayView: View {
             // Says WHOOP when the numbers came from WHOOP's own cloud, rather than crediting a source
             // that did not produce them.
             sourceLabel: cloudDay != nil ? "WHOOP" : heroSourceLabel,
+            weather: weather,
             onTapScore: { index in
                 switch index {
                 case 0: heroTap = .sleep
@@ -1284,7 +1299,10 @@ struct LiquidTodayView: View {
                 card {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
-                            Text("SYNTHESIS").font(StrandFont.overline).tracking(1.6)
+                            // STATE, not "Synthesis". The card used to summarise how the day reads;
+                            // it now also names what the day is measurably SHORT of, and "synthesis"
+                            // describes the method rather than the content.
+                            Text("STATE").font(StrandFont.overline).tracking(1.6)
                                 .foregroundStyle(StrandPalette.textSecondary)
                             Spacer()
                             Text(synthesisExpanded
@@ -1300,6 +1318,25 @@ struct LiquidTodayView: View {
                         Text(chargeDisplay.calibrationDetail ?? synthLine)
                             .font(StrandFont.body).foregroundStyle(StrandPalette.textPrimary)
                             .fixedSize(horizontal: false, vertical: true)
+                        // WHAT THE DAY IS SHORT OF, worst first. Only things that are both measured and
+                        // still fixable today — see `DayDeficits`. An empty list is an empty space, not
+                        // a "nothing to report", because the absence of a deficit is not news.
+                        if !deficits.isEmpty {
+                            VStack(alignment: .leading, spacing: 4) {
+                                ForEach(deficits.prefix(4)) { deficit in
+                                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                        Circle()
+                                            .fill(deficitTint(deficit.severity))
+                                            .frame(width: 5, height: 5)
+                                        Text(deficit.text)
+                                            .font(StrandFont.footnote)
+                                            .foregroundStyle(StrandPalette.textSecondary)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
+                                }
+                            }
+                            .padding(.top, 2)
+                        }
                         // The reason the count is not moving, when nights are arriving empty. Sits under
                         // the progress rather than replacing it: the wearer needs both the number and why.
                         if let why = chargeDisplay.calibrationReason(
@@ -1734,11 +1771,79 @@ struct LiquidTodayView: View {
         }
         cloudSleepScore = await repo.whoopCloudSleepScore(day: cloudDay?.day ?? key)
 
-        streaks = Streaks.evaluate(days: repo.days, stressMinutesByDay: await repo.bankedStressMinutes())
+        weather = await WeatherService.refresh() ?? weather
+        let stressByDay = await repo.bankedStressMinutes()
+        streaks = Streaks.evaluate(days: repo.days, stressMinutesByDay: stressByDay)
+        await loadStateAndEnergy(stressByDay: stressByDay)
         dailyMission = await coach.ensureDailyMission()?.text
         // Whatever today has earned, at most one at a time. Safe on every appearance: it returns
         // immediately when something is already waiting to be answered or today's list is full.
         await QuestIssuer.issueIfDue(repo: repo, coach: coach)
+    }
+
+
+    /// The State card's deficits and the energy bank, from figures the app already holds.
+    ///
+    /// ONE PASS, because the two share every input: the bank spends the same strain and stress the
+    /// deficits name, and reading them twice would let the card and the bar disagree about the day.
+    private func loadStateAndEnergy(stressByDay: [String: Double]) async {
+        let todayKey = Repository.localDayKey(Date())
+        let day = repo.days.last { $0.day == todayKey } ?? repo.days.last
+        let stressToday = stressByDay[todayKey]
+
+        // Calm is the rest of the waking day, once the loaded hours are taken out. Derived rather than
+        // measured, and only when there IS a stress read — with no reading there is no calm to claim.
+        let calmToday = stressToday.map { Swift.max(EnergyBank.wakingMinutes - $0, 0) }
+
+        energy = EnergyBank.balance(
+            recovery: cloudDay?.recovery ?? day?.recovery,
+            sleepScore: cloudSleepScore ?? restScore,
+            strain: heroStrain21,
+            stressMinutes: stressToday,
+            calmMinutes: calmToday)
+
+        let hydration = hydrationEnabled
+            ? await repo.hydrationTotal(day: todayKey)
+            : nil
+        let protein = await repo.series(key: NutritionCsvImporter.Keys.proteinG,
+                                        source: HealthKitNutritionSourceId,
+                                        from: todayKey, to: todayKey).last?.value
+
+        // Days since the last counted session, for the training deficit. Capped at the window the
+        // deficit rule cares about, so this never walks a whole history to answer "more than a week".
+        var since: Int?
+        if let last = repo.days.last(where: { ($0.exerciseCount ?? 0) > 0 || ($0.strain ?? 0) >= 8 }),
+           let lastDate = WhoopCloudApi.localDayDate(last.day) {
+            since = Calendar.current.dateComponents([.day], from: lastDate, to: Date()).day
+        }
+
+        deficits = DayDeficits.evaluate(
+            hydrationML: hydration,
+            hydrationGoalML: hydrationEnabled ? repo.hydrationGoalML(profileSex: profile.sex) : nil,
+            steps: day?.steps,
+            proteinG: protein,
+            bodyMassKg: profile.weightKg,
+            stressMinutes: stressToday,
+            sleepDebtMin: sleepDebtMinutes,
+            daysSinceTraining: since)
+    }
+
+    /// The day's sleep debt in minutes, or nil when there are too few nights to claim one.
+    private var sleepDebtMinutes: Double? {
+        let nights = repo.days.suffix(SleepDebt.defaultWindowNights).compactMap { $0.totalSleepMin }
+        guard nights.count >= 3 else { return nil }
+        let need = Streaks.sleepNeedHours * 60
+        let balance = nights.reduce(0) { $0 + ($1 - need) }
+        return balance < 0 ? -balance : 0
+    }
+
+    /// How far behind a deficit is, as a colour. Three bands: worth knowing, worth doing, worth doing now.
+    private func deficitTint(_ severity: Double) -> Color {
+        switch severity {
+        case ..<0.34: return StrandPalette.textTertiary
+        case ..<0.67: return StrandPalette.statusWarning
+        default: return StrandPalette.statusCritical
+        }
     }
 
     private func load() async {

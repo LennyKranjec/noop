@@ -956,6 +956,10 @@ final class AICoachEngine: ObservableObject {
         // with consent on), so it rides the SAME consent + text-only channel as the HRV/RHR summary, a
         // derived number, never raw R-R egress. Omitted when there aren't enough clean beats yet.
         if let line = await stressIndexLine() { ctx += "\n\n" + line }
+        // THE SKY, so a suggestion cannot contradict the tile the wearer is looking at. "Go for a walk"
+        // under a thunderstorm is the fastest way to make the coach read as something that has not
+        // looked outside. Read from the cache, so this costs nothing per turn.
+        if let weather = WeatherService.lastKnown { ctx += "\n\n" + weather.promptLine }
         if includeOnDeviceSignals {
             let block = await onDeviceSignalsBlock()
             if !block.isEmpty { ctx += "\n\n" + block }

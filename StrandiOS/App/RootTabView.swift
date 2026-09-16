@@ -495,6 +495,9 @@ struct RootTabView: View {
                            onRefresh: { await repo.refreshEverything() },
                            topBackground: liquidScaffoldSky()) {
                 moreSection("Insights") {
+                    // Goals heads Insights: everything else on this list reports on the body, and this
+                    // is the one row that says what the reporting is FOR.
+                    MoreRow("Goals", "flag.fill", .goals)
                     MoreRow("What Moves You", "wand.and.sparkles", .insightsHub)
                     MoreRow("Intelligence", "brain.head.profile", .intelligence)
                     // K3: Coach promoted to a top-level tab — no longer listed under More.
@@ -635,6 +638,7 @@ struct RootTabView: View {
 private enum MoreDestination: Hashable {
     case insightsHub, intelligence, coach, insights, explore, compare
     case live, workouts, health, labBook, sleep, stress, breathe, intervals, rhythm
+    case goals
     case fusedRecord, appleHealth, miBand, dataSources, backupSync, shortcutsExport, noopLimitations
     case alarms, automations, testCentre, siriShortcuts, powerSaving, settings
 
@@ -652,6 +656,7 @@ private enum MoreDestination: Hashable {
         case .labBook:         LabBookView()
         // Sleep handed its tab slot to Focus, so it needs a row here — a screen this central must not
         // be reachable only as a link off another one.
+        case .goals:           GoalsView()
         case .sleep:           SleepView()
         case .stress:          StressView()
         case .breathe:         BreathingView()

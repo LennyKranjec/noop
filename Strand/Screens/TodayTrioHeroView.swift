@@ -56,6 +56,9 @@ struct TodayTrioHeroView: View {
     let dateLabel: String
     /// Where the day's numbers were resolved from — "WHOOP", "Health Connect", and so on.
     let sourceLabel: String?
+    /// The sky, on the footer's own line. Nil drops the row entirely: a failed lookup shows nothing
+    /// rather than a guess.
+    var weather: WeatherNow? = nil
     let onTapScore: (Int) -> Void
 
     var body: some View {
@@ -102,10 +105,48 @@ struct TodayTrioHeroView: View {
             .padding(.horizontal, 14)
             .padding(.vertical, 10)
             .background(StrandPalette.surfaceBase.opacity(0.55))
+
+            // THE SKY, under the day. It is here rather than on a card of its own because it is not a
+            // metric — it is context for the three above it, and for what the coach suggests doing
+            // about them. The row is absent when the lookup failed; an invented forecast would be the
+            // kind of plausible number this app refuses to print.
+            if let weather {
+                HStack(spacing: 6) {
+                    Image(systemName: weather.symbol)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(StrandPalette.textTertiary)
+                    Text("\(Int(weather.temperatureC.rounded()))°C · \(weather.summary)")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(StrandPalette.textTertiary)
+                    Spacer(minLength: 0)
+                    // NOW AND PEAK, because the two answer different questions: what it is like to step
+                    // outside right now, and whether the middle of the day is worth avoiding.
+                    Image(systemName: "sun.max")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(uvTint(weather.uvIndex))
+                    Text(String(format: "UV %.1f · peak %.1f", weather.uvIndex, weather.uvPeak))
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
+                .padding(.horizontal, 14)
+                .padding(.bottom, 9)
+                .background(StrandPalette.surfaceBase.opacity(0.55))
+                .accessibilityElement(children: .combine)
+            }
         }
         // CLIPPED to the card's own curve: the footer is a plain filled row, and a fill does not know
         // about the rounded card it sits in — its square corners would poke past the curve at the bottom.
         .clipShape(RoundedRectangle(cornerRadius: 26, style: .continuous))
+    }
+}
+
+/// The UV figure's own colour. The WHO bands, because they are the ones the number is quoted against
+/// everywhere else a wearer will have met it.
+private func uvTint(_ uv: Double) -> Color {
+    switch uv {
+    case ..<3: return StrandPalette.statusPositive
+    case ..<6: return StrandPalette.statusWarning
+    default: return StrandPalette.statusCritical
     }
 }
 
