@@ -94,7 +94,11 @@ struct TodayTrioHeroView: View {
                 HStack(spacing: 5) {
                     Image(systemName: "clock.arrow.circlepath")
                         .font(.system(size: 9, weight: .semibold))
-                    Text("from \(carriedFrom) — today is not scored yet")
+                    // IT SAYS WHAT IT IS: a repeat, with the date it is a repeat OF. The old wording
+                    // led with the absence — "today is not scored yet" — which reads as broken data
+                    // rather than as the deliberate carry it is, and which is now only ever shown when
+                    // this app has nothing of its own for today either.
+                    Text("Repeating \(carriedFrom) — nothing scored for today yet")
                         .font(.system(size: 11, weight: .semibold))
                 }
                 .foregroundStyle(StrandPalette.textTertiary)

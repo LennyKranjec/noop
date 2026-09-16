@@ -48,9 +48,12 @@ struct CoachView: View {
     @State private var briefStatus: String?
     /// K2: confirmation gate for the destructive "Clear conversation" toolbar action.
     @State private var showClearConfirm = false
-    /// Today's spend on the current model. Held rather than computed in `body`: it lives in
-    /// preferences, so nothing publishes a change and the view has to be told when to re-read.
+    /// Today's spend on the current model, counted here. Held rather than computed in `body`: it lives
+    /// in preferences, so nothing publishes a change and the view has to be told when to re-read.
     @State private var budget: AITokenBudget.Reading?
+    /// What the provider itself said about its allowances on its last reply. Outranks `budget` when it
+    /// is there — see `budgetGauge`.
+    @State private var rateLimit: AIRateLimitReading?
     /// The ⋯ sheet holding consent, instructions, the brief and the connection.
     @State private var showCoachMenu = false
 
@@ -732,77 +735,145 @@ struct CoachView: View {
         // Re-read after every turn, and whenever the model changes — the reading lives in preferences
         // rather than on the engine, so nothing publishes it. `sending` is the trigger that matters:
         // it goes false exactly once a turn has been paid for.
-        .onAppear { budget = AITokenBudget.reading(model: coach.model) }
-        .onChangeCompat(of: coach.sending) { _ in budget = AITokenBudget.reading(model: coach.model) }
-        .onChangeCompat(of: coach.model) { _ in budget = AITokenBudget.reading(model: coach.model) }
+        .onAppear { refreshBudget() }
+        .onChangeCompat(of: coach.sending) { _ in refreshBudget() }
+        .onChangeCompat(of: coach.model) { _ in refreshBudget() }
     }
 
     /// TODAY'S ALLOWANCE, beside the model it belongs to.
     ///
-    /// The free tier is metered per model per day, and running out looks from the inside exactly like
-    /// the app breaking: the coach stops answering, mid-conversation, with nothing said about why. A bar
-    /// that fills as the day goes on is the difference between a cliff and a slope you can see.
+    /// The free tier is metered per model, and running out looks from the inside exactly like the app
+    /// breaking: the coach stops answering, mid-conversation, with nothing said about why. A bar that
+    /// fills as the day goes on is the difference between a cliff and a slope you can see.
+    ///
+    /// THE PROVIDER'S OWN FIGURE WHEN IT SENDS ONE. Groq returns its rate-limit state on every
+    /// response, and those are the numbers on the dashboard; the local tally can only ever be what this
+    /// app has spent since it was installed, on the device's own midnight, against an allowance that
+    /// was typed in rather than asked for. So the local count is now the FALLBACK, for a provider that
+    /// reports nothing.
+    ///
+    /// WHICH WINDOW IS DRAWN IS THE PROVIDER'S CHOICE, not a guess — see `AIRateLimit`. Where it meters
+    /// tokens by the day, the bar is tokens. Where it meters them by the minute (Groq's usual free
+    /// tier), the day is measured in REQUESTS and the bar is requests, because a bar labelled "today"
+    /// that is really "this minute" would sit near full all day and empty seconds before a 429.
     ///
     /// ALWAYS ON, including at zero on a fresh morning. The first cut hid it until the model had been
     /// used, on the grounds that an empty meter carries no information — but the thing it is there to
     /// answer is "how much have I got left", and a gauge that is absent exactly when the answer is "all
-    /// of it" is a gauge you cannot learn to trust. It reads 0 / 200k and stays put.
+    /// of it" is a gauge you cannot learn to trust.
     @ViewBuilder
     private var budgetPill: some View {
-        if let budget {
+        if let gauge = budgetGauge {
             Menu {
-                Text(budget.used.formatted() + " of " + budget.limit.formatted()
-                     + " tokens used today on " + budget.model)
-                if budget.unmetered > 0 {
-                    // SAID OUT LOUD. Those turns cost something the provider did not report, so the
-                    // figure above is a floor. A budget that quietly under-counts is worse than none.
-                    Text("\(budget.unmetered) turn(s) today reported no usage, so this is a floor.")
+                Text(gauge.detail)
+                if let limits = rateLimit {
+                    // EVERYTHING THE PROVIDER SAID, spelled out — including the window this bar is not
+                    // drawing, because the one that bites first is not always the one on screen.
+                    if let r = limits.requests {
+                        Text("Requests: \(r.remaining) of \(r.limit) left, resets in \(shortDuration(r.resetSeconds))")
+                    }
+                    if let t = limits.tokens {
+                        Text("Tokens: \(t.remaining.formatted()) of \(t.limit.formatted()) left, resets in \(shortDuration(t.resetSeconds))")
+                    }
+                    Text("Reported by the provider itself on its last reply.")
+                } else if let budget {
+                    if budget.unmetered > 0 {
+                        // SAID OUT LOUD. Those turns cost something the provider did not report, so the
+                        // figure above is a floor. A budget that quietly under-counts is worse than none.
+                        Text("\(budget.unmetered) turn(s) today reported no usage, so this is a floor.")
+                    }
+                    Text("Counted on this device, because the provider sends no limits. It resets at "
+                         + "your own midnight, and it cannot see anything you spent elsewhere.")
                 }
-                Text("Counted on this device, and it resets at your own midnight — the provider's own "
-                     + "window may roll at a different hour.")
                 Divider()
                 Button {
                     AITokenBudget.reset(model: coach.model)
-                    self.budget = AITokenBudget.reading(model: coach.model)
+                    AIRateLimit.forget(model: coach.model)
+                    refreshBudget()
                 } label: {
-                    Label("Reset today's count", systemImage: "arrow.counterclockwise")
+                    Label("Reset the local count", systemImage: "arrow.counterclockwise")
                 }
             } label: {
                 HStack(spacing: 5) {
-                    // A two-point bar rather than a percentage: the question is "how much is left",
-                    // which is a length, and a length is read without being parsed.
+                    // A short bar rather than a percentage: the question is "how much is left", which
+                    // is a length, and a length is read without being parsed.
                     ZStack(alignment: .leading) {
                         Capsule()
                             .fill(StrandPalette.textTertiary.opacity(0.25))
                             .frame(width: 34, height: 3)
                         Capsule()
-                            .fill(budget.isWarning ? StrandPalette.statusWarning : StrandPalette.accent)
-                            .frame(width: max(2, 34 * CGFloat(budget.fraction)), height: 3)
+                            .fill(gauge.isWarning ? StrandPalette.statusWarning : StrandPalette.accent)
+                            .frame(width: max(2, 34 * CGFloat(gauge.fraction)), height: 3)
                     }
-                    Text(budgetLabel(budget))
+                    Text(gauge.label)
                         .font(StrandFont.caption)
                         .monospacedDigit()
-                        .foregroundStyle(budget.isWarning
+                        .foregroundStyle(gauge.isWarning
                                          ? StrandPalette.statusWarning : StrandPalette.textTertiary)
                 }
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(StrandPalette.surfaceInset, in: Capsule())
             }
-            .accessibilityLabel(Text("Token budget"))
-            .accessibilityValue(Text("\(budget.used) of \(budget.limit) tokens used today"))
+            .accessibilityLabel(Text("Model allowance"))
+            .accessibilityValue(Text(gauge.detail))
         }
     }
 
-    /// "12.4k / 200k". Thousands, because the exact token count of a conversation is not a number
-    /// anybody acts on and six digits beside a model name is just noise; the precise figure is one tap
-    /// away in the menu.
-    private func budgetLabel(_ r: AITokenBudget.Reading) -> String {
-        func k(_ n: Int) -> String {
-            n >= 100_000 ? "\(n / 1000)k"
-                : (n >= 1000 ? String(format: "%.1fk", Double(n) / 1000) : "\(n)")
+    /// What the bar draws, and where the numbers came from.
+    private struct BudgetGauge {
+        let label: String
+        let detail: String
+        let fraction: Double
+        var isWarning: Bool { fraction >= AITokenBudget.warnAt }
+    }
+
+    /// The provider's figure if there is a live one, the local tally otherwise.
+    private var budgetGauge: BudgetGauge? {
+        if let limits = rateLimit {
+            if let tokens = limits.dailyTokens {
+                return BudgetGauge(
+                    label: shortCount(tokens.used) + " / " + shortCount(tokens.limit),
+                    detail: "\(tokens.used.formatted()) of \(tokens.limit.formatted()) tokens used "
+                        + "today on \(limits.model), as the provider reports it.",
+                    fraction: tokens.fraction)
+            }
+            if let requests = limits.dailyRequests {
+                return BudgetGauge(
+                    label: "\(requests.used) / \(requests.limit) req",
+                    detail: "\(requests.used) of \(requests.limit) requests used today on "
+                        + "\(limits.model), as the provider reports it. It meters tokens by the "
+                        + "minute, not by the day, so the day is measured in requests here.",
+                    fraction: requests.fraction)
+            }
         }
-        return k(r.used) + " / " + k(r.limit)
+        guard let budget else { return nil }
+        return BudgetGauge(
+            label: shortCount(budget.used) + " / " + shortCount(budget.limit),
+            detail: "\(budget.used.formatted()) of \(budget.limit.formatted()) tokens, counted on "
+                + "this device for \(budget.model).",
+            fraction: budget.fraction)
+    }
+
+    /// "12.4k", "200k", "840". Thousands, because the exact token count of a conversation is not a
+    /// number anybody acts on and six digits beside a model name is just noise; the precise figure is
+    /// one tap away in the menu.
+    private func shortCount(_ n: Int) -> String {
+        if n >= 100_000 { return "\(n / 1000)k" }
+        if n >= 1000 { return String(format: "%.1fk", Double(n) / 1000) }
+        return "\(n)"
+    }
+
+    /// A reset window, as a person would say it.
+    private func shortDuration(_ seconds: Double) -> String {
+        if seconds >= 3600 { return "\(Int((seconds / 3600).rounded()))h" }
+        if seconds >= 60 { return "\(Int((seconds / 60).rounded()))m" }
+        return "\(Int(seconds.rounded()))s"
+    }
+
+    private func refreshBudget() {
+        budget = AITokenBudget.reading(model: coach.model)
+        rateLimit = AIRateLimit.reading(model: coach.model)
     }
 
     /// One round header button. Three of them sit in the title row and they must not drift apart.

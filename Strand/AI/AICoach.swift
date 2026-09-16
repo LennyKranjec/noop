@@ -672,6 +672,9 @@ final class AICoachEngine: ObservableObject {
     /// persisted table. Fire-and-forget on the store side; the in-memory clear is immediate.
     func clearConversation() {
         messages = []
+        // A new thread is a new subject: the quest that opened the last one is not the subject of this
+        // one, and carrying it would have the coach answering about a directive the wearer has left.
+        activeQuest = nil
         droppedSummary = nil      // K13: reset the summary cache on clear
         droppedSummaryKey = []
         Task { try? await repo.storeHandle()?.clearCoachMessages() }
@@ -706,8 +709,43 @@ final class AICoachEngine: ObservableObject {
         var text = "**" + title.uppercased() + "**\n\n" + target
         if !taunt.isEmpty { text += "\n\n" + taunt }
         appendMessage(ChatMessage(role: .assistant, text: text))
+        // MARKED AS CONTEXT, not just dropped into the transcript.
+        //
+        // Putting the directive in as an assistant turn makes it VISIBLE, and that was the whole of it
+        // before: a follow-up rode a history that happened to contain a quest-shaped message, with
+        // nothing telling the model that the question is ABOUT it. As the conversation grew, the
+        // dropped-message summary could also retire that turn and take the quest with it.
+        //
+        // Held separately and rebuilt into every context from here on, so "how long should that take?"
+        // has an antecedent even twenty turns later.
+        activeQuest = QuestContext(title: title, target: target, taunt: taunt)
         persistMessages()
     }
+
+    /// The quest the wearer opened the coach from, if any. Cleared with the conversation, because a new
+    /// thread is a new subject.
+    struct QuestContext: Equatable {
+        let title: String
+        let target: String
+        let taunt: String
+
+        /// The block the model is given. Named as a directive rather than as data, because that is what
+        /// it is: the app has already told the wearer to do this, and the coach is being asked about a
+        /// commitment that exists rather than being invited to invent one.
+        var promptBlock: String {
+            var s = "THE QUEST THIS CONVERSATION IS ABOUT.\n"
+            s += "The system has already issued this directive to them and it is on screen right now. "
+            s += "Any question that follows is about THIS unless they plainly change the subject. "
+            s += "Do not re-issue it, do not invent a different one, and do not congratulate them for "
+            s += "it — it is not done yet.\n"
+            s += "- Title: " + title + "\n"
+            s += "- What it asks: " + target + "\n"
+            if !taunt.isEmpty { s += "- How it was put to them: " + taunt + "\n" }
+            return s
+        }
+    }
+
+    @Published private(set) var activeQuest: QuestContext?
 
     /// K11: An optional chart image (base64-encoded PNG) to send with the next user message.
     /// Set by the composer's "Attach chart" toggle when multimodal is enabled and the provider
@@ -971,6 +1009,9 @@ final class AICoachEngine: ObservableObject {
         // with consent on), so it rides the SAME consent + text-only channel as the HRV/RHR summary, a
         // derived number, never raw R-R egress. Omitted when there aren't enough clean beats yet.
         if let line = await stressIndexLine() { ctx += "\n\n" + line }
+        // THE QUEST ON SCREEN, when the coach was opened from one. First after the metrics, because
+        // everything below is background and this is the subject.
+        if let activeQuest { ctx += "\n\n" + activeQuest.promptBlock }
         // THE SKY, so a suggestion cannot contradict the tile the wearer is looking at. "Go for a walk"
         // under a thunderstorm is the fastest way to make the coach read as something that has not
         // looked outside. Read from the cache, so this costs nothing per turn.

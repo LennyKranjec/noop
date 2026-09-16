@@ -49,29 +49,43 @@ struct HydrationTileView: View {
         // NOT A BUTTON WRAPPING THE WHOLE TILE. It was, and the two glass buttons sat inside that
         // button's LABEL — where iOS gives the taps to the outer button. Tapping + or − opened the
         // hydration screen instead of logging anything, which is also why there was no haptic: the
-        // code that plays it never ran. The tile's own tap is a gesture on the backdrop now, and the
-        // two controls are real buttons on top of it.
-        ZStack(alignment: .topTrailing) {
+        // code that plays it never ran. The tile's own tap is a gesture on its own clear layer now,
+        // and the two controls are real buttons above it.
+        //
+        // THE TAP LAYER IS ITS OWN VIEW rather than a gesture on the water, because `WaterFill` ends
+        // in `.allowsHitTesting(false)` — it is a Canvas redrawn thirty times a second and must never
+        // be in the hit-test path. A tap gesture attached to it was therefore never delivered, which
+        // is why the tile opened nothing at all.
+        //
+        // NOTHING IN HERE STATES A WIDTH. A ZStack takes the size of its widest child, and a child
+        // with an intrinsic width (the figures) against children that are flexible is exactly how a
+        // tile ends up sized by its text and then offset inside the column it does not fill.
+        ZStack {
             WaterFill(fraction: fraction)
+
+            Color.clear
                 .contentShape(Rectangle())
                 .onTapGesture { onOpen() }
 
-            Text("\(formatML(shownML)) / \(formatML(Double(goalML)))")
-                .font(StrandFont.bodyNumber)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .padding(12)
-                .allowsHitTesting(false)
-
-            // The buttons take the place the reference tile gives its caption.
-            HStack(spacing: 12) {
-                WaterButton(icon: "minus", label: "Remove a glass") { change(-glassML) }
-                WaterButton(icon: "plus", label: "Add a glass") { change(glassML) }
+            VStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    Text("\(formatML(shownML)) / \(formatML(Double(goalML)))")
+                        .font(StrandFont.bodyNumber)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .allowsHitTesting(false)
+                }
+                Spacer(minLength: 0)
+                // The buttons take the place the reference tile gives its caption.
+                HStack(spacing: 12) {
+                    WaterButton(icon: "minus", label: "Remove a glass") { change(-glassML) }
+                    WaterButton(icon: "plus", label: "Add a glass") { change(glassML) }
+                }
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-            .padding(.bottom, 12)
+            .padding(12)
         }
-        .frame(height: waterTileHeight)
         .frame(maxWidth: .infinity)
+        .frame(height: waterTileHeight)
         .background(StrandPalette.surfaceRaised)
         .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
         .task(id: "\(repo.refreshSeq)-\(repo.hydrationSeq)-\(refreshKey)") { await load() }

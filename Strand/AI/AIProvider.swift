@@ -312,7 +312,15 @@ extension AIProviderClient {
 // MARK: - Shared HTTP helpers
 
 /// Execute a request, map HTTP status codes to `AICoachError`, return the decoded JSON object.
-func performRequest(_ req: URLRequest, session: URLSession) async throws -> [String: Any] {
+///
+/// `onHeaders` sees the response headers whatever the status, including a 429 — which is the one case
+/// where the rate-limit headers matter most and the one case the body is an error rather than a reply.
+/// Defaulted, so the providers that do not care are untouched.
+func performRequest(
+    _ req: URLRequest,
+    session: URLSession,
+    onHeaders: (([String: String]) -> Void)? = nil
+) async throws -> [String: Any] {
     let data: Data
     let response: URLResponse
 
@@ -325,6 +333,7 @@ func performRequest(_ req: URLRequest, session: URLSession) async throws -> [Str
     guard let http = response as? HTTPURLResponse else {
         throw AICoachError.network("no HTTP response")
     }
+    if let onHeaders { onHeaders(normalisedHeaders(http)) }
 
     switch http.statusCode {
     case 200...299:
@@ -340,6 +349,20 @@ func performRequest(_ req: URLRequest, session: URLSession) async throws -> [Str
     default:
         throw AICoachError.server(http.statusCode, providerErrorMessage(from: data))
     }
+}
+
+/// Response headers, lower-cased.
+///
+/// HTTP header names are case-insensitive and servers do not agree on a spelling — `x-ratelimit-…`
+/// arrives capitalised from some proxies. Lower-casing once here means every reader can use one
+/// spelling instead of each one guessing.
+func normalisedHeaders(_ http: HTTPURLResponse) -> [String: String] {
+    var out: [String: String] = [:]
+    for (key, value) in http.allHeaderFields {
+        guard let name = key as? String, let text = value as? String else { continue }
+        out[name.lowercased()] = text
+    }
+    return out
 }
 
 /// Best-effort extraction of a human-readable message from a provider error body.
@@ -373,6 +396,7 @@ func emptyReplyError(_ json: [String: Any]) -> AICoachError {
 func performStreamingRequest(
     _ req: URLRequest,
     session: URLSession,
+    onHeaders: (([String: String]) -> Void)? = nil,
     onLine: (String) -> Void
 ) async throws {
     let bytes: (URLSession.AsyncBytes, URLResponse)
@@ -385,6 +409,7 @@ func performStreamingRequest(
     guard let http = bytes.1 as? HTTPURLResponse else {
         throw AICoachError.network("no HTTP response")
     }
+    if let onHeaders { onHeaders(normalisedHeaders(http)) }
 
     switch http.statusCode {
     case 200...299:

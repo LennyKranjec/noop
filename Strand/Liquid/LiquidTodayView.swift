@@ -298,19 +298,12 @@ struct LiquidTodayView: View {
             }
         )
     }
-    /// Horizontal swipe between days (left = older, right = newer), clamped to [today, earliest].
-    private var daySwipeGesture: some Gesture {
-        DragGesture(minimumDistance: 24)
-            .onEnded { value in
-                let dx = value.translation.width, dy = value.translation.height
-                guard abs(dx) > abs(dy) * 1.5, abs(dx) > 50 else { return }
-                let delta = dx < 0 ? 1 : -1
-                let next = Self.clampedDayOffset(current: selectedDayOffset, delta: delta,
-                                                 maxOffset: earliestDayOffset)
-                guard next != selectedDayOffset else { return }
-                withAnimation(StrandMotion.interactive) { selectedDayOffset = next }
-            }
-    }
+    // THE DAY IS NO LONGER SWIPED. A horizontal flick changes the TAB here, as it does on every other
+    // screen — Today was the one place where the gesture people had learned everywhere else did
+    // something different, on the screen they open first. The calendar in the title still moves the day,
+    // where it is a deliberate act rather than something a thumb does by accident.
+    //
+    // `clampedDayOffset` below stays: the picker uses it, and it is pinned by TodayDayNavClampTests.
 
     static func clampedDayOffset(current: Int, delta: Int, maxOffset: Int) -> Int {
         min(max(0, maxOffset), max(0, current + delta))
@@ -530,11 +523,8 @@ struct LiquidTodayView: View {
             }
             .ignoresSafeArea()
         }
-        // Swipe left/right to change DAYS (WHOOP-style). Tab-swipe is disabled on Today in RootTabView so
-        // this owns the horizontal gesture here.
-        .simultaneousGesture(daySwipeGesture)
-        // A light tick when the day changes (swipe or calendar pick) — the WHOOP-style day nav should
-        // feel physical ("every tiny little thing").
+        // A light tick when the day changes — the day nav should feel physical ("every tiny little
+        // thing"). The swipe that used to drive it is gone; the calendar pick remains.
         .liquidSelectionHaptic(trigger: selectedDayOffset)
         // A firm tick when the pull passes the release threshold (the custom liquid refresh).
         .liquidMediumHaptic(trigger: pullHaptic)
@@ -680,7 +670,7 @@ struct LiquidTodayView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("\(dayTitle). Tap to pick a day, swipe to change day.")
+                .accessibilityLabel("\(dayTitle). Tap to pick a day.")
                 .popover(isPresented: $showDayPicker) {
                     DatePicker("", selection: dayPickerBinding, in: ...Repository.logicalDay(Date()),
                                displayedComponents: [.date])
@@ -850,17 +840,17 @@ struct LiquidTodayView: View {
         ]
     }
 
+    /// THE SHARED ROUTE TABLE, not a local copy of half of it.
+    ///
+    /// This switch used to handle `.sleep` and `.metric` and send everything else to `EmptyView()`, so
+    /// the water tile and the energy tile pushed a BLANK SCREEN — the tap worked, the navigation
+    /// happened, and what arrived was nothing, which is indistinguishable from a control that does not
+    /// respond. Every route now resolves through the same `tabRouteScreen` the rest of the app pushes
+    /// through, so a route added there can never silently dead-end here.
     @ViewBuilder
     private var heroTapDestination: some View {
-        switch heroTap {
-        case .sleep: SleepView()
-        case .metric(let key):
-            if let m = MetricCatalog.all.first(where: { $0.key == key }) {
-                MetricDetailView(metric: m)
-            } else {
-                HealthView()
-            }
-        default: EmptyView()
+        if let heroTap {
+            tabRouteScreen(heroTap)
         }
     }
 
@@ -1793,13 +1783,27 @@ struct LiquidTodayView: View {
         await WhoopCloudSync.syncIfStale(repo: repo)
 
         let key = selectedDayKey
+        // THE DAY'S OWN SCORE OUTRANKS A REPEAT OF YESTERDAY'S, and that ordering is the whole of this.
+        //
+        // The carry existed because three dashes over a working strap is worse than last night's real
+        // numbers with the date they belong to. But it was reached BEFORE the app's own scoring of
+        // today was consulted, so a morning where this app had already scored the night still showed
+        // yesterday's cloud figures under a banner apologising for them — a stale number winning over
+        // a fresh one, which is the opposite of what the carry is for.
+        let ownToday = repo.days.first { $0.day == key }
+        let hasOwnScore = ownToday?.recovery != nil || ownToday?.strain != nil
         if let own = await repo.whoopCloudDay(key) {
             cloudDay = own
             cloudIsCarried = false
+        } else if selectedDayOffset == 0, hasOwnScore {
+            // This app's own figures for today. `heroScores` already falls through to `displayDay` when
+            // `cloudDay` is nil, so leaving it nil IS the instruction to use them — and the footer says
+            // nothing, because nothing is being carried and nothing is missing.
+            cloudDay = nil
+            cloudIsCarried = false
         } else if selectedDayOffset == 0, let carried = await repo.whoopCloudCarriedDay(upTo: key) {
-            // A day WHOOP has not scored yet is common in the morning, and three dashes over a strap that
-            // is working is worse than last night's real numbers WITH the date they belong to — which the
-            // hero's footer shows. Today only: a past day that was never scored simply was not.
+            // Nothing from the cloud and nothing of our own yet: repeat the last real day and SAY that
+            // is what this is. Today only — a past day that was never scored simply was not.
             cloudDay = carried
             cloudIsCarried = true
         } else {
@@ -1885,6 +1889,18 @@ struct LiquidTodayView: View {
     /// sheets; the others stay due and come up on the next appearance.
     private func runDueRituals() async {
         guard ritual == nil else { return }
+        // THE 06:40 SLOT SCORES THE DAY BEFORE IT TALKS ABOUT IT.
+        //
+        // The morning briefing is the first thing the day says, and it was being written from whatever
+        // happened to be in memory when Today last appeared — which, first thing in the morning, is
+        // yesterday. A forced refresh here recomputes the day's own figures and re-reads the cloud, so
+        // the briefing describes today and the hero stops carrying the moment there is something of
+        // today's to show. Only the morning slot pays for it; midday and evening run on a day that has
+        // already been scored.
+        if DayRitualScheduler.dueRituals().contains(.morning) {
+            await repo.refreshEverything(force: true)
+            await refreshPlatformHealth()
+        }
         let grounding = RitualGrounding(
             recovery: cloudDay?.recovery ?? displayDay?.recovery,
             sleepScore: cloudSleepScore ?? restScore,

@@ -82,6 +82,10 @@ struct QuestPopupView: View {
         onSummonStrap()
         typed = 0
         let letters = Array(full)
+        // See `TypewriterText.run` — the engine is held open for the length of the line, or it idles
+        // out between letters and the restarts swallow the ticks.
+        if hapticsOn { SystemHaptics.holdTickEngine(true) }
+        defer { if hapticsOn { SystemHaptics.holdTickEngine(false) } }
         while typed < letters.count {
             try? await Task.sleep(nanoseconds: UInt64(typeInterval * 1_000_000_000))
             if Task.isCancelled { return }

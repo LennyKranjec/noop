@@ -66,7 +66,14 @@ struct OpenAIClient: AIProviderClient {
         // A streamed turn's cost arrives in the LAST chunk, which carries no delta — so it is banked
         // here and the turn is only marked unmetered if no chunk ever carried one.
         var metered: Int?
-        try await performStreamingRequest(req, session: session) { payload in
+        try await performStreamingRequest(
+            req,
+            session: session,
+            // THE PROVIDER'S OWN LEDGER. Groq returns its rate-limit state on every response, and its
+            // figures are the ones the dashboard shows — a count kept here can only ever be what THIS
+            // app has spent since it was installed.
+            onHeaders: { AIRateLimit.record(model: model, headers: $0) }
+        ) { payload in
             if let delta = SseDeltas.openAiDelta(payload) {
                 onDelta(delta)
             }
@@ -120,7 +127,9 @@ struct OpenAIClient: AIProviderClient {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = try JSONSerialization.data(withJSONObject: body)
 
-        let json = try await performRequest(req, session: session)
+        let json = try await performRequest(
+            req, session: session,
+            onHeaders: { AIRateLimit.record(model: model, headers: $0) })
         // BEFORE the content check. A 200 with no assistant text still spent the prompt, and not
         // counting it would make an empty-reply loop the cheapest-looking thing in the app.
         AITokenBudget.record(model: model, tokens: AITokenBudget.totalTokens(in: json))

@@ -297,6 +297,12 @@ struct TypewriterText: View {
     private func run() async {
         shown = 0
         let letters = Array(text)
+        // HELD OPEN FOR THE LINE. The engine idles out between letters otherwise, and each restart
+        // costs more than the gap between two of them — which is most of why the ticks were not there.
+        // `defer` rather than a close at the end: the sheet can be dismissed mid-type, and the task is
+        // cancelled rather than finished.
+        if hapticsOn { SystemHaptics.holdTickEngine(true) }
+        defer { if hapticsOn { SystemHaptics.holdTickEngine(false) } }
         while shown < letters.count {
             try? await Task.sleep(nanoseconds: UInt64(typewriterInterval * 1_000_000_000))
             if Task.isCancelled { return }

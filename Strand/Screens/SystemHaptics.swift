@@ -55,7 +55,11 @@ enum SystemHaptics {
         /// 0–1, matching the Android amplitudes (0–255) divided through.
         var intensity: Float {
             switch self {
-            case .tick: return 40.0 / 255
+            // 120, not the 40 the Android amplitude scale uses. Android's amplitude and CoreHaptics'
+            // `hapticIntensity` are not the same scale and do not share a perceptual floor: 40/255 is
+            // 0.16 here, which on the Taptic Engine is below the threshold at which a transient is
+            // felt at all. The typewriter was firing every letter and the hand felt nothing.
+            case .tick: return 120.0 / 255
             case .tap: return 90.0 / 255
             case .select: return 130.0 / 255
             case .confirm: return 200.0 / 255
@@ -101,17 +105,33 @@ enum SystemHaptics {
         #endif
     }
 
+    /// The shortest gap between two ticks that the hardware can still render as two.
+    ///
+    /// THIS IS THE OTHER HALF OF WHY THE TYPEWRITER FELT LIKE NOTHING. The line types at ~26 Hz, and
+    /// the Taptic Engine's actuator cannot strike, settle and strike again in 38 ms — the requests
+    /// arrive faster than it can reset, so they smear into one indistinct hum or are dropped outright.
+    /// At ~13 Hz each letter lands as its own event and the line reads through the fingertip as a run
+    /// of taps, which is the thing that was asked for.
+    ///
+    /// Every OTHER letter, in other words. That is not a compromise: two events the hand cannot tell
+    /// apart are one event that cost twice as much.
+    private static let minimumTickInterval: TimeInterval = 0.075
+    @MainActor private static var lastTickAt: TimeInterval = 0
+
     /// A tick that does NOT re-read preferences.
     ///
-    /// The typewriter fires one per letter at roughly 25 Hz, and a defaults read per letter is both
-    /// wasteful and — on a slow device — enough to make the animation stutter. The caller reads
-    /// `enabled` once, holds it, and calls this.
+    /// The typewriter fires one per letter, and a defaults read per letter is both wasteful and — on a
+    /// slow device — enough to make the animation stutter. The caller reads `enabled` once, holds it,
+    /// and calls this.
     @MainActor
     static func tick() {
         #if os(iOS)
+        let now = Date().timeIntervalSinceReferenceDate
+        guard now - lastTickAt >= minimumTickInterval else { return }
+        lastTickAt = now
         if !Engine.shared.playTransient(.tick) {
             // No fallback here on purpose: `UIImpactFeedbackGenerator` at .light is far heavier than a
-            // 40/255 tick, and firing it per letter is the "phone people silence" failure mode. A device
+            // tick, and firing it per letter is the "phone people silence" failure mode. A device
             // without CoreHaptics simply types silently.
         }
         #endif
@@ -123,6 +143,18 @@ enum SystemHaptics {
         #if os(iOS)
         guard enabled else { return }
         Engine.shared.prepare()
+        #endif
+    }
+
+    /// Hold the engine open across a burst of ticks, then let it go. See `Engine.holdOpen`.
+    ///
+    /// ALWAYS PAIRED. The typewriter opens it when a line starts and closes it when the line finishes
+    /// or is cancelled, so a screen that is dismissed mid-type cannot leave the hardware awake.
+    @MainActor
+    static func holdTickEngine(_ hold: Bool) {
+        #if os(iOS)
+        guard enabled else { return }
+        Engine.shared.holdOpen(hold)
         #endif
     }
 
@@ -169,6 +201,18 @@ private final class Engine {
 
     func prepare() {
         _ = ensureEngine()
+    }
+
+    /// Keep the hardware awake for the length of a typed line.
+    ///
+    /// `isAutoShutdownEnabled` is right for an app that ticks once a minute and wrong for one that is
+    /// about to tick forty times in three seconds: the engine idles out between letters and every
+    /// restart costs tens of milliseconds, during which the ticks are simply lost. The typewriter
+    /// holds it open and lets go at the end of the line.
+    func holdOpen(_ hold: Bool) {
+        guard let engine = ensureEngine() else { return }
+        engine.isAutoShutdownEnabled = !hold
+        if hold { try? engine.start() }
     }
 
     /// Play one transient. False when CoreHaptics could not, so the caller can fall back.
@@ -250,6 +294,7 @@ private final class Engine {
 private final class Engine {
     static let shared = Engine()
     func prepare() {}
+    func holdOpen(_ hold: Bool) {}
     func playTransient(_ cue: SystemHaptics.Cue) -> Bool { false }
     func playSummon() -> Bool { false }
 }
