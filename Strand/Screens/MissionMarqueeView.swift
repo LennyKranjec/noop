@@ -49,22 +49,7 @@ struct MissionMarqueeView: View {
     var body: some View {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmed.isEmpty {
-            ZStack(alignment: .leading) {
-                // The hidden twin is what measures the line at its TRUE width — `fixedSize` opts it out
-                // of the parent's width so it reports what it actually needs rather than what it was
-                // given. It never draws.
-                Text(trimmed)
-                    .font(font)
-                    .lineLimit(1)
-                    .fixedSize()
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear.onAppear { textWidth = geo.size.width }
-                                .onChangeCompat(of: geo.size.width) { textWidth = $0 }
-                        }
-                    )
-                    .hidden()
-
+            Group {
                 if overflows && !still {
                     Text(trimmed)
                         .font(font)
@@ -72,6 +57,7 @@ struct MissionMarqueeView: View {
                         .lineLimit(1)
                         .fixedSize()
                         .offset(x: offset)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 } else {
                     Text(trimmed)
                         .font(font)
@@ -81,15 +67,44 @@ struct MissionMarqueeView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
+            .frame(height: lineHeight)
             .frame(maxWidth: .infinity, alignment: .leading)
             .clipped()
+            // THE MEASURING TWIN LIVES IN AN OVERLAY, and that is the whole point of it being here
+            // rather than in the stack above.
+            //
+            // It has to be laid out UNCONSTRAINED — `fixedSize` — or it reports the viewport's width
+            // back and "is the line wider than the strip" is never true, which is the bug the Android
+            // lane shipped first. But a `fixedSize` child INSIDE the layout demands its full width from
+            // the parent, and a mission is a long sentence: the whole Today column stretched to the
+            // width of the longest line the coach had written and every card on the screen was clipped
+            // at both edges.
+            //
+            // An overlay is measured against its parent and cannot change the parent's size, so the
+            // twin can be as wide as it likes and nothing above it notices.
+            .overlay(alignment: .leading) {
+                Text(trimmed)
+                    .font(font)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear
+                                .onAppear { textWidth = geo.size.width }
+                                .onChangeCompat(of: geo.size.width) { textWidth = $0 }
+                        }
+                    )
+                    .hidden()
+                    .allowsHitTesting(false)
+            }
             .background(
                 GeometryReader { geo in
-                    Color.clear.onAppear { viewportWidth = geo.size.width }
+                    Color.clear
+                        .onAppear { viewportWidth = geo.size.width }
                         .onChangeCompat(of: geo.size.width) { viewportWidth = $0 }
                 }
             )
-            .padding(.horizontal, 16)
+            .padding(.horizontal, 4)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Text(trimmed))
             .onAppear { restart() }
@@ -98,6 +113,10 @@ struct MissionMarqueeView: View {
             .onChangeCompat(of: still) { _ in restart() }
         }
     }
+
+    /// The strip's own height. Fixed, so a line that is measured unconstrained cannot make the row
+    /// taller than one line while it is being measured.
+    private var lineHeight: CGFloat { 18 }
 
     /// Start (or stop) the loop for the current measurements.
     ///

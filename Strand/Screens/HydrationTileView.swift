@@ -46,29 +46,34 @@ struct HydrationTileView: View {
     }
 
     var body: some View {
-        Button(action: onOpen) {
-            ZStack(alignment: .topTrailing) {
-                WaterFill(fraction: fraction)
+        // NOT A BUTTON WRAPPING THE WHOLE TILE. It was, and the two glass buttons sat inside that
+        // button's LABEL — where iOS gives the taps to the outer button. Tapping + or − opened the
+        // hydration screen instead of logging anything, which is also why there was no haptic: the
+        // code that plays it never ran. The tile's own tap is a gesture on the backdrop now, and the
+        // two controls are real buttons on top of it.
+        ZStack(alignment: .topTrailing) {
+            WaterFill(fraction: fraction)
+                .contentShape(Rectangle())
+                .onTapGesture { onOpen() }
 
-                Text("\(formatML(shownML)) / \(formatML(Double(goalML)))")
-                    .font(StrandFont.bodyNumber)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .padding(12)
+            Text("\(formatML(shownML)) / \(formatML(Double(goalML)))")
+                .font(StrandFont.bodyNumber)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .padding(12)
+                .allowsHitTesting(false)
 
-                // The buttons take the place the reference tile gives its caption.
-                HStack(spacing: 12) {
-                    WaterButton(icon: "minus", label: "Remove a glass") { change(-glassML) }
-                    WaterButton(icon: "plus", label: "Add a glass") { change(glassML) }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                .padding(.bottom, 12)
+            // The buttons take the place the reference tile gives its caption.
+            HStack(spacing: 12) {
+                WaterButton(icon: "minus", label: "Remove a glass") { change(-glassML) }
+                WaterButton(icon: "plus", label: "Add a glass") { change(glassML) }
             }
-            .frame(height: waterTileHeight)
-            .frame(maxWidth: .infinity)
-            .background(StrandPalette.surfaceRaised)
-            .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+            .padding(.bottom, 12)
         }
-        .buttonStyle(.plain)
+        .frame(height: waterTileHeight)
+        .frame(maxWidth: .infinity)
+        .background(StrandPalette.surfaceRaised)
+        .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
         .task(id: "\(repo.refreshSeq)-\(repo.hydrationSeq)-\(refreshKey)") { await load() }
     }
 
@@ -79,7 +84,15 @@ struct HydrationTileView: View {
     }
 
     private func change(_ deltaML: Int) {
-        SystemHaptics.play(.tap)
+        // THE TWO DIRECTIONS FEEL DIFFERENT. Adding a glass is a commitment the day keeps, so it lands
+        // as a confirm; taking one back is an edit, so it is the lighter select. A single cue for both
+        // would make the undo feel like a second drink.
+        //
+        // AND NOTHING AT THE FLOOR. Pressing − on an empty day changes no figure, and a haptic for a
+        // tap that did nothing is the app claiming to have done something.
+        let wouldChange = deltaML > 0 || shownML > 0
+        if wouldChange { SystemHaptics.play(deltaML > 0 ? .confirm : .select) }
+        guard wouldChange else { return }
         shownML = max(shownML + Double(deltaML), 0)
         Task {
             if deltaML > 0 {

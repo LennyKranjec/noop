@@ -454,10 +454,14 @@ struct LiquidTodayView: View {
                     dataSourcesSection
                     Color.clear.frame(height: 90) // floating tab-bar clearance
                 }
-                // A WIDER GUTTER THAN THE OTHER SCREENS, on purpose. Today is a column of full-width
-                // cards one after another; at the standard 16 they run edge to edge and the screen
-                // reads as one slab rather than as a stack of things. The other tabs are mostly text
-                // and charts, which want the width.
+                // A slightly wider gutter than the other screens: Today is a column of full-width cards
+                // one after another, and at the standard 16 the stack reads as one slab. The other tabs
+                // are mostly text and charts, which want the width.
+                //
+                // This was NOT what made Today too wide — that was the mission marquee measuring its
+                // text with a `fixedSize` twin inside the layout, which demanded the full width of an
+                // unwrapped sentence and stretched the whole column past both screen edges. See
+                // `MissionMarqueeView`.
                 .padding(.horizontal, todayGutter)
                 .padding(.top, 30) // sit the title lower into the sky, not jammed under the status bar
             }
