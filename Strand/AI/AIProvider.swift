@@ -345,6 +345,9 @@ func performRequest(
     case let status where AICoachError.isKeyRejection(status):
         throw AICoachError.badKey
     case 429:
+        // READ BEFORE THROWING. A daily-limit rejection is the one place the provider states the day's
+        // real token usage over its API — see `AITokenBudget.absorbProviderError`.
+        AITokenBudget.absorbProviderError(providerErrorMessage(from: data))
         throw AICoachError.rateLimited
     default:
         throw AICoachError.server(http.statusCode, providerErrorMessage(from: data))
@@ -422,6 +425,11 @@ func performStreamingRequest(
     case let status where AICoachError.isKeyRejection(status):
         throw AICoachError.badKey
     case 429:
+        // The body is a plain error JSON even on a streaming request; collect it for the same reason as
+        // the non-streaming path does.
+        var body = ""
+        for try await line in bytes.0.lines { body += line }
+        AITokenBudget.absorbProviderError(providerErrorMessage(from: Data(body.utf8)))
         throw AICoachError.rateLimited
     default:
         // For non-200, the body is a (non-streaming) error JSON — collect it and surface the message.

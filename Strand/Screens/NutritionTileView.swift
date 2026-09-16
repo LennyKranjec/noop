@@ -165,6 +165,18 @@ private struct MacroColumn: View {
 /// Two ranks rather than one: a single line of dots at this width reads as a dotted rule, and the
 /// second rank is what makes it read as a quantity. Unlit dots keep their own colour so the bar has a
 /// visible full length to be a fraction OF.
+///
+/// DRAWN, NOT LAID OUT — AND THIS IS WHAT MADE TODAY TOO WIDE. It used to be fourteen fixed 3 pt
+/// circles in an HStack with 3 pt gaps: a RIGID 81 pt that no proposal could shrink. Three of those,
+/// the 96 pt gauge and the card padding came to ~411 pt, on a phone whose Today column is 346. The
+/// tile could not fit, so it reported its own width upward; the stack it shares with the water tile
+/// took that width; and the water tile, filling the stack, ran 65 pt past the right edge with its
+/// centred buttons visibly right of centre. The whole of Today widened with it, on today only, because
+/// this tile is today-only.
+///
+/// A Canvas takes the width it is OFFERED and fits the dots into it, so the tile can never again
+/// decide the width of the column it sits in. The dots keep their design pitch whenever there is room
+/// for it and tighten evenly when there is not.
 private struct DotBar: View {
     let fraction: Double
     let tint: Color
@@ -176,17 +188,20 @@ private struct DotBar: View {
 
     var body: some View {
         let litColumns = Int((Double(columns) * fraction).rounded())
-        VStack(alignment: .leading, spacing: spacing) {
-            ForEach(0..<ranks, id: \.self) { _ in
-                HStack(spacing: spacing) {
-                    ForEach(0..<columns, id: \.self) { column in
-                        Circle()
-                            .fill(column < litColumns ? tint : StrandPalette.textTertiary.opacity(0.22))
-                            .frame(width: dot, height: dot)
-                    }
+        let unlit = StrandPalette.textTertiary.opacity(0.22)
+        Canvas { context, size in
+            let pitch = min(dot + spacing, size.width / CGFloat(columns))
+            let diameter = min(dot, pitch * 0.5)
+            for rank in 0..<ranks {
+                let y = CGFloat(rank) * (dot + spacing)
+                for column in 0..<columns {
+                    let rect = CGRect(x: CGFloat(column) * pitch, y: y, width: diameter, height: diameter)
+                    context.fill(Path(ellipseIn: rect), with: .color(column < litColumns ? tint : unlit))
                 }
             }
         }
+        .frame(height: CGFloat(ranks) * dot + CGFloat(ranks - 1) * spacing)
+        .frame(maxWidth: .infinity)
     }
 }
 

@@ -175,9 +175,11 @@ public enum WhoopCloudApi {
         public let id: String
         public let start: Date
         public let end: Date
-        /// WHOOP's numeric sport id. Their catalogue is theirs and it changes, so this is kept RAW and
-        /// named through a table that degrades to "Workout" rather than guessing.
+        /// WHOOP's numeric sport id, kept raw. NOT used to name the session when `sportName` is there.
         public let sportId: Int?
+        /// WHOOP's OWN name for the sport, as v2 sends it (`sport_name`). The authority on what this
+        /// session was — see `displaySport`.
+        public let sportName: String?
         public let strain: Double?
         public let averageHeartRate: Int?
         public let maxHeartRate: Int?
@@ -210,6 +212,10 @@ public enum WhoopCloudApi {
                 start: start,
                 end: end,
                 sportId: num(rec, "sport_id").map { Int($0) },
+                sportName: {
+                    let raw = str(rec, "sport_name").trimmingCharacters(in: .whitespaces)
+                    return raw.isEmpty ? nil : raw
+                }(),
                 strain: scored ? score.flatMap { num($0, "strain") } : nil,
                 averageHeartRate: score.flatMap { num($0, "average_heart_rate") }.map { Int($0) },
                 maxHeartRate: score.flatMap { num($0, "max_heart_rate") }.map { Int($0) },
@@ -218,66 +224,42 @@ public enum WhoopCloudApi {
         }
     }
 
-    /// WHOOP's sport ids, for the ones worth naming.
+    /// The name a session is stored and shown under.
     ///
-    /// A PARTIAL TABLE ON PURPOSE. Their catalogue runs to a hundred-odd entries and changes without
-    /// notice; transcribing all of it would be a list that silently goes stale. What is here is what a
-    /// wearer actually logs, and anything else reads "Workout" — which is true, rather than a guess at
-    /// which sport a number stands for.
-    public static func sportName(_ id: Int?) -> String {
+    /// WHOOP'S OWN `sport_name` FIRST, and the numeric table only where it is absent. The first cut
+    /// named every session from a sport-id table transcribed from memory, and that table was off by one
+    /// across most of its range — 45 is Weightlifting, not Yoga; 44 is Yoga; 63 is Walking, not 66 — so
+    /// a strength session arrived labelled as yoga. That is precisely the failure the table's own note
+    /// said it existed to avoid, and it did a second piece of damage: the cross-source dedup only
+    /// collapses two rows of the SAME sport, so a strap-logged "Weightlifting" and the cloud's
+    /// mis-named copy of it both stayed on the list.
+    ///
+    /// v2 sends the name. The name is WHOOP's own, needs no table, and cannot go stale.
+    ///
+    /// The fallback covers only the three ids that have never moved. Anything else without a name is
+    /// "Workout", which is true, rather than a guess at which sport a number stands for.
+    public static func displaySport(name: String?, id: Int?) -> String {
+        if let name, !name.isEmpty { return prettySport(name) }
         switch id {
         case -1: return "Activity"
         case 0: return "Running"
         case 1: return "Cycling"
-        case 16: return "Baseball"
-        case 17: return "Basketball"
-        case 18: return "Rowing"
-        case 19: return "Fencing"
-        case 20: return "Field Hockey"
-        case 21: return "Football"
-        case 24: return "Golf"
-        case 27: return "Ice Hockey"
-        case 28: return "Lacrosse"
-        case 29: return "Rugby"
-        case 30: return "Sailing"
-        case 31: return "Skiing"
-        case 32: return "Soccer"
-        case 33: return "Softball"
-        case 34: return "Squash"
-        case 35: return "Swimming"
-        case 36: return "Tennis"
-        case 37: return "Track & Field"
-        case 38: return "Volleyball"
-        case 39: return "Water Polo"
-        case 42: return "Boxing"
-        case 43: return "Dance"
-        case 44: return "Pilates"
-        case 45: return "Yoga"
-        case 47: return "Weightlifting"
-        case 48: return "Cross Country Skiing"
-        case 49: return "Functional Fitness"
-        case 51: return "Hiking/Rucking"
-        case 52: return "Horseback Riding"
-        case 55: return "Kayaking"
-        case 56: return "Martial Arts"
-        case 57: return "Mountain Biking"
-        case 59: return "Powerlifting"
-        case 60: return "Rock Climbing"
-        case 62: return "Running"
-        case 63: return "Spinning"
-        case 64: return "Stairmaster"
-        case 65: return "Triathlon"
-        case 66: return "Walking"
-        case 70: return "Meditation"
-        case 71: return "Other"
-        case 73: return "Diving"
-        case 82: return "Barre"
-        case 83: return "Stretching"
-        case 85: return "HIIT"
-        case 96: return "Strength Training"
-        case 101: return "Pickleball"
         default: return "Workout"
         }
+    }
+
+    /// "functional-fitness" / "functional_fitness" / "FUNCTIONAL FITNESS" -> "Functional Fitness".
+    ///
+    /// Title-cased with SPACES, because that is the spelling the rest of the app stores a sport under,
+    /// and the cross-source dedup compares sports with whitespace removed and case folded. A hyphen
+    /// survives that fold, so "functional-fitness" and a strap-logged "Functional Fitness" would never
+    /// be recognised as the same session.
+    public static func prettySport(_ raw: String) -> String {
+        raw.replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(separator: " ")
+            .map { word in word.prefix(1).uppercased() + word.dropFirst().lowercased() }
+            .joined(separator: " ")
     }
 
     /// Fold the reads into one row per day.

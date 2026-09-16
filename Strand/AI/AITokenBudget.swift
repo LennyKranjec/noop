@@ -38,6 +38,8 @@ enum AITokenBudget {
     private static let usedKeyPrefix = "ai.tokens.used."
     private static let blindKeyPrefix = "ai.tokens.blind."
     private static let dayKeyPrefix = "ai.tokens.day."
+    private static let limitKeyPrefix = "ai.tokens.limit."
+    private static let syncedKeyPrefix = "ai.tokens.synced."
 
     /// One day's spend on one model.
     struct Reading: Equatable {
@@ -46,12 +48,15 @@ enum AITokenBudget {
         /// Turns this model answered today WITHOUT reporting their cost. See the note at the top: these
         /// are the reason `used` is a floor rather than a total.
         let unmetered: Int
+        /// The day's ceiling. The provider's own figure once it has stated one, `dailyLimit` until then.
+        let limit: Int
+        /// When the provider last stated the day's real usage. Nil until it has. See `absorbProviderError`.
+        let syncedAt: Date?
 
-        var limit: Int { AITokenBudget.dailyLimit }
-        var remaining: Int { max(0, AITokenBudget.dailyLimit - used) }
+        var remaining: Int { max(0, limit - used) }
         var fraction: Double {
-            guard AITokenBudget.dailyLimit > 0 else { return 0 }
-            return min(1, Double(used) / Double(AITokenBudget.dailyLimit))
+            guard limit > 0 else { return 0 }
+            return min(1, Double(used) / Double(limit))
         }
         var isWarning: Bool { fraction >= AITokenBudget.warnAt }
         /// True when nothing has been spent AND nothing went unmetered — i.e. the model has not been
@@ -86,9 +91,13 @@ enum AITokenBudget {
         let model = normalise(model)
         guard !model.isEmpty else { return nil }
         rollIfNeeded(model: model, d)
+        let storedLimit = d.integer(forKey: limitKeyPrefix + model)
+        let synced = d.double(forKey: syncedKeyPrefix + model)
         return Reading(model: model,
                        used: d.integer(forKey: usedKeyPrefix + model),
-                       unmetered: d.integer(forKey: blindKeyPrefix + model))
+                       unmetered: d.integer(forKey: blindKeyPrefix + model),
+                       limit: storedLimit > 0 ? storedLimit : dailyLimit,
+                       syncedAt: synced > 0 ? Date(timeIntervalSince1970: synced) : nil)
     }
 
     /// Throw away this model's day. The wearer's own button, for when they know the provider's window
@@ -98,6 +107,7 @@ enum AITokenBudget {
         guard !model.isEmpty else { return }
         d.removeObject(forKey: usedKeyPrefix + model)
         d.removeObject(forKey: blindKeyPrefix + model)
+        d.removeObject(forKey: syncedKeyPrefix + model)
         d.set(dayKey(), forKey: dayKeyPrefix + model)
     }
 
@@ -120,12 +130,84 @@ enum AITokenBudget {
     /// A streamed turn carries its usage only in the FINAL chunk, and only when the request asked for it
     /// (`stream_options.include_usage`). Every other chunk returns nil here, which is why this is a
     /// lookup rather than a parse failure.
+    ///
+    /// GROQ PUTS IT UNDER `x_groq`. Its final chunk carries `x_groq.usage`, not a top-level `usage`, and
+    /// a reader that only looked at the top level counted every streamed Groq turn as unmetered — which is
+    /// most of the coach's traffic, and a large part of why this count sat far below the dashboard's.
     static func totalTokens(inStreamPayload payload: String) -> Int? {
         guard payload.contains("\"usage\""),
               let data = payload.data(using: .utf8),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
         else { return nil }
-        return totalTokens(in: json)
+        if let top = totalTokens(in: json) { return top }
+        if let groq = json["x_groq"] as? [String: Any] { return totalTokens(in: groq) }
+        return nil
+    }
+
+    // MARK: - The provider's own figure
+
+    /// Set today's figures to what the provider says they are.
+    ///
+    /// AUTHORITATIVE, so it REPLACES rather than adds: the provider's "used" already includes every turn
+    /// this device counted, and every turn made anywhere else with the same key — the Android build,
+    /// a script, the playground. Unmetered turns are cleared for the same reason; the provider has
+    /// metered them.
+    static func resync(model: String, used: Int, limit: Int, _ d: UserDefaults = .standard) {
+        let model = normalise(model)
+        guard !model.isEmpty, used >= 0, limit > 0 else { return }
+        rollIfNeeded(model: model, d)
+        d.set(used, forKey: usedKeyPrefix + model)
+        d.set(0, forKey: blindKeyPrefix + model)
+        d.set(limit, forKey: limitKeyPrefix + model)
+        d.set(Date().timeIntervalSince1970, forKey: syncedKeyPrefix + model)
+    }
+
+    /// Read a provider error for a statement of the day's token usage, and resync from it if it is one.
+    ///
+    /// WHY THIS IS THE SYNC POINT. Groq does not publish daily token usage over its API: a normal reply
+    /// carries requests-per-day and tokens-per-MINUTE in its headers, and the per-day figure lives only
+    /// on the dashboard. The one place the API states it is the rejection when the day runs out —
+    ///
+    ///   Rate limit reached for model `openai/gpt-oss-20b` in organization `org_…` service tier
+    ///   `on_demand` on tokens per day (TPD): Limit 200000, Used 199500, Requested 1200. …
+    ///
+    /// — which names the model, the window, the ceiling and the real usage. So that is read, whenever it
+    /// arrives, and the local count and the limit both snap to it.
+    ///
+    /// ONLY THE DAILY TOKEN WINDOW. The same sentence shape reports per-minute limits ("tokens per minute
+    /// (TPM)") and request limits, and syncing a day's counter to a minute's usage would be worse than
+    /// not syncing at all.
+    @discardableResult
+    static func absorbProviderError(_ message: String, _ d: UserDefaults = .standard) -> Bool {
+        let lower = message.lowercased()
+        guard lower.contains("tokens per day") || lower.contains("(tpd)") else { return false }
+        guard let model = between(message, "for model `", "`"),
+              let limit = number(after: "Limit ", in: message),
+              let used = number(after: "Used ", in: message)
+        else { return false }
+        resync(model: model, used: used, limit: limit, d)
+        return true
+    }
+
+    /// The text between two markers, or nil.
+    private static func between(_ text: String, _ open: String, _ close: String) -> String? {
+        guard let start = text.range(of: open),
+              let end = text.range(of: close, range: start.upperBound..<text.endIndex)
+        else { return nil }
+        let inner = String(text[start.upperBound..<end.lowerBound])
+        return inner.isEmpty ? nil : inner
+    }
+
+    /// The integer immediately after `label`, tolerating thousands separators.
+    private static func number(after label: String, in text: String) -> Int? {
+        guard let start = text.range(of: label) else { return nil }
+        var digits = ""
+        for c in text[start.upperBound...] {
+            if c.isNumber { digits.append(c) }
+            else if c == "," && !digits.isEmpty { continue }
+            else { break }
+        }
+        return Int(digits)
     }
 
     // MARK: - Private
@@ -139,6 +221,9 @@ enum AITokenBudget {
         guard d.string(forKey: dayKeyPrefix + model) != today else { return }
         d.removeObject(forKey: usedKeyPrefix + model)
         d.removeObject(forKey: blindKeyPrefix + model)
+        // The sync time goes with the day; the LIMIT does not. The ceiling is a property of the plan,
+        // not of the day, and a stated 200,000 is still 200,000 tomorrow.
+        d.removeObject(forKey: syncedKeyPrefix + model)
         d.set(today, forKey: dayKeyPrefix + model)
     }
 

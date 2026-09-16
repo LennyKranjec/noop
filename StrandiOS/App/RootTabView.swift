@@ -115,15 +115,17 @@ struct RootTabView: View {
     /// rebuild the tab roots underneath it. The same class of rebuild is what #197 caused with an
     /// `.id()` reset and #198 had to undo — it lost scroll position and re-ran `.task`.
     ///
-    /// Only a decisive horizontal flick switches tabs. EVERY tab, Today included.
+    /// Only a decisive horizontal flick switches tabs — and NOT on Today.
     ///
-    /// Today used to be carved out because it read a horizontal swipe as "change the day", which made
-    /// the one screen people open first the one screen where the gesture they had learned everywhere
-    /// else did something different. A day is still picked from the calendar in the title, where it
-    /// is a deliberate act rather than something a thumb can do by accident.
+    /// Today is a long column of tiles, several of which the thumb drags across on purpose: the water
+    /// buttons, the quest chips, the model and streak strips. A sideways flick that lands a few points
+    /// off-axis there throws the wearer onto another tab mid-gesture, which on the screen people open
+    /// first is the wrong trade. Today therefore takes NO horizontal gesture at all — neither this one
+    /// nor the day swipe it once had; the day is picked from the calendar in the title.
     private var tabSwipeGesture: some Gesture {
         DragGesture(minimumDistance: 24)
             .onEnded { v in
+                guard selectedTab != 0 else { return }
                 let dx = v.translation.width, dy = v.translation.height
                 guard abs(dx) > 60, abs(dx) > abs(dy) * 1.6 else { return }
                 let next = min(4, max(0, selectedTab + (dx < 0 ? 1 : -1)))

@@ -154,7 +154,7 @@ enum WhoopCloudSync {
             WorkoutRow(
                 startTs: Int(w.start.timeIntervalSince1970),
                 endTs: Int(w.end.timeIntervalSince1970),
-                sport: WhoopCloudApi.sportName(w.sportId),
+                sport: WhoopCloudApi.displaySport(name: w.sportName, id: w.sportId),
                 source: sourceId,
                 durationS: w.end.timeIntervalSince(w.start),
                 energyKcal: w.energyKcal,
@@ -166,7 +166,11 @@ enum WhoopCloudSync {
                 notes: nil,
                 steps: nil)
         }
-        if !workoutRows.isEmpty { await writeWorkouts(repo: repo, rows: workoutRows) }
+        // ONLY ON A READ THAT ANSWERED. `pages` is empty when every request failed, and replacing the
+        // window with nothing on a dead network would delete every session the cloud had given us.
+        if !workoutsFetched.pages.isEmpty {
+            await writeWorkouts(repo: repo, rows: workoutRows, from: start, to: end)
+        }
 
         let all = WhoopCloudApi.merge(cycleDaysPerPage + recovery + sleep)
         guard !all.isEmpty else { return Result(days: 0, connected: true, note: note) }
@@ -202,11 +206,26 @@ enum WhoopCloudSync {
     /// Separate from `write` because it has to be able to run when the daily write does not — see the
     /// call site. The natural key is (device, start, sport), so re-syncing the same window updates the
     /// rows in place instead of stacking duplicates every half hour.
-    private static func writeWorkouts(repo: Repository, rows: [WorkoutRow]) async {
+    ///
+    /// THE CLOUD'S OWN WINDOW IS REPLACED, not merged into. The natural key includes the sport, so a
+    /// session whose NAME changes — which is exactly what correcting the sport table does to every
+    /// session synced before it — would upsert as a second row beside the first rather than over it,
+    /// and every workout would appear twice. The cloud is the only writer of its own source, so its
+    /// window is cleared and rewritten from what it just said; no other source is touched.
+    private static func writeWorkouts(repo: Repository, rows: [WorkoutRow], from: Date, to: Date) async {
         guard let store = await repo.storeHandle() else { return }
+        let lo = Int(from.timeIntervalSince1970), hi = Int(to.timeIntervalSince1970)
         do {
             try await store.upsertDevice(id: sourceId, mac: nil, name: "WHOOP (cloud)")
-            _ = try await store.upsertWorkouts(rows, deviceId: sourceId)
+            // `deleteWorkouts` is keyed by sport, so the stale rows are cleared one stored sport at a
+            // time — every sport this source holds in the window, whatever it was named when written.
+            let existing = try await store.workouts(deviceId: sourceId, from: lo, to: hi, limit: 100_000)
+            for sport in Set(existing.map(\.sport)) {
+                _ = try await store.deleteWorkouts(deviceId: sourceId, sport: sport, from: lo, to: hi)
+            }
+            if !rows.isEmpty {
+                _ = try await store.upsertWorkouts(rows, deviceId: sourceId)
+            }
             await MainActor.run { repo.noteWhoopCloudChanged() }
         } catch {
             // Reported through the note, not thrown: a sync that got the days but not the sessions is

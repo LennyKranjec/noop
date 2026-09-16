@@ -740,50 +740,55 @@ struct CoachView: View {
         .onChangeCompat(of: coach.model) { _ in refreshBudget() }
     }
 
-    /// TODAY'S ALLOWANCE, beside the model it belongs to.
+    /// TODAY'S ALLOWANCE, beside the model it belongs to: TOKENS, out of the day's ceiling.
     ///
     /// The free tier is metered per model, and running out looks from the inside exactly like the app
     /// breaking: the coach stops answering, mid-conversation, with nothing said about why. A bar that
     /// fills as the day goes on is the difference between a cliff and a slope you can see.
     ///
-    /// THE PROVIDER'S OWN FIGURE WHEN IT SENDS ONE. Groq returns its rate-limit state on every
-    /// response, and those are the numbers on the dashboard; the local tally can only ever be what this
-    /// app has spent since it was installed, on the device's own midnight, against an allowance that
-    /// was typed in rather than asked for. So the local count is now the FALLBACK, for a provider that
-    /// reports nothing.
+    /// WHERE THE NUMBER COMES FROM, in order of authority:
     ///
-    /// WHICH WINDOW IS DRAWN IS THE PROVIDER'S CHOICE, not a guess — see `AIRateLimit`. Where it meters
-    /// tokens by the day, the bar is tokens. Where it meters them by the minute (Groq's usual free
-    /// tier), the day is measured in REQUESTS and the bar is requests, because a bar labelled "today"
-    /// that is really "this minute" would sit near full all day and empty seconds before a 429.
+    ///   1. A daily token window in the response headers, if the provider sends one — live and exact.
+    ///   2. The provider's own statement of the day's usage, which Groq makes on a daily-limit rejection
+    ///      ("tokens per day (TPD): Limit 200000, Used …"). The count snaps to it and stays synced.
+    ///   3. The tokens this app's replies reported, summed.
     ///
-    /// ALWAYS ON, including at zero on a fresh morning. The first cut hid it until the model had been
-    /// used, on the grounds that an empty meter carries no information — but the thing it is there to
-    /// answer is "how much have I got left", and a gauge that is absent exactly when the answer is "all
-    /// of it" is a gauge you cannot learn to trust.
+    /// Groq's API does not publish daily token usage on an ordinary reply — its headers carry requests
+    /// per DAY and tokens per MINUTE, and the per-day token figure lives on the dashboard — so between
+    /// rejections (3) is what there is, and it cannot see what the same key spent elsewhere. The menu
+    /// says which of the three is on screen. An earlier cut showed REQUESTS on the bar when tokens were
+    /// only metered per minute, which was accurate and was not the number anyone was asking for.
+    ///
+    /// ALWAYS ON, including at zero on a fresh morning. A gauge that is absent exactly when the answer
+    /// is "all of it" is a gauge you cannot learn to trust.
     @ViewBuilder
     private var budgetPill: some View {
         if let gauge = budgetGauge {
             Menu {
                 Text(gauge.detail)
-                if let limits = rateLimit {
-                    // EVERYTHING THE PROVIDER SAID, spelled out — including the window this bar is not
-                    // drawing, because the one that bites first is not always the one on screen.
-                    if let r = limits.requests {
-                        Text("Requests: \(r.remaining) of \(r.limit) left, resets in \(shortDuration(r.resetSeconds))")
-                    }
-                    if let t = limits.tokens {
-                        Text("Tokens: \(t.remaining.formatted()) of \(t.limit.formatted()) left, resets in \(shortDuration(t.resetSeconds))")
-                    }
-                    Text("Reported by the provider itself on its last reply.")
-                } else if let budget {
+                if let budget, gauge.isLocal {
                     if budget.unmetered > 0 {
                         // SAID OUT LOUD. Those turns cost something the provider did not report, so the
                         // figure above is a floor. A budget that quietly under-counts is worse than none.
                         Text("\(budget.unmetered) turn(s) today reported no usage, so this is a floor.")
                     }
-                    Text("Counted on this device, because the provider sends no limits. It resets at "
-                         + "your own midnight, and it cannot see anything you spent elsewhere.")
+                    if let synced = budget.syncedAt {
+                        Text("Last set to the provider's own figure at "
+                             + synced.formatted(date: .omitted, time: .shortened) + ".")
+                    } else {
+                        Text("Not yet confirmed by the provider today. It states the real figure when "
+                             + "the day's limit is reached, and this count snaps to it then.")
+                    }
+                }
+                if let limits = rateLimit {
+                    // EVERYTHING ELSE THE PROVIDER SAID on its last reply, spelled out — the window that
+                    // bites first is not always the one on the bar.
+                    if let r = limits.requests {
+                        Text("Requests: \(r.remaining) of \(r.limit) left, resets in \(shortDuration(r.resetSeconds))")
+                    }
+                    if let t = limits.tokens, !t.isDaily {
+                        Text("Tokens this minute: \(t.remaining.formatted()) of \(t.limit.formatted()) left")
+                    }
                 }
                 Divider()
                 Button {
@@ -815,7 +820,7 @@ struct CoachView: View {
                 .padding(.vertical, 5)
                 .background(StrandPalette.surfaceInset, in: Capsule())
             }
-            .accessibilityLabel(Text("Model allowance"))
+            .accessibilityLabel(Text("Token allowance"))
             .accessibilityValue(Text(gauge.detail))
         }
     }
@@ -825,34 +830,31 @@ struct CoachView: View {
         let label: String
         let detail: String
         let fraction: Double
+        /// True when this is the local count rather than a live provider window.
+        let isLocal: Bool
         var isWarning: Bool { fraction >= AITokenBudget.warnAt }
     }
 
-    /// The provider's figure if there is a live one, the local tally otherwise.
+    /// Tokens today, from the most authoritative source available — see `budgetPill`.
     private var budgetGauge: BudgetGauge? {
-        if let limits = rateLimit {
-            if let tokens = limits.dailyTokens {
-                return BudgetGauge(
-                    label: shortCount(tokens.used) + " / " + shortCount(tokens.limit),
-                    detail: "\(tokens.used.formatted()) of \(tokens.limit.formatted()) tokens used "
-                        + "today on \(limits.model), as the provider reports it.",
-                    fraction: tokens.fraction)
-            }
-            if let requests = limits.dailyRequests {
-                return BudgetGauge(
-                    label: "\(requests.used) / \(requests.limit) req",
-                    detail: "\(requests.used) of \(requests.limit) requests used today on "
-                        + "\(limits.model), as the provider reports it. It meters tokens by the "
-                        + "minute, not by the day, so the day is measured in requests here.",
-                    fraction: requests.fraction)
-            }
+        if let tokens = rateLimit?.dailyTokens, let model = rateLimit?.model {
+            return BudgetGauge(
+                label: shortCount(tokens.used) + " / " + shortCount(tokens.limit),
+                detail: "\(tokens.used.formatted()) of \(tokens.limit.formatted()) tokens used today on "
+                    + "\(model), live from the provider.",
+                fraction: tokens.fraction,
+                isLocal: false)
         }
         guard let budget else { return nil }
+        let origin = budget.syncedAt == nil
+            ? "counted from this app's replies"
+            : "synced to the provider's figure, plus this app's replies since"
         return BudgetGauge(
             label: shortCount(budget.used) + " / " + shortCount(budget.limit),
-            detail: "\(budget.used.formatted()) of \(budget.limit.formatted()) tokens, counted on "
-                + "this device for \(budget.model).",
-            fraction: budget.fraction)
+            detail: "\(budget.used.formatted()) of \(budget.limit.formatted()) tokens today on "
+                + "\(budget.model), \(origin).",
+            fraction: budget.fraction,
+            isLocal: true)
     }
 
     /// "12.4k", "200k", "840". Thousands, because the exact token count of a conversation is not a

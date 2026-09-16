@@ -145,7 +145,7 @@ final class WhoopCloudApiTests: XCTestCase {
         XCTAssertEqual(out.count, 1)
         let w = out[0]
         XCTAssertEqual(w.id, "w-1")
-        XCTAssertEqual(WhoopCloudApi.sportName(w.sportId), "Running")
+        XCTAssertEqual(WhoopCloudApi.displaySport(name: w.sportName, id: w.sportId), "Running")
         XCTAssertEqual(w.strain ?? 0, 11.4, accuracy: 0.0001)
         XCTAssertEqual(w.averageHeartRate, 148)
         XCTAssertEqual(w.maxHeartRate, 179)
@@ -164,7 +164,8 @@ final class WhoopCloudApiTests: XCTestCase {
         XCTAssertEqual(out.count, 1)
         XCTAssertNil(out[0].strain)
         XCTAssertNil(out[0].energyKcal)
-        XCTAssertEqual(WhoopCloudApi.sportName(out[0].sportId), "Yoga")
+        // No `sport_name` and an id outside the three that never move: honest, not guessed.
+        XCTAssertEqual(WhoopCloudApi.displaySport(name: out[0].sportName, id: out[0].sportId), "Workout")
     }
 
     func testAWorkoutWithNoUsableSpanIsDropped() {
@@ -179,10 +180,31 @@ final class WhoopCloudApiTests: XCTestCase {
     }
 
     func testAnUnknownSportIsNamedHonestlyRatherThanGuessed() {
-        // WHOOP's catalogue changes without notice, and the table here is deliberately partial. An id
-        // it does not know reads "Workout", which is true, instead of whatever sport sits next to it.
-        XCTAssertEqual(WhoopCloudApi.sportName(9_999), "Workout")
-        XCTAssertEqual(WhoopCloudApi.sportName(nil), "Workout")
+        // WHOOP's catalogue changes without notice. An id with no name reads "Workout", which is true,
+        // instead of whatever sport a remembered table puts next to it.
+        XCTAssertEqual(WhoopCloudApi.displaySport(name: nil, id: 9_999), "Workout")
+        XCTAssertEqual(WhoopCloudApi.displaySport(name: nil, id: nil), "Workout")
+    }
+
+    func testWhoopsOwnSportNameWinsOverTheId() {
+        // The regression this pins: id 45 is Weightlifting, and the first table called it Yoga. With a
+        // name present, the id is not consulted at all.
+        let body = """
+        {"records":[{"id":"w-9","start":"2026-09-14T06:00:00Z","end":"2026-09-14T07:00:00Z",
+        "timezone_offset":"+00:00","sport_id":45,"sport_name":"weightlifting","score_state":"SCORED",
+        "score":{"strain":9.1}}]}
+        """
+        let w = WhoopCloudApi.parseWorkouts(body)[0]
+        XCTAssertEqual(w.sportName, "weightlifting")
+        XCTAssertEqual(WhoopCloudApi.displaySport(name: w.sportName, id: w.sportId), "Weightlifting")
+    }
+
+    func testSportNamesAreSpelledTheWayTheRestOfTheAppStoresThem() {
+        // Spaces and title case, because the cross-source dedup folds case and whitespace but NOT
+        // hyphens — "functional-fitness" would never match a strap-logged "Functional Fitness".
+        XCTAssertEqual(WhoopCloudApi.prettySport("functional-fitness"), "Functional Fitness")
+        XCTAssertEqual(WhoopCloudApi.prettySport("hiking_rucking"), "Hiking Rucking")
+        XCTAssertEqual(WhoopCloudApi.prettySport("RUNNING"), "Running")
     }
 
     // MARK: - Paging

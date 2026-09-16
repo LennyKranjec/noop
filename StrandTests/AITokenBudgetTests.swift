@@ -99,6 +99,44 @@ final class AITokenBudgetTests: XCTestCase {
         XCTAssertNil(AITokenBudget.totalTokens(in: ["usage": ["total_tokens": 0]]))
     }
 
+    // MARK: - Syncing to the provider's own figure
+
+    func testAGroqDailyLimitRejectionResyncsTheCountAndTheLimit() {
+        AITokenBudget.record(model: "openai/gpt-oss-20b", tokens: 3_000, defaults)
+        let message = "Rate limit reached for model `openai/gpt-oss-20b` in organization `org_01abc` "
+            + "service tier `on_demand` on tokens per day (TPD): Limit 200000, Used 199500, "
+            + "Requested 1200. Please try again in 7m12s."
+        XCTAssertTrue(AITokenBudget.absorbProviderError(message, defaults))
+        let r = AITokenBudget.reading(model: "openai/gpt-oss-20b", defaults)
+        // REPLACED, not added: the provider's figure already includes this device's 3,000 and whatever
+        // the same key spent anywhere else.
+        XCTAssertEqual(r?.used, 199_500)
+        XCTAssertEqual(r?.limit, 200_000)
+        XCTAssertNotNil(r?.syncedAt)
+    }
+
+    func testAPerMinuteRejectionDoesNotTouchTheDaysCount() {
+        AITokenBudget.record(model: "m", tokens: 3_000, defaults)
+        let message = "Rate limit reached for model `m` in organization `org_x` service tier `on_demand` "
+            + "on tokens per minute (TPM): Limit 8000, Used 7900, Requested 900."
+        XCTAssertFalse(AITokenBudget.absorbProviderError(message, defaults))
+        XCTAssertEqual(AITokenBudget.reading(model: "m", defaults)?.used, 3_000)
+    }
+
+    func testAStatedLimitSurvivesTheNextDay() {
+        AITokenBudget.resync(model: "m", used: 50_000, limit: 500_000, defaults)
+        defaults.set("2000-01-01", forKey: "ai.tokens.day.m")
+        let r = AITokenBudget.reading(model: "m", defaults)
+        XCTAssertEqual(r?.used, 0)
+        XCTAssertEqual(r?.limit, 500_000)
+        XCTAssertNil(r?.syncedAt)
+    }
+
+    func testGroqsStreamedUsageUnderItsOwnKeyIsCounted() {
+        XCTAssertEqual(AITokenBudget.totalTokens(
+            inStreamPayload: #"{"choices":[],"x_groq":{"id":"req_1","usage":{"total_tokens":913}}}"#), 913)
+    }
+
     func testAStreamChunkOnlyReportsWhenItCarriesUsage() {
         XCTAssertNil(AITokenBudget.totalTokens(
             inStreamPayload: #"{"choices":[{"delta":{"content":"hi"}}]}"#))
