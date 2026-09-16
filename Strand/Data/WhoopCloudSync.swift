@@ -133,11 +133,40 @@ enum WhoopCloudSync {
         let sleepFetched = await fetchAll(token: token, path: "activity/sleep", start: start, end: end)
         let sleep = sleepFetched.pages.map { WhoopCloudApi.parseSleep($0) }
 
+        // THE SESSIONS, not just the day totals. A cycle's strain says the day was hard; a workout says
+        // WHAT was hard, when, and for how long — which is the difference between the coach saying "your
+        // strain is high" and it saying "that 74-minute run this morning is why". They are also the only
+        // cloud records the wearer recognises by name.
+        let workoutsFetched = await fetchAll(token: token, path: "activity/workout", start: start, end: end)
+        let workouts = workoutsFetched.pages.flatMap { WhoopCloudApi.parseWorkouts($0) }
+
         // Records READ versus days STORED are different numbers, and the gap is the interesting part: a
         // hundred records that all come back PENDING_SCORE store nothing, and without both figures that
         // is indistinguishable from a request that failed.
-        let note = [cyclesFetched.note, recoveryFetched.note, sleepFetched.note].joined(separator: " · ")
+        let note = [cyclesFetched.note, recoveryFetched.note, sleepFetched.note, workoutsFetched.note]
+            .joined(separator: " · ")
         UserDefaults.standard.set(note, forKey: lastNoteKey)
+
+        // WRITTEN BEFORE THE EARLY RETURN BELOW. An account whose daily endpoints are all pending but
+        // whose workouts came back fine is a real state — dropping the sessions because no DAY scored
+        // would be losing the half that did arrive.
+        let workoutRows = workouts.map { w in
+            WorkoutRow(
+                startTs: Int(w.start.timeIntervalSince1970),
+                endTs: Int(w.end.timeIntervalSince1970),
+                sport: WhoopCloudApi.sportName(w.sportId),
+                source: sourceId,
+                durationS: w.end.timeIntervalSince(w.start),
+                energyKcal: w.energyKcal,
+                avgHr: w.averageHeartRate,
+                maxHr: w.maxHeartRate,
+                strain: w.strain,
+                distanceM: w.distanceMetre,
+                zonesJSON: nil,
+                notes: nil,
+                steps: nil)
+        }
+        if !workoutRows.isEmpty { await writeWorkouts(repo: repo, rows: workoutRows) }
 
         let all = WhoopCloudApi.merge(cycleDaysPerPage + recovery + sleep)
         guard !all.isEmpty else { return Result(days: 0, connected: true, note: note) }
@@ -166,6 +195,23 @@ enum WhoopCloudSync {
         // A failed write is reported as zero days rather than as the count it TRIED to store — the
         // caller's message goes on screen, and "synced 30 days" over an empty table is the worst of both.
         return Result(days: stored ? rows.count : 0, connected: true, note: note)
+    }
+
+    /// Store the sessions under the cloud's own source.
+    ///
+    /// Separate from `write` because it has to be able to run when the daily write does not — see the
+    /// call site. The natural key is (device, start, sport), so re-syncing the same window updates the
+    /// rows in place instead of stacking duplicates every half hour.
+    private static func writeWorkouts(repo: Repository, rows: [WorkoutRow]) async {
+        guard let store = await repo.storeHandle() else { return }
+        do {
+            try await store.upsertDevice(id: sourceId, mac: nil, name: "WHOOP (cloud)")
+            _ = try await store.upsertWorkouts(rows, deviceId: sourceId)
+            await MainActor.run { repo.noteWhoopCloudChanged() }
+        } catch {
+            // Reported through the note, not thrown: a sync that got the days but not the sessions is
+            // still a sync that got the days.
+        }
     }
 
     private static func write(repo: Repository, rows: [DailyMetric], sleepScores: [MetricPoint]) async -> Bool {

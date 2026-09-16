@@ -1246,7 +1246,11 @@ final class AICoachEngine: ObservableObject {
     /// Append recent workouts to an existing context string. Async (workouts are read from the store),
     /// so callers that want workouts in the context can await this and feed the result to `send`'s
     /// flow via the chat, kept separate so `buildContext()` stays synchronous per the spec.
-    func recentWorkoutsBlock(limit: Int = 6) async -> String {
+    /// TEN, not six. Six was set when the only sessions here were the ones logged in this app; the
+    /// WHOOP cloud now contributes every session the wearer recorded on the strap, and a keen week runs
+    /// past six — at which point the block silently became "the last four days" while still being
+    /// introduced to the model as the last thirty.
+    func recentWorkoutsBlock(limit: Int = 10) async -> String {
         let rows = await repo.workoutRows(days: 30) // newest first
         guard !rows.isEmpty else { return "Recent workouts: none recorded in the last 30 days." }
         let bodySystem = UnitSystem(

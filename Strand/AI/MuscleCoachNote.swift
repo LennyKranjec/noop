@@ -31,10 +31,13 @@ enum MuscleCoachNote {
     /// Room for a real reading, not a caption.
     ///
     /// The first cut capped this at 180 characters, which bought one sentence and a clipped second — the
-    /// model had to choose between naming the group and saying what to do about it. The panel now takes
-    /// ALL the room the legend leaves, which on a nine-row side is most of the column, so this is length
-    /// the card can actually show rather than text it will cut.
-    static let maxChars = 620
+    /// model had to choose between naming the group and saying what to do about it.
+    ///
+    /// 480 is what the panel can now SHOW rather than what it would cut: the column it sits in takes the
+    /// figure's height as a MINIMUM rather than a ceiling, so the note fills the blank corner the legend
+    /// leaves and then grows the card downward. The prompt asks for 260–440 so the usual note lands
+    /// inside the free corner and the card only grows when the reading genuinely needs the room.
+    static let maxChars = 480
 
     static let question = "Which muscle group most needs attention this week, and what should they do?"
 
@@ -88,10 +91,14 @@ enum MuscleCoachNote {
         s += "Below is the last seven days of lifting volume per muscle group. Where a group has a "
         s += "frozen personal normal, its z-score says how unusual this week is FOR THAT GROUP: 0 is "
         s += "a normal week, +2 is unusually heavy, -2 unusually light.\n"
-        s += "Answer in ONE or TWO short sentences, under 180 characters total. Name the group that "
-        s += "most needs attention and say what to do about it this week. Cite at most one figure, "
-        s += "and only one that appears below. NEVER invent a number. No heading, no preamble, no "
-        s += "list, no markdown.\n\n"
+        // THE LENGTH ASKED FOR AND THE LENGTH ALLOWED HAVE TO AGREE. This said "under 180 characters"
+        // while `maxChars` allowed 620, so the panel was sized for a reading and the model was told to
+        // write a caption — and it obeyed the prompt, which is why the note was one clipped thought.
+        s += "Answer in THREE or FOUR sentences, 260 to 440 characters total. Name the group that most "
+        s += "needs attention, say WHY this week's figure makes it that group, say what to do about it "
+        s += "this week in concrete terms — sets, a session, a day off — and name one group that is "
+        s += "fine, so the reading is not all correction. Cite at most two figures, and only ones that "
+        s += "appear below. NEVER invent a number. No heading, no preamble, no list, no markdown.\n\n"
         s += "VOLUME, LAST 7 DAYS:\n"
         for (group, kg) in loads.sorted(by: { $0.value > $1.value }) {
             if let baseline = baselines[group] {

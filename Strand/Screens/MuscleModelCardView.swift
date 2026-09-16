@@ -147,7 +147,16 @@ struct MuscleModelCardView: View {
                 SystemNotePanel(text: note, unavailable: unavailableReason)
                 Spacer(minLength: 0)
             }
-            .frame(height: figureHeight, alignment: .top)
+            // MIN height, not a fixed one. The note reads the whole training week and now says more
+            // than a caption, and a FIXED height meant the panel had exactly the room the legend left
+            // over — about nine lines — and silently CLIPPED anything past it. The reading was being
+            // written and then cut.
+            //
+            // A minimum keeps everything the fixed height bought: the column still matches the figure,
+            // so the blank bottom-right corner is filled by the note before anything grows, and the
+            // legend stays pinned to the top. It only differs once the note outgrows that corner, and
+            // then the card grows DOWNWARD into the page rather than the text disappearing.
+            .frame(minHeight: figureHeight, alignment: .top)
             .frame(maxWidth: .infinity)
         }
     }

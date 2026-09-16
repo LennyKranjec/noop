@@ -128,6 +128,63 @@ final class WhoopCloudApiTests: XCTestCase {
         XCTAssertEqual(merged[1].sleepPerformance ?? 0, 81, accuracy: 0.0001)
     }
 
+    // MARK: - Workouts
+    //
+    // The one endpoint here whose UNSCORED records are KEPT. A session WHOOP has not finished grading
+    // still happened — it has a start, an end and a sport — and dropping it takes a real workout off the
+    // list to avoid showing one missing number.
+
+    func testAWorkoutIsParsedWithItsScoreAndKilojoulesBecomeKilocalories() {
+        let body = """
+        {"records":[{"id":"w-1","start":"2026-09-14T06:00:00.000Z","end":"2026-09-14T07:14:00.000Z",
+        "timezone_offset":"+02:00","sport_id":0,"score_state":"SCORED",
+        "score":{"strain":11.4,"average_heart_rate":148,"max_heart_rate":179,
+        "kilojoule":2510.0,"distance_meter":13400.5}}]}
+        """
+        let out = WhoopCloudApi.parseWorkouts(body)
+        XCTAssertEqual(out.count, 1)
+        let w = out[0]
+        XCTAssertEqual(w.id, "w-1")
+        XCTAssertEqual(WhoopCloudApi.sportName(w.sportId), "Running")
+        XCTAssertEqual(w.strain ?? 0, 11.4, accuracy: 0.0001)
+        XCTAssertEqual(w.averageHeartRate, 148)
+        XCTAssertEqual(w.maxHeartRate, 179)
+        XCTAssertEqual(w.distanceMetre ?? 0, 13400.5, accuracy: 0.0001)
+        // 2510 kJ / 4.184 = 599.9 kcal.
+        XCTAssertEqual(w.energyKcal ?? 0, 599.9, accuracy: 0.1)
+        XCTAssertEqual(w.end.timeIntervalSince(w.start), 74 * 60, accuracy: 0.5)
+    }
+
+    func testAnUnscoredWorkoutIsKeptWithoutItsStrain() {
+        let body = """
+        {"records":[{"id":"w-2","start":"2026-09-14T06:00:00Z","end":"2026-09-14T06:40:00Z",
+        "timezone_offset":"+00:00","sport_id":45,"score_state":"PENDING_SCORE"}]}
+        """
+        let out = WhoopCloudApi.parseWorkouts(body)
+        XCTAssertEqual(out.count, 1)
+        XCTAssertNil(out[0].strain)
+        XCTAssertNil(out[0].energyKcal)
+        XCTAssertEqual(WhoopCloudApi.sportName(out[0].sportId), "Yoga")
+    }
+
+    func testAWorkoutWithNoUsableSpanIsDropped() {
+        // No end, and an end before its start. Neither is a session; storing either would put a row on
+        // the list with a negative duration.
+        let body = """
+        {"records":[{"id":"w-3","start":"2026-09-14T06:00:00Z","timezone_offset":"+00:00"},
+        {"id":"w-4","start":"2026-09-14T08:00:00Z","end":"2026-09-14T07:00:00Z",
+        "timezone_offset":"+00:00"}]}
+        """
+        XCTAssertTrue(WhoopCloudApi.parseWorkouts(body).isEmpty)
+    }
+
+    func testAnUnknownSportIsNamedHonestlyRatherThanGuessed() {
+        // WHOOP's catalogue changes without notice, and the table here is deliberately partial. An id
+        // it does not know reads "Workout", which is true, instead of whatever sport sits next to it.
+        XCTAssertEqual(WhoopCloudApi.sportName(9_999), "Workout")
+        XCTAssertEqual(WhoopCloudApi.sportName(nil), "Workout")
+    }
+
     // MARK: - Paging
 
     func testNextTokenIsReadAndAnAbsentOneIsTheLastPage() {

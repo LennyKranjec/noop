@@ -206,6 +206,14 @@ final class Repository: ObservableObject {
     @Published private(set) var hydrationSeq = 0
     func noteHydrationChanged() { hydrationSeq += 1 }
 
+    /// The platform's own "read today's food log" hook, installed by the iOS shell at launch.
+    ///
+    /// A CLOSURE RATHER THAN A CALL. The macro read lives in `HealthKitBridge`, which is iOS-only, and
+    /// the screens that want it are shared with macOS. Handing the repository a closure lets the shared
+    /// side ask for a refresh without naming a type that does not exist on the other platform — and on
+    /// macOS the closure is simply never installed, so asking costs nothing.
+    var refreshPlatformNutrition: (() async -> Void)?
+
     /// Bumped when a platform health read tops up today's macros, so the Today nutrition tile re-reads.
     ///
     /// Its own counter for the same reason the cloud has one: the read writes straight through the store
@@ -2754,6 +2762,12 @@ final class Repository: ObservableObject {
         // them too, or a successful file import never appears in the Workouts list (Data Sources counts it,
         // the load didn't). HR is reconciled from the strap trace at the end like every other row.
         rows += (try? await store.workouts(deviceId: "activity-file", from: lo, to: hi, limit: 5000)) ?? []
+        // WHOOP's OWN SESSIONS, pulled from their cloud under their own source. Without this line the
+        // sync writes them and nothing reads them: the list, the Today card and the coach's grounding
+        // block all come through here, so a wearer whose workouts are recorded in WHOOP's app rather
+        // than in this one saw an empty list over a full account. The cross-source dedup below is what
+        // stops a session tracked BOTH by the strap and by the cloud showing up twice.
+        rows += (try? await store.workouts(deviceId: WhoopCloudSync.sourceId, from: lo, to: hi, limit: 5000)) ?? []
         rows = Self.dedupWorkoutsByNaturalKey(rows)
         let spans = WorkoutSource.parseDismissedSpans(dismissedDetectedSpans)
         // #687: collapse the SAME activity tracked live under the strap AND imported from Health Connect /

@@ -406,7 +406,12 @@ struct AppleHealthView: View {
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("To get your Apple Health data in anyway: import a Health export .zip in Data Sources, or turn on Shortcuts Export to feed your strap data into Health without the entitlement. (A build installed from the App Store or signed with a paid Apple Developer account connects directly.)")
+                    // NAME THE IMPORT LANE FIRST. The earlier copy offered a file import and the
+                    // Shortcuts EXPORT — one of which is a manual chore and the other of which pushes
+                    // data the wrong way. `ShortcutHealthImport` (noop://import-health) is the lane that
+                    // actually brings Apple Health's own daily totals and workouts IN without the
+                    // entitlement, and leaving it unmentioned meant nobody found it.
+                    Text("Two ways in that need no entitlement: run the Health Shortcut, which reads your daily totals and workouts and hands them to Telos through noop://import-health — this is the closest thing to a live sync a sideload can have — or import a Health export .zip in Data Sources. Shortcuts Export sends the other way, feeding your strap data into Health. (A build from the App Store, or one signed with a paid Apple Developer account whose App ID has HealthKit enabled, connects directly.)")
                         .font(StrandFont.caption)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)

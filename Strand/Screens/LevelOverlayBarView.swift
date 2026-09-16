@@ -31,12 +31,13 @@ let levelBarHeight: CGFloat = 46
 /// The radar's full diameter. Two thirds of it live in the bar; the rest overhangs.
 let levelRadarDiameter: CGFloat = 86
 
-/// How far the radar sits below the top of the strip.
+/// How far the radar sits below the top of the strip. NEGATIVE: it is lifted INTO the strip.
 ///
-/// ZERO, now that the strip itself is inset below the notch: the drop used to be the clearance for the
-/// notch, and any of it on top of the safe area pushes the pentagon down a second time — which left it
-/// hanging far enough into the screen to sit over the System tab's own controls.
-let levelRadarDrop: CGFloat = 0
+/// The drop used to be clearance for the notch, and once the strip itself was inset below the safe area
+/// any of it pushed the pentagon down a second time. At zero it still hung further into the screen than
+/// it needed to — the plate reads as part of the bar when its top edge is level with the bar's own, not
+/// when it starts where the bar starts.
+let levelRadarDrop: CGFloat = -6
 
 /// How much of the radar hangs below the strip, and therefore how far content must clear it.
 var levelRadarOverhang: CGFloat { levelRadarDiameter / 3 + levelRadarDrop }
@@ -75,7 +76,7 @@ struct LevelOverlayBarView: View {
                 diameter: levelRadarDiameter,
                 countUpKey: countUpKey
             )
-            .padding(.top, levelRadarDrop)
+            .offset(y: levelRadarDrop)
             .contentShape(PentagonShape())
             .onTapGesture {
                 guard breakdown != nil else { return }

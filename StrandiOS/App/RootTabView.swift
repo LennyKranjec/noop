@@ -226,7 +226,14 @@ struct RootTabView: View {
             // TODAY'S MACROS, from whichever app the wearer keeps their food diary in. A live read
             // rather than an import: a diary is filled in across the day, so a figure banked once is
             // wrong by lunchtime. iOS-only, which is why it is here and not in the shared Today.
-            if await health.refreshTodayMacros() != nil { repo.noteNutritionChanged() }
+            //
+            // INSTALLED AS A HOOK, not just run once at launch: every refresh the wearer asks for should
+            // re-read the diary, and the shared screens cannot call HealthKit themselves.
+            repo.refreshPlatformNutrition = { [weak repo] in
+                guard let repo else { return }
+                if await health.refreshTodayMacros() != nil { repo.noteNutritionChanged() }
+            }
+            await repo.refreshPlatformNutrition?()
             // Backup & Sync: on-launch catch-up (see RootView). Detached + utility priority so a
             // 100MB+ whole-DB ZIP never blocks startup; gated on the auto toggle (default OFF). (Must-fix #4.)
             let backupRepo = repo

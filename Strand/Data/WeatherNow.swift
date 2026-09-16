@@ -117,9 +117,13 @@ enum WeatherService {
     }
 
     /// Fetch, unless the cached reading is still fresh. Nil when there is nothing to show.
+    ///
+    /// `force` skips the staleness gate. A deliberate refresh — a pull, a tab appearance the wearer
+    /// asked for — should ask the sky again; the gate exists to stop the app making a request every time
+    /// a view happens to rebuild, not to ignore the wearer.
     @discardableResult
-    static func refresh() async -> WeatherNow? {
-        if let cached { return cached }
+    static func refresh(force: Bool = false) async -> WeatherNow? {
+        if !force, let cached { return cached }
         guard let url = URL(string:
             "https://api.open-meteo.com/v1/forecast"
             + "?latitude=\(latitude)&longitude=\(longitude)"

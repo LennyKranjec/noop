@@ -85,7 +85,7 @@ public enum WhoopCloudApi {
     }
 
     /// WHOOP's own scoring state. Only this one carries a `score` object.
-    private static let scored = "SCORED"
+    private static let scored_ = "SCORED"
 
     /// `GET /recovery` — the recovery score and the two markers under it.
     ///
@@ -95,7 +95,7 @@ public enum WhoopCloudApi {
     public static func parseRecovery(_ body: String, cycleDayById: [String: String]) -> [String: CloudDay] {
         var out: [String: CloudDay] = [:]
         for rec in records(body) {
-            guard str(rec, "score_state") == scored else { continue }
+            guard str(rec, "score_state") == scored_ else { continue }
             // READ AS A STRING, deliberately. v1 numbers its cycles and v2 moved several ids to UUIDs;
             // reading this as an integer means every recovery whose id is not numeric silently fails to
             // place and the whole endpoint looks empty. A string key is correct for both.
@@ -126,7 +126,7 @@ public enum WhoopCloudApi {
                   let day = localDay(str(rec, "start"), offset: str(rec, "timezone_offset"))
             else { continue }
             dayById[id] = day
-            guard str(rec, "score_state") == scored, let score = rec["score"] as? [String: Any] else { continue }
+            guard str(rec, "score_state") == scored_, let score = rec["score"] as? [String: Any] else { continue }
             byDay[day] = CloudDay(day: day, strain: num(score, "strain"))
         }
         return (byDay, dayById)
@@ -142,7 +142,7 @@ public enum WhoopCloudApi {
         var out: [String: CloudDay] = [:]
         for rec in records(body) {
             if (rec["nap"] as? Bool) == true { continue }
-            guard str(rec, "score_state") == scored,
+            guard str(rec, "score_state") == scored_,
                   let day = localDay(str(rec, "end"), offset: str(rec, "timezone_offset")),
                   let score = rec["score"] as? [String: Any]
             else { continue }
@@ -164,6 +164,120 @@ public enum WhoopCloudApi {
                 respRateBpm: num(score, "respiratory_rate"))
         }
         return out
+    }
+
+    /// One workout, as the cloud reports it.
+    ///
+    /// Its own type rather than a `CloudDay` field: a day holds ONE of every score and any number of
+    /// workouts, and folding them into the daily row would either lose all but one or turn every field on
+    /// that row into an array for the sake of a sport name.
+    public struct CloudWorkout: Equatable, Sendable {
+        public let id: String
+        public let start: Date
+        public let end: Date
+        /// WHOOP's numeric sport id. Their catalogue is theirs and it changes, so this is kept RAW and
+        /// named through a table that degrades to "Workout" rather than guessing.
+        public let sportId: Int?
+        public let strain: Double?
+        public let averageHeartRate: Int?
+        public let maxHeartRate: Int?
+        public let kilojoule: Double?
+        public let distanceMetre: Double?
+
+        /// Kilojoules as kilocalories, which is the unit every other workout row in this app carries.
+        public var energyKcal: Double? {
+            kilojoule.map { $0 / 4.184 }
+        }
+    }
+
+    /// `GET /activity/workout` — the sessions WHOOP scored.
+    ///
+    /// UNSCORED SESSIONS ARE STILL RETURNED, unlike the daily endpoints. A workout that WHOOP has not
+    /// finished grading still HAPPENED — it has a start, an end and a sport — and dropping it would take
+    /// a real session off the list to avoid showing one missing number. The strain is simply nil, which
+    /// every consumer of a workout row already handles.
+    public static func parseWorkouts(_ body: String) -> [CloudWorkout] {
+        records(body).compactMap { rec -> CloudWorkout? in
+            guard let id = idString(rec["id"]),
+                  let start = parseInstant(str(rec, "start")),
+                  let end = parseInstant(str(rec, "end")),
+                  end > start
+            else { return nil }
+            let score = rec["score"] as? [String: Any]
+            let scored = str(rec, "score_state") == scored_
+            return CloudWorkout(
+                id: id,
+                start: start,
+                end: end,
+                sportId: num(rec, "sport_id").map { Int($0) },
+                strain: scored ? score.flatMap { num($0, "strain") } : nil,
+                averageHeartRate: score.flatMap { num($0, "average_heart_rate") }.map { Int($0) },
+                maxHeartRate: score.flatMap { num($0, "max_heart_rate") }.map { Int($0) },
+                kilojoule: score.flatMap { num($0, "kilojoule") },
+                distanceMetre: score.flatMap { num($0, "distance_meter") })
+        }
+    }
+
+    /// WHOOP's sport ids, for the ones worth naming.
+    ///
+    /// A PARTIAL TABLE ON PURPOSE. Their catalogue runs to a hundred-odd entries and changes without
+    /// notice; transcribing all of it would be a list that silently goes stale. What is here is what a
+    /// wearer actually logs, and anything else reads "Workout" — which is true, rather than a guess at
+    /// which sport a number stands for.
+    public static func sportName(_ id: Int?) -> String {
+        switch id {
+        case -1: return "Activity"
+        case 0: return "Running"
+        case 1: return "Cycling"
+        case 16: return "Baseball"
+        case 17: return "Basketball"
+        case 18: return "Rowing"
+        case 19: return "Fencing"
+        case 20: return "Field Hockey"
+        case 21: return "Football"
+        case 24: return "Golf"
+        case 27: return "Ice Hockey"
+        case 28: return "Lacrosse"
+        case 29: return "Rugby"
+        case 30: return "Sailing"
+        case 31: return "Skiing"
+        case 32: return "Soccer"
+        case 33: return "Softball"
+        case 34: return "Squash"
+        case 35: return "Swimming"
+        case 36: return "Tennis"
+        case 37: return "Track & Field"
+        case 38: return "Volleyball"
+        case 39: return "Water Polo"
+        case 42: return "Boxing"
+        case 43: return "Dance"
+        case 44: return "Pilates"
+        case 45: return "Yoga"
+        case 47: return "Weightlifting"
+        case 48: return "Cross Country Skiing"
+        case 49: return "Functional Fitness"
+        case 51: return "Hiking/Rucking"
+        case 52: return "Horseback Riding"
+        case 55: return "Kayaking"
+        case 56: return "Martial Arts"
+        case 57: return "Mountain Biking"
+        case 59: return "Powerlifting"
+        case 60: return "Rock Climbing"
+        case 62: return "Running"
+        case 63: return "Spinning"
+        case 64: return "Stairmaster"
+        case 65: return "Triathlon"
+        case 66: return "Walking"
+        case 70: return "Meditation"
+        case 71: return "Other"
+        case 73: return "Diving"
+        case 82: return "Barre"
+        case 83: return "Stretching"
+        case 85: return "HIIT"
+        case 96: return "Strength Training"
+        case 101: return "Pickleball"
+        default: return "Workout"
+        }
     }
 
     /// Fold the reads into one row per day.

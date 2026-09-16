@@ -346,6 +346,15 @@ struct LiquidTodayView: View {
     private static let topAnchorID = "liquidToday.top"
 
     var body: some View {
+        // THE COLUMN IS PINNED TO THE VIEWPORT, and this is a guard rather than a layout choice.
+        //
+        // A vertical ScrollView sizes its content column to the WIDEST child, so any one view that
+        // demands more than the screen — a text measured unconstrained, a fixed-width row, a chart with
+        // an intrinsic size — silently stretches every card on the screen and clips the lot at both
+        // edges. That has now happened twice from two different children, and chasing the next one is
+        // not a plan: the column is given the container's own width outright, so a greedy child is
+        // clipped to the screen instead of taking the screen with it.
+        GeometryReader { container in
         ScrollViewReader { proxy in
         ScrollView {
             VStack(spacing: 0) {
@@ -465,6 +474,9 @@ struct LiquidTodayView: View {
                 .padding(.horizontal, todayGutter)
                 .padding(.top, 30) // sit the title lower into the sky, not jammed under the status bar
             }
+            // See the note at the top of `body`. `width:`, not `maxWidth:` — a maximum still lets a
+            // child propose more and win; a fixed width is the only form the child cannot argue with.
+            .frame(width: container.size.width)
             #if os(macOS)
             // Keep the phone-shaped column readable + centred on the wide mac detail pane. The sky is a
             // ScrollView background (full-bleed), so constraining the content column here doesn't touch it.
@@ -587,6 +599,7 @@ struct LiquidTodayView: View {
         }
         #endif
         }
+        }   // GeometryReader — see the column pin at the top of `body`
     }
 
     // MARK: - Liquid pull-to-refresh
@@ -636,6 +649,7 @@ struct LiquidTodayView: View {
                 await repo.refreshEverything(force: true)
                 await load()
                 await loadCloudDay()
+                await refreshPlatformHealth()
                 try? await Task.sleep(nanoseconds: 350_000_000)   // let the fill read as "done"
                 withAnimation(.easeOut(duration: 0.25)) { refreshing = false }
             }
@@ -1790,7 +1804,10 @@ struct LiquidTodayView: View {
         }
         cloudSleepScore = await repo.whoopCloudSleepScore(day: cloudDay?.day ?? key)
 
-        weather = await WeatherService.refresh() ?? weather
+        // FORCED. `loadCloudDay` runs on a deliberate refresh — a pull, a day change, a sync landing —
+        // and on every one of those the wearer has asked to be brought up to date. The staleness gate
+        // still covers the incidental rebuilds, because those do not come through here.
+        weather = await WeatherService.refresh(force: true) ?? weather
         let stressByDay = await repo.bankedStressMinutes()
         streaks = Streaks.evaluate(days: repo.days,
                                    stressMinutesByDay: stressByDay,
@@ -1847,6 +1864,15 @@ struct LiquidTodayView: View {
             stressMinutes: stressToday,
             sleepDebtMin: sleepDebtMinutes,
             daysSinceTraining: since)
+    }
+
+    /// Ask the platform health store for today's macros, on every refresh.
+    ///
+    /// iOS-only, and reached through the shell rather than from here: `HealthKitBridge` does not exist on
+    /// macOS, and a shared view that reached for a platform store could not compile there. The shell
+    /// publishes the result by bumping `nutritionSeq`, which is what the tile reads.
+    private func refreshPlatformHealth() async {
+        await repo.refreshPlatformNutrition?()
     }
 
     /// Run whatever slot is due, and show the first thing it produced.
