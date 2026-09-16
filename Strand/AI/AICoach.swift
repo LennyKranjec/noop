@@ -694,6 +694,21 @@ final class AICoachEngine: ObservableObject {
         persistMessages()
     }
 
+    /// Put a quest into the transcript as the system's own opening line, so the wearer can ask about it.
+    ///
+    /// APPENDED, NOT SENT. Nothing is asked of the provider here — the directive is already written, and
+    /// the point of the button is to put it where a follow-up question can be asked ABOUT it. Spending a
+    /// round trip to re-state a sentence the app already has would be a request for nothing.
+    ///
+    /// It does not clear the conversation. A wearer who was mid-thread and taps a quest is adding to that
+    /// thread, and a button that silently wiped it would be the most expensive thing on the screen.
+    func surfaceQuest(title: String, target: String, taunt: String) {
+        var text = "**" + title.uppercased() + "**\n\n" + target
+        if !taunt.isEmpty { text += "\n\n" + taunt }
+        appendMessage(ChatMessage(role: .assistant, text: text))
+        persistMessages()
+    }
+
     /// K11: An optional chart image (base64-encoded PNG) to send with the next user message.
     /// Set by the composer's "Attach chart" toggle when multimodal is enabled and the provider
     /// is Gemini. Consumed (cleared) on the next send. nil when no image is attached.

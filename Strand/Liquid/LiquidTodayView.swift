@@ -337,6 +337,10 @@ struct LiquidTodayView: View {
         return f
     }()
 
+    /// Today's own horizontal gutter. See the note at the call site on why it is wider than
+    /// `NoopMetrics.screenHPadding`.
+    private let todayGutter: CGFloat = 22
+
     /// Scroll-to-top on an at-root Today re-tap (#198 follow-up); default 0 so macOS/other contexts stay inert.
     @Environment(\.scrollToTopSignal) private var scrollToTopSignal
     private static let topAnchorID = "liquidToday.top"
@@ -450,7 +454,11 @@ struct LiquidTodayView: View {
                     dataSourcesSection
                     Color.clear.frame(height: 90) // floating tab-bar clearance
                 }
-                .padding(.horizontal, NoopMetrics.screenHPadding)
+                // A WIDER GUTTER THAN THE OTHER SCREENS, on purpose. Today is a column of full-width
+                // cards one after another; at the standard 16 they run edge to edge and the screen
+                // reads as one slab rather than as a stack of things. The other tabs are mostly text
+                // and charts, which want the width.
+                .padding(.horizontal, todayGutter)
                 .padding(.top, 30) // sit the title lower into the sky, not jammed under the status bar
             }
             #if os(macOS)
@@ -781,10 +789,7 @@ struct LiquidTodayView: View {
     private var heroCard: some View {
         TodayTrioHeroView(
             scores: heroScores,
-            dateLabel: heroDateLabel,
-            // Says WHOOP when the numbers came from WHOOP's own cloud, rather than crediting a source
-            // that did not produce them.
-            sourceLabel: cloudDay != nil ? "WHOOP" : heroSourceLabel,
+            carriedFrom: cloudIsCarried ? heroDateLabel : nil,
             weather: weather,
             onTapScore: { index in
                 switch index {
@@ -860,8 +865,8 @@ struct LiquidTodayView: View {
         return Swift.min(Swift.max(value / max, 0), 1)
     }
 
-    /// The day the FIGURES are from, which on a carried row is not the selected day. This label is the
-    /// entire reason the carry is honest rather than a substitution nobody was told about.
+    /// The day the CARRIED figures are from. Only ever shown when they are carried — see `carriedFrom`
+    /// on the hero.
     private var heroDateLabel: String {
         let key = (cloudIsCarried ? cloudDay?.day : nil) ?? selectedDayKey
         guard let date = WhoopCloudApi.localDayDate(key) else { return key }

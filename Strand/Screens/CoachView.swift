@@ -688,6 +688,45 @@ struct CoachView: View {
     }
     #endif
 
+    /// THE MODEL, one tap from the conversation — and at the BOTTOM of it.
+    ///
+    /// It started in the title row, which is exactly where the level strip's pentagon hangs a third of
+    /// itself over every screen: the chip sat under it and could not be tapped. Above the composer it is
+    /// out of the pentagon's way, and it is also nearer the thing it affects — switching between a fast
+    /// model and a thorough one is what you do as you type a question, not while setting the screen up.
+    private var modelChip: some View {
+        HStack {
+            Menu {
+                Picker("Model", selection: modelPickerSelection) {
+                    ForEach(coach.availableModels, id: \.self) { m in Text(m).tag(m) }
+                }
+                Divider()
+                Button {
+                    Task { await coach.refreshModels() }
+                } label: {
+                    Label("Refresh models", systemImage: "arrow.clockwise")
+                }
+                .disabled(!coach.hasKey)
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "cpu")
+                        .font(.system(size: 9, weight: .semibold))
+                    Text(shortModelName)
+                        .font(StrandFont.caption)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 8, weight: .bold))
+                }
+                .foregroundStyle(StrandPalette.textSecondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(StrandPalette.surfaceInset, in: Capsule())
+            }
+            .accessibilityLabel("Model")
+            Spacer(minLength: 0)
+        }
+    }
+
     /// One round header button. Three of them sit in the title row and they must not drift apart.
     private func coachHeaderButton(_ icon: String, _ label: String,
                                    action: @escaping () -> Void) -> some View {
@@ -739,38 +778,16 @@ struct CoachView: View {
                 .font(StrandFont.title1)
                 .foregroundStyle(StrandPalette.textPrimary)
             Spacer(minLength: 8)
-
-            // THE MODEL, one tap from the conversation. It was three levels deep — sheet, connection
-            // card, picker — and switching between a fast model and a thorough one is the thing you do
-            // MID-conversation, not while setting the screen up.
-            Menu {
-                Picker("Model", selection: modelPickerSelection) {
-                    ForEach(coach.availableModels, id: \.self) { m in Text(m).tag(m) }
-                }
-                Divider()
-                Button {
-                    Task { await coach.refreshModels() }
-                } label: {
-                    Label("Refresh models", systemImage: "arrow.clockwise")
-                }
-                .disabled(!coach.hasKey)
-            } label: {
-                HStack(spacing: 4) {
-                    Text(shortModelName)
-                        .font(StrandFont.caption)
-                        .lineLimit(1)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 9, weight: .bold))
-                }
-                .foregroundStyle(StrandPalette.textSecondary)
-                .padding(.horizontal, 10)
-                .frame(height: 34)
-                .background(StrandPalette.surfaceInset, in: Capsule())
-            }
-            .accessibilityLabel("Model")
-
             coachHeaderButton("line.3.horizontal", "System settings") { showCoachMenu = true }
-            coachHeaderButton("plus", "New chat") { showClearConfirm = true }
+            // NO CONFIRMATION. "New chat" is not a destructive act in the sense a dialog is for: the
+            // transcript is the app's own notes, the next question rebuilds the context from the same
+            // data, and asking every time made starting a fresh thread a two-tap decision. The
+            // destructive-sounding "Clear conversation" in the settings sheet keeps its dialog, because
+            // that one is phrased as a deletion and is reached deliberately.
+            coachHeaderButton("plus", "New chat") {
+                SystemHaptics.play(.tap)
+                coach.clearConversation()
+            }
         }
         .padding(.horizontal, 20)
         .padding(.top, 8)
@@ -795,6 +812,7 @@ struct CoachView: View {
             }
             // K7: follow-ups after a reply, the opening chips before one.
             if showFollowUpChips { followUpChips } else { suggestionChips }
+            modelChip
             composer
             if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                let tokens = coach.estimatedTokens(forDraft: draft) {
@@ -847,6 +865,7 @@ struct CoachView: View {
         Group {
             if coach.messages.isEmpty {
                 emptyTranscript
+                    .frame(maxHeight: .infinity, alignment: .top)
             } else {
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -895,7 +914,10 @@ struct CoachView: View {
                 .foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity, minHeight: 180, alignment: .topLeading)
+        // FILLS THE VIEWPORT, not 180 points of it. The composer is a bottom safe-area inset on the
+        // transcript, so a short empty state pulled it up to just under the text — the input line sat in
+        // the middle of the screen for the first question and jumped to the bottom for the second.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
     }
 
     @ViewBuilder

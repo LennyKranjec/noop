@@ -33,9 +33,10 @@ let levelRadarDiameter: CGFloat = 86
 
 /// How far the radar sits below the top of the strip.
 ///
-/// Small, now that the strip itself is inset below the notch: the drop used to be the clearance for it,
-/// and keeping it at 8 on top of the safe area pushed the pentagon a second time.
-let levelRadarDrop: CGFloat = 4
+/// ZERO, now that the strip itself is inset below the notch: the drop used to be the clearance for the
+/// notch, and any of it on top of the safe area pushes the pentagon down a second time — which left it
+/// hanging far enough into the screen to sit over the System tab's own controls.
+let levelRadarDrop: CGFloat = 0
 
 /// How much of the radar hangs below the strip, and therefore how far content must clear it.
 var levelRadarOverhang: CGFloat { levelRadarDiameter / 3 + levelRadarDrop }

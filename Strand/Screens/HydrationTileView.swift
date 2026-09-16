@@ -138,6 +138,12 @@ private struct WaterFill: View {
 
     private var still: Bool { motion.poseStill(reduceMotion) }
 
+    /// The water's own blue. Deeper than the palette's cyan and with a lift at the surface, because a
+    /// flat fill reads as a coloured rectangle — the gradient is what makes it read as a body of liquid
+    /// with a top to it.
+    private var deep: Color { Color(.sRGB, red: 0.06, green: 0.36, blue: 0.62, opacity: 1) }
+    private var bright: Color { Color(.sRGB, red: 0.30, green: 0.71, blue: 0.96, opacity: 1) }
+
     var body: some View {
         TimelineView(.animation(minimumInterval: still ? nil : 1.0 / 30, paused: still)) { timeline in
             Canvas { context, size in
@@ -146,11 +152,25 @@ private struct WaterFill: View {
                 let surfaceY = size.height * (1 - clamped)
                 let amplitude = still ? 0 : size.height * 0.03
 
+                // THE MEASURE LINES, behind the water and across the whole tile. Dashed rather than
+                // solid: a solid rule at a quarter of the tile reads as a target, and there is no
+                // hydration target being drawn here — these are a scale to judge the level against,
+                // which is exactly what a dashed rule says and a solid one does not.
+                for share in [0.25, 0.5, 0.75] {
+                    var rule = Path()
+                    let y = size.height * (1 - share)
+                    rule.move(to: CGPoint(x: 0, y: y))
+                    rule.addLine(to: CGPoint(x: size.width, y: y))
+                    context.stroke(rule, with: .color(StrandPalette.hairlineStrong),
+                                   style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
+                }
+
                 func sheet(depth: Double, speed: Double, offset: Double, opacity: Double, wobble: Double) {
                     let swell = amplitude * 0.45 * sin(t * 0.23 * speed + offset)
                     var path = Path()
                     path.move(to: CGPoint(x: 0, y: size.height))
                     let steps = 48
+                    var crest = size.height
                     for i in 0...steps {
                         let x = size.width * Double(i) / Double(steps)
                         let phase = x / size.width * .pi * 2
@@ -158,18 +178,42 @@ private struct WaterFill: View {
                             + amplitude * wobble * sin(phase * 1.0 + t * 0.9 * speed + offset)
                             + amplitude * wobble * 0.5 * sin(phase * 2.3 + t * 1.4 * speed)
                             + amplitude * wobble * 0.25 * sin(phase * 3.7 - t * 0.7 * speed)
-                        if i == 0 { path.addLine(to: CGPoint(x: x, y: y)) }
-                        else { path.addLine(to: CGPoint(x: x, y: y)) }
+                        crest = Swift.min(crest, y)
+                        path.addLine(to: CGPoint(x: x, y: y))
                     }
                     path.addLine(to: CGPoint(x: size.width, y: size.height))
                     path.closeSubpath()
-                    context.fill(path, with: .color(StrandPalette.metricCyan.opacity(opacity)))
+                    // Lit at the surface, dark at the bottom — the gradient runs from the highest crest
+                    // this sheet reaches to the floor of the tile, so the sheen stays ON the water as the
+                    // level rises rather than sitting at a fixed height.
+                    context.fill(path, with: .linearGradient(
+                        Gradient(colors: [bright.opacity(opacity * 1.15), deep.opacity(opacity)]),
+                        startPoint: CGPoint(x: 0, y: crest),
+                        endPoint: CGPoint(x: 0, y: size.height)))
                 }
 
                 // Back to front: deeper, slower, fainter behind.
-                sheet(depth: 6, speed: 0.6, offset: 1.7, opacity: 0.22, wobble: 0.6)
-                sheet(depth: 3, speed: 0.85, offset: 0.6, opacity: 0.30, wobble: 0.8)
-                sheet(depth: 0, speed: 1.0, offset: 0.0, opacity: 0.42, wobble: 1.0)
+                sheet(depth: 6, speed: 0.6, offset: 1.7, opacity: 0.38, wobble: 0.6)
+                sheet(depth: 3, speed: 0.85, offset: 0.6, opacity: 0.52, wobble: 0.8)
+                sheet(depth: 0, speed: 1.0, offset: 0.0, opacity: 0.72, wobble: 1.0)
+
+                // THE GLINT along the waterline. One bright hairline on the front sheet's crest, which
+                // is the whole difference between "blue shape" and "wet".
+                if clamped > 0.02 {
+                    var glint = Path()
+                    let steps = 48
+                    for i in 0...steps {
+                        let x = size.width * Double(i) / Double(steps)
+                        let phase = x / size.width * .pi * 2
+                        let y = surfaceY
+                            + amplitude * sin(phase + t * 0.9)
+                            + amplitude * 0.5 * sin(phase * 2.3 + t * 1.4)
+                            + amplitude * 0.25 * sin(phase * 3.7 - t * 0.7)
+                        if i == 0 { glint.move(to: CGPoint(x: x, y: y)) }
+                        else { glint.addLine(to: CGPoint(x: x, y: y)) }
+                    }
+                    context.stroke(glint, with: .color(.white.opacity(0.42)), lineWidth: 1)
+                }
             }
         }
         .allowsHitTesting(false)

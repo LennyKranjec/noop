@@ -53,9 +53,14 @@ struct HeroScore: Identifiable {
 
 struct TodayTrioHeroView: View {
     let scores: [HeroScore]
-    let dateLabel: String
-    /// Where the day's numbers were resolved from — "WHOOP", "Health Connect", and so on.
-    let sourceLabel: String?
+    /// The day these figures are actually from, when it is NOT the day on screen.
+    ///
+    /// The footer used to carry the date unconditionally, and that was redundant — the day selector at
+    /// the top of Today already says which day you are looking at. It is not redundant in one case: when
+    /// WHOOP has not scored today yet and the rings are showing last night's numbers. Removing the row
+    /// outright would have taken the honesty with the repetition, so what survives is only the part that
+    /// says something the screen does not.
+    var carriedFrom: String? = nil
     /// The sky, on the footer's own line. Nil drops the row entirely: a failed lookup shows nothing
     /// rather than a guess.
     var weather: WeatherNow? = nil
@@ -83,29 +88,21 @@ struct TodayTrioHeroView: View {
             }
             .padding(.vertical, 16)
 
-            Rectangle()
-                .fill(StrandPalette.hairline.opacity(0.7))
-                .frame(height: 1)
-
-            // The footer strip: a shade darker than the card.
-            HStack(spacing: 8) {
-                Image(systemName: "calendar")
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textTertiary)
-                Text(dateLabel)
-                    .font(.system(size: 12, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textTertiary)
-                Spacer(minLength: 0)
-                if let sourceLabel {
-                    Text(sourceLabel)
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(StrandPalette.textTertiary)
+            // NO SOURCE BADGE: "WHOOP" under three rings labelled with WHOOP's own scores is a
+            // caption for a caption. And no date, EXCEPT when the figures are carried — see `carriedFrom`.
+            if let carriedFrom {
+                HStack(spacing: 5) {
+                    Image(systemName: "clock.arrow.circlepath")
+                        .font(.system(size: 9, weight: .semibold))
+                    Text("from \(carriedFrom) — today is not scored yet")
+                        .font(.system(size: 11, weight: .semibold))
                 }
+                .foregroundStyle(StrandPalette.textTertiary)
+                .padding(.horizontal, 14)
+                .padding(.bottom, 9)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(StrandPalette.surfaceBase.opacity(0.55))
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
-            .background(StrandPalette.surfaceBase.opacity(0.55))
-
             // THE SKY, under the day. It is here rather than on a card of its own because it is not a
             // metric — it is context for the three above it, and for what the coach suggests doing
             // about them. The row is absent when the lookup failed; an invented forecast would be the

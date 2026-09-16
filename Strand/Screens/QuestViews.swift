@@ -139,13 +139,18 @@ struct QuestReviewSheet: View {
     let onClose: () -> Void
 
     @ObservedObject private var store = QuestStore.shared
+    @EnvironmentObject private var coach: AICoachEngine
+    @EnvironmentObject private var router: NavRouter
+
+    /// How much of the taunt has been typed. See `TypewriterText`.
+    @State private var typed = 0
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(quest.title.uppercased())
                 .font(StrandFont.headline)
                 .foregroundStyle(StrandPalette.textPrimary)
-            Text(quest.taunt)
+            TypewriterText(text: quest.taunt, shown: $typed)
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.textTertiary)
             Text(quest.target)
@@ -163,6 +168,25 @@ struct QuestReviewSheet: View {
                         .accessibilityLabel(Text(questRewardLabel(reward)))
                 }
             }
+
+            // ASK ABOUT IT. The directive lands in the transcript as the system's own opening line and
+            // the coach opens on it, so a follow-up has something to be a follow-up TO. Nothing is sent:
+            // the sentence already exists, and spending a round trip to restate it would be a request
+            // for nothing.
+            Button {
+                SystemHaptics.play(.tap)
+                coach.surfaceQuest(title: quest.title, target: quest.target, taunt: quest.taunt)
+                onClose()
+                router.openCoach()
+            } label: {
+                Label("Ask the system about this", systemImage: "sparkles")
+                    .font(StrandFont.footnote)
+                    .frame(maxWidth: .infinity, minHeight: 40)
+                    .background(StrandPalette.surfaceInset,
+                                in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .foregroundStyle(StrandPalette.accent)
+            }
+            .buttonStyle(.plain)
 
             Button {
                 SystemHaptics.play(.confirm)
@@ -232,5 +256,54 @@ func questRewardTint(_ reward: QuestReward) -> Color {
     case .muscle: return StrandPalette.statusWarning
     case .sleep: return StrandPalette.restColor
     case .stress: return StrandPalette.statusWarning
+    }
+}
+
+
+// MARK: - The typewriter
+//
+// The shared letter-by-letter reveal, with a haptic tick per letter. It lives here rather than inside the
+// pop-up because every surface that shows a taunt types it: the pop-up that issues a quest, and the
+// review sheet that revisits one. A line that typed itself when issued and simply appeared when reopened
+// would read as two different systems.
+//
+// SPACES GET NO TICK. The finger feels a gap between words, which is what a space is.
+//
+// SKIPPABLE. Tapping finishes the line at once — a wearer who has read it already must never be made to
+// sit through the animation.
+//
+// THE FULL STRING IS LAID OUT INVISIBLY UNDERNEATH, so the block does not change height as it fills.
+// Text that reflows while it types is the thing that makes a typewriter effect feel cheap.
+
+/// How long between letters. ~25/s: fast enough not to be a wait, slow enough to read as typing.
+private let typewriterInterval: TimeInterval = 0.038
+
+struct TypewriterText: View {
+    let text: String
+    @Binding var shown: Int
+
+    @State private var hapticsOn = SystemHaptics.enabled
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Text(text).foregroundStyle(Color.clear)
+            Text(String(text.prefix(shown)))
+        }
+        .contentShape(Rectangle())
+        .onTapGesture { shown = text.count }
+        .task(id: text) { await run() }
+    }
+
+    private func run() async {
+        shown = 0
+        let letters = Array(text)
+        while shown < letters.count {
+            try? await Task.sleep(nanoseconds: UInt64(typewriterInterval * 1_000_000_000))
+            if Task.isCancelled { return }
+            guard shown < letters.count else { return }
+            let next = letters[shown]
+            shown += 1
+            if hapticsOn, !next.isWhitespace { SystemHaptics.tick() }
+        }
     }
 }

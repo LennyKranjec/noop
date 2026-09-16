@@ -55,6 +55,9 @@ struct QuestPopupView: View {
     /// Read ONCE, held for the whole animation: a preference lookup per letter would stutter the type.
     @State private var hapticsOn = SystemHaptics.enabled
 
+    @EnvironmentObject private var coach: AICoachEngine
+    @EnvironmentObject private var router: NavRouter
+
     private var full: String { quest.taunt }
     private var done: Bool { typed >= full.count }
 
@@ -100,6 +103,23 @@ struct QuestPopupView: View {
             rewardRow
             deadline
             acceptButton
+
+            // ASK ABOUT IT, before deciding. The directive goes into the transcript as the system's own
+            // opening line so a follow-up has something to be a follow-up to — and the quest stays
+            // OFFERED, because asking a question about a commitment is not the same as making it.
+            Button {
+                SystemHaptics.play(.tap)
+                coach.surfaceQuest(title: quest.title, target: quest.target, taunt: quest.taunt)
+                router.openCoach()
+            } label: {
+                Label("Ask about this", systemImage: "sparkles")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.accent)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.plain)
+            .disabled(!done)
+
             Button {
                 SystemHaptics.play(.tap)
                 onDismiss()
