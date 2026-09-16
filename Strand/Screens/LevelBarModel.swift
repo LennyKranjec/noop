@@ -9,8 +9,9 @@ import WhoopStore
 // The one place the shell asks for a level. It reads the repository's already-loaded days, the four
 // series the formula needs, and the frozen baselines, and produces the snapshot the bar renders.
 //
-// RECOMPUTED WHEN THE DATA MOVES, NOT ON A TIMER. The level moves on the day's data, not on the
-// second's, so this is keyed on the repository's own refresh counter — there is nothing to poll.
+// ONE LEVEL A DAY. The headline figure is set at 06:40 and held until the next 06:40 — see
+// `LevelDayFreeze`. The refresh counter still drives this, because the day has to be scored the first
+// time its night arrives, but a refresh after that reads the frozen figure back rather than moving it.
 //
 // IT NEVER THROWS AND NEVER BLOCKS THE BAR. Every read is best-effort: a store that is not ready yet
 // produces no snapshot, and the strip draws its empty state rather than a zero.
@@ -51,27 +52,54 @@ final class LevelBarModel: ObservableObject {
             LevelWiring.baselineHistory(days: days, series: series, calendar: calendar)
         }
 
-        func level(daysBack: Int) -> LevelBreakdown? {
-            guard let date = calendar.date(byAdding: .day, value: -daysBack, to: Date()) else { return nil }
-            let key = LevelWiring.key(from: date, calendar: calendar)
-            let inputs = LevelWiring.inputs(days: days, asOf: key, series: series, calendar: calendar)
-            return LevelEngine.compute(inputs: inputs, baselines: baselines)
-        }
-
-        let todayKey = LevelWiring.key(from: Date(), calendar: calendar)
-        let todayInputs = LevelWiring.inputs(days: days, asOf: todayKey, series: series, calendar: calendar)
-        var drivers: [LevelPart: LevelDriver] = [:]
-        for part in LevelPart.allCases {
-            if let driver = LevelDrivers.driver(for: part, inputs: todayInputs, baselines: baselines) {
-                drivers[part] = driver
+        /// A day's level and its drivers, from the same frozen-day inputs.
+        func score(_ key: String) -> (LevelBreakdown?, [LevelPart: LevelDriver]) {
+            let inputs = LevelWiring.dayInputs(days: days, day: key, series: series, calendar: calendar)
+            var drivers: [LevelPart: LevelDriver] = [:]
+            for part in LevelPart.allCases {
+                if let driver = LevelDrivers.driver(for: part, inputs: inputs, baselines: baselines) {
+                    drivers[part] = driver
+                }
             }
+            return (LevelEngine.compute(inputs: inputs, baselines: baselines), drivers)
         }
 
+        func shifted(_ key: String, by delta: Int) -> String? {
+            guard let date = LevelWiring.date(from: key, calendar: calendar),
+                  let moved = calendar.date(byAdding: .day, value: delta, to: date) else { return nil }
+            return LevelWiring.key(from: moved, calendar: calendar)
+        }
+
+        // THE DAY WHOSE LEVEL IS CURRENT, and its frozen figure — computed and frozen the first time its
+        // night is here, read back unchanged every time after that.
+        let dayKey = LevelWiring.key(from: LevelDayFreeze.levelDay(), calendar: calendar)
+        let shown: FrozenLevel?
+        if let frozen = LevelDayFreeze.stored(), frozen.day == dayKey {
+            shown = frozen
+        } else if LevelWiring.nightLanded(days: days, day: dayKey), case let (b?, d) = score(dayKey) {
+            let fresh = FrozenLevel(day: dayKey, breakdown: b, drivers: d)
+            LevelDayFreeze.store(fresh)
+            shown = fresh
+        } else if let frozen = LevelDayFreeze.stored() {
+            // The night has not landed yet: yesterday's level stays up rather than an empty one.
+            shown = frozen
+        } else if let previous = shifted(dayKey, by: -1), case let (b?, d) = score(previous) {
+            // Nothing frozen ever, and no night yet today: score the last complete day and hold that.
+            let fresh = FrozenLevel(day: previous, breakdown: b, drivers: d)
+            LevelDayFreeze.store(fresh)
+            shown = fresh
+        } else {
+            shown = nil
+        }
+
+        // The comparisons are measured from the day SHOWN, with the same inputs, so a delta compares a
+        // frozen level with frozen levels rather than with live ones.
+        let base = shown?.day ?? dayKey
         trend = LevelTrendSnapshot(
-            now: LevelEngine.compute(inputs: todayInputs, baselines: baselines),
-            threeDaysAgo: level(daysBack: 3),
-            monthAgo: level(daysBack: 30),
-            drivers: drivers
+            now: shown?.breakdown,
+            threeDaysAgo: shifted(base, by: -3).flatMap { score($0).0 },
+            monthAgo: shifted(base, by: -30).flatMap { score($0).0 },
+            drivers: shown?.drivers ?? [:]
         )
     }
 
@@ -94,7 +122,11 @@ final class LevelBarModel: ObservableObject {
             LevelWiring.baselineHistory(days: days, series: series, calendar: calendar)
         }
 
-        let today = Date()
+        // The curve ends on the day whose level is current, and uses the same frozen-day inputs, so
+        // its last point IS the headline rather than a live figure beside a frozen one.
+        let frozen = LevelDayFreeze.stored()
+        let today = frozen.flatMap { LevelWiring.date(from: $0.day, calendar: calendar) }
+            ?? LevelDayFreeze.levelDay()
         let requested = calendar.date(byAdding: .day, value: -(spanDays - 1), to: today) ?? today
         let earliest = days.first.flatMap { LevelWiring.date(from: $0.day, calendar: calendar) }
         var cursor = (earliest.map { Swift.max($0, requested) }) ?? requested
@@ -102,8 +134,11 @@ final class LevelBarModel: ObservableObject {
         var out: [LevelPoint] = []
         while cursor <= today {
             let key = LevelWiring.key(from: cursor, calendar: calendar)
-            let inputs = LevelWiring.inputs(days: days, asOf: key, series: series, calendar: calendar)
-            if let breakdown = LevelEngine.compute(inputs: inputs, baselines: baselines) {
+            let inputs = LevelWiring.dayInputs(days: days, day: key, series: series, calendar: calendar)
+            let computed = frozen?.day == key
+                ? frozen?.breakdown
+                : LevelEngine.compute(inputs: inputs, baselines: baselines)
+            if let breakdown = computed {
                 var parts: [LevelPart: Double] = [:]
                 for component in breakdown.components {
                     if let score = component.score { parts[component.part] = score }

@@ -1,4 +1,5 @@
 import Foundation
+import StrandAnalytics
 
 // DailyMission.swift — one thing to do today, written overnight.
 //
@@ -19,11 +20,24 @@ struct DailyMission: Equatable, Codable {
     let dayKey: String
     let text: String
     let createdAt: Date
+    /// The measurable goal the mission ends on, as its `GOAL:` line stated it. Optional so a mission
+    /// stored before goals still decodes.
+    var goalMetric: String?
+    var goalThreshold: Double?
 
-    init(dayKey: String, text: String, createdAt: Date = Date()) {
+    init(dayKey: String, text: String, createdAt: Date = Date(), goal: QuestGoal? = nil) {
         self.dayKey = dayKey
         self.text = text
         self.createdAt = createdAt
+        self.goalMetric = goal?.metric.rawValue
+        self.goalThreshold = goal?.threshold
+    }
+
+    var goal: QuestGoal? {
+        guard let raw = goalMetric, let metric = QuestMetric(rawValue: raw), let t = goalThreshold else {
+            return nil
+        }
+        return QuestGoal(metric: metric, threshold: t)
     }
 }
 
@@ -78,11 +92,25 @@ enum DailyMissionWriter {
         s += "today, chosen from their numbers and their goals. Not a list, not a plan for the "
         s += "week. It must be doable today and it must suit the state their data is in: do not "
         s += "prescribe a hard session on a wrecked night.\n\n"
-        s += "Answer with the mission itself, two or three sentences, and nothing else — no heading, "
-        s += "no preamble, no score.\n\n"
+        s += "Answer with the mission itself, two or three sentences, then ONE final line stating "
+        s += "the goal the app will check automatically — no heading, no preamble, no score.\n\n"
+        // THE GOAL LINE. The quest closes itself when the data meets it, so the mission has to be
+        // something the data can see: a named metric and a number, in a fixed shape a parser does not
+        // have to interpret.
+        s += "The goal line is exactly one of:\n"
+        s += "GOAL: STEPS <number>\n"
+        s += "GOAL: WORKOUT_MIN <minutes of training>\n"
+        s += "GOAL: MEDITATION_MIN <minutes>\n"
+        s += "GOAL: WATER_ML <millilitres>\n"
+        s += "GOAL: STRAIN <WHOOP day strain, 0-21>\n"
+        s += "GOAL: SLEEP_H <hours tonight>\n"
+        s += "GOAL: BEDTIME_BY <HH:MM>\n"
+        s += "GOAL: JOURNAL\n"
+        s += "The mission must be about that one thing, and its number must match the sentence.\n\n"
         s += "Example:\n"
         s += "Bed by 22:30. Yes, that early. Your HRV has been filing complaints for three days "
-        s += "and no amount of Zone 2 is going to out-train a 5-hour night."
+        s += "and no amount of Zone 2 is going to out-train a 5-hour night.\n"
+        s += "GOAL: BEDTIME_BY 22:30"
         s += "\n\n" + grounding
         if let goals = CoachGoals.promptSection(defaults) { s += "\n\n" + goals }
         return s
@@ -97,13 +125,17 @@ enum DailyMissionWriter {
     /// the instruction no longer asks for one, but a model that saw thousands of them in training will
     /// occasionally volunteer one anyway, and it must not end up on the strip.
     static func parse(_ answer: String, dayKey: String) -> DailyMission? {
-        let text = answer
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .filter { !isScoreLine(String($0)) }
+        let lines = answer.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        // The GOAL line is read and then REMOVED: it is for the parser, and "GOAL: STEPS 9000" running
+        // across the mission strip would read as a debug print.
+        let goal = lines.lazy.compactMap { QuestGoal.parseLine($0) }.first
+        let text = lines
+            .filter { !isScoreLine($0) && QuestGoal.parseLine($0) == nil
+                && !$0.trimmingCharacters(in: .whitespaces).uppercased().hasPrefix("GOAL:") }
             .joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return nil }
-        return DailyMission(dayKey: dayKey, text: text)
+        return DailyMission(dayKey: dayKey, text: text, goal: goal ?? QuestGoal.parse(text))
     }
 
     /// A leftover `XP: 40` line, with or without the colon or surrounding asterisks.

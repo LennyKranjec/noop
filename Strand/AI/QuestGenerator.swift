@@ -38,7 +38,8 @@ enum QuestGenerator {
             rewards: trigger.rewards,
             xp: trigger.xp,
             dayKey: dayKey,
-            createdAtMs: nowMs())
+            createdAtMs: nowMs(),
+            goal: trigger.goal)
     }
 
     /// The day's main quest, from the mission the coach already wrote.
@@ -59,7 +60,8 @@ enum QuestGenerator {
             rewards: QuestNaming.rewards(forDirective: mission.text),
             xp: dailyXp,
             dayKey: mission.dayKey,
-            createdAtMs: nowMs())
+            createdAtMs: nowMs(),
+            goal: mission.goal ?? QuestGoal.parse(mission.text))
     }
 
     /// What the day's own quest is worth. Fixed, because the daily is always the same commitment.

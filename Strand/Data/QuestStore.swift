@@ -58,20 +58,34 @@ final class QuestStore: ObservableObject {
     @discardableResult
     func setState(id: String, state: QuestState) -> Quest? {
         guard let existing = quests.first(where: { $0.id == id }) else { return nil }
-        let updated = Quest(
-            id: existing.id,
-            kind: existing.kind,
-            title: existing.title,
-            taunt: existing.taunt,
-            target: existing.target,
-            rewards: existing.rewards,
-            xp: existing.xp,
-            state: state,
-            dayKey: existing.dayKey,
-            createdAtMs: existing.createdAtMs,
-            expiresAtMs: existing.expiresAtMs)
+        // Through `with(state:)`, which carries EVERY field. Rebuilding the quest here field by field is
+        // how the goal would have been silently dropped the first time a quest was accepted.
+        let updated = existing.with(state: state)
         upsert(updated)
         return updated
+    }
+
+    /// A quest the data just closed, and what the data said. What the completion pop-up reads.
+    struct Completion: Identifiable, Equatable {
+        let quest: Quest
+        let summary: String
+        var id: String { quest.id }
+    }
+
+    /// Completions waiting to be shown, oldest first. A queue, because two quests can close in the same
+    /// refresh and each deserves its own moment.
+    @Published private(set) var completions: [Completion] = []
+
+    /// Close `quest` because its goal was met, and queue the pop-up that says so.
+    func complete(_ quest: Quest, summary: String) {
+        guard quests.contains(where: { $0.id == quest.id && $0.state != .completed }) else { return }
+        setState(id: quest.id, state: .completed)
+        completions.append(Completion(quest: quest.with(state: .completed), summary: summary))
+    }
+
+    /// The front completion has been seen.
+    func dismissCompletion() {
+        if !completions.isEmpty { completions.removeFirst() }
     }
 
     /// Re-read from storage. For a screen that has been away while a background pass wrote one.

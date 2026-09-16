@@ -188,19 +188,10 @@ struct QuestReviewSheet: View {
             }
             .buttonStyle(.plain)
 
-            Button {
-                SystemHaptics.play(.confirm)
-                store.setState(id: quest.id, state: .completed)
-                onClose()
-            } label: {
-                Text("MARK IT DONE")
-                    .font(StrandFont.headline)
-                    .tracking(2)
-                    .frame(maxWidth: .infinity, minHeight: 50)
-                    .background(StrandPalette.accent, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .foregroundStyle(StrandPalette.surfaceBase)
-            }
-            .buttonStyle(.plain)
+            // NO "MARK IT DONE". The quest closes itself when the data meets its goal — see
+            // `QuestAutoComplete` — so what sits here is where the data stands, not a button asking the
+            // wearer to vouch for themselves.
+            QuestProgressPanel(quest: quest)
 
             Button {
                 SystemHaptics.play(.tap)
@@ -218,6 +209,54 @@ struct QuestReviewSheet: View {
         }
         .padding(16)
         .background(StrandPalette.surfaceBase)
+    }
+}
+
+/// Where the data stands against an open quest's goal.
+private struct QuestProgressPanel: View {
+    let quest: Quest
+
+    @EnvironmentObject private var repo: Repository
+    @State private var line: String?
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "gauge.with.dots.needle.33percent")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(StrandPalette.accent)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("CHECKED AUTOMATICALLY")
+                    .font(StrandFont.overline)
+                    .tracking(1.4)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                Text(line ?? " ")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .task(id: quest.id) { await load() }
+    }
+
+    private func load() async {
+        guard let goal = quest.effectiveGoal else {
+            line = "This directive names nothing the app can measure, so it cannot close itself. It "
+                + "will run out on its own clock."
+            return
+        }
+        if goal.metric.resolvesNextMorning {
+            line = "Read from tonight's sleep. It closes itself tomorrow morning if the night meets it."
+            return
+        }
+        // Run the check as well as reading it: opening the sheet is a reason to look, and a quest that
+        // is already met should close now rather than on the next refresh.
+        await QuestAutoComplete.run(repo: repo)
+        let evidence = await QuestAutoComplete.gather(repo: repo, day: quest.dayKey)
+        line = "So far: " + goal.summary(evidence) + " It closes itself the moment the data meets it."
     }
 }
 

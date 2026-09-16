@@ -46,7 +46,7 @@ public enum QuestState: String, Equatable, Codable, CaseIterable, Sendable {
     case offered = "OFFERED"
     /// Accepted. Visible on Today until it is finished or the window closes.
     case active = "ACTIVE"
-    /// The user says it is done. XP claimed once, through the XP ledger.
+    /// Done — closed by the data meeting the quest's goal, not by the wearer saying so.
     case completed = "COMPLETED"
     /// Offered and turned down, or expired unfinished. Kept briefly so it is not re-issued at once.
     case declined = "DECLINED"
@@ -77,6 +77,9 @@ public struct Quest: Equatable, Sendable {
     /// EVERY QUEST HAS ONE. A directive with no deadline is a suggestion, and the countdown is most of
     /// what separates the two: "8,000 steps" is advice, "8,000 steps in 14:22:07" is a quest.
     public let expiresAtMs: Int64
+    /// What closes it. Nil only for a quest whose directive states nothing the app can measure — which
+    /// no issuing path produces any more; see `QuestGoal`.
+    public let goal: QuestGoal?
 
     public init(
         id: String = UUID().uuidString,
@@ -89,7 +92,8 @@ public struct Quest: Equatable, Sendable {
         state: QuestState = .offered,
         dayKey: String,
         createdAtMs: Int64,
-        expiresAtMs: Int64? = nil
+        expiresAtMs: Int64? = nil,
+        goal: QuestGoal? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -102,6 +106,37 @@ public struct Quest: Equatable, Sendable {
         self.dayKey = dayKey
         self.createdAtMs = createdAtMs
         self.expiresAtMs = expiresAtMs ?? (createdAtMs + Quest.defaultWindowMs)
+        self.goal = goal
+    }
+
+    /// The same quest in another state. Every field carried, so a state change cannot drop one.
+    public func with(state: QuestState) -> Quest {
+        Quest(id: id, kind: kind, title: title, taunt: taunt, target: target, rewards: rewards, xp: xp,
+              state: state, dayKey: dayKey, createdAtMs: createdAtMs, expiresAtMs: expiresAtMs,
+              goal: goal)
+    }
+
+    /// The goal, falling back to reading one out of the directive for a quest stored before goals.
+    public var effectiveGoal: QuestGoal? { goal ?? QuestGoal.parse(target) }
+
+    /// Until when the data may still close it.
+    ///
+    /// Its own deadline — except for a goal that can only be checked the morning after, which gets
+    /// until noon of the next day, or a bedtime quest would expire at exactly the moment it became
+    /// checkable.
+    public func checkableUntilMs(calendar: Calendar = .current) -> Int64 {
+        guard let metric = effectiveGoal?.metric, metric.resolvesNextMorning,
+              let start = calendar.date(from: Self.components(dayKey)),
+              let noonNext = calendar.date(byAdding: .hour, value: 36, to: start)
+        else { return expiresAtMs }
+        return max(expiresAtMs, Int64(noonNext.timeIntervalSince1970 * 1000))
+    }
+
+    private static func components(_ key: String) -> DateComponents {
+        let p = key.split(separator: "-").compactMap { Int($0) }
+        var c = DateComponents()
+        if p.count == 3 { c.year = p[0]; c.month = p[1]; c.day = p[2] }
+        return c
     }
 
     /// The ledger key, so one quest pays out exactly once however many times the button is tapped.
@@ -143,7 +178,7 @@ public enum QuestCodec {
 
     public static func encode(_ quests: [Quest]) -> String {
         let array: [[String: Any]] = quests.map { q in
-            [
+            var o: [String: Any] = [
                 "id": q.id,
                 "kind": q.kind.rawValue,
                 "title": q.title,
@@ -156,6 +191,11 @@ public enum QuestCodec {
                 "createdAt": q.createdAtMs,
                 "expiresAt": q.expiresAtMs,
             ]
+            // Only when there is one: a quest without a goal writes the same bytes it always did.
+            if let g = q.goal {
+                o["goal"] = ["metric": g.metric.rawValue, "threshold": g.threshold] as [String: Any]
+            }
+            return o
         }
         guard let data = try? JSONSerialization.data(withJSONObject: array),
               let text = String(data: data, encoding: .utf8) else { return "[]" }
@@ -191,7 +231,15 @@ public enum QuestCodec {
                 state: QuestState(rawValue: o["state"] as? String ?? "") ?? .offered,
                 dayKey: (o["day"] as? String).flatMap { $0.isEmpty ? nil : $0 } ?? fallbackDay,
                 createdAtMs: created,
-                expiresAtMs: (expires.map { $0 > 0 ? $0 : nil } ?? nil) ?? (created + Quest.defaultWindowMs)
+                expiresAtMs: (expires.map { $0 > 0 ? $0 : nil } ?? nil) ?? (created + Quest.defaultWindowMs),
+                // Tolerant: an older record has no goal, and an unknown metric from a newer build is
+                // dropped rather than failing the quest.
+                goal: (o["goal"] as? [String: Any]).flatMap { g -> QuestGoal? in
+                    guard let metric = QuestMetric(rawValue: g["metric"] as? String ?? ""),
+                          let threshold = (g["threshold"] as? NSNumber)?.doubleValue
+                    else { return nil }
+                    return QuestGoal(metric: metric, threshold: threshold)
+                }
             )
         }
     }

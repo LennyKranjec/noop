@@ -282,7 +282,13 @@ struct QuestHostModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         content.overlay {
-            if let quest = store.offered {
+            // A COMPLETION FIRST. It is news about something already done, and an offer sitting on top
+            // of it would ask for a new commitment before the last one had been acknowledged.
+            if let completion = store.completions.first {
+                QuestCompletedPopupView(completion: completion) { store.dismissCompletion() }
+                    .id(completion.id)
+                    .transition(.opacity)
+            } else if let quest = store.offered {
                 QuestPopupView(
                     quest: quest,
                     onAccept: { store.setState(id: quest.id, state: .active) },
@@ -292,6 +298,119 @@ struct QuestHostModifier: ViewModifier {
             }
         }
         .animation(.easeOut(duration: 0.25), value: store.offered?.id)
+        .animation(.easeOut(duration: 0.25), value: store.completions.first?.id)
+    }
+}
+
+// MARK: - The quest closing itself
+//
+// The other half of the pop-up above: the system telling the wearer that it has seen the thing done.
+// Same card, same blue, same typed line — it is the same voice closing the loop it opened.
+//
+// IT SAYS WHAT WAS MEASURED. "Quest complete" alone would be the app asking to be believed; the line
+// underneath is the figure the data actually showed against the figure the quest asked for, written
+// from the same evidence that closed it.
+
+struct QuestCompletedPopupView: View {
+    let completion: QuestStore.Completion
+    let onDismiss: () -> Void
+
+    @State private var typed = 0
+
+    private var quest: Quest { completion.quest }
+
+    /// The typed explanation: what was read, then how it was read.
+    private var explanation: String {
+        completion.summary + " Closed automatically — the system read it off your data, so there is "
+            + "nothing for you to confirm."
+    }
+
+    var body: some View {
+        ZStack {
+            StrandPalette.surfaceBase.opacity(questScrimAlpha)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { typed = explanation.count }
+
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 12) {
+                    Image(systemName: "checkmark.seal.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(StrandPalette.statusPositive)
+                    Text("QUEST COMPLETE")
+                        .font(StrandFont.headline.weight(.bold))
+                        .tracking(3)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                }
+
+                VStack(spacing: 12) {
+                    Text(quest.title.uppercased())
+                        .font(StrandFont.title2)
+                        .tracking(2)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .multilineTextAlignment(.center)
+                    Text(quest.target)
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .multilineTextAlignment(.center)
+                    TypewriterText(text: explanation, shown: $typed)
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(14)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(StrandPalette.statusPositive.opacity(0.35), lineWidth: 1)
+                )
+
+                HStack(spacing: 12) {
+                    ForEach(quest.rewards, id: \.rawValue) { reward in
+                        Image(systemName: questRewardIcon(reward))
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(questRewardTint(reward))
+                            .frame(width: 34, height: 34)
+                            .background(StrandPalette.surfaceInset, in: Capsule())
+                            .accessibilityLabel(Text(questRewardLabel(reward)))
+                    }
+                    Spacer(minLength: 0)
+                    Text("+\(quest.xp) XP")
+                        .font(StrandFont.headline.weight(.bold))
+                        .foregroundStyle(StrandPalette.statusPositive)
+                }
+
+                Button {
+                    SystemHaptics.play(.tap)
+                    onDismiss()
+                } label: {
+                    Text("ACKNOWLEDGED")
+                        .font(StrandFont.headline.weight(.bold))
+                        .tracking(4)
+                        .foregroundStyle(StrandPalette.surfaceBase)
+                        .frame(maxWidth: .infinity, minHeight: 56)
+                        .background(StrandPalette.statusPositive,
+                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(16)
+            .background(
+                LinearGradient(
+                    colors: [StrandPalette.statusPositive.opacity(0.14), StrandPalette.surfaceBase],
+                    startPoint: .top, endPoint: .bottom)
+                    .background(StrandPalette.surfaceRaised)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(StrandPalette.statusPositive.opacity(0.70), lineWidth: 1)
+            )
+            .shadow(color: StrandPalette.statusPositive.opacity(0.45), radius: questGlowRadius)
+            .padding(questScreenMargin)
+        }
+        // The confirm cue, not the summon: this is the system handing something back, not asking.
+        .task(id: completion.id) { SystemHaptics.play(.confirm) }
     }
 }
 

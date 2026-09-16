@@ -117,6 +117,8 @@ struct HydrationTileView: View {
                 await repo.removeHydration(amountMl: -deltaML)
             }
             await load()
+            // The glass that finishes a water quest should close it now, not on the next refresh.
+            await QuestAutoComplete.run(repo: repo)
         }
     }
 

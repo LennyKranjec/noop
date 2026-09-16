@@ -24,13 +24,18 @@ public struct QuestTrigger: Equatable, Sendable {
     public let target: String
     public let rewards: [QuestReward]
     public let xp: Int
+    /// What closes it — stated beside the directive rather than parsed back out of it, because the
+    /// trigger already knows the number it just wrote into the sentence.
+    public let goal: QuestGoal?
 
-    public init(id: String, observation: String, target: String, rewards: [QuestReward], xp: Int) {
+    public init(id: String, observation: String, target: String, rewards: [QuestReward], xp: Int,
+                goal: QuestGoal? = nil) {
         self.id = id
         self.observation = observation
         self.target = target
         self.rewards = rewards
         self.xp = xp
+        self.goal = goal
     }
 }
 
@@ -70,7 +75,8 @@ public enum QuestTriggers {
                     + "\(Int(charge.rounded()))%, which is training into a hole.",
                 target: "20 minutes of Zone 2 or mobility only — nothing hard, and in bed early",
                 rewards: [.heart, .muscle, .sleep],
-                xp: 60
+                xp: 60,
+                goal: QuestGoal(metric: .workoutMinutes, threshold: 20)
             ))
         }
 
@@ -81,7 +87,8 @@ public enum QuestTriggers {
                 observation: "They slept \(fmt(minutes / 60)) hours, which is under six.",
                 target: "Lights out 45 minutes earlier than last night. No screen in bed",
                 rewards: [.sleep, .brain],
-                xp: 50
+                xp: 50,
+                goal: QuestGoal(metric: .bedtimeEarlier, threshold: 45)
             ))
         }
 
@@ -94,7 +101,8 @@ public enum QuestTriggers {
                 observation: "They have taken \(steps) steps today, which is essentially none.",
                 target: "\(stepsTarget) steps before the day is out",
                 rewards: [.heart, .lungs],
-                xp: 40
+                xp: 40,
+                goal: QuestGoal(metric: .steps, threshold: Double(stepsTarget))
             ))
         }
 
@@ -107,7 +115,8 @@ public enum QuestTriggers {
                 observation: "Nothing above light effort has been recorded in four days.",
                 target: "One 30-minute session today. Anything that raises your heart rate",
                 rewards: [.heart, .muscle],
-                xp: 55
+                xp: 55,
+                goal: QuestGoal(metric: .workoutMinutes, threshold: 30)
             ))
         }
 
@@ -123,7 +132,8 @@ public enum QuestTriggers {
                         + "\(Int(baseline.rounded()))ms — a fifth below normal for them.",
                     target: "10 minutes of slow breathing or meditation before this evening",
                     rewards: [.brain, .stress, .heart],
-                    xp: 45
+                    xp: 45,
+                    goal: QuestGoal(metric: .meditationMinutes, threshold: 10)
                 ))
             }
         }

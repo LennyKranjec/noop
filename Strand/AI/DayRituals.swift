@@ -123,15 +123,21 @@ enum DayRitual: String, CaseIterable, Identifiable, Sendable {
         case .evening:
             s += ""
         }
-        s += "Answer in EXACTLY three lines and nothing else:\n"
+        s += "Answer in EXACTLY four lines and nothing else:\n"
         s += "TITLE: <a quest name, 2-5 words, no quotation marks>\n"
         s += "TARGET: <the directive itself, one sentence, with its number in it>\n"
-        s += "TAUNT: <one sentence, at most 25 words, mocking the SITUATION and never the person>\n\n"
+        s += "TAUNT: <one sentence, at most 25 words, mocking the SITUATION and never the person>\n"
+        // The quest closes ITSELF when the data meets this, so the directive has to be one the data
+        // can see. Anything else — "stretch your hamstrings", "call a friend" — is not a quest here.
+        s += "GOAL: <exactly one of: STEPS <n> | WORKOUT_MIN <n> | MEDITATION_MIN <n> | WATER_ML <n> | "
+        s += "STRAIN <0-21> | SLEEP_H <n> | BEDTIME_BY <HH:MM> | JOURNAL>\n\n"
+        s += "The directive MUST be something that goal measures, with the same number.\n\n"
         s += "Example:\n"
         s += "TITLE: The Horizontal Hour\n"
-        s += "TARGET: 30 minutes of NSDR after the gym, before you touch a screen.\n"
+        s += "TARGET: 15 minutes of slow breathing after the gym, before you touch a screen.\n"
         s += "TAUNT: Your stress has been flat out since ten. Lying still is not a reward, it is "
-        s += "maintenance.\n\n"
+        s += "maintenance.\n"
+        s += "GOAL: MEDITATION_MIN 15\n\n"
         s += "Ground the directive in the figures below — a low recovery earns rest, a high one earns "
         s += "work, a wet forecast rules out anything outdoors. NEVER invent a number.\n\n"
         s += grounding
@@ -211,6 +217,8 @@ enum DayRitualWriter {
         let title: String
         let target: String
         let taunt: String
+        /// What closes it. Nil when neither the GOAL line nor the directive states anything measurable.
+        let goal: QuestGoal?
     }
 
     /// Read a quest out of the model's answer.
@@ -235,8 +243,11 @@ enum DayRitualWriter {
             return nil
         }
         guard let title = field("title"), let target = field("target") else { return nil }
+        let goal = answer.split(whereSeparator: \.isNewline).lazy
+            .compactMap { QuestGoal.parseLine(String($0)) }.first
         return WrittenQuest(title: String(title.prefix(QuestNaming.maxTitleChars)),
                             target: target,
-                            taunt: String((field("taunt") ?? "").prefix(QuestNaming.maxTauntChars)))
+                            taunt: String((field("taunt") ?? "").prefix(QuestNaming.maxTauntChars)),
+                            goal: goal ?? QuestGoal.parse(target))
     }
 }

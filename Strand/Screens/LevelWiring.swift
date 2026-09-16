@@ -136,6 +136,38 @@ enum LevelWiring {
         )
     }
 
+    /// The inputs for a day's FROZEN level: the night that ended on `day`, and the activity of the
+    /// last complete day before it.
+    ///
+    /// See `LevelDayFreeze` for why. In short: the level is set at 06:40, when the day's own steps,
+    /// stress and training have barely begun, and freezing those partial figures would lock the step
+    /// penalty in for the whole day. The night is finished by then and so is yesterday; both are facts
+    /// that will not move, which is what lets the number stand until the next morning.
+    static func dayInputs(
+        days: [DailyMetric],
+        day: String,
+        series: LevelSeries,
+        calendar: Calendar = .current
+    ) -> LevelInputs {
+        var inputs = self.inputs(days: days, asOf: day, series: series, calendar: calendar)
+        guard let date = self.date(from: day, calendar: calendar),
+              let previousDate = calendar.date(byAdding: .day, value: -1, to: date)
+        else { return inputs }
+        let previous = self.inputs(days: days, asOf: key(from: previousDate, calendar: calendar),
+                                   series: series, calendar: calendar)
+        inputs.stepsToday = previous.stepsToday
+        inputs.stressScores = previous.stressScores
+        inputs.meditationDays = previous.meditationDays
+        inputs.muscleSessions = previous.muscleSessions
+        return inputs
+    }
+
+    /// Whether the night that ended on `day` has arrived — the half of a day's level that comes from
+    /// that morning. Until it has, the day cannot be scored and must not be frozen.
+    static func nightLanded(days: [DailyMetric], day: String) -> Bool {
+        days.contains { $0.day == day && ($0.avgHrv != nil || $0.restingHr != nil || $0.totalSleepMin != nil) }
+    }
+
     /// `yyyy-MM-dd`, in the calendar's own zone, matching every other day key in the app.
     static func key(from date: Date, calendar: Calendar = .current) -> String {
         let formatter = DateFormatter()

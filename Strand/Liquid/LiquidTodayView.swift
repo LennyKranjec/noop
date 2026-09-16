@@ -482,6 +482,7 @@ struct LiquidTodayView: View {
             #endif
         }
         .coordinateSpace(name: Self.pullSpace)
+        .refreshable { await pullRefresh() }
         #if os(iOS)
         // #697 parity: ScreenScaffold already stops a vertical scroll from drifting/bouncing the
         // screen left-right on every other tab. Liquid Today runs its own ScrollView (not
@@ -612,42 +613,35 @@ struct LiquidTodayView: View {
     /// Arm the refresh once the pull passes the threshold; FIRE it when the finger releases (the pull
     /// springs back toward zero). Guarded so it can't double-fire or re-trigger mid-refresh.
     private func handlePull(_ y: CGFloat) {
+        // THE OFFSET NOW ONLY DRAWS. The refresh itself is `.refreshable` — see `pullRefresh`. What is
+        // left here grows the liquid vessel with the pull, which is decoration and nothing more.
         pullY = max(0, y)
-        guard !refreshing else { return }
-        // THE GESTURE IS NOT THE STRAP'S TO WITHHOLD. This used to arm only when `ble.state.historyReady`
-        // — a strap connected, bonded and ready to offload — which made pull-to-refresh do NOTHING AT ALL
-        // for a wearer whose data comes from the WHOOP cloud rather than from a paired strap: no haptic,
-        // no spinner, no reload. The gesture means "get me up to date", and the cloud sync and the local
-        // re-read are up-to-date-ness the strap has no part in.
-        //
-        // #1748's point survives, moved down to where it belongs: the STRAP leg is what is conditional,
-        // so a pull can no longer promise an offload that `syncNow()` would silently decline.
-        if pullY >= pullThreshold, !refreshArmed {
-            refreshArmed = true
-            pullHaptic &+= 1
-        }
-        if refreshArmed, pullY < 6 {
-            refreshArmed = false
-            refreshing = true
-            Task {
-                // #334 (iOS twin of Android #426): a pull requests a fresh strap history offload, not just
-                // a UI reload. syncNow() is internally gated (connected + bonded + not-already-backfilling),
-                // so a pull while disconnected or mid-offload safely no-ops. The sync status chip owns the
-                // ongoing offload progress; the pull spinner stays short (the reload below).
-                // Only when the strap is actually ready to offload — see the note on the arm above.
-                if ble.state.historyReady { ble.syncNow() }
-                // The gesture says "get me up to date", so the clouds are pulled too — not only the
-                // strap and the local re-read. FORCED: the staleness gate exists to stop an app launch
-                // making a round trip every time, and a deliberate pull is the one case that should
-                // always ask.
-                await repo.refreshEverything(force: true)
-                await load()
-                await loadCloudDay()
-                await refreshPlatformHealth()
-                try? await Task.sleep(nanoseconds: 350_000_000)   // let the fill read as "done"
-                withAnimation(.easeOut(duration: 0.25)) { refreshing = false }
-            }
-        }
+    }
+
+    /// The refresh a pull asks for.
+    ///
+    /// THROUGH `.refreshable`, like every other tab, rather than through a hand-built gesture. The
+    /// custom arm-and-release read the pull from a scroll-offset preference and fired when the offset
+    /// sprang back below six points; that preference does not arrive reliably while the scroll view is
+    /// rubber-banding, so on Today — the one screen that built its own — the pull did nothing, while
+    /// the same gesture refreshed every tab built on the scaffold. The system's refresh cannot miss the
+    /// release, and it holds its spinner until the work is actually done.
+    ///
+    /// The strap leg stays conditional (#1748): `syncNow()` is only asked when the strap can offload,
+    /// but the gesture itself is never withheld — the cloud sync and the re-read are up-to-date-ness
+    /// the strap has no part in.
+    private func pullRefresh() async {
+        pullHaptic &+= 1
+        refreshing = true
+        // #334 (iOS twin of Android #426): a pull requests a fresh strap history offload, not just a UI
+        // reload. syncNow() is internally gated, so a pull while disconnected or mid-offload no-ops.
+        if ble.state.historyReady { ble.syncNow() }
+        // The clouds too, FORCED: a deliberate pull is the one case the staleness gate must not stop.
+        await repo.refreshEverything(force: true)
+        await load()
+        await loadCloudDay()
+        await refreshPlatformHealth()
+        withAnimation(.easeOut(duration: 0.25)) { refreshing = false }
     }
 
     // MARK: - Scene (sky title + controls + hero)
@@ -1832,6 +1826,9 @@ struct LiquidTodayView: View {
         // Whatever today has earned, at most one at a time. Safe on every appearance: it returns
         // immediately when something is already waiting to be answered or today's list is full.
         await QuestIssuer.issueIfDue(repo: repo, coach: coach)
+        // And whatever the fresh data has already FINISHED. Quests close themselves; this is where the
+        // day's re-read gets the chance to close them.
+        await QuestAutoComplete.run(repo: repo)
     }
 
 

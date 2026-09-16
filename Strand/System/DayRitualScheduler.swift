@@ -156,7 +156,10 @@ enum DayRitualScheduler {
         guard let answer = await coach.generateOneShot(
             systemPrompt: ritual.questSystemPrompt(grounding: grounding),
             question: "Set the directive."),
-            let written = DayRitualWriter.parseQuest(answer)
+            let written = DayRitualWriter.parseQuest(answer),
+            // NO GOAL, NO QUEST. It would be a directive nothing can close, and quests are no longer
+            // closed by the wearer saying so.
+            let goal = written.goal
         else { return nil }
 
         let quest = Quest(
@@ -170,7 +173,8 @@ enum DayRitualScheduler {
             createdAtMs: nowMs(),
             // The midday quest expires with the day rather than 24 hours later: an afternoon
             // correction that could still be met at noon tomorrow is not a correction.
-            expiresAtMs: endOfDayMs())
+            expiresAtMs: endOfDayMs(),
+            goal: goal)
         QuestStore.shared.upsert(quest)
         return quest
     }
