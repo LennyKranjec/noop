@@ -81,6 +81,8 @@ struct LiquidTodayView: View {
     @State private var deficits: [DayDeficit] = []
     /// The day's energy bank. Nil when there is no opening balance to draw one from.
     @State private var energy: EnergyBalance?
+    /// A ritual that has just run and has something to show.
+    @State private var ritual: RitualResult?
 
     // async-loaded via the confirmed Repository accessors
     @State private var restScore: Double?          // sleep_performance, day-keyed
@@ -517,6 +519,14 @@ struct LiquidTodayView: View {
         // without bumping `refreshSeq` — the first cut keyed the hero on the day alone and the rings
         // stayed blank until something else happened to reload the screen.
         .task(id: "\(selectedDayKey)-\(repo.whoopCloudSeq)") { await loadCloudDay() }
+        // THE THREE SLOTS. Registered once, then run on appearance for any slot whose time has passed
+        // and which has not run today — see `DayRitualScheduler` on why the generation happens here
+        // rather than in the notification body.
+        .task {
+            await DayRitualScheduler.schedule()
+            await runDueRituals()
+        }
+        .sheet(item: $ritual) { RitualSheetView(result: $0) }
         // A ring tap pushes its own screen. `isPresented` rather than `navigationDestination(item:)`,
         // which needs macOS 14 and this target is 13.
         .navigationDestination(
@@ -1773,7 +1783,9 @@ struct LiquidTodayView: View {
 
         weather = await WeatherService.refresh() ?? weather
         let stressByDay = await repo.bankedStressMinutes()
-        streaks = Streaks.evaluate(days: repo.days, stressMinutesByDay: stressByDay)
+        streaks = Streaks.evaluate(days: repo.days,
+                                   stressMinutesByDay: stressByDay,
+                                   journalDays: await repo.journalDays())
         await loadStateAndEnergy(stressByDay: stressByDay)
         dailyMission = await coach.ensureDailyMission()?.text
         // Whatever today has earned, at most one at a time. Safe on every appearance: it returns
@@ -1826,6 +1838,29 @@ struct LiquidTodayView: View {
             stressMinutes: stressToday,
             sleepDebtMin: sleepDebtMinutes,
             daysSinceTraining: since)
+    }
+
+    /// Run whatever slot is due, and show the first thing it produced.
+    ///
+    /// ONE AT A TIME. Opening the app in the evening with all three un-run should not stack three
+    /// sheets; the others stay due and come up on the next appearance.
+    private func runDueRituals() async {
+        guard ritual == nil else { return }
+        let grounding = RitualGrounding(
+            recovery: cloudDay?.recovery ?? displayDay?.recovery,
+            sleepScore: cloudSleepScore ?? restScore,
+            strain: heroStrain21,
+            energy: energy,
+            deficits: deficits,
+            weather: weather,
+            streaks: streaks)
+        for due in DayRitualScheduler.dueRituals() {
+            if let result = await DayRitualScheduler.runIfDue(
+                due, repo: repo, coach: coach, grounding: grounding) {
+                ritual = result
+                return
+            }
+        }
     }
 
     /// The day's sleep debt in minutes, or nil when there are too few nights to claim one.

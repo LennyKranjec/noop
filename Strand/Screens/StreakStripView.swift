@@ -2,7 +2,7 @@ import SwiftUI
 import StrandAnalytics
 import StrandDesign
 
-// StreakStripView.swift — three numbers, each a flame.
+// StreakStripView.swift — four numbers, each a flame.
 //
 // SwiftUI twin of the Android `StreakCard`. The flame is the whole point: a digit is information, a lit
 // flame is something you do not want to put out, and that difference is why streaks work at all.
@@ -12,8 +12,8 @@ import StrandDesign
 // nothing running. A streak UI that looks identical whether or not today is done is a streak UI that
 // cannot tell you the one thing you open it for.
 //
-// NO SECTION HEADER, and the strip is as short as three flames allow. A heading reading "Streaks" over
-// three flames labelled with their own rules is a label for a label, and it cost the strip more height
+// NO SECTION HEADER, and the strip is as short as four flames allow. A heading reading "Streaks" over
+// four flames labelled with their own rules is a label for a label, and it cost the strip more height
 // than the content it introduced.
 //
 // THE LABEL IS THE RULE, not the metric's name. "Sleep" says which number; "consistency > 80%" says what
@@ -99,6 +99,7 @@ private struct StreakFlame: View {
         case .sleepConsistency: return "consistency > 80%"
         case .sleepDebt: return "debt < 1h"
         case .stressTime: return "stress < 6h"
+        case .journal: return "journal"
         }
     }
 

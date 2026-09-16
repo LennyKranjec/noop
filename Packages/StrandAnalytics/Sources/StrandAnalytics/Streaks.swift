@@ -19,9 +19,13 @@ import WhoopStore
 
 /// What a streak measures.
 ///
-/// Three, and nothing else. Each is a rule the wearer named, each is a threshold on a figure the app
-/// already computes, and none can be satisfied by using the app. A fourth would dilute the row: three
-/// flames fit across a thin strip, and three things are the most anybody actually holds in mind.
+/// Four, and nothing else. Three are thresholds on figures the app computes from the body, and none of
+/// those can be satisfied by using the app. The fourth is the journal, which is the opposite case and
+/// earns its place for the opposite reason: it is the only one the app cannot see for itself.
+///
+/// A fifth would dilute the row. Four flames still fit across a thin strip; the moment they stop being
+/// readable at a glance the strip has stopped doing its job, because a glance is the only way it is
+/// ever read.
 public enum StreakKind: String, Equatable, Codable, CaseIterable, Sendable {
     /// Sleep CONSISTENCY at or above 80 %: the spread of four weeks of nights, not one night.
     case sleepConsistency
@@ -29,6 +33,12 @@ public enum StreakKind: String, Equatable, Codable, CaseIterable, Sendable {
     case sleepDebt
     /// Under six hours of high stress that was NOT exercise.
     case stressTime
+    /// A day with something written in the journal.
+    ///
+    /// The one streak here that is not a threshold on a measured figure, and it earns its place for the
+    /// opposite reason to the others: it is the only thing the app cannot see for itself. Everything
+    /// else on this row is read off the body; this is the wearer telling it something.
+    case journal
 }
 
 /// One streak: what it measures, how long it is running, and whether today is already secured.
@@ -87,14 +97,17 @@ public enum Streaks {
     ///     the stress read banked them. Supplied rather than derived: the figure costs a whole day of
     ///     heart rate and R-R to compute, so recomputing it across a year of history inside a card is
     ///     not an option. A day with no banked row is unmeasured, which neither breaks nor extends.
+    ///   - journalDays: the local days that carry a journal entry. Its own input rather than a field on
+    ///     `DailyMetric`, for the reason given on the journal walk below.
     ///   - today: the local day being judged.
     ///
-    /// Not sorted by length: the strip is three fixed columns and the wearer learns which flame is
+    /// Not sorted by length: the strip is four fixed columns and the wearer learns which flame is
     /// which by position. Re-ordering them as the numbers move would make the row unreadable at a
     /// glance, which is the only way it is ever read.
     public static func evaluate(
         days: [DailyMetric],
         stressMinutesByDay: [String: Double] = [:],
+        journalDays: Swift.Set<String> = [],
         today: Date = Date(),
         calendar: Calendar = .current
     ) -> [Streak] {
@@ -108,7 +121,35 @@ public enum Streaks {
             consistency(days: days, index: index, byDay: byDay, todayKey: todayKey, calendar: calendar),
             debt(days: days, index: index, byDay: byDay, todayKey: todayKey, calendar: calendar),
             stressTime(byDay: byDay, stressMinutesByDay: stressMinutesByDay, todayKey: todayKey, calendar: calendar),
+            journal(journalDays: journalDays, todayKey: todayKey, calendar: calendar),
         ]
+    }
+
+    /// A day with something written in it.
+    ///
+    /// Counted off the SET of days that carry an entry rather than off `days`, because a journal entry
+    /// is not a strap reading: a day the wearer wrote on but wore nothing still counts, and a day with
+    /// a strap reading and no entry is a genuine miss rather than an unmeasured gap. That is the one
+    /// place this streak's rules differ from the three above it, and it is why it has its own walk.
+    private static func journal(journalDays: Swift.Set<String>, todayKey: String,
+                                calendar: Calendar) -> Streak {
+        let todaySecured = journalDays.contains(todayKey)
+        guard var cursor = calendar.date(from: dayComponents(todayKey, calendar: calendar)) else {
+            return Streak(kind: .journal, days: 0, todaySecured: todaySecured)
+        }
+        // Today not being written yet is not a break — the day is not over. Same rule as every other
+        // streak here.
+        if !todaySecured {
+            cursor = calendar.date(byAdding: .day, value: -1, to: cursor) ?? cursor
+        }
+        var count = 0
+        for _ in 0..<maxLookbackDays {
+            guard journalDays.contains(dayKey(cursor, calendar: calendar)) else { break }
+            count += 1
+            guard let previous = calendar.date(byAdding: .day, value: -1, to: cursor) else { break }
+            cursor = previous
+        }
+        return Streak(kind: .journal, days: count, todaySecured: todaySecured)
     }
 
     /// Sleep consistency at or above 80 %.

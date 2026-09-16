@@ -56,11 +56,11 @@ final class StreaksTests: XCTestCase {
 
     // MARK: - what is offered at all
 
-    func testExactlyTheThreeRulesAreOfferedAndAlwaysInTheSameOrder() {
-        // The strip is three fixed columns and the wearer learns which flame is which by POSITION.
+    func testExactlyTheFourRulesAreOfferedAndAlwaysInTheSameOrder() {
+        // The strip is four fixed columns and the wearer learns which flame is which by POSITION.
         // Sorting by length — which the previous cut did — makes the row unreadable at a glance, which
         // is the only way it is ever read.
-        let expected: [StreakKind] = [.sleepConsistency, .sleepDebt, .stressTime]
+        let expected: [StreakKind] = [.sleepConsistency, .sleepDebt, .stressTime, .journal]
         XCTAssertEqual(Streaks.evaluate(days: steady(30, 8), today: today, calendar: calendar).map(\.kind), expected)
         XCTAssertEqual(Streaks.evaluate(days: steady(3, 4), today: today, calendar: calendar).map(\.kind), expected)
     }
@@ -191,6 +191,28 @@ final class StreaksTests: XCTestCase {
         )
         XCTAssertEqual(s.days, 5)
         XCTAssertFalse(s.todaySecured, "today is not banked")
+    }
+
+    // MARK: - the journal
+
+    func testTheJournalStreakCountsWrittenDaysAndSpansNothing() {
+        // Unlike the three above it, a MISSING day here is a genuine miss rather than an unmeasured
+        // gap: the wearer either wrote or did not, and the app always knows which.
+        let days = steady(6, 8)
+        let written: Swift.Set<String> = [key(0), key(1), key(2), key(4)]
+        let s = of(Streaks.evaluate(days: days, journalDays: written, today: today, calendar: calendar),
+                   .journal)
+        XCTAssertEqual(s.days, 3, "the gap on day 3 ends it")
+        XCTAssertTrue(s.todaySecured)
+    }
+
+    func testAnUnwrittenTodayDoesNotBreakTheJournalStreak() {
+        let days = steady(6, 8)
+        let written: Swift.Set<String> = [key(1), key(2), key(3)]
+        let s = of(Streaks.evaluate(days: days, journalDays: written, today: today, calendar: calendar),
+                   .journal)
+        XCTAssertEqual(s.days, 3, "the day is not over")
+        XCTAssertFalse(s.todaySecured)
     }
 
     // MARK: - midnight

@@ -2614,6 +2614,14 @@ final class Repository: ObservableObject {
     static let journalDeviceId = "noop-journal"
 
     /// Logged behaviours (imported WHOOP journal ∪ native noop-journal) for correlation insights.
+    /// The local days that carry at least one journal entry, for the journal streak.
+    ///
+    /// A SET of days rather than the entries themselves: the streak only asks "did they write", and a
+    /// year of entries is a lot of rows to walk for a yes-or-no per day.
+    func journalDays(days: Int = 400) async -> Swift.Set<String> {
+        Swift.Set(await journalEntries(days: days).map(\.day))
+    }
+
     func journalEntries(days: Int = 4000) async -> [JournalEntry] {
         guard let store = await ensureStore() else { return [] }
         let now = Date()
