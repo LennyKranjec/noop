@@ -90,6 +90,14 @@ enum AIRateLimit {
     static func record(model: String, headers: [String: String], _ d: UserDefaults = .standard) {
         let model = normalise(model)
         guard !model.isEmpty else { return }
+        // LOWER-CASED HERE TOO, not only in the HTTP helper that usually hands these over. Header names
+        // are case-insensitive and proxies re-spell them; a reader that depends on someone upstream
+        // having normalised first is a reader that silently returns nothing the day it is called from
+        // anywhere else.
+        var headers = headers
+        for (key, value) in headers where key != key.lowercased() {
+            headers[key.lowercased()] = value
+        }
         let requests = window(headers, "requests")
         let tokens = window(headers, "tokens")
         guard requests != nil || tokens != nil else { return }
@@ -160,8 +168,11 @@ enum AIRateLimit {
                 index = text.index(after: index)
                 continue
             }
-            // The unit: "ms" first, or the two-character read swallows the "m" of a minute.
-            let value = Double(number) ?? 0
+            // A UNIT WITH NO NUMBER IN FRONT OF IT IS NOT A DURATION. Without this, "soon" parsed as
+            // zero seconds and passed for a real reading — and zero seconds is not a harmless default
+            // here: it is what tells the window classifier "this resets immediately", which turns a
+            // daily allowance into a per-minute one.
+            guard let value = Double(number) else { return nil }
             number = ""
             if text[index...].hasPrefix("ms") {
                 total += value / 1000
@@ -171,12 +182,14 @@ enum AIRateLimit {
                 case "h": total += value * 3600
                 case "m": total += value * 60
                 case "s": total += value
-                default: return matched ? total : nil
+                default: return nil
                 }
                 index = text.index(after: index)
             }
             matched = true
         }
+        // Trailing digits with no unit ("1h2") are a spelling nobody sends; the part that did parse is
+        // returned rather than the whole reading being thrown away over it.
         return matched ? total : nil
     }
 
