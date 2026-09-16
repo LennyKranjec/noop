@@ -398,11 +398,16 @@ struct LiquidTodayView: View {
                         // section keeps its slot in the saved order without drawing a second copy of a
                         // surface that already exists.
                         case .stressEnergy: EmptyView()
-                        // The macros. Water is one of the Your Cards here rather than a second tile, so
-                        // this section carries the half that had no home.
+                        // The water tile and the macro tile — what the Nutrition TAB used to be on the
+                        // Android lane. Both read stores that already exist, so neither invents a figure.
                         case .hydrationNutrition:
                             if selectedDayOffset == 0 {
-                                NutritionTileView(refreshKey: repo.nutritionSeq)
+                                VStack(spacing: NoopMetrics.gap) {
+                                    HydrationTileView(
+                                        refreshKey: repo.nutritionSeq,
+                                        onOpen: { heroTap = .hydration })
+                                    NutritionTileView(refreshKey: repo.nutritionSeq)
+                                }
                             }
                         case .yourCards: yourCardsSection
                         case .menstrualCycle:
@@ -566,16 +571,15 @@ struct LiquidTodayView: View {
     private func handlePull(_ y: CGFloat) {
         pullY = max(0, y)
         guard !refreshing else { return }
-        // #1748 twin: gate the ARM, not the release. `syncNow()`'s own gate checks connected + bonded, and
-        // `bonded` is set by the live-HR path for a 5/MG that has never completed a handshake — so the pull
-        // was accepted and then declined in silence. `historyReady` is the client's OWN precondition, so
-        // this cannot withhold a sync that would have run.
+        // THE GESTURE IS NOT THE STRAP'S TO WITHHOLD. This used to arm only when `ble.state.historyReady`
+        // — a strap connected, bonded and ready to offload — which made pull-to-refresh do NOTHING AT ALL
+        // for a wearer whose data comes from the WHOOP cloud rather than from a paired strap: no haptic,
+        // no spinner, no reload. The gesture means "get me up to date", and the cloud sync and the local
+        // re-read are up-to-date-ness the strap has no part in.
         //
-        // On the ARM specifically: gating the RELEASE below would leave `refreshArmed` stuck true for the
-        // rest of the gesture, since that branch is the only thing that clears it — a worse failure than
-        // the silent one being fixed. Not arming also withholds the haptic, which is the honest signal
-        // that the gesture is unavailable rather than unresponsive.
-        if pullY >= pullThreshold, !refreshArmed, ble.state.historyReady {
+        // #1748's point survives, moved down to where it belongs: the STRAP leg is what is conditional,
+        // so a pull can no longer promise an offload that `syncNow()` would silently decline.
+        if pullY >= pullThreshold, !refreshArmed {
             refreshArmed = true
             pullHaptic &+= 1
         }
@@ -587,10 +591,13 @@ struct LiquidTodayView: View {
                 // a UI reload. syncNow() is internally gated (connected + bonded + not-already-backfilling),
                 // so a pull while disconnected or mid-offload safely no-ops. The sync status chip owns the
                 // ongoing offload progress; the pull spinner stays short (the reload below).
-                ble.syncNow()
+                // Only when the strap is actually ready to offload — see the note on the arm above.
+                if ble.state.historyReady { ble.syncNow() }
                 // The gesture says "get me up to date", so the clouds are pulled too — not only the
-                // strap and the local re-read.
-                await repo.refreshEverything()
+                // strap and the local re-read. FORCED: the staleness gate exists to stop an app launch
+                // making a round trip every time, and a deliberate pull is the one case that should
+                // always ask.
+                await repo.refreshEverything(force: true)
                 await load()
                 await loadCloudDay()
                 try? await Task.sleep(nanoseconds: 350_000_000)   // let the fill read as "done"

@@ -43,6 +43,13 @@ struct TrendsView: View {
         }
     }
 
+    /// The level snapshot the vital trio reads. Loaded once per data change rather than recomputed in
+    /// the body: the formula walks the whole history, and the body runs on every hover.
+    @StateObject private var levelBar = LevelBarModel()
+    private var levelTrend: LevelTrendSnapshot? { levelBar.trend }
+    /// Pushes the Sleep screen from the third vital tile.
+    @State private var openSleep = false
+
     @State private var range: Range = .quarter
 
     // #436 — shareable offline trends report (PDF over a date range). The sheet owns its
@@ -276,28 +283,33 @@ struct TrendsView: View {
                         // down that the wearer had to go looking for the thing they came to see.
                         MuscleModelCardView()
                             .staggeredAppear(index: 0)
+                        // Heart, lungs and sleep, directly under the muscle model. No heading of their
+                        // own: the figure above already says what this part of the screen is, and a
+                        // title here would label a label. The third tile IS the Sleep door.
+                        VitalTrioCardView(trend: levelTrend, onOpenSleep: { openSleep = true })
+                            .staggeredAppear(index: 1)
                         // Week-in-review digest (#208) with prev/next week browsing (#710) — self-hides
                         // only when NO week in history has data. Past weeks render in the same format.
                         weeklyDigestNav
-                            .staggeredAppear(index: 1)
+                            .staggeredAppear(index: 2)
                         // The Charge / Effort / Rest trio, presented in NOOP's pip language.
                         weekInReview(charge: recovery, effort: strain, rest: rest)
-                            .staggeredAppear(index: 2)
-                        rangeBar(recovery: recovery)
                             .staggeredAppear(index: 3)
-                        heroRecovery(recovery: recovery)
+                        rangeBar(recovery: recovery)
                             .staggeredAppear(index: 4)
-                        smallMultiples(hrv: hrv, rhr: rhr, strain: strain)
+                        heroRecovery(recovery: recovery)
                             .staggeredAppear(index: 5)
+                        smallMultiples(hrv: hrv, rhr: rhr, strain: strain)
+                            .staggeredAppear(index: 6)
                         // Long-horizon training load (CTL/ATL/TSB). Uses the FULL history, not the
                         // range window — chronic load is inherently a 42-day horizon. Self-hides its
                         // chart behind an honest "needs N more days" state until enough history exists.
                         TrainingLoadCard(days: repo.days)
-                            .staggeredAppear(index: 6)
-                        yearStrip
                             .staggeredAppear(index: 7)
-                        exportReportRow
+                        yearStrip
                             .staggeredAppear(index: 8)
+                        exportReportRow
+                            .staggeredAppear(index: 9)
                     }
                 }
             }
@@ -314,6 +326,12 @@ struct TrendsView: View {
             let s = await repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
             sleepPerfByDay = Dictionary(s.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
         }
+        // The level snapshot the vital trio reads. Its own task: the formula walks the whole history,
+        // so it must not re-run with the per-metric windows above.
+        .task(id: repo.refreshSeq) { await levelBar.refresh(repo: repo, tick: repo.refreshSeq) }
+        // `isPresented` rather than `navigationDestination(item:)`, which needs macOS 14 and this
+        // target is 13.
+        .navigationDestination(isPresented: $openSleep) { SleepView() }
     }
 
     // MARK: Week-in-review digest with prev/next week browsing (#710)

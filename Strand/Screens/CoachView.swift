@@ -688,6 +688,27 @@ struct CoachView: View {
     }
     #endif
 
+    /// One round header button. Three of them sit in the title row and they must not drift apart.
+    private func coachHeaderButton(_ icon: String, _ label: String,
+                                   action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .semibold))
+                .foregroundStyle(StrandPalette.textSecondary)
+                .frame(width: 34, height: 34)
+                .background(StrandPalette.surfaceInset, in: Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(label))
+    }
+
+    /// The model id with its vendor prefix dropped, so "openai/gpt-oss-20b" fits a header chip as
+    /// "gpt-oss-20b". The full id is still what the picker shows and what is sent.
+    private var shortModelName: String {
+        let id = coach.model
+        return id.contains("/") ? String(id.split(separator: "/").last ?? "") : id
+    }
+
     /// What the floating title row takes: the 34pt buttons plus the padding around them. The transcript
     /// insets by exactly this, so the first bubble starts clear of the title instead of under it.
     private var coachTitleOverlayHeight: CGFloat { 34 + 8 + 18 }
@@ -718,26 +739,38 @@ struct CoachView: View {
                 .font(StrandFont.title1)
                 .foregroundStyle(StrandPalette.textPrimary)
             Spacer(minLength: 8)
-            Button { showCoachMenu = true } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .frame(width: 34, height: 34)
-                    .background(StrandPalette.surfaceInset, in: Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("System settings")
-            Button {
-                showClearConfirm = true
+
+            // THE MODEL, one tap from the conversation. It was three levels deep — sheet, connection
+            // card, picker — and switching between a fast model and a thorough one is the thing you do
+            // MID-conversation, not while setting the screen up.
+            Menu {
+                Picker("Model", selection: modelPickerSelection) {
+                    ForEach(coach.availableModels, id: \.self) { m in Text(m).tag(m) }
+                }
+                Divider()
+                Button {
+                    Task { await coach.refreshModels() }
+                } label: {
+                    Label("Refresh models", systemImage: "arrow.clockwise")
+                }
+                .disabled(!coach.hasKey)
             } label: {
-                Image(systemName: "square.and.pencil")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .frame(width: 34, height: 34)
-                    .background(StrandPalette.surfaceInset, in: Circle())
+                HStack(spacing: 4) {
+                    Text(shortModelName)
+                        .font(StrandFont.caption)
+                        .lineLimit(1)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 9, weight: .bold))
+                }
+                .foregroundStyle(StrandPalette.textSecondary)
+                .padding(.horizontal, 10)
+                .frame(height: 34)
+                .background(StrandPalette.surfaceInset, in: Capsule())
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("New chat")
+            .accessibilityLabel("Model")
+
+            coachHeaderButton("line.3.horizontal", "System settings") { showCoachMenu = true }
+            coachHeaderButton("plus", "New chat") { showClearConfirm = true }
         }
         .padding(.horizontal, 20)
         .padding(.top, 8)

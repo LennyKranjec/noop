@@ -248,6 +248,39 @@ extension Repository {
         return await rebankHydrationTotal(entries: next, day: dayKey)
     }
 
+    /// Remove `amountMl` from the day's HAND-LOGGED total, flooring at zero.
+    ///
+    /// SUBTRACTED FROM THE MANUAL ROW, never the combined one. Against the combined figure this would be
+    /// badly wrong: with 200 ml logged by hand and 500 ml imported, removing 100 would compute
+    /// 700 − 100 = 600 and store THAT as the hand-logged total — inflating the day to 1,100 instead of
+    /// reducing it to 600. Twin of the Android `HydrationStore.remove`.
+    ///
+    /// The newest entries go first, because the tap that removes a glass is nearly always undoing the tap
+    /// that added one.
+    @discardableResult
+    func removeHydration(amountMl: Int, day: String? = nil) async -> Double {
+        let dayKey = day ?? Repository.localDayKey(Date())
+        guard amountMl > 0 else { return await hydrationTotal(day: dayKey) }
+        var entries = Self.hydrationEntries(day: dayKey)
+        var remaining = Double(amountMl)
+        while remaining > 0, let last = entries.last {
+            if Double(last.amountMl) <= remaining {
+                remaining -= Double(last.amountMl)
+                entries.removeLast()
+            } else {
+                // A partial glass: the entry stays, lighter. Dropping it whole would remove more than
+                // the wearer asked to remove.
+                entries[entries.count - 1] = HydrationEntry(
+                    id: last.id,
+                    amountMl: last.amountMl - Int(remaining.rounded()),
+                    loggedAt: last.loggedAt)
+                remaining = 0
+            }
+        }
+        Self.writeHydrationEntries(entries, day: dayKey)
+        return await rebankHydrationTotal(entries: entries, day: dayKey)
+    }
+
     /// Re-derive the day total from `entries` and upsert it into `metricSeries` (the canonical total). The
     /// per-entry list is the source of truth for an edited/deleted day; this keeps the rest of the app in sync.
     @discardableResult

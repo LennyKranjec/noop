@@ -80,6 +80,9 @@ struct MuscleModelCardView: View {
     @State private var side: BodySide = .front
     @State private var loaded: MuscleLoads?
     @State private var note: String?
+    /// Why there is no note, when the reason is something the wearer can fix. Nil when there IS one, or
+    /// when the absence is not actionable.
+    @State private var unavailableReason: String?
 
     private var data: [MuscleGroup: Double] { loaded?.thisWeek ?? [:] }
 
@@ -141,7 +144,7 @@ struct MuscleModelCardView: View {
                 ForEach(rankedGroups, id: \.self) { group in
                     MuscleLegendRow(group: group, kg: data[group], scale: scale)
                 }
-                SystemNotePanel(text: note)
+                SystemNotePanel(text: note, unavailable: unavailableReason)
                 Spacer(minLength: 0)
             }
             .frame(height: figureHeight, alignment: .top)
@@ -181,10 +184,18 @@ struct MuscleModelCardView: View {
     /// The full history is read ONLY while some group is still unfrozen: once the scale has settled —
     /// which it does permanently, a month in — every open costs the seven-day read and nothing else.
     private func load() async {
+        // EXACTLY seven calendar days, ending today. The seconds-offset read spans eight and would make
+        // this card disagree with the Android one for the same import — which is precisely the kind of
+        // quiet difference the parity contract exists to prevent.
+        let calendar = Calendar.current
+        let today = Date()
+        let weekFrom = calendar.date(byAdding: .day, value: -(muscleWindowDays - 1), to: today) ?? today
+        let todayKey = Repository.localDayKey(today)
+
         var week: [MuscleGroup: Double] = [:]
         for group in MuscleGroup.allCases {
             let rows = await repo.series(key: group.volumeKey, source: LiftingImporter.sourceId,
-                                         days: muscleWindowDays)
+                                         from: Repository.localDayKey(weekFrom), to: todayKey)
             let sum = rows.reduce(0) { $0 + $1.value }
             if sum > 0 { week[group] = sum }
         }
@@ -192,9 +203,10 @@ struct MuscleModelCardView: View {
         var baselines = MuscleBaselineStore.read()
         if MuscleBaselineStore.needsDerivation() {
             var history: [MuscleGroup: [Double]] = [:]
+            let historyFrom = calendar.date(byAdding: .day, value: -muscleHistoryDays, to: today) ?? today
             for group in MuscleGroup.allCases where baselines[group] == nil {
                 let rows = await repo.series(key: group.volumeKey, source: LiftingImporter.sourceId,
-                                             days: muscleHistoryDays)
+                                             from: Repository.localDayKey(historyFrom), to: todayKey)
                 guard !rows.isEmpty else { continue }
                 var daily: [String: Double] = [:]
                 for row in rows { daily[row.day, default: 0] += row.value }
@@ -214,6 +226,17 @@ struct MuscleModelCardView: View {
             note = nil
             return
         }
+        // WHY THE PANEL WAS EMPTY. The note is written by the coach, and the coach needs a provider and
+        // the data consent. With neither set the generation returns nil and the panel simply did not
+        // appear — which reads as a broken feature rather than as an un-set-up one. Say which it is.
+        guard coach.isConfigured, coach.dataConsent else {
+            note = nil
+            unavailableReason = coach.isConfigured
+                ? "Turn on data access in System to have the coach read this chart."
+                : "Connect a model in System to have the coach read this chart."
+            return
+        }
+        unavailableReason = nil
         let fingerprint = MuscleCoachNote.fingerprint(loads)
         if let stored = MuscleCoachNote.stored(fingerprint: fingerprint) {
             note = stored
@@ -241,9 +264,27 @@ struct MuscleModelCardView: View {
 /// answer. A placeholder would be a promise the card cannot keep.
 private struct SystemNotePanel: View {
     let text: String?
+    /// Shown INSTEAD of the note when there is a reason the wearer can act on. An empty corner says
+    /// nothing; "connect a model" says what to do.
+    var unavailable: String?
 
     var body: some View {
-        if let text, !text.isEmpty {
+        if let unavailable, text == nil {
+            HStack(alignment: .top, spacing: 6) {
+                Image(systemName: "sparkles")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .padding(.top, 1)
+                Text(unavailable)
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .padding(.top, 8)
+        } else if let text, !text.isEmpty {
             HStack(alignment: .top, spacing: 6) {
                 Image(systemName: "sparkles")
                     .font(.system(size: 10, weight: .semibold))

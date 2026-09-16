@@ -1514,6 +1514,15 @@ final class HealthKitBridge: ObservableObject {
     @discardableResult
     func refreshTodayMacros() async -> Macros? {
         guard HKHealthStore.isHealthDataAvailable() else { return nil }
+        // ASK FOR THE DIETARY TYPES FIRST. HealthKit never reports read authorization, and the four
+        // macro types were added in an update — so for anyone who granted access before they existed
+        // they sit `.notDetermined` and every query returns empty, forever and silently. That is
+        // indistinguishable from "you have logged no food", which is exactly how this was reported.
+        //
+        // The re-request is quiet: HealthKit only presents a sheet for types that are still
+        // undetermined. It lives in `sync()` too, but the macro read runs on its own task and must not
+        // depend on a sync having happened first.
+        await requestNewReadTypesIfNeeded()
         let calendar = Calendar.current
         let startOfDay = calendar.startOfDay(for: Date())
         let dayKey = Repository.localDayKey(Date())

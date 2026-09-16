@@ -911,8 +911,14 @@ final class Repository: ObservableObject {
     /// EACH LEG IS BEST-EFFORT AND BOUNDED BY ITS OWN STALENESS RULE. A wearer who pulls five times in a
     /// minute makes at most one round trip per service; a dead network costs the gesture nothing but the
     /// spinner, and everything already stored is left exactly as it was.
-    func refreshEverything() async {
-        await WhoopCloudSync.syncIfStale(repo: self)
+    /// `force` skips each leg's staleness gate. A deliberate pull-to-refresh passes true; an automatic
+    /// catch-up on appearance does not — that gate is what stops ten app launches making ten round trips.
+    func refreshEverything(force: Bool = false) async {
+        if force {
+            await WhoopCloudSync.sync(repo: self)
+        } else {
+            await WhoopCloudSync.syncIfStale(repo: self)
+        }
         await refresh()
     }
 
@@ -1787,6 +1793,24 @@ final class Repository: ObservableObject {
     /// `days`; when false (the default) `days` is honoured exactly as before, so every existing caller (all
     /// default `fullHistory: false`, keep `days: 4000`) is byte-identical. The per-source pages window their
     /// genuine reloads with `days` and force full range only for their ALL view via this flag.
+    /// One series over an EXPLICIT day range, inclusive at both ends.
+    ///
+    /// `series(key:source:days:)` computes its window from a seconds offset and adds a day of slack at
+    /// the top, so "the last 7 days" through it is eight calendar days wide. That is harmless for a
+    /// sparkline and wrong for a figure the wearer compares against the other platform: the muscle card
+    /// summed an extra day and read higher than Android for the same import. A caller that means a
+    /// calendar window asks for one.
+    func series(key: String, source: String, from: String, to: String) async -> [(day: String, value: Double)] {
+        guard let store = await ensureStore() else { return [] }
+        let pts: [MetricPoint]
+        if source == canonicalDeviceId {
+            pts = await unionMetricSeries(store: store, key: key, from: from, to: to)
+        } else {
+            pts = (try? await store.metricSeries(deviceId: source, key: key, from: from, to: to)) ?? []
+        }
+        return pts.map { ($0.day, $0.value) }
+    }
+
     func series(key: String, source: String, days: Int = 4000, fullHistory: Bool = false) async -> [(day: String, value: Double)] {
         guard let store = await ensureStore() else { return [] }
         let now = Date()

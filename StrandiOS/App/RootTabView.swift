@@ -164,11 +164,6 @@ struct RootTabView: View {
             moreTab(path: $tabPaths[4], scrollSignal: scrollTop[4]).tag(4)
         }
         .tint(StrandPalette.accent)
-        // THE STRIP'S OWN ROOM, taken out of every tab's safe area so no screen's content starts
-        // underneath it. Without this the bar floated over the top of whatever was scrolled below.
-        .safeAreaInset(edge: .top, spacing: 0) {
-            Color.clear.frame(height: levelBarHeight)
-        }
         // THE LEVEL STRIP, over every tab. An overlay rather than a toolbar: the radar hangs a third of
         // its own height past the bar's bottom edge, and a toolbar clips its content.
         //
@@ -472,6 +467,13 @@ struct RootTabView: View {
         // TabRoute values, registered here ONCE per stack (a double registration double-pushes, #38).
         NavigationStack(path: path) {
             view
+                // THE STRIP'S OWN ROOM. Inset HERE, on the tab's content, not on the TabView: each tab
+                // is its own NavigationStack and lays its content out inside that, so an inset applied
+                // to the TabView never reached the screen's scroll view — which is why the level bar
+                // sat on top of every tab's heading.
+                .safeAreaInset(edge: .top, spacing: 0) {
+                    Color.clear.frame(height: levelBarHeight)
+                }
                 .background(StrandPalette.surfaceBase.ignoresSafeArea())
                 .toolbar(.hidden, for: .navigationBar)
                 .tabRouteDestinations()
@@ -546,6 +548,11 @@ struct RootTabView: View {
                     MoreRow("Power saving", "battery.25", .powerSaving)
                     MoreRow("Settings", "gearshape.fill", .settings)
                 }
+            }
+            // The strip's own room, as in `tab(_:_:_:path:scrollSignal:)` — the More tab builds its own
+            // stack rather than going through that helper, so it needs the same inset.
+            .safeAreaInset(edge: .top, spacing: 0) {
+                Color.clear.frame(height: levelBarHeight)
             }
             // The rows push MoreDestination VALUES so a re-tap of the More tab can pop them off the
             // bound path (#135/#198). Each destination keeps the per-screen wrapper the rows used to

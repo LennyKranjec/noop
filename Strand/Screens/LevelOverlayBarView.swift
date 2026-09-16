@@ -23,13 +23,19 @@ import StrandDesign
 // its own content would cut the plate in half.
 
 /// The strip's own height, without the status-bar inset it sits under.
-let levelBarHeight: CGFloat = 52
+///
+/// 46, not 52. Once the strip stopped hiding under the status bar it sat noticeably low, and six points
+/// is the difference between the chips reading as part of the chrome and as a band floating under it.
+let levelBarHeight: CGFloat = 46
 
 /// The radar's full diameter. Two thirds of it live in the bar; the rest overhangs.
 let levelRadarDiameter: CGFloat = 86
 
-/// How far the radar sits below the top of the strip — clearance for the notch / Dynamic Island.
-let levelRadarDrop: CGFloat = 8
+/// How far the radar sits below the top of the strip.
+///
+/// Small, now that the strip itself is inset below the notch: the drop used to be the clearance for it,
+/// and keeping it at 8 on top of the safe area pushed the pentagon a second time.
+let levelRadarDrop: CGFloat = 4
 
 /// How much of the radar hangs below the strip, and therefore how far content must clear it.
 var levelRadarOverhang: CGFloat { levelRadarDiameter / 3 + levelRadarDrop }
