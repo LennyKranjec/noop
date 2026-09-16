@@ -185,6 +185,7 @@ struct RitualGrounding {
         case .sleepConsistency: return "sleep consistency"
         case .sleepDebt: return "sleep debt"
         case .stressTime: return "stress time"
+        case .journal: return "journal"
         }
     }
 }

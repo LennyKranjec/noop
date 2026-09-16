@@ -1,4 +1,5 @@
 import Foundation
+import StrandAnalytics
 #if canImport(UserNotifications)
 import UserNotifications
 #endif

@@ -408,7 +408,7 @@ struct LiquidTodayView: View {
                         // section that had no home.
                         case .stressEnergy:
                             if selectedDayOffset == 0 {
-                                EnergyTileView(energy, onOpen: { heroTap = .stress })
+                                EnergyTileView(balance: energy, onOpen: { heroTap = .stress })
                             }
                         // The water tile and the macro tile — what the Nutrition TAB used to be on the
                         // Android lane. Both read stores that already exist, so neither invents a figure.
