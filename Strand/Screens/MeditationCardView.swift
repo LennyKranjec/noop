@@ -45,12 +45,21 @@ struct MeditationCardView: View {
 
     var body: some View {
         StrandCard {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 14) {
                 headline
                 controls
                 footer
             }
         }
+        // THE CARD BREATHES WHILE A SESSION RUNS. A stopwatch that looks identical running and stopped
+        // is one people check to find out which it is doing; a faint accent ring says it at a glance
+        // from across the room, which is where a phone sits during a meditation.
+        .overlay(
+            RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous)
+                .strokeBorder(StrandPalette.statusPositive.opacity(running ? 0.55 : 0), lineWidth: 1.5)
+                .animation(.easeInOut(duration: 1.6).repeatForever(autoreverses: true), value: running)
+                .allowsHitTesting(false)
+        )
         .task(id: repo.refreshSeq) { await reload() }
         .onReceive(ticker) { _ in
             guard let start = runningSince else {
@@ -67,29 +76,44 @@ struct MeditationCardView: View {
     /// watching is the one the session is adding to. That is a live reading, not a stored one — nothing
     /// is written until they stop.
     private var headline: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("TOTAL MEDITATED")
-                .font(StrandFont.overline)
-                .foregroundStyle(StrandPalette.textSecondary)
-            HStack(alignment: .bottom, spacing: 4) {
-                Text("\(Int((lifetime + (running ? Double(elapsed) / 60 : 0)).rounded()))")
-                    .font(StrandFont.title1)
-                    .monospacedDigit()
-                    .foregroundStyle(StrandPalette.textPrimary)
-                    .contentTransitionNumericIfAvailable()
-                Text("min")
-                    .font(StrandFont.footnote)
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("TOTAL MEDITATED")
+                    .font(StrandFont.overline)
+                    .tracking(1.2)
                     .foregroundStyle(StrandPalette.textSecondary)
-                    .padding(.bottom, 3)
-                if running {
-                    Spacer(minLength: 8)
-                    Text(clock(elapsed))
-                        .font(StrandFont.title2)
+                HStack(alignment: .firstTextBaseline, spacing: 4) {
+                    Text("\(Int((lifetime + (running ? Double(elapsed) / 60 : 0)).rounded()))")
+                        .font(StrandFont.title1)
                         .monospacedDigit()
-                        .foregroundStyle(StrandPalette.statusPositive)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .contentTransitionNumericIfAvailable()
+                    Text("min")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textSecondary)
                 }
             }
+
+            Spacer(minLength: 0)
+
+            // THE RUNNING CLOCK GETS ITS OWN PLATE, so the two numbers stop competing. The lifetime
+            // total is the headline and barely moves; the stopwatch moves every second and was
+            // stealing the eye from it by sitting in the same row at the same weight.
+            if running {
+                Text(clock(elapsed))
+                    .font(StrandFont.title2)
+                    .monospacedDigit()
+                    .foregroundStyle(StrandPalette.statusPositive)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(StrandPalette.statusPositive.opacity(0.12),
+                                in: Capsule())
+                    .overlay(Capsule().strokeBorder(StrandPalette.statusPositive.opacity(0.35),
+                                                    lineWidth: 1))
+                    .transition(.scale.combined(with: .opacity))
+            }
         }
+        .animation(.easeOut(duration: 0.25), value: running)
     }
 
     // MARK: - 2 · The window, and the controls that fill it
