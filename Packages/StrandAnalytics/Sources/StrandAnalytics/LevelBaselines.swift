@@ -123,6 +123,27 @@ public enum LevelBaselines {
         )
     }
 
+    /// The metrics that must have real history before a scale is worth freezing.
+    ///
+    /// Sleep and the heart pair carry 53 % of the level between them. A scale frozen before these have
+    /// data is a scale made of TABLE ENTRIES — and because it is frozen forever, the wearer is then
+    /// measured against a stranger's numbers for good.
+    ///
+    /// This is not hypothetical. The iOS app derived its baselines on the first level it computed, which
+    /// happened before the WHOOP cloud sync had landed any history: HRV fell back to 50 ± 15 and resting
+    /// HR to 60 ± 10, and a wearer whose real HRV is well above 50 and resting HR well below 60 scored a
+    /// heart component far higher than the same data scored on Android, where the freeze had a year
+    /// behind it. Same formula, same import, different yardstick.
+    public static let freezeRequires: [LevelMetric] = [.sleepScore, .hrv, .rhr]
+
+    /// Whether `history` is deep enough that freezing it means something.
+    ///
+    /// A caller that gets `false` should still SCORE — the table gives a usable number today — but must
+    /// not write the result down, so the real scale is taken once the history arrives.
+    public static func isDerivable(history: [LevelMetric: [Double]]) -> Bool {
+        freezeRequires.allSatisfy { (history[$0] ?? []).filter(\.isFinite).count >= minSamples }
+    }
+
     /// Derive every metric at once. What a caller does exactly once, and then stores.
     ///
     /// A metric absent from `history` keeps the table entry rather than being dropped: the set has to

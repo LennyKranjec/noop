@@ -59,6 +59,14 @@ struct LevelRadarView: View {
     /// Flipped once per app launch by the shell; changing it re-runs the count-up.
     let countUpKey: Int
 
+    /// The best each part has ever scored, 0–100 per part.
+    ///
+    /// Drawn in GOLD around the live web, so the shape says not only where the wearer is but how far
+    /// that is from their OWN best — which is the only comparison this app is willing to draw. Absent
+    /// (the default) it is not drawn at all: a personal best needs history, and an invented ceiling
+    /// would be a target nobody set.
+    var best: [LevelPart: Double]? = nil
+
     @State private var reveal: Double = 0
     @State private var shown: Int = 0
 
@@ -107,6 +115,23 @@ struct LevelRadarView: View {
                     if i == 0 { web.move(to: point) } else { web.addLine(to: point) }
                 }
                 web.closeSubpath()
+
+                // THE PERSONAL BEST, UNDER the live web and only where it is genuinely ahead of it.
+                // Drawn first so the current shape sits on top: the reading is the subject, and the
+                // best is the frame around it. Gold rather than another tint because nothing else in
+                // this palette is gold, so it cannot be mistaken for one of the five parts.
+                if let best {
+                    var crown = Path()
+                    for i in radarParts.indices {
+                        let frac = min(max((best[radarParts[i]] ?? 0) / 100 * reveal, 0), 1)
+                        let point = radarVertex(centre: centre, radius: radius * frac, index: i)
+                        if i == 0 { crown.move(to: point) } else { crown.addLine(to: point) }
+                    }
+                    crown.closeSubpath()
+                    context.stroke(crown, with: .color(radarBestGold.opacity(0.85)),
+                                   style: StrokeStyle(lineWidth: 1.5, dash: [3, 3]))
+                }
+
                 context.fill(web, with: .color(StrandPalette.accent.opacity(0.16)))
                 context.stroke(web, with: .color(StrandPalette.accent.opacity(0.75)), lineWidth: 1.5)
             }
@@ -176,6 +201,10 @@ struct LevelRadarView: View {
 }
 
 /// The SF Symbol for each part. Chosen to match the Android glyphs as closely as the two sets allow.
+/// The personal-best ring's colour. A real gold, and the only gold in the app — see the note at the
+/// draw site on why it is not one of the metric tints.
+let radarBestGold = Color(.sRGB, red: 0xE5 / 255, green: 0xB8 / 255, blue: 0x4B / 255, opacity: 1)
+
 func levelPartSymbol(_ part: LevelPart) -> String {
     switch part {
     case .sleep: return "moon.fill"

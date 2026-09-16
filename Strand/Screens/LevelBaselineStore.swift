@@ -17,7 +17,14 @@ import StrandAnalytics
 
 enum LevelBaselineStore {
 
-    private static let key = "level.baselines"
+    /// Version 2, and the reason is the one case where a frozen scale MUST be thrown away.
+    ///
+    /// The first iOS scales were frozen on the app's very first level computation — before the WHOOP
+    /// cloud sync had landed any history at all — so HRV, resting HR and the sleep score all fell back
+    /// to the table. Every level measured since was measured against a stranger's numbers. A scale is
+    /// frozen so a colour keeps its meaning, not so a wrong one does. See `MuscleBaselineStore` for the
+    /// same decision taken for the same reason.
+    private static let key = "level.baselines.v2"
     private static let frozenAtKey = "level.baselinesFrozenAt"
 
     private struct Stored: Codable {
@@ -31,12 +38,21 @@ enum LevelBaselineStore {
     ///
     /// `history` is only consulted when there is nothing stored, so the (potentially expensive) read of
     /// a whole metric history can be a closure the caller never pays for on a warm start.
+    /// NOT FROZEN UNTIL IT IS WORTH FREEZING. A scale derived before the history arrived is a scale made
+    /// of table entries, and freezing that would measure the wearer against a stranger forever — which is
+    /// exactly what happened on the first iOS builds. Below the bar the derived set is still RETURNED, so
+    /// today has a usable number; it is simply not written down, and the next call with real history
+    /// freezes the real thing.
     static func resolve(history: () -> [LevelMetric: [Double]]) -> [LevelMetric: Baseline] {
         if let stored = read() { return stored }
-        let derived = LevelBaselines.deriveAll(history: history())
-        write(derived)
+        let readings = history()
+        let derived = LevelBaselines.deriveAll(history: readings)
+        if LevelBaselines.isDerivable(history: readings) { write(derived) }
         return derived
     }
+
+    /// Whether the scale on disk is the frozen one, as opposed to today's provisional table fallback.
+    static var isFrozen: Bool { read() != nil }
 
     /// The stored set, or nil when the scale has never been frozen.
     static func read() -> [LevelMetric: Baseline]? {

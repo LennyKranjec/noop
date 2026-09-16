@@ -60,7 +60,7 @@ private struct VitalTileView: View {
         let tile = VStack(alignment: .leading, spacing: 8) {
             // Header: the glyph and the metric's name.
             HStack(spacing: 6) {
-                Image(systemName: levelPartIcon(part))
+                Image(systemName: levelPartSymbol(part))
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(StrandPalette.textSecondary)
                 Text(levelPartLabel(part))
@@ -167,29 +167,11 @@ private struct TrendArrow: View {
     }
 }
 
-// MARK: - The level parts' vocabulary
+// MARK: - The part names
 //
-// Shared with the level strip, so a part cannot wear one colour in the bar and another on this card.
-
-func levelPartIcon(_ part: LevelPart) -> String {
-    switch part {
-    case .sleep: return "moon.zzz.fill"
-    case .heart: return "heart"
-    case .lungs: return "wind"
-    case .muscle: return "figure.strengthtraining.traditional"
-    case .focus: return "bolt.fill"
-    }
-}
-
-func levelPartTint(_ part: LevelPart) -> Color {
-    switch part {
-    case .sleep: return StrandPalette.restBright
-    case .heart: return StrandPalette.statusCritical
-    case .lungs: return StrandPalette.metricCyan
-    case .muscle: return StrandPalette.statusWarning
-    case .focus: return StrandPalette.accent
-    }
-}
+// The GLYPH and the TINT already live in `LevelRadarView`, which is where the level's own vocabulary is
+// kept — a part must not wear one colour in the strip and another on this card. Only the written name is
+// added here, because the radar labels its axes with glyphs and has never needed one.
 
 func levelPartLabel(_ part: LevelPart) -> String {
     switch part {
