@@ -52,7 +52,8 @@ final class VO2MaxEstimatorTests: XCTestCase {
         let week = VO2MaxEstimator.ActivityWeek(activeDays: 4, minutesPerActiveDay: 45, highIntensityFraction: 0.3)
         // PA index = 2.5 × 2 × 0.75 = 3.75. Men: 100.27 − 0.296·30 − 0.369·85 + 0.226·3.75 − 0.155·50.
         let v = try XCTUnwrap(VO2MaxEstimator.activityModel(age: 30, sex: "male", waistCm: 85, restingHr: 50, week: week))
-        XCTAssertEqual(v, 100.27 - 0.296 * 30 - 0.369 * 85 + 0.226 * 3.75 - 0.155 * 50, accuracy: 1e-9)
+        let terms: [Double] = [100.27, -0.296 * 30, -0.369 * 85, 0.226 * 3.75, -0.155 * 50]
+        XCTAssertEqual(v, terms.reduce(0, +), accuracy: 1e-9)
         XCTAssertNil(VO2MaxEstimator.activityModel(age: 30, sex: "male", waistCm: 0, restingHr: 50, week: week))
     }
 
