@@ -30,7 +30,7 @@ final class LevelDayFreezeTests: XCTestCase {
             components: [LevelComponent(part: .sleep, score: 71, effectiveWeight: 0.3),
                          LevelComponent(part: .lungs, score: nil, effectiveWeight: 0)],
             raw: 64.2, stepPenalty: 0.97, level: 62.3, coverage: 0.93)
-        let frozen = FrozenLevel(day: "2026-09-16", breakdown: breakdown, drivers: [.sleep: .sleepScore])
+        let frozen = FrozenLevel(day: "2026-09-16", breakdown: breakdown, drivers: [.sleep: .restorativeSleep])
         let data = try! JSONEncoder().encode(frozen)
         let back = try! JSONDecoder().decode(FrozenLevel.self, from: data)
         XCTAssertEqual(back, frozen)
