@@ -255,6 +255,7 @@ enum GoveeAdvertisement {
 
     /// Govee's company identifier, little-endian at the head of the manufacturer data.
     static let companyId: UInt16 = 0xEC88
+    static let h5179CompanyId: UInt16 = 0x8801
 
     /// Decode one advertisement, or nil when it is not a Govee thermo-hygrometer this understands.
     ///
@@ -266,8 +267,17 @@ enum GoveeAdvertisement {
     ///     packs temperature ×10 × 1000 + humidity ×10, top bit set for below zero, battery at byte 6.
     static func parse(name: String, manufacturerData d: Data) -> Parsed? {
         let b = [UInt8](d)
-        guard b.count >= 7, UInt16(b[0]) | (UInt16(b[1]) << 8) == companyId else { return nil }
         let model = name.uppercased()
+        // H5179 — the Wi-Fi model — advertises under a different company id (0x8801) with its own
+        // layout: signed 16-bit temperature ×100 and 16-bit humidity ×100, little-endian, from byte 6,
+        // battery at byte 10.
+        if model.contains("5179") {
+            guard b.count >= 11, UInt16(b[0]) | (UInt16(b[1]) << 8) == h5179CompanyId else { return nil }
+            let rawT = Int16(bitPattern: UInt16(b[6]) | (UInt16(b[7]) << 8))
+            let rawH = UInt16(b[8]) | (UInt16(b[9]) << 8)
+            return sane(Double(rawT) / 100, Double(rawH) / 100, battery: Int(b[10]))
+        }
+        guard b.count >= 7, UInt16(b[0]) | (UInt16(b[1]) << 8) == companyId else { return nil }
         if model.contains("5074") || model.contains("5051") {
             guard b.count >= 8 else { return nil }
             let rawT = Int16(bitPattern: UInt16(b[3]) | (UInt16(b[4]) << 8))

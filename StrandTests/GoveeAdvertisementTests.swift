@@ -30,6 +30,15 @@ final class GoveeAdvertisementTests: XCTestCase {
         XCTAssertEqual(p?.battery, 100)
     }
 
+    func testTheH5179LayoutUnderItsOwnCompanyId() {
+        // 20.75 °C = 2075 = 0x081B, 52.40 % = 5240 = 0x1478, battery 94.
+        let data = Data([0x01, 0x88, 0xEC, 0x00, 0x01, 0x01, 0x1B, 0x08, 0x78, 0x14, 94])
+        let p = GoveeAdvertisement.parse(name: "Govee_H5179_9C1F", manufacturerData: data)
+        XCTAssertEqual(p?.temperatureC ?? 0, 20.75, accuracy: 0.001)
+        XCTAssertEqual(p?.humidityPct ?? 0, 52.40, accuracy: 0.001)
+        XCTAssertEqual(p?.battery, 94)
+    }
+
     func testAnythingElseIsNotRead() {
         // Wrong company, unknown model, too short.
         XCTAssertNil(GoveeAdvertisement.parse(name: "GVH5075", manufacturerData: Data([0x4C, 0x00, 0, 3, 0x49, 0xBB, 87, 0])))

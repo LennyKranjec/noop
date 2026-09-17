@@ -91,7 +91,7 @@ struct BedroomClimateSettingsView: View {
             StrandCard {
                 VStack(alignment: .leading, spacing: 10) {
                     header("BLUETOOTH SENSOR — NO ACCOUNT NEEDED")
-                    Text("For H5072, H5074, H5075, H5101, H5102, H5174 and H5177. Keep the phone near the sensor and scan.")
+                    Text("For H5072, H5074, H5075, H5101, H5102, H5174, H5177 and H5179. Keep the phone near the sensor and scan.")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -136,7 +136,7 @@ struct BedroomClimateSettingsView: View {
             StrandCard {
                 VStack(alignment: .leading, spacing: 10) {
                     header("WI-FI SENSOR — GOVEE CLOUD")
-                    Text("For Wi-Fi models, or Bluetooth ones behind a Govee gateway. Request an API key in the Govee Home app (Profile → Settings → Apply for API key).")
+                    Text("For Wi-Fi models such as the H5179 — the most reliable way for those — or Bluetooth ones behind a Govee gateway. Request an API key in the Govee Home app (Profile → Settings → Apply for API key).")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
