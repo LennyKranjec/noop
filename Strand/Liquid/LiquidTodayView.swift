@@ -62,6 +62,11 @@ struct LiquidTodayView: View {
     /// True when `cloudDay` is a CARRIED earlier day rather than the selected one. The hero's footer
     /// shows that day's date, which is what makes the carry honest rather than a silent substitution.
     @State private var cloudIsCarried = false
+    @State private var showBedroomSettings = false
+    /// NOOP's own Charge / Effort / Rest for the selected day, each 0–100. The hero's first choice.
+    @State private var noopCharge: Double?
+    @State private var noopEffort: Double?
+    @State private var noopRest: Double?
     /// WHOOP's own `sleep_performance_percentage`, banked on the series seam.
     ///
     /// BANKED, NOT RE-SCORED. An earlier cut ran this app's own scorer over the night instead, which
@@ -414,18 +419,22 @@ struct LiquidTodayView: View {
                         // section that had no home.
                         case .stressEnergy:
                             if selectedDayOffset == 0 {
+                                // Today's stress, live, directly above the energy bar — the Android
+                                // Stress & Energy block, both halves of it.
+                                TodayStressTileView(dailyFallback: stress, onOpen: { heroTap = .stress })
                                 EnergyTileView(balance: energy, onOpen: { heroTap = .stress })
                             }
                         // The water tile and the macro tile — what the Nutrition TAB used to be on the
                         // Android lane. Both read stores that already exist, so neither invents a figure.
                         case .hydrationNutrition:
                             if selectedDayOffset == 0 {
-                                VStack(spacing: NoopMetrics.gap) {
-                                    HydrationTileView(
-                                        refreshKey: repo.nutritionSeq,
-                                        onOpen: { heroTap = .hydration })
-                                    NutritionTileView(refreshKey: repo.nutritionSeq)
-                                }
+                                // The food tile is gone from Today; the water tile stays. The bedroom
+                                // tile sits beside it — both are the room and the glass, not the body —
+                                // and draws nothing until a sensor is set up.
+                                HydrationTileView(
+                                    refreshKey: repo.nutritionSeq,
+                                    onOpen: { heroTap = .hydration })
+                                BedroomClimateTileView(onOpen: { showBedroomSettings = true })
                             }
                         case .yourCards: yourCardsSection
                         case .menstrualCycle:
@@ -568,6 +577,9 @@ struct LiquidTodayView: View {
                 hostedCardsRaw: $hostedCardsRaw
             )
         }
+        .sheet(isPresented: $showBedroomSettings) {
+            NavigationStack { BedroomClimateSettingsView() }
+        }
         .sheet(isPresented: $showCoachLauncher) {
             CoachLauncherSheet()
         }
@@ -615,7 +627,14 @@ struct LiquidTodayView: View {
     private func handlePull(_ y: CGFloat) {
         // THE OFFSET NOW ONLY DRAWS. The refresh itself is `.refreshable` — see `pullRefresh`. What is
         // left here grows the liquid vessel with the pull, which is decoration and nothing more.
-        pullY = max(0, y)
+        //
+        // AND IT WRITES ONLY WHEN IT CHANGES. This fires on every frame of every scroll, and `pullY` is
+        // state on the whole of Today: assigning it — even the same 0 — re-evaluated the entire screen
+        // body sixty times a second while scrolling down the column, which is the stutter. Scrolling
+        // through the content is a negative offset that clamps to 0, so it now writes nothing at all.
+        let clamped = max(0, y)
+        guard clamped != pullY else { return }
+        pullY = clamped
     }
 
     /// The refresh a pull asks for.
@@ -795,7 +814,7 @@ struct LiquidTodayView: View {
     private var heroCard: some View {
         TodayTrioHeroView(
             scores: heroScores,
-            carriedFrom: cloudIsCarried ? heroDateLabel : nil,
+            carriedFrom: heroIsCarried ? heroDateLabel : nil,
             weather: weather,
             onTapScore: { index in
                 switch index {
@@ -809,28 +828,44 @@ struct LiquidTodayView: View {
     }
 
     /// The three rings, in the order the wearer asked for: Sleep, Recovery, Strain.
+    /// NOOP's OWN THREE SCORES, each on 0–100, preferred over everything else.
+    ///
+    /// The rings showed WHOOP's recovery, strain and sleep performance for a while. They are back to the
+    /// app's own Charge, Effort and Rest, because those are the figures the rest of the app — the level,
+    /// the quests, the coach — is built on, and a hero that disagreed with every screen below it was the
+    /// one number on Today that could not be explained from inside the app. Order: the computed lane,
+    /// then the merged day, and WHOOP's figure only when the app has nothing of its own for the day.
+    private var heroCharge: Double? { noopCharge ?? displayDay?.recovery ?? cloudDay?.recovery }
+    private var heroEffort: Double? {
+        let own = StrainScorer.effectiveEffort(live: selectedDayOffset == 0 ? liveTodayStrain : nil,
+                                               stored: noopEffort ?? displayDay?.strain)
+        return own ?? cloudDay?.strain.map { $0 * WhoopExportImporter.dayStrainToEffortScale }
+    }
+    private var heroRest: Double? { noopRest ?? restScore ?? cloudSleepScore }
+
+    /// Whether the rings are showing the carried cloud row — i.e. the app has nothing of its own.
+    private var heroIsCarried: Bool {
+        cloudIsCarried && noopCharge == nil && noopEffort == nil && noopRest == nil
+            && displayDay?.recovery == nil && restScore == nil
+    }
+
     private var heroScores: [HeroScore] {
-        let recovery = cloudDay?.recovery ?? displayDay?.recovery
-        return [
-            HeroScore(id: 0, label: "Sleep", text: heroPercentText(cloudSleepScore ?? restScore),
-                      fraction: heroFraction(cloudSleepScore ?? restScore),
+        [
+            HeroScore(id: 0, label: "Rest", text: heroPercentText(heroRest),
+                      fraction: heroFraction(heroRest),
                       tint: StrandPalette.restColor),
-            HeroScore(id: 1, label: "Recovery", text: heroPercentText(recovery),
-                      fraction: heroFraction(recovery),
+            HeroScore(id: 1, label: "Charge", text: heroPercentText(heroCharge),
+                      fraction: heroFraction(heroCharge),
                       tint: StrandPalette.statusPositive),
-            // STRAIN ON WHOOP'S OWN 0-21 SCALE, always, and never as a percentage. This tile shows
-            // WHOOP's figures under WHOOP's name, and 14.9 is what their app says — rendering it as
-            // "71%" would be this app restating their number in units they do not use, on a tile that
-            // credits them for it. The cloud value is ALREADY 0-21; only a locally derived fallback
-            // needs converting, which is what `heroStrain21` is for.
-            HeroScore(id: 2, label: "Strain",
-                      text: heroStrain21.map { String(format: "%.1f", $0) } ?? "–",
-                      fraction: heroFraction(heroStrain21, max: whoopStrainMax),
+            // EFFORT ON THE APP'S 0–100, through the same formatter every Effort read-out uses, so the
+            // wearer's scale setting reaches it like everything else.
+            HeroScore(id: 2, label: "Effort",
+                      text: heroEffort.map { UnitFormatter.effortDisplay($0, scale: effortScale) } ?? "–",
+                      fraction: heroFraction(heroEffort),
                       tint: StrandPalette.effortColor,
-                      // THE DAY'S OPTIMAL STRAIN, always drawn, so the arc can be read against the
-                      // target rather than against nothing: a 15.0 means something different on a 92 %
-                      // recovery than on a 19 %, and the number alone cannot say which.
-                      mark: heroFraction(optimalStrainCeiling, max: whoopStrainMax)),
+                      // The day's optimal effort ceiling, on the same 0–100, so the arc still reads
+                      // against a target rather than against nothing.
+                      mark: heroFraction(optimalStrainCeiling.map { $0 * WhoopExportImporter.dayStrainToEffortScale })),
         ]
     }
 
@@ -1686,9 +1721,14 @@ struct LiquidTodayView: View {
     private var lastWorkoutsSection: some View {
         VStack(spacing: 8) {
             sectionHead("LAST WORKOUTS", trailing: "\(workouts.count) total")
-            if let w = workouts.first {
-                NavigationLink(value: TabRoute.workouts) { workoutCard(w) }
-                    .buttonStyle(LiquidPressStyle())
+            // EVERY SESSION OF THE DAY, newest first — not only the latest. A morning run and an evening
+            // lift are two workouts, and a card that showed one of them was a card that hid the other
+            // behind a count.
+            if !workouts.isEmpty {
+                ForEach(workouts, id: \.startTs) { w in
+                    NavigationLink(value: TabRoute.workouts) { workoutCard(w) }
+                        .buttonStyle(LiquidPressStyle())
+                }
             } else {
                 card {
                     Text("No workouts yet")
@@ -1710,14 +1750,11 @@ struct LiquidTodayView: View {
                         Text(workoutSub(w)).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
                     }
                     Spacer()
-                    // STRAIN, ON WHOOP'S 0–21, whatever the Effort toggle says — the same rule the hero
-                    // ring follows. The wearer reads this card against WHOOP's app, and a WHOOP session's
-                    // 11.4 printed as "54.3 EFFORT" is the same figure in a unit nobody recognises. The
-                    // stored value is still the app's 0–100 (see `WhoopCloudSync`); only this read-out
-                    // converts, through the shared formatter.
-                    (Text(w.strain.map { UnitFormatter.effortDisplay($0, scale: .whoop) } ?? Self.noValueDash)
-                        .font(StrandFont.number(15))
-                        + Text(" STRAIN").font(StrandFont.overlineScaled(9)))
+                    // EFFORT, on the wearer's own Effort scale, like the hero ring above it. A WHOOP
+                    // session still carries WHOOP's measured strain (see `WorkoutSource.preferred`);
+                    // it is only shown in the app's units.
+                    (Text(effortText(w.strain)).font(StrandFont.number(15))
+                        + Text(" EFFORT").font(StrandFont.overlineScaled(9)))
                         .foregroundStyle(StrandPalette.textPrimary)
                 }
                 LiquidTube(frac: (w.strain ?? 0) / 100, tint: StrandPalette.effortColor, height: 12, animated: false)
@@ -1783,6 +1820,10 @@ struct LiquidTodayView: View {
         await WhoopCloudSync.syncIfStale(repo: repo)
 
         let key = selectedDayKey
+        let own = await repo.noopScores(day: key)
+        noopCharge = own.charge
+        noopEffort = own.effort
+        noopRest = own.rest
         // THE DAY'S OWN SCORE OUTRANKS A REPEAT OF YESTERDAY'S, and that ordering is the whole of this.
         //
         // The carry existed because three dashes over a working strap is worse than last night's real
@@ -1818,9 +1859,10 @@ struct LiquidTodayView: View {
         weather = await WeatherService.refresh(force: true) ?? weather
         let stressByDay = await repo.bankedStressMinutes()
         streaks = Streaks.evaluate(days: repo.days,
-                                   stressMinutesByDay: stressByDay,
+                                   stressScoreByDay: await repo.stressScoreByDay(),
                                    journalDays: await repo.journalDays(),
-                                   sleepTimesByDay: await repo.sleepTimingsByDay())
+                                   sleepTimesByDay: await repo.sleepTimingsByDay(),
+                                   sleepDebtMinByDay: await repo.sleepDebtMinByDay())
         await loadStateAndEnergy(stressByDay: stressByDay)
         dailyMission = await coach.ensureDailyMission()?.text
         // Whatever today has earned, at most one at a time. Safe on every appearance: it returns
@@ -1906,8 +1948,8 @@ struct LiquidTodayView: View {
             await refreshPlatformHealth()
         }
         let grounding = RitualGrounding(
-            recovery: cloudDay?.recovery ?? displayDay?.recovery,
-            sleepScore: cloudSleepScore ?? restScore,
+            recovery: heroCharge,
+            sleepScore: heroRest,
             strain: heroStrain21,
             energy: energy,
             deficits: deficits,

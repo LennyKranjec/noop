@@ -109,31 +109,10 @@ struct RootTabView: View {
         }
     }
 
-    /// The anywhere-swipe tab-switch drag (2026-07-02). Held as a property so the attachment site can
-    /// enable or disable it through a `GestureMask` instead of attaching it conditionally: a conditional
-    /// attachment changes view identity, and this condition toggles on every push and pop, which would
-    /// rebuild the tab roots underneath it. The same class of rebuild is what #197 caused with an
-    /// `.id()` reset and #198 had to undo — it lost scroll position and re-ran `.task`.
-    ///
-    /// Only a decisive horizontal flick switches tabs — and NOT on Today.
-    ///
-    /// Today is a long column of tiles, several of which the thumb drags across on purpose: the water
-    /// buttons, the quest chips, the model and streak strips. A sideways flick that lands a few points
-    /// off-axis there throws the wearer onto another tab mid-gesture, which on the screen people open
-    /// first is the wrong trade. Today therefore takes NO horizontal gesture at all — neither this one
-    /// nor the day swipe it once had; the day is picked from the calendar in the title.
-    private var tabSwipeGesture: some Gesture {
-        DragGesture(minimumDistance: 24)
-            .onEnded { v in
-                guard selectedTab != 0 else { return }
-                let dx = v.translation.width, dy = v.translation.height
-                guard abs(dx) > 60, abs(dx) > abs(dy) * 1.6 else { return }
-                let next = min(4, max(0, selectedTab + (dx < 0 ? 1 : -1)))
-                if next != selectedTab {
-                    withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = next }
-                }
-            }
-    }
+    // NO TAB SWIPE. The anywhere-swipe that moved between tabs is gone on every tab: the tab bar is
+    // the one way between them. A sideways flick is too easily a scroll that drifted, a chip strip
+    // dragged, or a back-swipe that started a few points from the edge — and each of those throwing the
+    // wearer onto a different tab cost more than the gesture ever saved.
 
     var body: some View {
         // The platform tab bar is intentionally left fully native. iOS 26 supplies Liquid Glass and
@@ -204,27 +183,6 @@ struct RootTabView: View {
             // Tab crossfade — README §Motion: ~240ms opacity swap between tab roots, global calm
             // easing cubic-bezier(0.22,1,0.36,1).
             .animation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24), value: selectedTab)
-            // Swipe left/right anywhere to move between tabs (2026-07-02), but ONLY while the current
-            // tab is at its root. Attaching this ancestor drag gesture unconditionally defeated the
-            // edge-restriction of a pushed NavigationStack screen's native interactive-pop gesture —
-            // any More-tab subscreen (Settings, Devices, …) became draggable/rubber-banding from
-            // anywhere, not just the left edge (#519). Disabling the recognizer once a push is active,
-            // rather than just gating the onEnded action, is what stops the interference: the action
-            // never runs early enough, because the recognizer competes during recognition.
-            //
-            // The mask does that WITHOUT changing view identity. #519 attached the gesture through a
-            // conditional ViewModifier, which put the two states in separate _ConditionalContent
-            // branches — and since this condition toggles on every push and pop, each navigation
-            // rebuilt the whole TabView subtree and could reset @State inside the tab roots (scroll
-            // offsets, chart ranges, expanded sections). `including:` keeps one view type in both
-            // states, so nothing is torn down.
-            //
-            // The mask MUST be `.subviews`, not `.none`. `.subviews` means "enable the subview
-            // hierarchy's gestures, disable the added one" — exactly this requirement. `.none` disables
-            // the subview hierarchy TOO, which on a pushed screen would take out scrolling, taps and the
-            // interactive-pop itself: far worse than the bug being fixed.
-            .simultaneousGesture(tabSwipeGesture,
-                                 including: tabPaths[selectedTab].isEmpty ? .all : .subviews)
         .task {
             await repo.refresh()
             // TODAY'S MACROS, from whichever app the wearer keeps their food diary in. A live read
@@ -506,9 +464,9 @@ struct RootTabView: View {
                            onRefresh: { await repo.refreshEverything() },
                            topBackground: liquidScaffoldSky()) {
                 moreSection("Insights") {
-                    // Goals heads Insights: everything else on this list reports on the body, and this
-                    // is the one row that says what the reporting is FOR.
-                    MoreRow("Goals", "flag.fill", .goals)
+                    // Routines head Insights: everything else on this list reports on the body, and
+                    // this is the one row that says what the day around it looks like.
+                    MoreRow("Routines", "clock.badge.checkmark", .routines)
                     MoreRow("What Moves You", "wand.and.sparkles", .insightsHub)
                     MoreRow("Intelligence", "brain.head.profile", .intelligence)
                     // K3: Coach promoted to a top-level tab — no longer listed under More.
@@ -518,6 +476,7 @@ struct RootTabView: View {
                 }
                 moreSection("Body") {
                     MoreRow("Sleep", "bed.double.fill", .sleep)
+                    MoreRow("Bedroom", "thermometer.medium", .bedroom)
                     MoreRow("Live", "waveform.path.ecg", .live)
                     MoreRow("Workouts", "figure.run", .workouts)
                     MoreRow("Health", "heart.text.square.fill", .health)
@@ -649,7 +608,7 @@ struct RootTabView: View {
 private enum MoreDestination: Hashable {
     case insightsHub, intelligence, coach, insights, explore, compare
     case live, workouts, health, labBook, sleep, stress, breathe, intervals, rhythm
-    case goals
+    case routines, bedroom
     case fusedRecord, appleHealth, miBand, dataSources, backupSync, shortcutsExport, noopLimitations
     case alarms, automations, testCentre, siriShortcuts, powerSaving, settings
 
@@ -667,7 +626,8 @@ private enum MoreDestination: Hashable {
         case .labBook:         LabBookView()
         // Sleep handed its tab slot to Focus, so it needs a row here — a screen this central must not
         // be reachable only as a link off another one.
-        case .goals:           GoalsView()
+        case .routines:        RoutinesView()
+        case .bedroom:         BedroomClimateSettingsView()
         case .sleep:           SleepView()
         case .stress:          StressView()
         case .breathe:         BreathingView()

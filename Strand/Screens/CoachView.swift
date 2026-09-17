@@ -23,6 +23,8 @@ struct CoachView: View {
     /// Restored on first appear, saved on every change. Keyed identically to the Android twin.
     private static let draftKey = "coach.composerDraft"
     @State private var draft: String = UserDefaults.standard.string(forKey: "coach.composerDraft") ?? ""
+    /// The pending debounced write of `draft`. See the `onChange` that owns it.
+    @State private var draftSave: Task<Void, Never>?
     /// Pending key text in the setup card (never persisted here, handed to `setKey`).
     @State private var keyDraft: String = ""
     /// The corrected key, typed into the editor a rejection opens. Separate from `keyDraft` so the
@@ -176,8 +178,17 @@ struct CoachView: View {
             await coach.send(prompt)
         }
         // K15: persist the composer draft so it survives an app relaunch.
+        //
+        // DEBOUNCED. A defaults write per keystroke is a synchronous write on the main thread for every
+        // letter; the draft only has to survive a relaunch, and one write after the typing pauses does
+        // that just as well.
         .onChangeCompat(of: draft) { newValue in
-            UserDefaults.standard.set(newValue, forKey: Self.draftKey)
+            draftSave?.cancel()
+            draftSave = Task {
+                try? await Task.sleep(nanoseconds: 600_000_000)
+                guard !Task.isCancelled else { return }
+                UserDefaults.standard.set(newValue, forKey: Self.draftKey)
+            }
         }
         // K14: haptic feedback when a reply arrives (sending goes true → false).
         .onChangeCompat(of: coach.sending) { isSending in
@@ -995,6 +1006,7 @@ struct CoachView: View {
                     if coach.dataConsent && coach.provider == .gemini { multimodalChartBar }
                     systemPromptBar
                     morningBriefBar
+                    CoachMemoryPanel()
                     privacyFootnote
                 }
                 .padding(16)
@@ -1090,12 +1102,31 @@ struct CoachView: View {
             .accessibilityElement(children: .combine)
             .accessibilityLabel("You said: \(message.text)")
         case .assistant:
-            // LLM replies arrive as Markdown (bold, lists, headings, tables),             // rendered with the chat-bubble-sized Strand theme. User bubbles stay
-            // verbatim `Text` so typed `*`/`#` never turn into surprise formatting.
-            // The reply sits on a frosted Charge-tinted surface, a card, not a flat box.
+            // EQUATABLE, SO A KEYSTROKE DOES NOT RE-RENDER THE CONVERSATION. The draft is state on this
+            // screen, so every letter typed re-evaluates the body — and every visible reply was being
+            // re-laid-out as Markdown for it, which is the lag in the composer. A reply whose text has not
+            // changed now skips its body entirely. (Streaming still updates: the text changes.)
+            // Memory commands are hidden while a reply is still streaming; they are stripped for good
+            // when it finishes (see `CoachMemory.apply`).
+            AssistantBubble(text: CoachMemory.hidingCommands(message.text), onSave: saveAdvice)
+                .equatable()
+        }
+    }
+
+    /// One assistant reply. See the note at its call site on why it is its own `Equatable` view.
+    private struct AssistantBubble: View, Equatable {
+        let text: String
+        let onSave: (String) -> Void
+
+        static func == (lhs: Self, rhs: Self) -> Bool { lhs.text == rhs.text }
+
+        var body: some View {
+            // LLM replies arrive as Markdown (bold, lists, headings, tables), rendered with the
+            // chat-bubble-sized Strand theme. User bubbles stay verbatim `Text` so typed `*`/`#` never
+            // turn into surprise formatting. The reply sits on a frosted Charge-tinted surface.
             // K8: context menu (long-press / right-click) with Copy, Share, and Save actions.
             HStack {
-                Markdown(message.text)
+                Markdown(text)
                     .markdownTheme(.strand)
                     .textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1108,18 +1139,18 @@ struct CoachView: View {
                         Button {
                             #if os(macOS)
                             NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(message.text, forType: .string)
+                            NSPasteboard.general.setString(text, forType: .string)
                             #else
-                            UIPasteboard.general.string = message.text
+                            UIPasteboard.general.string = text
                             #endif
                         } label: {
                             Label("Copy", systemImage: "doc.on.doc")
                         }
-                        ShareLink(item: message.text) {
+                        ShareLink(item: text) {
                             Label("Share", systemImage: "square.and.arrow.up")
                         }
                         Button {
-                            saveAdvice(message.text)
+                            onSave(text)
                         } label: {
                             Label("Save to Journal", systemImage: "square.and.pencil")
                         }
@@ -1127,7 +1158,7 @@ struct CoachView: View {
                 Spacer(minLength: 48)
             }
             .accessibilityElement(children: .combine)
-            .accessibilityLabel("Coach said: \(message.text)")
+            .accessibilityLabel("Coach said: \(text)")
         }
     }
 
@@ -1484,6 +1515,63 @@ struct CoachView: View {
                 proxy.scrollTo("typing", anchor: .bottom)
             } else if let last = coach.messages.last {
                 proxy.scrollTo(last.id, anchor: .bottom)
+            }
+        }
+    }
+}
+
+
+// MARK: - The coach's memory file
+
+/// What the coach has written down, and a way to strike any of it.
+///
+/// The coach adds and removes entries itself as it talks; this is where the wearer sees exactly what it
+/// is carrying from one session to the next, and removes anything wrong or out of date.
+private struct CoachMemoryPanel: View {
+    @ObservedObject private var memory = CoachMemory.shared
+
+    var body: some View {
+        StrandCard {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("MEMORY")
+                        .font(StrandFont.overline)
+                        .tracking(1.2)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                    Spacer()
+                    if !memory.items.isEmpty {
+                        Button("Clear all", role: .destructive) { memory.clear() }
+                            .font(StrandFont.caption)
+                    }
+                }
+                Text("Notes the coach keeps between sessions — plans, injuries, what worked. It reads them "
+                     + "at the start of every session and adds or removes them as it goes.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if memory.items.isEmpty {
+                    Text("Nothing written yet.")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                } else {
+                    ForEach(memory.items) { item in
+                        HStack(alignment: .top, spacing: 8) {
+                            Text(item.text)
+                                .font(StrandFont.subhead)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Button {
+                                memory.remove(id: item.id)
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(StrandPalette.textTertiary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Delete memory")
+                        }
+                    }
+                }
             }
         }
     }

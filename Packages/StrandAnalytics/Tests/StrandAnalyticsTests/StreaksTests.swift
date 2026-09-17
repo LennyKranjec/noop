@@ -138,98 +138,75 @@ final class StreaksTests: XCTestCase {
 
     // MARK: - sleep debt < 1h
 
-    func testSleepingTheNeedEveryNightKeepsTheDebtStreakLit() {
-        let s = of(
-            Streaks.evaluate(days: steady(20, Streaks.sleepNeedHours), today: today, calendar: calendar),
-            .sleepDebt
-        )
-        XCTAssertGreaterThanOrEqual(s.days, 15)
+    private func debts(_ minutes: [Double]) -> [String: Double] {
+        // minutes[0] is today, minutes[1] yesterday, and so on back.
+        Dictionary(uniqueKeysWithValues: minutes.enumerated().map { (key($0.offset), $0.element) })
+    }
+
+    func testTheDebtStreakReadsTheDebtFigureItIsGiven() {
+        let s = of(Streaks.evaluate(days: steady(10, 8), sleepDebtMinByDay: debts([20, 35, 0, 50]),
+                                    today: today, calendar: calendar), .sleepDebt)
+        XCTAssertEqual(s.days, 4)
         XCTAssertTrue(s.todaySecured)
     }
 
-    func testAFortnightOfShortNightsBreaksTheDebtStreak() {
-        // Six hours against a seven-hour need is an hour a night: the balance passes the limit on the
-        // second night and never comes back.
-        let s = of(Streaks.evaluate(days: steady(20, 6), today: today, calendar: calendar), .sleepDebt)
+    func testElevenDaysOverAnHourHoldNothing() {
+        // The reported bug: eleven days of more than an hour of debt, and the flame was lit. A long
+        // night in the middle does not change what the debt figure SAYS for those days.
+        let s = of(Streaks.evaluate(days: steady(12, 8), sleepDebtMinByDay: debts(Array(repeating: 95, count: 11)),
+                                    today: today, calendar: calendar), .sleepDebt)
         XCTAssertEqual(s.days, 0)
         XCTAssertFalse(s.todaySecured)
     }
 
-    func testASurplusIsNotCredit() {
-        // Ten-hour nights do not bank hours against a future short one in any model worth quoting, so a
-        // net-positive balance reads as NO DEBT rather than as a buffer.
-        let s = of(Streaks.evaluate(days: steady(20, 10), today: today, calendar: calendar), .sleepDebt)
-        XCTAssertGreaterThanOrEqual(s.days, 15)
+    func testExactlyAnHourOfDebtIsNotUnderAnHour() {
+        let s = of(Streaks.evaluate(days: steady(4, 8), sleepDebtMinByDay: debts([60, 60]),
+                                    today: today, calendar: calendar), .sleepDebt)
+        XCTAssertEqual(s.days, 0)
     }
 
-    func testOneHalfHourShortfallIsInsideTheHour() {
-        var nights = steady(20, Streaks.sleepNeedHours)
-        nights[nights.count - 3] = day(2, sleepMin: (Streaks.sleepNeedHours - 0.5) * 60)
-        let s = of(Streaks.evaluate(days: nights, today: today, calendar: calendar), .sleepDebt)
-        XCTAssertGreaterThanOrEqual(s.days, 3, "a single half-hour shortfall is under the limit")
+    func testADayWithNoDebtFigureIsUnmeasured() {
+        var d = debts([10, 10])
+        d[key(3)] = 15
+        let s = of(Streaks.evaluate(days: steady(6, 8), sleepDebtMinByDay: d,
+                                    today: today, calendar: calendar), .sleepDebt)
+        XCTAssertEqual(s.days, 3, "day 2 has no figure and spans")
     }
 
-    // MARK: - non-activity stress < 6h
+    // MARK: - stress score under 1
+
+    private func stress(_ scores: [Double]) -> [String: Double] {
+        Dictionary(uniqueKeysWithValues: scores.enumerated().map { (key($0.offset), $0.element) })
+    }
 
     func testCalmDaysHoldTheStressStreak() {
-        let days = steady(10, 8)
-        let stress = Dictionary(uniqueKeysWithValues: days.map { ($0.day, 60.0) })
-        let s = of(
-            Streaks.evaluate(days: days, stressMinutesByDay: stress, today: today, calendar: calendar),
-            .stressTime
-        )
+        let s = of(Streaks.evaluate(days: steady(10, 8), stressScoreByDay: stress(Array(repeating: 0.6, count: 10)),
+                                    today: today, calendar: calendar), .stressTime)
         XCTAssertEqual(s.days, 10)
         XCTAssertTrue(s.todaySecured)
     }
 
-    func testADayOverTheLimitBreaksIt() {
-        let days = steady(10, 8)
-        var stress = Dictionary(uniqueKeysWithValues: days.map { ($0.day, 60.0) })
-        stress[key(3)] = Streaks.stressLimitMin + 1
-        let s = of(
-            Streaks.evaluate(days: days, stressMinutesByDay: stress, today: today, calendar: calendar),
-            .stressTime
-        )
-        XCTAssertEqual(s.days, 3)
+    func testAScoreOfOneBreaksIt() {
+        // "Under 1". One is the top of the low band, not inside it.
+        let s = of(Streaks.evaluate(days: steady(10, 8), stressScoreByDay: stress([0.4, 0.9, 1.0, 0.2]),
+                                    today: today, calendar: calendar), .stressTime)
+        XCTAssertEqual(s.days, 2)
     }
 
-    func testExactlyTheLimitIsOverIt() {
-        // The rule the wearer stated is "under six hours". Six hours is not under six hours, and a
-        // boundary that quietly rounds in the wearer's favour is a boundary that means nothing.
-        let days = steady(4, 8)
-        let stress = Dictionary(uniqueKeysWithValues: days.map { ($0.day, Streaks.stressLimitMin) })
-        let s = of(
-            Streaks.evaluate(days: days, stressMinutesByDay: stress, today: today, calendar: calendar),
-            .stressTime
-        )
-        XCTAssertEqual(s.days, 0)
-    }
-
-    func testDaysWithNoBankedStressNeitherBreakNorExtend() {
-        // THE GAP DOCTRINE, on the streak most exposed to it: the figure is only banked on days the
-        // stress read actually ran, so most history has no row at all. Those days must SPAN, not fail —
-        // otherwise the streak reads zero forever for a wearer who has simply not opened that screen.
-        let days = steady(10, 8)
-        let stress = [key(0): 30.0, key(9): 30.0]
-        let s = of(
-            Streaks.evaluate(days: days, stressMinutesByDay: stress, today: today, calendar: calendar),
-            .stressTime
-        )
-        XCTAssertEqual(s.days, 2, "both measured days count, the eight unmeasured ones span")
+    func testDaysWithNoStressScoreNeitherBreakNorExtend() {
+        let s = of(Streaks.evaluate(days: steady(10, 8), stressScoreByDay: [key(0): 0.5, key(9): 0.5],
+                                    today: today, calendar: calendar), .stressTime)
+        XCTAssertEqual(s.days, 2)
         XCTAssertTrue(s.todaySecured)
     }
 
     // MARK: - today is not yet a failure
 
     func testAnUnsecuredTodayDoesNotBreakYesterdaysStreak() {
-        let days = steady(6, 8)
-        var stress = Dictionary(uniqueKeysWithValues: days.map { ($0.day, 30.0) })
-        // Today has already blown the budget; the days before it stand.
-        stress[key(0)] = Streaks.stressLimitMin + 120
-        let s = of(
-            Streaks.evaluate(days: days, stressMinutesByDay: stress, today: today, calendar: calendar),
-            .stressTime
-        )
+        var scores = stress(Array(repeating: 0.5, count: 6))
+        scores[key(0)] = 2.4
+        let s = of(Streaks.evaluate(days: steady(6, 8), stressScoreByDay: scores,
+                                    today: today, calendar: calendar), .stressTime)
         XCTAssertEqual(s.days, 5)
         XCTAssertFalse(s.todaySecured, "today is not banked")
     }

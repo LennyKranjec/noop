@@ -1540,9 +1540,10 @@ struct TodayView: View {
         // refreshSeq — so they get their own trigger for the same reason hydration does.
         .task(id: "\(repo.refreshSeq)-\(selectedDayOffset)") {
             todayStreaks = Streaks.evaluate(days: repo.days,
-                                            stressMinutesByDay: await repo.bankedStressMinutes(),
+                                            stressScoreByDay: await repo.stressScoreByDay(),
                                             journalDays: await repo.journalDays(),
-                                            sleepTimesByDay: await repo.sleepTimingsByDay())
+                                            sleepTimesByDay: await repo.sleepTimingsByDay(),
+                                            sleepDebtMinByDay: await repo.sleepDebtMinByDay())
         }
         .onChangeCompat(of: hydrationEnabled) { _ in Task { await reloadHydration() } }
         // #755: NO per-edge safety net here, on purpose. A deep offload segments into many slices that each

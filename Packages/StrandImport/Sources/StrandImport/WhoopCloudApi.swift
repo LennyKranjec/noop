@@ -58,6 +58,8 @@ public enum WhoopCloudApi {
         /// Clock times rather than instants because the regularity streak compares them across dates.
         public var sleepOnsetMin: Int?
         public var wakeMin: Int?
+        /// WHOOP's own sleep debt going into the night, in minutes (`sleep_needed.need_from_sleep_debt_milli`).
+        public var sleepDebtMin: Double?
 
         public init(
             day: String,
@@ -73,7 +75,8 @@ public enum WhoopCloudApi {
             efficiency: Double? = nil,
             respRateBpm: Double? = nil,
             sleepOnsetMin: Int? = nil,
-            wakeMin: Int? = nil
+            wakeMin: Int? = nil,
+            sleepDebtMin: Double? = nil
         ) {
             self.day = day
             self.recovery = recovery
@@ -89,6 +92,7 @@ public enum WhoopCloudApi {
             self.respRateBpm = respRateBpm
             self.sleepOnsetMin = sleepOnsetMin
             self.wakeMin = wakeMin
+            self.sleepDebtMin = sleepDebtMin
         }
     }
 
@@ -179,7 +183,10 @@ public enum WhoopCloudApi {
                 efficiency: num(score, "sleep_efficiency_percentage"),
                 respRateBpm: num(score, "respiratory_rate"),
                 sleepOnsetMin: minuteOfDay(str(rec, "start"), offset: str(rec, "timezone_offset")),
-                wakeMin: minuteOfDay(str(rec, "end"), offset: str(rec, "timezone_offset")))
+                wakeMin: minuteOfDay(str(rec, "end"), offset: str(rec, "timezone_offset")),
+                sleepDebtMin: (score["sleep_needed"] as? [String: Any])
+                    .flatMap { num($0, "need_from_sleep_debt_milli") }
+                    .map { $0 / 60_000 })
         }
         return out
     }
@@ -306,6 +313,7 @@ public enum WhoopCloudApi {
                 cur.respRateBpm = cur.respRateBpm ?? d.respRateBpm
                 cur.sleepOnsetMin = cur.sleepOnsetMin ?? d.sleepOnsetMin
                 cur.wakeMin = cur.wakeMin ?? d.wakeMin
+                cur.sleepDebtMin = cur.sleepDebtMin ?? d.sleepDebtMin
                 out[day] = cur
             }
         }

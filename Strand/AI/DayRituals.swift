@@ -101,7 +101,7 @@ enum DayRitual: String, CaseIterable, Identifiable, Sendable {
 
         s += "\nNo heading, no preamble, no markdown, no lists.\n\n"
         s += grounding
-        if let goals = CoachGoals.promptSection(defaults) { s += "\n\n" + goals }
+        if let routines = CoachRoutines.promptSection(defaults) { s += "\n\n" + routines }
         return s
     }
 
@@ -141,7 +141,7 @@ enum DayRitual: String, CaseIterable, Identifiable, Sendable {
         s += "Ground the directive in the figures below — a low recovery earns rest, a high one earns "
         s += "work, a wet forecast rules out anything outdoors. NEVER invent a number.\n\n"
         s += grounding
-        if let goals = CoachGoals.promptSection(defaults) { s += "\n\n" + goals }
+        if let routines = CoachRoutines.promptSection(defaults) { s += "\n\n" + routines }
         return s
     }
 }
@@ -190,7 +190,7 @@ struct RitualGrounding {
         switch kind {
         case .sleepConsistency: return "bed and wake time within 30 minutes of the night before"
         case .sleepDebt: return "sleep debt"
-        case .stressTime: return "stress time"
+        case .stressTime: return "stress score under 1"
         case .journal: return "journal"
         }
     }

@@ -786,7 +786,13 @@ final class AICoachEngine: ObservableObject {
         // full running history so follow-ups stay coherent; the context only needs to ride the
         // earliest user message.
         // Include the user's data ONLY with explicit consent; otherwise send a note instead of numbers.
-        let context = dataConsent ? await buildFullContext() : noConsentNote
+        // THE ROUTINES AND THE MEMORY RIDE EVERY SESSION, consent or not. Neither is biometric data —
+        // they are what the wearer told the coach about their day and what it wrote down itself — so
+        // withholding them without data access would only make the plans collide with the day they
+        // are for. With consent they are already part of `buildFullContext`.
+        let context = dataConsent
+            ? await buildFullContext()
+            : noConsentNote + "\n\n" + Self.sessionConstraints()
         // K13: if the conversation overflows the sliding window, summarize the dropped middle so
         // the model retains context continuity. Best-effort; failure degrades to the old gap.
         await summarizeDroppedMiddleIfNeeded(key: key)
@@ -817,8 +823,9 @@ final class AICoachEngine: ObservableObject {
                     )
                 }
             }
-            // Finalize: trim whitespace. If the stream produced nothing, show "(no reply)".
-            let clean = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Finalize: apply the memory commands the reply carried and strip them, then trim. If the
+            // stream produced nothing, show "(no reply)".
+            let clean = CoachMemory.shared.apply(reply: accumulated)
             if let lastIdx = messages.indices.last, messages[lastIdx].role == .assistant {
                 messages[lastIdx] = ChatMessage(
                     id: placeholder.id, role: .assistant,
@@ -858,7 +865,20 @@ final class AICoachEngine: ObservableObject {
     /// Proactively generate "Today's brief" the first time the Coach opens, readiness + a training
     /// prescription + one recovery tip, without the user typing. Requires a key + data consent.
     /// K1: streams the brief the same way `send` does.
+    /// The local day the opening brief last ran on. See `startBriefIfNeeded`.
+    static let briefDayKey = "coach.openingBrief.day"
+
+    /// Whether today's opening brief has already been written.
+    static func briefAlreadyRanToday(_ d: UserDefaults = .standard, now: Date = Date()) -> Bool {
+        d.string(forKey: briefDayKey) == Repository.localDayKey(now)
+    }
+
     func startBriefIfNeeded() async {
+        // ONCE A DAY, on the first session. The brief used to run whenever the transcript was empty —
+        // which is also the state "New chat" leaves — so every fresh session opened on another full
+        // briefing of the same day, at the cost of a round trip nobody asked for. The day's first
+        // session gets it; a new chat after that starts blank.
+        guard !Self.briefAlreadyRanToday() else { return }
         guard isConfigured, dataConsent, messages.isEmpty, !sending else { return }
         guard let key = resolvedKey else { return }
         errorText = nil
@@ -884,13 +904,16 @@ final class AICoachEngine: ObservableObject {
                     )
                 }
             }
-            let clean = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
+            let clean = CoachMemory.shared.apply(reply: accumulated)
             if clean.isEmpty {
                 if let lastIdx = messages.indices.last, messages[lastIdx].role == .assistant {
                     messages.remove(at: lastIdx)
                 }
             } else if let lastIdx = messages.indices.last, messages[lastIdx].role == .assistant {
                 messages[lastIdx] = ChatMessage(id: placeholder.id, role: .assistant, text: prefix + clean)
+                // Marked only once a brief actually arrived: a failed round trip must not use up the
+                // day's one brief.
+                UserDefaults.standard.set(Repository.localDayKey(Date()), forKey: Self.briefDayKey)
             }
         } catch let e as AICoachError {
             let partial = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -999,10 +1022,54 @@ final class AICoachEngine: ObservableObject {
         return mission
     }
 
+    /// The routines and the memory file — the part of the context that is not biometric data, and so is
+    /// sent on every session whether or not data access is on.
+    static func sessionConstraints(_ d: UserDefaults = .standard) -> String {
+        var parts: [String] = []
+        if let routines = CoachRoutines.promptSection(d) { parts.append(routines) }
+        parts.append(CoachMemory.shared.promptSection())
+        return parts.joined(separator: "\n\n")
+    }
+
+    /// NOOP's three scores (primary) and WHOOP's (secondary), per recent day.
+    func threeScoresBlock() async -> String {
+        func pct(_ v: Double?) -> String { v.map { "\(Int($0.rounded()))" } ?? "—" }
+        var s = "THE THREE DAILY SCORES — use NOOP's own figures FIRST. They are Charge (recovery/readiness, "
+        s += "0-100), Effort (cardiovascular load, 0-100) and Rest (sleep quality, 0-100), calculated by this "
+        s += "app. Call them Charge, Effort and Rest.\n"
+        let own = await repo.noopRecentDays()
+        if own.isEmpty {
+            s += "NOOP's own scores: none computed for the last week.\n"
+        } else {
+            s += "NOOP (primary, newest first):\n"
+            for d in own.reversed() {
+                s += "  \(d.day): charge \(pct(d.charge)), effort \(pct(d.effort)), rest \(pct(d.rest))\n"
+            }
+        }
+        let whoop = await repo.whoopRecentDays()
+        if !whoop.isEmpty {
+            s += "WHOOP's own figures (secondary reference — only where NOOP has none, and always with WHOOP's "
+            s += "names and scales: Recovery %, Strain 0-21, Sleep Score %):\n"
+            for d in whoop.reversed() {
+                s += "  \(d.day): recovery \(pct(d.recovery)), strain "
+                s += (d.strain.map { String(format: "%.1f", $0) } ?? "—")
+                s += ", sleep score \(pct(d.sleep))\n"
+            }
+        }
+        return s
+    }
+
     /// Full data context = the metrics summary + recent workouts (+ an OPT-IN on-device-signals summary
     /// when the second consent is on). Used when the user has granted data access.
     func buildFullContext() async -> String {
-        var ctx = buildContext()
+        // THE SCORES THE COACH SPEAKS IN, first. NOOP's own Charge / Effort / Rest on 0–100 are the
+        // primary figures — the ones the level, the quests and every screen are built on. WHOOP's own
+        // recovery, strain and sleep score follow as a secondary reference, clearly labelled with their
+        // own names and scales, so the model never quotes a WHOOP strain of 14 as an effort out of 100.
+        var ctx = await threeScoresBlock()
+        ctx += "\n\n" + CoachLevelContext.promptSection()
+        ctx += "\n\n" + Self.sessionConstraints()
+        ctx += "\n\n" + buildContext()
         ctx += "\n\n" + (await recentWorkoutsBlock())
         // Derived stress: a single Baevsky Stress Index summary line over today's R-R, computed the same
         // way StressView does. Gated here under `dataConsent` (the caller only reaches buildFullContext()

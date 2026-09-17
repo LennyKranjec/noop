@@ -100,7 +100,7 @@ private struct StreakFlame: View {
         // each within half an hour of the night before.
         case .sleepConsistency: return "bed & wake ±30m"
         case .sleepDebt: return "debt < 1h"
-        case .stressTime: return "stress < 6h"
+        case .stressTime: return "stress < 1"
         case .journal: return "journal"
         }
     }

@@ -10,7 +10,7 @@ import WhoopStore
 //
 // EVERY STREAK HERE IS COMPUTED FROM A MEASURED FIGURE, never from an intention. Regularity is the
 // actual clock time of falling asleep and waking, night against night; debt is the rolling ledger;
-// stress time is minutes the day read as autonomically loaded while the wearer was still. A streak the app awards for
+// stress is the day's own stress score. A streak the app awards for
 // opening the app would look identical on screen and mean nothing.
 //
 // A DAY WITH NO DATA BREAKS NOTHING AND EXTENDS NOTHING. The strap comes off, the phone dies, a sync
@@ -32,9 +32,10 @@ public enum StreakKind: String, Equatable, Codable, CaseIterable, Sendable {
     /// The raw value is still `sleepConsistency`: it is a persisted and cross-platform key, and the
     /// flame keeps its column. What it MEASURES changed — see `regularity`.
     case sleepConsistency
-    /// Sleep DEBT under an hour: the rolling ledger, not a single short night.
+    /// Sleep DEBT under an hour, as the app's own debt figure states it for the day.
     case sleepDebt
-    /// Under six hours of high stress that was NOT exercise.
+    /// The day's stress score under 1 on the 0–3 scale. The raw value is still `stressTime` — a
+    /// persisted key — though what it measures changed; see `stress`.
     case stressTime
     /// A day with something written in the journal.
     ///
@@ -93,30 +94,27 @@ public enum Streaks {
     /// personal label.
     public static let sleepNeedHours: Double = 7
 
-    /// High stress below this many minutes holds the streak.
+    /// A day's stress score below this holds the streak, on the 0–3 scale the Stress screen shows.
     ///
-    /// NON-ACTIVITY by construction, not by subtraction: `DaytimeStress` masks ambulatory hours as
-    /// exertion and leaves them unscored, so the minutes counted here are already only the ones where
-    /// the wearer was still and the autonomic load was high anyway. A hard session does not spend this
-    /// budget, which is the whole point of the rule.
-    public static let stressLimitMin: Double = 6 * 60
+    /// One is the top of the "low" band. The previous rule counted minutes of high stress against a
+    /// six-hour budget, and it had no data at all: nothing ever wrote the minutes it read, so the flame
+    /// could never light. The day's score is what every stress surface already computes and shows.
+    public static let stressScoreLimit: Double = 1
 
     /// A year. Past this the number stops being motivating and starts being decoration.
     private static let maxLookbackDays = 365
 
     private static let minutesPerDay: Double = 1440
 
-    /// The fewest nights a rolling debt balance means anything over.
-    private static let minNightsForDebt = 3
 
     /// Every streak worth showing, in a FIXED ORDER.
     ///
     /// - Parameters:
     ///   - days: recent days, oldest→newest, as the metrics cache returns them.
-    ///   - stressMinutesByDay: minutes of NON-ACTIVITY high stress per local day (`yyyy-MM-dd`), as
-    ///     the stress read banked them. Supplied rather than derived: the figure costs a whole day of
-    ///     heart rate and R-R to compute, so recomputing it across a year of history inside a card is
-    ///     not an option. A day with no banked row is unmeasured, which neither breaks nor extends.
+    ///   - stressScoreByDay: the day's stress score, 0–3, per local day (`yyyy-MM-dd`) — the same
+    ///     figure the Stress screen shows for that day. A day with no score is unmeasured.
+    ///   - sleepDebtMinByDay: the sleep debt that stood on each day, in minutes — the same figure the
+    ///     Sleep screen shows, WHOOP's own where it exists. A day with no figure is unmeasured.
     ///   - journalDays: the local days that carry a journal entry. Its own input rather than a field on
     ///     `DailyMetric`, for the reason given on the journal walk below.
     ///   - sleepTimesByDay: when each night began and ended, keyed by the local day it ENDED on. Its own
@@ -128,9 +126,10 @@ public enum Streaks {
     /// glance, which is the only way it is ever read.
     public static func evaluate(
         days: [DailyMetric],
-        stressMinutesByDay: [String: Double] = [:],
+        stressScoreByDay: [String: Double] = [:],
         journalDays: Swift.Set<String> = [],
         sleepTimesByDay: [String: SleepTiming] = [:],
+        sleepDebtMinByDay: [String: Double] = [:],
         today: Date = Date(),
         calendar: Calendar = .current
     ) -> [Streak] {
@@ -142,8 +141,8 @@ public enum Streaks {
 
         return [
             regularity(byDay: byDay, sleepTimesByDay: sleepTimesByDay, todayKey: todayKey, calendar: calendar),
-            debt(days: days, index: index, byDay: byDay, todayKey: todayKey, calendar: calendar),
-            stressTime(byDay: byDay, stressMinutesByDay: stressMinutesByDay, todayKey: todayKey, calendar: calendar),
+            debt(byDay: byDay, sleepDebtMinByDay: sleepDebtMinByDay, todayKey: todayKey, calendar: calendar),
+            stress(byDay: byDay, stressScoreByDay: stressScoreByDay, todayKey: todayKey, calendar: calendar),
             journal(journalDays: journalDays, todayKey: todayKey, calendar: calendar),
         ]
     }
@@ -208,46 +207,36 @@ public enum Streaks {
         return Streak(kind: .sleepConsistency, days: count, todaySecured: secured)
     }
 
-    /// Sleep debt under an hour.
+    /// Sleep debt under an hour, as the debt figure stood ON each day.
     ///
-    /// Read as the balance stood ON each day — the rolling shortfall of the fortnight before it, not
-    /// today's balance applied backwards. A streak computed from one current figure would light or
-    /// break every day at once, which is not a streak.
-    ///
-    /// Only the SHORTFALL counts. Surplus nights do not repay debt hour for hour in any model worth
-    /// quoting, so a balance that nets positive reads as no debt rather than as credit.
+    /// READ, NOT RECOMPUTED. This used to keep its own ledger: the fortnight's nights summed against a
+    /// seven-hour need, surplus included. So a nine-hour night cancelled two six-hour ones, and the
+    /// flame stayed lit through eleven days the Sleep screen — and WHOOP — both called over an hour of
+    /// debt. The streak now reads the same per-day debt the Sleep screen draws (WHOOP's own where the
+    /// cloud states it, the recency-weighted ledger where it does not), so the two cannot disagree.
     private static func debt(
-        days: [DailyMetric],
-        index: [String: Int],
         byDay: [String: DailyMetric],
+        sleepDebtMinByDay: [String: Double],
         todayKey: String,
         calendar: Calendar
     ) -> Streak {
         let (count, secured) = countBack(byDay: byDay, todayKey: todayKey, calendar: calendar) { metric in
-            guard let i = index[metric.day] else { return nil }
-            let from = Swift.max(0, i - (SleepDebt.defaultWindowNights - 1))
-            let slept = days[from...i].compactMap { night -> Double? in
-                guard let m = night.totalSleepMin, m > 0 else { return nil }
-                return m
-            }
-            guard slept.count >= minNightsForDebt else { return nil }
-            let needMin = sleepNeedHours * 60
-            let balance = slept.reduce(0) { $0 + ($1 - needMin) }
-            return (balance < 0 ? -balance : 0) < debtLimitMin
+            guard let debt = sleepDebtMinByDay[metric.day] else { return nil }
+            return debt < debtLimitMin
         }
         return Streak(kind: .sleepDebt, days: count, todaySecured: secured)
     }
 
-    /// Under six hours of high stress that was not exercise.
-    private static func stressTime(
+    /// The day's stress score under 1.
+    private static func stress(
         byDay: [String: DailyMetric],
-        stressMinutesByDay: [String: Double],
+        stressScoreByDay: [String: Double],
         todayKey: String,
         calendar: Calendar
     ) -> Streak {
         let (count, secured) = countBack(byDay: byDay, todayKey: todayKey, calendar: calendar) { metric in
-            guard let minutes = stressMinutesByDay[metric.day] else { return nil }
-            return minutes < stressLimitMin
+            guard let score = stressScoreByDay[metric.day] else { return nil }
+            return score < stressScoreLimit
         }
         return Streak(kind: .stressTime, days: count, todaySecured: secured)
     }

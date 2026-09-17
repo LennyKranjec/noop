@@ -40,6 +40,8 @@ enum WhoopCloudSync {
     /// and the regularity streak needs the clock time of a night, not just its length.
     static let sleepOnsetKey = "sleep_onset_min"
     static let sleepWakeKey = "sleep_wake_min"
+    /// WHOOP's own sleep debt per day, under the same key the export importer uses for its figure.
+    static let sleepDebtKey = "sleep_debt_min"
 
     /// How far back a full sync reaches.
     ///
@@ -231,6 +233,9 @@ enum WhoopCloudSync {
         }
         sleepScoreRows += all.compactMap { d in
             d.wakeMin.map { MetricPoint(day: d.day, key: sleepWakeKey, value: Double($0)) }
+        }
+        sleepScoreRows += all.compactMap { d in
+            d.sleepDebtMin.map { MetricPoint(day: d.day, key: sleepDebtKey, value: $0) }
         }
 
         let stored = await write(repo: repo, rows: rows, sleepScores: sleepScoreRows)

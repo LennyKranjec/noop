@@ -112,7 +112,7 @@ enum DailyMissionWriter {
         s += "and no amount of Zone 2 is going to out-train a 5-hour night.\n"
         s += "GOAL: BEDTIME_BY 22:30"
         s += "\n\n" + grounding
-        if let goals = CoachGoals.promptSection(defaults) { s += "\n\n" + goals }
+        if let routines = CoachRoutines.promptSection(defaults) { s += "\n\n" + routines }
         return s
     }
 

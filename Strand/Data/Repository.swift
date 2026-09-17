@@ -1328,10 +1328,12 @@ final class Repository: ObservableObject {
         var out: [String: SleepTiming] = [:]
         let now = Int(Date().timeIntervalSince1970)
         let lo = now - days * 86_400
-        var sessions = await sleepSessions(from: lo, to: now + 86_400, limit: 5000)
-        if sessions.isEmpty {
-            sessions = await computedSleepSessions(from: lo, to: now + 86_400, limit: 5000)
-        }
+        // BOTH sources, not the computed one only when the imported one is empty. An install with an
+        // old WHOOP export imported has imported sessions for the export's months and computed ones for
+        // every night since — and the either/or read took the import and saw none of the recent nights,
+        // which are the only ones the streak is ever about.
+        let sessions = await sleepSessions(from: lo, to: now + 86_400, limit: 5000)
+            + (await computedSleepSessions(from: lo, to: now + 86_400, limit: 5000))
         let calendar = Calendar.current
         var longest: [String: Int] = [:]
         for s in sessions {
@@ -1360,6 +1362,99 @@ final class Repository: ObservableObject {
         for o in onsets {
             guard let w = wakes[o.day] else { continue }
             out[o.day] = SleepTiming(onsetMinute: Int(o.value), wakeMinute: Int(w))
+        }
+        return out
+    }
+
+    /// NOOP's OWN three scores for a day — Charge, Effort and Rest, each 0–100 — read from the
+    /// computed ("-noop") source only.
+    ///
+    /// The merged day picks one winner per field across every source, so an imported WHOOP recovery
+    /// can outrank the app's own calculation there. Where the wearer asks for the app's own figures,
+    /// that is the wrong answer, so this asks the computed lane and nothing else.
+    func noopScores(day: String) async -> (charge: Double?, effort: Double?, rest: Double?) {
+        guard let store = await ensureStore() else { return (nil, nil, nil) }
+        let row = await unionComputedDailyMetrics(store: store, from: day, to: day).last
+        var rest: Double?
+        for id in computedReadIds {
+            if let v = (try? await store.metricSeries(deviceId: id, key: "sleep_performance",
+                                                      from: day, to: day))?.last?.value {
+                rest = v
+                break
+            }
+        }
+        return (row?.recovery, row?.strain, rest)
+    }
+
+    /// NOOP's own computed days, newest last, for the coach. The computed lane only.
+    func noopRecentDays(days n: Int = 7) async -> [(day: String, charge: Double?, effort: Double?, rest: Double?)] {
+        guard let store = await ensureStore() else { return [] }
+        let now = Date()
+        let from = Self.localDayKey(now.addingTimeInterval(-Double(n - 1) * 86_400))
+        let to = Self.localDayKey(now)
+        let rows = await unionComputedDailyMetrics(store: store, from: from, to: to)
+        var rest: [String: Double] = [:]
+        for id in computedReadIds.reversed() {
+            for p in (try? await store.metricSeries(deviceId: id, key: "sleep_performance", from: from, to: to)) ?? [] {
+                rest[p.day] = p.value
+            }
+        }
+        let keys = Set(rows.map(\.day)).union(rest.keys).sorted()
+        let byDay = Dictionary(rows.map { ($0.day, $0) }, uniquingKeysWith: { _, last in last })
+        return keys.map { k in (k, byDay[k]?.recovery, byDay[k]?.strain, rest[k]) }
+    }
+
+    /// WHOOP's own recent days from the cloud source, for the coach's secondary reference.
+    func whoopRecentDays(days n: Int = 7) async -> [(day: String, recovery: Double?, strain: Double?, sleep: Double?)] {
+        guard let store = await ensureStore() else { return [] }
+        let now = Date()
+        let from = Self.localDayKey(now.addingTimeInterval(-Double(n - 1) * 86_400))
+        let to = Self.localDayKey(now)
+        let rows = (try? await store.dailyMetrics(deviceId: WhoopCloudSync.sourceId, from: from, to: to)) ?? []
+        let sleep = Dictionary(((try? await store.metricSeries(deviceId: WhoopCloudSync.sourceId,
+                                                               key: WhoopCloudSync.sleepPerformanceKey,
+                                                               from: from, to: to)) ?? []).map { ($0.day, $0.value) },
+                               uniquingKeysWith: { _, last in last })
+        return rows.map { ($0.day, $0.recovery, $0.strain, sleep[$0.day]) }
+    }
+
+    /// The sleep debt that stood on each day, in minutes — the figure the Sleep screen draws.
+    ///
+    /// The same `SleepDebt.debtSeries` over the same need the Sleep screen uses, with an imported debt
+    /// winning for its day; and WHOOP's own cloud figure winning over both, because it is the number
+    /// the wearer reads in WHOOP's app. One definition of debt, so the streak and the screen cannot
+    /// disagree about a day.
+    func sleepDebtMinByDay() async -> [String: Double] {
+        let days = self.days
+        guard !days.isEmpty else { return [:] }
+        var imported = importedSleep.compactMapValues(\.debtMin)
+        if let first = days.first?.day, let last = days.last?.day {
+            for row in await series(key: WhoopCloudSync.sleepDebtKey, source: WhoopCloudSync.sourceId,
+                                    from: first, to: last) {
+                imported[row.day] = row.value
+            }
+        }
+        let series = SleepDebt.debtSeries(
+            series: days.map { (day: $0.day, totalSleepMin: $0.totalSleepMin) },
+            needHours: SleepModel.debtNeedMin(days: days) / 60.0,
+            importedDebtMin: imported)
+        return Dictionary(series.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
+    }
+
+    /// The day's stress score, 0–3, per day — the figure the Stress screen shows for that day.
+    ///
+    /// Built by the Stress screen's own model, stored value where one exists and its derivation where
+    /// not, so the flame reads the number the wearer can open and look at.
+    func stressScoreByDay() async -> [String: Double] {
+        let stored = await series(key: "stress", source: "my-whoop")
+        guard let model = StressModel(days: days, stored: stored) else { return [:] }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        var out: [String: Double] = [:]
+        for point in model.fullTrend {
+            let c = calendar.dateComponents([.year, .month, .day], from: point.date)
+            let key = String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+            out[key] = point.value
         }
         return out
     }

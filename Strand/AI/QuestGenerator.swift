@@ -88,7 +88,7 @@ enum QuestGenerator {
         s += "TAUNT: Eleven hundred steps. Impressive — most furniture manages that only when moved.\n\n"
         s += "Never mock their body or their weight. If the situation involves pain, injury or "
         s += "illness, drop the theatre and write both lines plainly."
-        if let goals = CoachGoals.promptSection(defaults) { s += "\n\n" + goals }
+        if let routines = CoachRoutines.promptSection(defaults) { s += "\n\n" + routines }
         return s
     }
 }
