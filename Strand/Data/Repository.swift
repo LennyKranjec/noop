@@ -1372,6 +1372,39 @@ final class Repository: ObservableObject {
     /// The merged day picks one winner per field across every source, so an imported WHOOP recovery
     /// can outrank the app's own calculation there. Where the wearer asks for the app's own figures,
     /// that is the wrong answer, so this asks the computed lane and nothing else.
+    /// The key NOOP's own training-based VO₂max is banked under, per day, on the computed source.
+    static let noopVo2Key = "vo2max_noop"
+    private static let noopVo2DayKey = "vo2max.noop.bankedDay"
+
+    /// Estimate today's VO₂max from the wearer's runs and walks and bank it — once a day.
+    ///
+    /// Resting HR is the 7-day median; HRmax is observed from the wearer's own workouts (the shared
+    /// estimator, which falls back to the age formula without enough history). See `VO2MaxEstimator`.
+    func bankNoopVo2Max(age: Int) async {
+        let today = Self.localDayKey(Date())
+        guard UserDefaults.standard.string(forKey: Self.noopVo2DayKey) != today,
+              let store = await ensureStore() else { return }
+        let rhrs = days.suffix(7).compactMap { $0.restingHr.map(Double.init) }.sorted()
+        guard !rhrs.isEmpty else { return }
+        let rhr = rhrs[rhrs.count / 2]
+        let workouts = await workoutRows(days: 365)
+        let hrMax = StrainScorer.estimateHRmax(workouts.compactMap { $0.maxHr.map(Double.init) },
+                                               age: age > 0 ? Double(age) : nil).0
+        let sessions = workouts.compactMap { w -> VO2MaxEstimator.Session? in
+            guard let d = w.distanceM, let hr = w.avgHr else { return nil }
+            return VO2MaxEstimator.Session(start: Date(timeIntervalSince1970: TimeInterval(w.startTs)),
+                                           durationS: w.durationS ?? Double(w.endTs - w.startTs),
+                                           distanceM: d, avgHr: Double(hr))
+        }
+        guard hrMax > 0,
+              let estimate = VO2MaxEstimator.estimate(sessions: sessions, restingHr: rhr, hrMax: hrMax)
+        else { return }
+        _ = try? await store.upsertMetricSeries(
+            [MetricPoint(day: today, key: Self.noopVo2Key, value: estimate.vo2max)],
+            deviceId: computedDeviceId)
+        UserDefaults.standard.set(today, forKey: Self.noopVo2DayKey)
+    }
+
     func noopScores(day: String) async -> (charge: Double?, effort: Double?, rest: Double?) {
         guard let store = await ensureStore() else { return (nil, nil, nil) }
         let row = await unionComputedDailyMetrics(store: store, from: day, to: day).last

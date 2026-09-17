@@ -20,7 +20,8 @@ public enum LevelDriver: String, CaseIterable, Sendable, Codable {
     case rhr
     case vo2max
     case respRate
-    case muscleVolume
+    case strength
+    case trainingLoad
     case daytimeCalm
     case meditation
 
@@ -29,7 +30,7 @@ public enum LevelDriver: String, CaseIterable, Sendable, Codable {
         case .restorativeSleep, .sleepHrv, .sleepRegularity: return .sleep
         case .hrv, .rhr: return .heart
         case .vo2max, .respRate: return .lungs
-        case .muscleVolume: return .muscle
+        case .strength, .trainingLoad: return .muscle
         case .daytimeCalm, .meditation: return .focus
         }
     }
@@ -48,7 +49,7 @@ public enum LevelDrivers {
         case .sleep: subs = LevelEngine.sleepSubScores(inputs, baselines)
         case .heart: subs = LevelEngine.heartSubScores(inputs, baselines)
         case .lungs: subs = LevelEngine.lungsSubScores(inputs, baselines)
-        case .muscle: return inputs.muscleSessions.isEmpty ? nil : .muscleVolume
+        case .muscle: subs = LevelEngine.muscleSubScores(inputs, baselines)
         case .focus: subs = LevelEngine.focusSubScores(inputs, baselines)
         }
         let present = subs.compactMap { s in s.1.map { (driver: s.0, score: $0, share: s.2) } }

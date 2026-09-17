@@ -163,7 +163,14 @@ final class LevelBarModel: ObservableObject {
 
     /// ONE READ PER SERIES, for the whole span — see the note in `LevelWiring`.
     private func readSeries(repo: Repository) async -> LevelSeries {
-        let vo2 = await repo.series(key: "vo2max_est", source: "\(repo.deviceId)-noop", fullHistory: true)
+        // NOOP's own training-based estimate first; the older weekly HR-ratio / non-exercise figure only
+        // where there is none.
+        var vo2 = await repo.series(key: Repository.noopVo2Key, source: "\(repo.deviceId)-noop", fullHistory: true)
+        if vo2.isEmpty {
+            vo2 = await repo.series(key: "vo2max_est", source: "\(repo.deviceId)-noop", fullHistory: true)
+        }
+        vo2.sort { $0.day < $1.day }
+        let strength = await repo.series(key: StrengthIndex.key, source: "lifting", fullHistory: true)
             .sorted { $0.day < $1.day }
 
         var muscle: [String: Double] = [:]
@@ -179,7 +186,8 @@ final class LevelBarModel: ObservableObject {
 
         return LevelSeries(vo2max: vo2, muscleByDay: muscle, meditation: meditation,
                            sleepTimings: await repo.sleepTimingsByDay(),
-                           daytimeRmssd: await repo.bankedDaytimeRmssd())
+                           daytimeRmssd: await repo.bankedDaytimeRmssd(),
+                           strengthIndex: strength)
     }
 
 }

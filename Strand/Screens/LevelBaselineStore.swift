@@ -17,8 +17,8 @@ import StrandAnalytics
 
 enum LevelBaselineStore {
 
-    private static let key = "level.baselines.v3"
-    private static let frozenAtKey = "level.baselinesFrozenAt.v3"
+    private static let key = "level.baselines.v4"
+    private static let frozenAtKey = "level.baselinesFrozenAt.v4"
 
     private struct Stored: Codable {
         let mean: Double

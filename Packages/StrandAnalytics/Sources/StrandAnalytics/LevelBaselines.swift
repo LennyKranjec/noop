@@ -54,17 +54,24 @@ public struct Baseline: Equatable, Sendable {
 }
 
 /// Which metrics the level reads. Named so a missing one can be reported by name.
+///
+/// Every metric that is a 7-day mean in the level is baselined AS a 7-day mean: a rolling mean swings far
+/// less than single days, and a 95th percentile taken from single days would put 100 somewhere a weekly
+/// average can never reach.
 public enum LevelMetric: String, CaseIterable, Sendable, Codable {
-    /// Deep + REM minutes a night.
+    /// Deep + REM minutes a night (7-night mean).
     case restorativeMin
-    /// How far bedtime and wake time moved against the night before, in minutes (lower is better).
+    /// How far bedtime and wake time moved against the night before, in minutes (7-night mean, lower is better).
     case sleepRegularityMin
     case hrv
     case rhr
     case vo2max
     case respRate
-    case muscleLoad
-    /// Mean RMSSD over the day's still, scored waking hours — daytime calm.
+    /// Estimated-1RM strength index (see `StrengthIndex`): 1.0 is typical for the exercises trained.
+    case strengthIndex
+    /// Chronic training load: a 42-day exponentially weighted volume load.
+    case chronicLoad
+    /// Mean RMSSD over the day's still, scored waking hours — daytime calm (7-day mean).
     case daytimeRmssd
 }
 
@@ -83,14 +90,15 @@ public enum LevelBaselines {
     /// `LevelBaselineStore`: a metric on the table is re-derived on every load until its own history
     /// is deep enough, and frozen then.
     public static let table: [LevelMetric: Baseline] = [
-        .restorativeMin: entry(mean: 170, sd: 40),
-        .sleepRegularityMin: entry(mean: 45, sd: 25),
-        .hrv: entry(mean: 50, sd: 15),
-        .rhr: entry(mean: 60, sd: 10),
-        .vo2max: entry(mean: 45, sd: 8),
-        .respRate: entry(mean: 16, sd: 3),
-        .muscleLoad: entry(mean: 5000, sd: 2500),
-        .daytimeRmssd: entry(mean: 35, sd: 12),
+        .restorativeMin: entry(mean: 170, sd: 25),
+        .sleepRegularityMin: entry(mean: 45, sd: 15),
+        .hrv: entry(mean: 50, sd: 8),
+        .rhr: entry(mean: 60, sd: 5),
+        .vo2max: entry(mean: 45, sd: 5),
+        .respRate: entry(mean: 16, sd: 1.5),
+        .strengthIndex: entry(mean: 1.0, sd: 0.08),
+        .chronicLoad: entry(mean: 3000, sd: 1200),
+        .daytimeRmssd: entry(mean: 35, sd: 7),
     ]
 
     private static func entry(mean: Double, sd: Double) -> Baseline {

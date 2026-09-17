@@ -37,21 +37,30 @@ final class LevelDayFreezeTests: XCTestCase {
         XCTAssertEqual(back.breakdown, breakdown)
     }
 
-    func testTheFrozenDayReadsYesterdaysStepsNotThisMorningsPartialCount() {
-        func row(_ day: String, steps: Int?, sleep: Double?) -> DailyMetric {
-            DailyMetric(day: day, totalSleepMin: sleep, efficiency: nil, deepMin: nil, remMin: nil,
-                        lightMin: nil, disturbances: nil, restingHr: 55, avgHrv: 60, recovery: nil,
-                        strain: nil, exerciseCount: nil, steps: steps)
+    func testTheFrozenDayReadsTheLastCompleteDaysActivityAndThisMorningsNight() {
+        func row(_ day: Int, steps: Int?, hrv: Double?) -> DailyMetric {
+            DailyMetric(day: String(format: "2026-09-%02d", day), totalSleepMin: 450, efficiency: nil,
+                        deepMin: nil, remMin: nil, lightMin: nil, disturbances: nil, restingHr: 55,
+                        avgHrv: hrv, recovery: nil, strain: nil, exerciseCount: nil, steps: steps)
         }
-        let days = [row("2026-09-15", steps: 11_400, sleep: 420), row("2026-09-16", steps: 300, sleep: 450)]
-        let series = LevelSeries(vo2max: [], muscleByDay: [:], meditation: ["2026-09-14": 10, "2026-09-15": 12, "2026-09-16": 30])
+        // Eight days of 10,000 steps, then a morning with 300.
+        var days = (8...15).map { row($0, steps: 10_000, hrv: 60) }
+        days.append(row(16, steps: 300, hrv: 90))
+        let series = LevelSeries(vo2max: [], muscleByDay: [:], meditation: [:])
         let inputs = LevelWiring.dayInputs(days: days, day: "2026-09-16", series: series, calendar: calendar)
-        XCTAssertEqual(inputs.stepsToday, 11_400)
-        // The meditation run is also the previous complete day's: 10 + 12 minutes, not today's 30.
-        XCTAssertEqual(inputs.meditationStreakMin, 22, accuracy: 1e-9)
-        // The night is this morning's.
-        XCTAssertEqual(inputs.hrv, 60)
+        // The step average is the previous complete week's, not this morning's partial count.
+        XCTAssertEqual(inputs.steps, 10_000)
+        // The HRV mean includes this morning's night (seven days: six at 60, one at 90).
+        XCTAssertEqual(inputs.hrv ?? 0, (6 * 60.0 + 90) / 7, accuracy: 1e-9)
         XCTAssertTrue(LevelWiring.nightLanded(days: days, day: "2026-09-16"))
         XCTAssertFalse(LevelWiring.nightLanded(days: days, day: "2026-09-17"))
+    }
+
+    func testTheMeditationShareIsNotResetByOneMissedDay() {
+        var minutes: [String: Double] = [:]
+        for d in 1...28 where d != 20 { minutes[String(format: "2026-09-%02d", d)] = 10 }
+        let series = LevelSeries(vo2max: [], muscleByDay: [:], meditation: minutes)
+        let share = LevelWiring.meditationShare("2026-09-28", series, calendar)
+        XCTAssertGreaterThan(share, 0.9)
     }
 }

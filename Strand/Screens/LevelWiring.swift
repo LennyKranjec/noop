@@ -1,5 +1,6 @@
 import Foundation
 import StrandAnalytics
+import StrandImport
 import WhoopStore
 
 // LevelWiring.swift — assembling the level's inputs from the store.
@@ -34,9 +35,9 @@ struct LevelPoint: Equatable, Sendable {
 
 /// Every per-day series the level needs, read once over a whole span.
 struct LevelSeries {
-    /// VO2max estimates by day, oldest first; the newest at-or-before a day wins.
+    /// VO₂max estimates by day, oldest first; the newest at-or-before a day wins.
     let vo2max: [(day: String, value: Double)]
-    /// Total muscle volume load by day, summed across groups.
+    /// Total volume load by day, summed across muscle groups — the chronic load is built from it.
     let muscleByDay: [String: Double]
     /// Minutes meditated by day.
     let meditation: [String: Double]
@@ -44,84 +45,32 @@ struct LevelSeries {
     var sleepTimings: [String: SleepTiming] = [:]
     /// Daytime calm (mean RMSSD over the still, scored waking hours) by day.
     var daytimeRmssd: [String: Double] = [:]
-
-    /// The newest VO2max at or before `day`, or nil when none was recorded by then.
-    func vo2maxAsOf(_ day: String) -> Double? {
-        vo2max.last { $0.day <= day }?.value
-    }
-
-    /// Muscle sessions in the window ending `asOf`, as (volume, days ago).
-    func muscleSessions(asOf: String, windowDays: Int, calendar: Calendar) -> [(load: Double, daysAgo: Int)] {
-        guard let asOfDate = LevelWiring.date(from: asOf, calendar: calendar) else { return [] }
-        var out: [(load: Double, daysAgo: Int)] = []
-        for (day, load) in muscleByDay {
-            guard let date = LevelWiring.date(from: day, calendar: calendar) else { continue }
-            let ago = calendar.dateComponents([.day], from: date, to: asOfDate).day ?? 0
-            guard ago >= 0, ago <= windowDays else { continue }
-            out.append((load: load, daysAgo: ago))
-        }
-        return out.sorted { $0.daysAgo > $1.daysAgo }
-    }
-
-    /// Minutes meditated over the UNBROKEN run of consecutive days ending on `asOf`. A day without
-    /// meditation ends the run, which is what makes the daily habit the point.
-    func meditationStreakMinutes(asOf: String, calendar: Calendar) -> Double {
-        guard var cursor = LevelWiring.date(from: asOf, calendar: calendar) else { return 0 }
-        var total = 0.0
-        for _ in 0..<400 {
-            guard let minutes = meditation[LevelWiring.key(from: cursor, calendar: calendar)], minutes > 0
-            else { break }
-            total += minutes
-            guard let previous = calendar.date(byAdding: .day, value: -1, to: cursor) else { break }
-            cursor = previous
-        }
-        return total
-    }
-
-    /// How far bedtime and wake time moved against the night before, in minutes (the mean of the two
-    /// ends), for the night that ended on `day`. Nil unless both nights have a timing.
-    func regularityMinutes(day: String, calendar: Calendar) -> Double? {
-        guard let tonight = sleepTimings[day],
-              let date = LevelWiring.date(from: day, calendar: calendar),
-              let prev = calendar.date(byAdding: .day, value: -1, to: date),
-              let lastNight = sleepTimings[LevelWiring.key(from: prev, calendar: calendar)]
-        else { return nil }
-        return (Streaks.clockDistance(tonight.onsetMinute, lastNight.onsetMinute)
-                + Streaks.clockDistance(tonight.wakeMinute, lastNight.wakeMinute)) / 2
-    }
-
-    /// The daytime-calm readings of the three days ending `asOf`, oldest first.
-    func daytimeRmssdWindow(asOf: String, calendar: Calendar) -> [Double] {
-        guard let asOfDate = LevelWiring.date(from: asOf, calendar: calendar) else { return [] }
-        var out: [Double] = []
-        for back in stride(from: 2, through: 0, by: -1) {
-            guard let date = calendar.date(byAdding: .day, value: -back, to: asOfDate) else { continue }
-            if let v = daytimeRmssd[LevelWiring.key(from: date, calendar: calendar)] { out.append(v) }
-        }
-        return out
-    }
+    /// The estimated-1RM strength index by day, oldest first.
+    var strengthIndex: [(day: String, value: Double)] = []
 }
 
 enum LevelWiring {
 
-    /// The window the muscle term reads sessions from.
-    static let muscleWindowDays = 7
+    /// How far back the chronic load sums, in days. Past ~4 time constants a session contributes nothing.
+    static let chronicLookbackDays = 180
 
-    static func baselineHistory(
-        days: [DailyMetric],
-        series: LevelSeries,
-        calendar: Calendar = .current
-    ) -> [LevelMetric: [Double]] {
-        [
-            .restorativeMin: days.compactMap(restorative),
-            .sleepRegularityMin: days.compactMap { series.regularityMinutes(day: $0.day, calendar: calendar) },
-            .hrv: days.compactMap(\.avgHrv),
-            .rhr: days.compactMap { $0.restingHr.map(Double.init) },
-            .vo2max: series.vo2max.map(\.value),
-            .respRate: days.compactMap(\.respRateBpm),
-            .muscleLoad: Array(series.muscleByDay.values),
-            .daytimeRmssd: Array(series.daytimeRmssd.values),
-        ]
+    // MARK: - Day arithmetic
+
+    static func shift(_ key: String, _ delta: Int, _ calendar: Calendar) -> String? {
+        guard let d = date(from: key, calendar: calendar),
+              let moved = calendar.date(byAdding: .day, value: delta, to: d) else { return nil }
+        return self.key(from: moved, calendar: calendar)
+    }
+
+    /// The mean of `value` over the 7 days ending `key`, or nil with fewer than `rollingMinDays` readings.
+    static func rolling(_ key: String, _ calendar: Calendar, _ value: (String) -> Double?) -> Double? {
+        var xs: [Double] = []
+        for k in 0..<LevelEngine.rollingDays {
+            guard let d = shift(key, -k, calendar), let v = value(d), v.isFinite else { continue }
+            xs.append(v)
+        }
+        guard xs.count >= LevelEngine.rollingMinDays else { return nil }
+        return xs.reduce(0, +) / Double(xs.count)
     }
 
     /// Deep + REM minutes for a night, or nil when the night was not staged.
@@ -132,29 +81,89 @@ enum LevelWiring {
         }
     }
 
-    /// Build the engine's inputs as of `asOf`, from prefetched series.
+    /// Minutes bedtime and wake time moved against the night before (mean of the two ends).
+    static func regularity(_ key: String, _ series: LevelSeries, _ calendar: Calendar) -> Double? {
+        guard let tonight = series.sleepTimings[key], let prev = shift(key, -1, calendar),
+              let lastNight = series.sleepTimings[prev] else { return nil }
+        return (Streaks.clockDistance(tonight.onsetMinute, lastNight.onsetMinute)
+                + Streaks.clockDistance(tonight.wakeMinute, lastNight.wakeMinute)) / 2
+    }
+
+    /// Chronic training load on `key`: Σ load × (1 − e^(−1/τ)) × e^(−days ago / τ). Nil when nothing was
+    /// ever lifted on or before the day.
+    static func chronicLoad(_ key: String, _ series: LevelSeries, _ calendar: Calendar) -> Double? {
+        guard series.muscleByDay.keys.contains(where: { $0 <= key }) else { return nil }
+        let tau = LevelEngine.chronicLoadDays
+        let gain = 1 - exp(-1 / tau)
+        var total = 0.0
+        for k in 0..<chronicLookbackDays {
+            guard let d = shift(key, -k, calendar), let load = series.muscleByDay[d] else { continue }
+            total += load * gain * exp(-Double(k) / tau)
+        }
+        return total
+    }
+
+    /// The newest strength index on or before `key`, while it is still inside its twelve-week window.
+    static func strength(_ key: String, _ series: LevelSeries, _ calendar: Calendar) -> Double? {
+        guard let last = series.strengthIndex.last(where: { $0.day <= key }),
+              let floor = shift(key, -StrengthIndex.windowDays, calendar), last.day > floor
+        else { return nil }
+        return last.value
+    }
+
+    static func meditationShare(_ key: String, _ series: LevelSeries, _ calendar: Calendar) -> Double {
+        let flags = (0..<LevelEngine.meditationWindowDays).map { k -> Bool in
+            guard let d = shift(key, -k, calendar) else { return false }
+            return (series.meditation[d] ?? 0) >= LevelEngine.meditationMinMinutes
+        }
+        return LevelEngine.meditationShare(meditated: flags)
+    }
+
+    // MARK: - Inputs
+
     static func inputs(
         days: [DailyMetric],
         asOf: String,
         series: LevelSeries,
         calendar: Calendar = .current
     ) -> LevelInputs {
-        let upTo = days.filter { $0.day <= asOf }
-        let window = Array(upTo.suffix(3))
-        let today = upTo.last
+        let byDay = Dictionary(days.map { ($0.day, $0) }, uniquingKeysWith: { _, last in last })
         return LevelInputs(
-            restorativeMin: window.compactMap(restorative),
-            sleepHrv: window.compactMap(\.avgHrv),
-            regularityMin: window.compactMap { series.regularityMinutes(day: $0.day, calendar: calendar) },
-            hrv: today?.avgHrv,
-            rhr: today?.restingHr.map(Double.init),
-            vo2max: series.vo2maxAsOf(asOf),
-            respRate: today?.respRateBpm,
-            muscleSessions: series.muscleSessions(asOf: asOf, windowDays: muscleWindowDays, calendar: calendar),
-            daytimeRmssd: series.daytimeRmssdWindow(asOf: asOf, calendar: calendar),
-            meditationStreakMin: series.meditationStreakMinutes(asOf: asOf, calendar: calendar),
-            stepsToday: today?.steps
+            restorativeMin: rolling(asOf, calendar) { byDay[$0].flatMap(restorative) },
+            sleepHrv: rolling(asOf, calendar) { byDay[$0]?.avgHrv },
+            regularityMin: rolling(asOf, calendar) { regularity($0, series, calendar) },
+            hrv: rolling(asOf, calendar) { byDay[$0]?.avgHrv },
+            rhr: rolling(asOf, calendar) { byDay[$0]?.restingHr.map(Double.init) },
+            vo2max: series.vo2max.last { $0.day <= asOf }?.value,
+            respRate: rolling(asOf, calendar) { byDay[$0]?.respRateBpm },
+            strengthIndex: strength(asOf, series, calendar),
+            chronicLoad: chronicLoad(asOf, series, calendar),
+            daytimeRmssd: rolling(asOf, calendar) { series.daytimeRmssd[$0] },
+            meditationShare: meditationShare(asOf, series, calendar),
+            steps: rolling(asOf, calendar) { byDay[$0]?.steps.map(Double.init) }.map { Int($0.rounded()) }
         )
+    }
+
+    /// Every metric's history AS THE LEVEL READS IT — 7-day means as 7-day means — for the baselines.
+    static func baselineHistory(
+        days: [DailyMetric],
+        series: LevelSeries,
+        calendar: Calendar = .current
+    ) -> [LevelMetric: [Double]] {
+        let byDay = Dictionary(days.map { ($0.day, $0) }, uniquingKeysWith: { _, last in last })
+        let keys = days.map(\.day)
+        func each(_ f: (String) -> Double?) -> [Double] { keys.compactMap(f) }
+        return [
+            .restorativeMin: each { k in rolling(k, calendar) { byDay[$0].flatMap(restorative) } },
+            .sleepRegularityMin: each { k in rolling(k, calendar) { regularity($0, series, calendar) } },
+            .hrv: each { k in rolling(k, calendar) { byDay[$0]?.avgHrv } },
+            .rhr: each { k in rolling(k, calendar) { byDay[$0]?.restingHr.map(Double.init) } },
+            .vo2max: series.vo2max.map(\.value),
+            .respRate: each { k in rolling(k, calendar) { byDay[$0]?.respRateBpm } },
+            .strengthIndex: series.strengthIndex.map(\.value),
+            .chronicLoad: each { chronicLoad($0, series, calendar) },
+            .daytimeRmssd: each { k in rolling(k, calendar) { series.daytimeRmssd[$0] } },
+        ]
     }
 
     /// The inputs for a day's FROZEN level: the night that ended on `day`, and the activity of the
@@ -176,10 +185,11 @@ enum LevelWiring {
         else { return inputs }
         let previous = self.inputs(days: days, asOf: key(from: previousDate, calendar: calendar),
                                    series: series, calendar: calendar)
-        inputs.stepsToday = previous.stepsToday
+        inputs.steps = previous.steps
         inputs.daytimeRmssd = previous.daytimeRmssd
-        inputs.meditationStreakMin = previous.meditationStreakMin
-        inputs.muscleSessions = previous.muscleSessions
+        inputs.meditationShare = previous.meditationShare
+        inputs.chronicLoad = previous.chronicLoad
+        inputs.strengthIndex = previous.strengthIndex
         return inputs
     }
 

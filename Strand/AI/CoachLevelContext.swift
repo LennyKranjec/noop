@@ -46,14 +46,15 @@ enum CoachLevelContext {
         s += "- level = (sum of part score × weight, weights re-shared over the parts that have data) × step multiplier. Not clamped: all five parts at their own 100 with no step penalty is a level of 100, more is more.\n"
         s += "- Weights: " + LevelPart.allCases.map { "\($0.rawValue) \(Int(($0.weight * 100).rounded()))%" }
             .joined(separator: ", ") + ".\n"
-        s += "- sleep = 0.60 × deep+REM minutes (3-night mean) + 0.25 × night HRV (3-night mean) + 0.15 × bedtime/wake regularity (minutes moved vs the night before, lower is better).\n"
+        s += "- A LEVEL OF STATE: every physiological input is a 7-day mean, strength a 12-week best, training load a 42-day chronic figure, meditation a 28-day share — one bad day barely moves it.\n"
+        s += "- sleep = 0.60 × deep+REM minutes + 0.25 × night HRV + 0.15 × bedtime/wake regularity (minutes moved vs the night before, lower is better).\n"
         s += "- heart = 0.5 × HRV + 0.5 × resting HR (lower is better).\n"
-        s += "- lungs = 0.6 × VO2max + 0.4 × respiratory rate (lower is better).\n"
-        s += String(format: "- muscle = the last 3 training sessions' volume load, each scored against the baseline, weighted by e^(−%.1f × days ago).\n", LevelEngine.muscleDecay)
-        s += String(format: "- focus = 0.5 × daytime calm (RMSSD of still waking hours, 3-day mean) + 0.5 × meditation, where meditation = 100 × (1 − e^(−minutes/%.0f)) over the UNBROKEN run of consecutive days meditated — one missed day resets it to 0.\n", LevelEngine.meditationTauMin)
-        s += "- steps: below \(LevelEngine.stepsFloor) the level is multiplied down, linearly, by up to \(Int(LevelEngine.stepsMaxPenalty * 100))% at zero steps.\n"
-        s += "- The day's level is fixed at 06:40 from the night that ended that morning and the previous full day's activity (steps, calm, meditation run, training), so what they do TODAY shows up in TOMORROW's level.\n"
-        s += "The cheapest points are usually: never breaking the daily meditation run, deep+REM sleep, and bedtime regularity."
+        s += "- lungs = 0.75 × VO2max (NOOP's own estimate from runs and walks: speed against heart-rate reserve) + 0.25 × respiratory rate (lower is better).\n"
+        s += "- muscle = 0.60 × strength (estimated-1RM index: each exercise's best e1RM over 12 weeks as a ratio of its own median) + 0.40 × chronic training load (42-day exponentially weighted volume).\n"
+        s += "- focus = 0.75 × daytime calm (RMSSD of still waking hours) + 0.25 × meditation (weighted share of the last 28 days with at least 5 minutes).\n"
+        s += "- steps (7-day average): below \(LevelEngine.stepsFloor) the level is multiplied down, linearly, by up to \(Int(LevelEngine.stepsMaxPenalty * 100))% at zero steps.\n"
+        s += "- The day's level is fixed at 06:40 from the night that ended that morning and the previous full day's activity (steps, calm, meditation, training load, strength), so what they do TODAY shows up in TOMORROW's level.\n"
+        s += "Because the level tracks state, advise for the weeks ahead — sustained sleep, progressive strength, aerobic base — rather than for tomorrow's number."
         return s
     }
 }

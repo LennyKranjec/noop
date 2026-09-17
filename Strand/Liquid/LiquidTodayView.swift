@@ -1820,6 +1820,8 @@ struct LiquidTodayView: View {
         await WhoopCloudSync.syncIfStale(repo: repo)
 
         let key = selectedDayKey
+        // NOOP's own VO₂max from training, once a day, before anything reads the level.
+        await repo.bankNoopVo2Max(age: profile.age)
         let own = await repo.noopScores(day: key)
         noopCharge = own.charge
         noopEffort = own.effort

@@ -529,6 +529,16 @@ struct DataSourcesView: View {
                         muscleRows.map { MetricPoint(day: $0.day, key: $0.key, value: $0.value) },
                         deviceId: LiftingImporter.sourceId)
                 }
+                // THE STRENGTH INDEX, from every working set — only the Alphaprog reader keeps the sets, so
+                // only its import can write it. See `StrengthIndex`.
+                if useAlphaprog, let parsed = alphaprog {
+                    let strength = StrengthIndex.daily(parsed.workouts)
+                    if !strength.isEmpty {
+                        _ = try? await store.upsertMetricSeries(
+                            strength.map { MetricPoint(day: $0.day, key: StrengthIndex.key, value: $0.value) },
+                            deviceId: LiftingImporter.sourceId)
+                    }
+                }
                 await repo.refresh()
                 let totalVolume = result.sessions.reduce(0.0) { $0 + $1.volumeLoadKg }
                 // Whole-phrase variants per count so translators never see a stitched plural.

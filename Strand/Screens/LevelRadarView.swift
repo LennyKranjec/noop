@@ -239,7 +239,8 @@ func levelDriverLabel(_ driver: LevelDriver) -> LocalizedStringKey {
     case .rhr: return "rhr"
     case .vo2max: return "vo₂max"
     case .respRate: return "resp. rate"
-    case .muscleVolume: return "volume"
+    case .strength: return "strength"
+    case .trainingLoad: return "training load"
     case .daytimeCalm: return "calm"
     case .meditation: return "meditation"
     }
