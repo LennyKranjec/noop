@@ -2798,7 +2798,10 @@ final class IntelligenceEngine: ObservableObject {
         // stale rows under the (deviceId,startTs,sport) key), then re-insert.
         _ = try? await store.deleteWorkouts(deviceId: computedId, sport: "detected",
                                             from: windowStart, to: now)
-        if !workoutRows.isEmpty { _ = try? await store.upsertWorkouts(workoutRows, deviceId: computedId) }
+        if !workoutRows.isEmpty {
+            _ = try? await store.upsertWorkouts(workoutRows, deviceId: computedId)
+            await MainActor.run { repo.noteWorkoutsChanged() }
+        }
         // #510: write back any real (manual/imported) rows a dropped detected bout backfilled, one
         // upsert per owning deviceId (see the collision branch above for why these can't share the
         // `computedId` batch above).
@@ -3027,7 +3030,10 @@ final class IntelligenceEngine: ObservableObject {
                 strain: s.strain, distanceM: row.distanceM, zonesJSON: row.zonesJSON, notes: row.notes,
                 steps: row.steps))
         }
-        if !updated.isEmpty { _ = try? await store.upsertWorkouts(updated, deviceId: deviceId) }
+        if !updated.isEmpty {
+            _ = try? await store.upsertWorkouts(updated, deviceId: deviceId)
+            await MainActor.run { repo.noteWorkoutsChanged() }
+        }
     }
 
     /// Pass 1 has no seeded skin baseline. Attach the deviation before scoring so the score,

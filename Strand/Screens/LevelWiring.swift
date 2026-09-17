@@ -62,11 +62,35 @@ enum LevelWiring {
         return self.key(from: moved, calendar: calendar)
     }
 
+    /// `count` day keys ending on `key`, newest first.
+    ///
+    /// PERF: every window in here used to be built by calling `shift` once per day, and each `shift`
+    /// parsed the key back into a date and formatted the result again. One day scored walked about five
+    /// hundred of those, a year of timeline walked hundreds of thousands, and all of it on the main
+    /// actor — which is what made the app stutter and then get killed for not drawing. The window is now
+    /// parsed ONCE and stepped, and `key`/`date` no longer build a formatter at all.
+    static func keysBack(_ key: String, _ count: Int, _ calendar: Calendar) -> [String] {
+        guard count > 0, let base = date(from: key, calendar: calendar) else { return [] }
+        var out: [String] = []
+        out.reserveCapacity(count)
+        for k in 0..<count {
+            guard let d = k == 0 ? base : calendar.date(byAdding: .day, value: -k, to: base) else { continue }
+            out.append(self.key(from: d, calendar: calendar))
+        }
+        return out
+    }
+
     /// The mean of `value` over the 7 days ending `key`, or nil with fewer than `rollingMinDays` readings.
     static func rolling(_ key: String, _ calendar: Calendar, _ value: (String) -> Double?) -> Double? {
+        rolling(window: keysBack(key, LevelEngine.rollingDays, calendar), value)
+    }
+
+    /// The same mean over a window that has already been built — the form every caller that reads more
+    /// than one metric for a day uses, so the seven keys are built once rather than once per metric.
+    static func rolling(window: [String], _ value: (String) -> Double?) -> Double? {
         var xs: [Double] = []
-        for k in 0..<LevelEngine.rollingDays {
-            guard let d = shift(key, -k, calendar), let v = value(d), v.isFinite else { continue }
+        for d in window {
+            guard let v = value(d), v.isFinite else { continue }
             xs.append(v)
         }
         guard xs.count >= LevelEngine.rollingMinDays else { return nil }
@@ -95,9 +119,17 @@ enum LevelWiring {
         guard series.muscleByDay.keys.contains(where: { $0 <= key }) else { return nil }
         let tau = LevelEngine.chronicLoadDays
         let gain = 1 - exp(-1 / tau)
+        // WALKED OVER THE TRAINING DAYS, not over the window. The sum is the same — every day in the
+        // window without a session contributes nothing — but a wearer has tens of sessions in half a
+        // year, not a hundred and eighty days of them.
+        guard let base = date(from: key, calendar: calendar),
+              let floor = calendar.date(byAdding: .day, value: -(chronicLookbackDays - 1), to: base)
+        else { return nil }
+        let floorKey = self.key(from: floor, calendar: calendar)
         var total = 0.0
-        for k in 0..<chronicLookbackDays {
-            guard let d = shift(key, -k, calendar), let load = series.muscleByDay[d] else { continue }
+        for (day, load) in series.muscleByDay where day <= key && day >= floorKey {
+            guard let d = date(from: day, calendar: calendar),
+                  let k = calendar.dateComponents([.day], from: d, to: base).day, k >= 0 else { continue }
             total += load * gain * exp(-Double(k) / tau)
         }
         return total
@@ -112,10 +144,8 @@ enum LevelWiring {
     }
 
     static func meditationShare(_ key: String, _ series: LevelSeries, _ calendar: Calendar) -> Double {
-        let flags = (0..<LevelEngine.meditationWindowDays).map { k -> Bool in
-            guard let d = shift(key, -k, calendar) else { return false }
-            return (series.meditation[d] ?? 0) >= LevelEngine.meditationMinMinutes
-        }
+        let window = keysBack(key, LevelEngine.meditationWindowDays, calendar)
+        let flags = window.map { (series.meditation[$0] ?? 0) >= LevelEngine.meditationMinMinutes }
         return LevelEngine.meditationShare(meditated: flags)
     }
 
@@ -127,20 +157,36 @@ enum LevelWiring {
         series: LevelSeries,
         calendar: Calendar = .current
     ) -> LevelInputs {
-        let byDay = Dictionary(days.map { ($0.day, $0) }, uniquingKeysWith: { _, last in last })
+        inputs(byDay: byDay(days), asOf: asOf, series: series, calendar: calendar)
+    }
+
+    /// The day rows keyed by day. Built ONCE by a caller that scores more than one day — this used to be
+    /// rebuilt inside every `inputs` call, which made a year of timeline quadratic in the history.
+    static func byDay(_ days: [DailyMetric]) -> [String: DailyMetric] {
+        Dictionary(days.map { ($0.day, $0) }, uniquingKeysWith: { _, last in last })
+    }
+
+    static func inputs(
+        byDay: [String: DailyMetric],
+        asOf: String,
+        series: LevelSeries,
+        calendar: Calendar = .current
+    ) -> LevelInputs {
+        // The seven-day window, built once and read by all eight rolling metrics.
+        let window = keysBack(asOf, LevelEngine.rollingDays, calendar)
         return LevelInputs(
-            restorativeMin: rolling(asOf, calendar) { byDay[$0].flatMap(restorative) },
-            sleepHrv: rolling(asOf, calendar) { byDay[$0]?.avgHrv },
-            regularityMin: rolling(asOf, calendar) { regularity($0, series, calendar) },
-            hrv: rolling(asOf, calendar) { byDay[$0]?.avgHrv },
-            rhr: rolling(asOf, calendar) { byDay[$0]?.restingHr.map(Double.init) },
+            restorativeMin: rolling(window: window) { byDay[$0].flatMap(restorative) },
+            sleepHrv: rolling(window: window) { byDay[$0]?.avgHrv },
+            regularityMin: rolling(window: window) { regularity($0, series, calendar) },
+            hrv: rolling(window: window) { byDay[$0]?.avgHrv },
+            rhr: rolling(window: window) { byDay[$0]?.restingHr.map(Double.init) },
             vo2max: series.vo2max.last { $0.day <= asOf }?.value,
-            respRate: rolling(asOf, calendar) { byDay[$0]?.respRateBpm },
+            respRate: rolling(window: window) { byDay[$0]?.respRateBpm },
             strengthIndex: strength(asOf, series, calendar),
             chronicLoad: chronicLoad(asOf, series, calendar),
-            daytimeRmssd: rolling(asOf, calendar) { series.daytimeRmssd[$0] },
+            daytimeRmssd: rolling(window: window) { series.daytimeRmssd[$0] },
             meditationShare: meditationShare(asOf, series, calendar),
-            steps: rolling(asOf, calendar) { byDay[$0]?.steps.map(Double.init) }.map { Int($0.rounded()) }
+            steps: rolling(window: window) { byDay[$0]?.steps.map(Double.init) }.map { Int($0.rounded()) }
         )
     }
 
@@ -150,7 +196,7 @@ enum LevelWiring {
         series: LevelSeries,
         calendar: Calendar = .current
     ) -> [LevelMetric: [Double]] {
-        let byDay = Dictionary(days.map { ($0.day, $0) }, uniquingKeysWith: { _, last in last })
+        let byDay = byDay(days)
         let keys = days.map(\.day)
         func each(_ f: (String) -> Double?) -> [Double] { keys.compactMap(f) }
         return [
@@ -179,11 +225,20 @@ enum LevelWiring {
         series: LevelSeries,
         calendar: Calendar = .current
     ) -> LevelInputs {
-        var inputs = self.inputs(days: days, asOf: day, series: series, calendar: calendar)
+        dayInputs(byDay: byDay(days), day: day, series: series, calendar: calendar)
+    }
+
+    static func dayInputs(
+        byDay: [String: DailyMetric],
+        day: String,
+        series: LevelSeries,
+        calendar: Calendar = .current
+    ) -> LevelInputs {
+        var inputs = self.inputs(byDay: byDay, asOf: day, series: series, calendar: calendar)
         guard let date = self.date(from: day, calendar: calendar),
               let previousDate = calendar.date(byAdding: .day, value: -1, to: date)
         else { return inputs }
-        let previous = self.inputs(days: days, asOf: key(from: previousDate, calendar: calendar),
+        let previous = self.inputs(byDay: byDay, asOf: key(from: previousDate, calendar: calendar),
                                    series: series, calendar: calendar)
         inputs.steps = previous.steps
         inputs.daytimeRmssd = previous.daytimeRmssd
@@ -200,22 +255,30 @@ enum LevelWiring {
     }
 
     /// `yyyy-MM-dd`, in the calendar's own zone, matching every other day key in the app.
+    ///
+    /// BUILT FROM COMPONENTS, not by a `DateFormatter`. These two are the hottest functions in the level
+    /// by a wide margin, and a formatter is one of the most expensive objects Foundation makes — this
+    /// pair used to construct one on every single call. The result is byte-identical: the calendar's own
+    /// year / month / day, zero-padded, in its own zone.
     static func key(from date: Date, calendar: Calendar = .current) -> String {
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = calendar.timeZone
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: date)
+        let c = calendar.dateComponents([.year, .month, .day], from: date)
+        return pad(c.year ?? 0, 4) + "-" + pad(c.month ?? 0, 2) + "-" + pad(c.day ?? 0, 2)
     }
 
     static func date(from key: String, calendar: Calendar = .current) -> Date? {
-        let formatter = DateFormatter()
-        formatter.calendar = calendar
-        formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = calendar.timeZone
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.date(from: key)
+        let parts = key.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2])
+        else { return nil }
+        var c = DateComponents()
+        c.year = year; c.month = month; c.day = day
+        return calendar.date(from: c)
+    }
+
+    /// Zero-padded decimal, the one piece of a date format this needs.
+    private static func pad(_ value: Int, _ width: Int) -> String {
+        let s = String(value)
+        return s.count >= width ? s : String(repeating: "0", count: width - s.count) + s
     }
 
 }

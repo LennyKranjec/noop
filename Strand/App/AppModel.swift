@@ -976,6 +976,7 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             if let store = await self.repo.storeHandle() {
                 _ = try? await store.upsertWorkouts([row], deviceId: self.deviceId)
+                self.repo.noteWorkoutsChanged()
                 await self.repo.refresh()
             }
         }

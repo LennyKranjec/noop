@@ -28,6 +28,14 @@ final class LevelBarModel: ObservableObject {
 
     private var lastLoadedTick: Int = -1
 
+    /// The series behind the last load, and the tick they were read at.
+    ///
+    /// PERF: reading them is a dozen full-history series reads plus the workout log, and `load()` and
+    /// `loadHistory` each used to do their own — so opening the timeline read everything twice, and the
+    /// strip on another tab a third time. They are the same reads for the same data, so they are kept
+    /// until the data behind them changes.
+    private var cachedSeries: (key: String, series: LevelSeries)?
+
     /// Load today's level and the two comparison points, unless nothing has changed since last time.
     func refresh(repo: Repository, tick: Int) async {
         guard tick != lastLoadedTick else { return }
@@ -48,13 +56,14 @@ final class LevelBarModel: ObservableObject {
         }
         let calendar = Calendar.current
         let series = await readSeries(repo: repo)
+        let byDay = LevelWiring.byDay(days)
         let baselines = LevelBaselineStore.resolve {
             LevelWiring.baselineHistory(days: days, series: series, calendar: calendar)
         }
 
         /// A day's level and its drivers, from the same frozen-day inputs.
         func score(_ key: String) -> (LevelBreakdown?, [LevelPart: LevelDriver]) {
-            let inputs = LevelWiring.dayInputs(days: days, day: key, series: series, calendar: calendar)
+            let inputs = LevelWiring.dayInputs(byDay: byDay, day: key, series: series, calendar: calendar)
             var drivers: [LevelPart: LevelDriver] = [:]
             for part in LevelPart.allCases {
                 if let driver = LevelDrivers.driver(for: part, inputs: inputs, baselines: baselines) {
@@ -118,6 +127,7 @@ final class LevelBarModel: ObservableObject {
         }
         let calendar = Calendar.current
         let series = await readSeries(repo: repo)
+        let byDay = LevelWiring.byDay(days)
         let baselines = LevelBaselineStore.resolve {
             LevelWiring.baselineHistory(days: days, series: series, calendar: calendar)
         }
@@ -132,9 +142,18 @@ final class LevelBarModel: ObservableObject {
         var cursor = (earliest.map { Swift.max($0, requested) }) ?? requested
 
         var out: [LevelPoint] = []
+        var since = 0
         while cursor <= today {
+            if Task.isCancelled { return }
+            // A LONG SPAN LETS THE SCREEN DRAW. "All" is ten years of days, and running that as one
+            // uninterrupted stretch on the main actor is what a hang looks like from outside.
+            since += 1
+            if since >= 40 {
+                since = 0
+                await Task.yield()
+            }
             let key = LevelWiring.key(from: cursor, calendar: calendar)
-            let inputs = LevelWiring.dayInputs(days: days, day: key, series: series, calendar: calendar)
+            let inputs = LevelWiring.dayInputs(byDay: byDay, day: key, series: series, calendar: calendar)
             let computed = frozen?.day == key
                 ? frozen?.breakdown
                 : LevelEngine.compute(inputs: inputs, baselines: baselines)
@@ -163,6 +182,14 @@ final class LevelBarModel: ObservableObject {
 
     /// ONE READ PER SERIES, for the whole span — see the note in `LevelWiring`.
     private func readSeries(repo: Repository) async -> LevelSeries {
+        let key = "\(repo.refreshSeq)|\(repo.workoutsSeq)|\(repo.days.count)"
+        if let cached = cachedSeries, cached.key == key { return cached.series }
+        let series = await readSeriesUncached(repo: repo)
+        cachedSeries = (key, series)
+        return series
+    }
+
+    private func readSeriesUncached(repo: Repository) async -> LevelSeries {
         // NOOP's own training-based estimate first; the older weekly HR-ratio / non-exercise figure only
         // where there is none.
         var vo2 = await repo.series(key: Repository.noopVo2Key, source: "\(repo.deviceId)-noop", fullHistory: true)
@@ -179,7 +206,9 @@ final class LevelBarModel: ObservableObject {
             for row in rows { muscle[row.day, default: 0] += row.value }
         }
 
-        let meditation = await repo.meditationMinutesByDay()
+        // The level reads a 28-day share and baselines nothing off meditation, so it asks for months
+        // rather than the whole log — the Focus card is the surface that wants the lifetime figure.
+        let meditation = await repo.meditationMinutesByDay(days: 180)
 
         return LevelSeries(vo2max: vo2, muscleByDay: muscle, meditation: meditation,
                            sleepTimings: await repo.sleepTimingsByDay(),

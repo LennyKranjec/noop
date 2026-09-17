@@ -90,6 +90,11 @@ final class BedroomClimate: NSObject, ObservableObject {
 
     #if canImport(CoreBluetooth)
     private var central: CBCentralManager?
+    /// The central's own queue. NOT the main one: with no service filter the delegate hears EVERY
+    /// advertisement from every device in radio range — in a flat with a few dozen of them that is
+    /// hundreds of callbacks a second, and on the main queue each one competed with the frame the app
+    /// was drawing. Discovery is parsed here and only a Govee reading is handed to the main actor.
+    private let bleQueue = DispatchQueue(label: "noop.bedroom.ble", qos: .utility)
     #endif
     private var scanEndsAt: Date?
 
@@ -154,9 +159,10 @@ final class BedroomClimate: NSObject, ObservableObject {
         scanning = true
         scanEndsAt = Date().addingTimeInterval(seconds)
         if central == nil {
-            central = CBCentralManager(delegate: self, queue: .main, options: [CBCentralManagerOptionShowPowerAlertKey: false])
+            central = CBCentralManager(delegate: self, queue: bleQueue,
+                                       options: [CBCentralManagerOptionShowPowerAlertKey: false])
         } else if central?.state == .poweredOn {
-            central?.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
+            central?.scanForPeripherals(withServices: nil, options: nil)
         }
         try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
         central?.stopScan()
@@ -166,6 +172,13 @@ final class BedroomClimate: NSObject, ObservableObject {
 
     fileprivate func heardAdvertisement(id: String, name: String, manufacturerData: Data) {
         guard let parsed = GoveeAdvertisement.parse(name: name, manufacturerData: manufacturerData) else { return }
+        heard(id: id, name: name, parsed: parsed)
+    }
+
+    /// One parsed Govee advertisement. Ignored unless a scan is running, so a late delivery cannot
+    /// repopulate the picker after it closed.
+    fileprivate func heard(id: String, name: String, parsed: GoveeAdvertisement.Parsed) {
+        guard scanning else { return }
         let reading = ClimateReading(temperatureC: parsed.temperatureC, humidityPct: parsed.humidityPct,
                                      battery: parsed.battery, deviceName: name, source: "govee-ble", at: Date())
         if let i = heard.firstIndex(where: { $0.id == id }) {
@@ -229,7 +242,7 @@ extension BedroomClimate: CBCentralManagerDelegate {
                 if central.state == .unauthorized { self.lastError = "Bluetooth access is off for this app." }
                 return
             }
-            central.scanForPeripherals(withServices: nil, options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
+            central.scanForPeripherals(withServices: nil, options: nil)
         }
     }
 
@@ -237,8 +250,11 @@ extension BedroomClimate: CBCentralManagerDelegate {
                                     advertisementData: [String: Any], rssi RSSI: NSNumber) {
         guard let data = advertisementData[CBAdvertisementDataManufacturerDataKey] as? Data else { return }
         let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String) ?? peripheral.name ?? ""
+        // PARSED HERE, on the central's own queue: `parse` is pure, and everything that is not a Govee
+        // sensor — which is most of what a scan hears — is dropped without ever touching the main actor.
+        guard let parsed = GoveeAdvertisement.parse(name: name, manufacturerData: data) else { return }
         let id = peripheral.identifier.uuidString
-        Task { @MainActor in self.heardAdvertisement(id: id, name: name, manufacturerData: data) }
+        Task { @MainActor in self.heard(id: id, name: name, parsed: parsed) }
     }
 }
 #endif

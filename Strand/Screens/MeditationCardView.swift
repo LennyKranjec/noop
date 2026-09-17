@@ -170,7 +170,9 @@ struct MeditationCardView: View {
         week = (0..<7).reversed().map { minutes(back: $0) }
         daysInWindow = (0..<LevelEngine.meditationWindowDays)
             .filter { minutes(back: $0) >= LevelEngine.meditationMinMinutes }.count
-        recent = Array(await repo.meditationSessions(days: 60).prefix(3))
+        // The same window `meditationMinutesByDay` just read, so both come out of one workout read
+        // rather than two.
+        recent = Array(await repo.meditationSessions().prefix(3))
     }
 
     private static let whenFormatter: DateFormatter = {

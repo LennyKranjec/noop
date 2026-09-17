@@ -274,7 +274,7 @@ enum WhoopCloudSync {
             if !rows.isEmpty {
                 _ = try await store.upsertWorkouts(rows, deviceId: sourceId)
             }
-            await MainActor.run { repo.noteWhoopCloudChanged() }
+            await MainActor.run { repo.noteWhoopCloudChanged(); repo.noteWorkoutsChanged() }
         } catch {
             // Reported through the note, not thrown: a sync that got the days but not the sessions is
             // still a sync that got the days.
@@ -291,7 +291,7 @@ enum WhoopCloudSync {
             }
             // The hero reads its cloud row on this counter. Without it a sync lands in the store and the
             // rings keep showing dashes until something unrelated reloads the screen.
-            await MainActor.run { repo.noteWhoopCloudChanged() }
+            await MainActor.run { repo.noteWhoopCloudChanged(); repo.noteWorkoutsChanged() }
             return true
         } catch {
             return false

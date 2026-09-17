@@ -206,6 +206,31 @@ final class Repository: ObservableObject {
     @Published private(set) var hydrationSeq = 0
     func noteHydrationChanged() { hydrationSeq += 1 }
 
+    /// Bumped by every workout write, and the signal that drops the `workoutRows` cache below.
+    ///
+    /// Its own counter for the same reason hydration has one: a workout write does not necessarily bump
+    /// `refreshSeq` (the merge skips the bump when the daily caches are byte-identical, which ending a
+    /// session usually leaves them), so a cache keyed on `refreshSeq` alone would serve the session that
+    /// just ended as missing.
+    @Published private(set) var workoutsSeq = 0
+    func noteWorkoutsChanged() {
+        workoutsSeq += 1
+        workoutRowsCache.removeAll()
+        workoutRowsInFlight.removeAll()
+    }
+
+    /// PERF: `workoutRows` is the most expensive read in the app — up to seven 5 000-row store reads, a
+    /// cross-source dedup over the union, and up to 300 HR-window aggregates to reconcile the displayed
+    /// averages. It was being run again from scratch by every caller that wanted anything out of a
+    /// workout: the Workouts list, the coach's grounding block, Insights, the quest evidence, the level's
+    /// strength + meditation series and the Focus card — several of them on the same screen refresh, all
+    /// on the main actor. Memoised per (days, refreshSeq, workoutsSeq) with the in-flight read shared, so
+    /// the first caller pays and the rest join it, and any workout write drops it.
+    private var workoutRowsCache: [String: [WorkoutRow]] = [:]
+    private var workoutRowsInFlight: [String: Task<[WorkoutRow], Never>] = [:]
+    /// How many windows are kept. Small, because a full-history read is a few MB of rows.
+    private static let workoutRowsCacheLimit = 3
+
     /// The platform's own "read today's food log" hook, installed by the iOS shell at launch.
     ///
     /// A CLOSURE RATHER THAN A CALL. The macro read lives in `HealthKitBridge`, which is iOS-only, and
@@ -1375,6 +1400,14 @@ final class Repository: ObservableObject {
     /// The key NOOP's own training-based VO₂max is banked under, per day, on the computed source.
     static let noopVo2Key = "vo2max_noop"
     private static let noopVo2DayKey = "vo2max.noop.bankedDay"
+    /// When the estimate was last ATTEMPTED, banked or not.
+    ///
+    /// The day marker below is written only when a figure lands, so a wearer with no usable session ran
+    /// the whole read — a year of workouts, the HRmax pass and the four-week zone walk — again on every
+    /// cloud sync and every day change. An attempt that came back empty will come back empty again until
+    /// something is imported or recorded, so it is retried on this interval instead.
+    private static let noopVo2TriedKey = "vo2max.noop.triedAt"
+    private static let noopVo2RetrySeconds: TimeInterval = 3 * 3600
 
     /// Estimate today's VO₂max from the wearer's runs and walks and bank it — once a day.
     ///
@@ -1382,8 +1415,11 @@ final class Repository: ObservableObject {
     /// estimator, which falls back to the age formula without enough history). See `VO2MaxEstimator`.
     func bankNoopVo2Max(age: Int, sex: String = "", waistCm: Double = 0) async {
         let today = Self.localDayKey(Date())
+        let tried = UserDefaults.standard.double(forKey: Self.noopVo2TriedKey)
         guard UserDefaults.standard.string(forKey: Self.noopVo2DayKey) != today,
+              Date().timeIntervalSince1970 - tried >= Self.noopVo2RetrySeconds,
               let store = await ensureStore() else { return }
+        UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.noopVo2TriedKey)
         let rhrs = days.suffix(7).compactMap { $0.restingHr.map(Double.init) }.sorted()
         guard !rhrs.isEmpty else { return }
         let rhr = rhrs[rhrs.count / 2]
@@ -2942,6 +2978,27 @@ final class Repository: ObservableObject {
     /// re-derives the detected rows each run, so a plain delete would resurrect them; the dismissed
     /// span list is the durable "not a workout" record.
     func workoutRows(days: Int = 4000) async -> [WorkoutRow] {
+        let key = "\(days)|\(refreshSeq)|\(workoutsSeq)"
+        if let hit = workoutRowsCache[key] { return hit }
+        if let running = workoutRowsInFlight[key] { return await running.value }
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return [WorkoutRow]() }
+            return await self.readWorkoutRows(days: days)
+        }
+        workoutRowsInFlight[key] = task
+        let rows = await task.value
+        workoutRowsInFlight[key] = nil
+        // Only cache what is still current: a write that landed while the read ran cleared the cache, and
+        // putting the now-stale rows back would undo that.
+        if key == "\(days)|\(refreshSeq)|\(workoutsSeq)" {
+            if workoutRowsCache.count >= Self.workoutRowsCacheLimit { workoutRowsCache.removeAll() }
+            workoutRowsCache[key] = rows
+        }
+        return rows
+    }
+
+    /// The read itself. Everything goes through `workoutRows`, which memoises it.
+    private func readWorkoutRows(days: Int) async -> [WorkoutRow] {
         guard let store = await ensureStore() else { return [] }
         let now = Int(Date().timeIntervalSince1970)
         let lo = now - days * 86_400, hi = now + 86_400
@@ -3191,6 +3248,7 @@ final class Repository: ObservableObject {
             }
         }
         _ = try? await store.upsertWorkouts([row], deviceId: deviceId)
+        noteWorkoutsChanged()
     }
 
     /// Re-label a detected bout: copy it to a manual strap row with the chosen sport, then delete the
@@ -3209,6 +3267,7 @@ final class Repository: ObservableObject {
         _ = try? await store.upsertWorkouts([manual], deviceId: deviceId)
         _ = try? await store.deleteWorkouts(deviceId: computedDeviceId, sport: "detected",
                                             from: row.startTs, to: row.startTs)
+        noteWorkoutsChanged()
     }
 
     /// Dismiss a DETECTED bout the user says isn't a workout. Records its span in the durable dismissed
@@ -3222,6 +3281,7 @@ final class Repository: ObservableObject {
         guard let store = await ensureStore() else { return }
         _ = try? await store.deleteWorkouts(deviceId: computedDeviceId, sport: row.sport,
                                             from: row.startTs, to: row.startTs)
+        noteWorkoutsChanged()
     }
 
     /// Delete ONE workout by natural key. The read model has no deviceId, so reconstruct it from the
@@ -3232,6 +3292,7 @@ final class Repository: ObservableObject {
         guard let store = await ensureStore() else { return }
         _ = try? await store.deleteWorkouts(deviceId: deviceId, sport: row.sport,
                                             from: row.startTs, to: row.startTs)
+        noteWorkoutsChanged()
     }
 
     /// #64: merge two-or-more overlapping / adjacent MANUAL or DETECTED sessions into ONE manual session
