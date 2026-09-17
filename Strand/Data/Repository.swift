@@ -1380,7 +1380,7 @@ final class Repository: ObservableObject {
     ///
     /// Resting HR is the 7-day median; HRmax is observed from the wearer's own workouts (the shared
     /// estimator, which falls back to the age formula without enough history). See `VO2MaxEstimator`.
-    func bankNoopVo2Max(age: Int) async {
+    func bankNoopVo2Max(age: Int, sex: String = "", waistCm: Double = 0) async {
         let today = Self.localDayKey(Date())
         guard UserDefaults.standard.string(forKey: Self.noopVo2DayKey) != today,
               let store = await ensureStore() else { return }
@@ -1396,8 +1396,34 @@ final class Repository: ObservableObject {
                                            durationS: w.durationS ?? Double(w.endTs - w.startTs),
                                            distanceM: d, avgHr: Double(hr))
         }
+        // THE WEEKLY ZONES: four weeks of workouts averaged into one week. Zones 4–5 come from the
+        // workout's own zone split where it has one (strap, WHOOP cloud, WHOOP export); a session with no
+        // split counts as hard only when its average HR was already at 85 % of HRmax.
+        let fourWeeksAgo = Int(Date().timeIntervalSince1970) - 28 * 86_400
+        let recent = workouts.filter { $0.startTs >= fourWeeksAgo }
+            .filter { ($0.durationS ?? Double($0.endTs - $0.startTs)) >= 10 * 60 }
+        var activeDayKeys = Swift.Set<String>()
+        var minutes = 0.0, hardMinutes = 0.0
+        for w in recent {
+            let m = (w.durationS ?? Double(w.endTs - w.startTs)) / 60
+            activeDayKeys.insert(Self.localDayKey(Date(timeIntervalSince1970: TimeInterval(w.startTs))))
+            minutes += m
+            if let p = WorkoutZones.percents(w.zonesJSON) {
+                hardMinutes += m * (p[3] + p[4]) / 100
+            } else if let hr = w.avgHr, Double(hr) >= 0.85 * hrMax {
+                hardMinutes += m
+            }
+        }
+        let week = VO2MaxEstimator.ActivityWeek(
+            activeDays: Int((Double(activeDayKeys.count) / 4).rounded()),
+            minutesPerActiveDay: activeDayKeys.isEmpty ? 0 : minutes / Double(activeDayKeys.count),
+            highIntensityFraction: minutes > 0 ? hardMinutes / minutes : 0)
+        let activityModel = VO2MaxEstimator.activityModel(
+            age: Double(age), sex: sex, waistCm: waistCm, restingHr: rhr, week: week)
+
         guard hrMax > 0,
-              let estimate = VO2MaxEstimator.estimate(sessions: sessions, restingHr: rhr, hrMax: hrMax)
+              let estimate = VO2MaxEstimator.estimate(sessions: sessions, restingHr: rhr, hrMax: hrMax,
+                                                      activityModel: activityModel)
         else { return }
         _ = try? await store.upsertMetricSeries(
             [MetricPoint(day: today, key: Self.noopVo2Key, value: estimate.vo2max)],

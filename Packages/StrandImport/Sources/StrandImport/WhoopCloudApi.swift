@@ -210,11 +210,24 @@ public enum WhoopCloudApi {
         public let maxHeartRate: Int?
         public let kilojoule: Double?
         public let distanceMetre: Double?
+        /// Percent of the session in HR zones 1…5 (from `score.zone_durations`), or nil when not scored.
+        public var zonePercents: [Double]? = nil
 
         /// Kilojoules as kilocalories, which is the unit every other workout row in this app carries.
         public var energyKcal: Double? {
             kilojoule.map { $0 / 4.184 }
         }
+    }
+
+    /// Zones 1…5 as percent of the session, from `score.zone_durations` (zone_one_milli … zone_five_milli).
+    ///
+    /// The same shape the WHOOP export import stores, so every zone reader treats both alike. Zone zero —
+    /// time below zone one — is not a zone and is left out, as the export leaves it out.
+    static func zonePercents(_ score: [String: Any]?, durationS: Double) -> [Double]? {
+        guard let z = score?["zone_durations"] as? [String: Any], durationS > 0 else { return nil }
+        let names = ["zone_one_milli", "zone_two_milli", "zone_three_milli", "zone_four_milli", "zone_five_milli"]
+        let pct = names.map { (num(z, $0) ?? 0) / 1000 / durationS * 100 }
+        return pct.contains(where: { $0 > 0 }) ? pct : nil
     }
 
     /// `GET /activity/workout` — the sessions WHOOP scored.
@@ -245,7 +258,8 @@ public enum WhoopCloudApi {
                 averageHeartRate: score.flatMap { num($0, "average_heart_rate") }.map { Int($0) },
                 maxHeartRate: score.flatMap { num($0, "max_heart_rate") }.map { Int($0) },
                 kilojoule: score.flatMap { num($0, "kilojoule") },
-                distanceMetre: score.flatMap { num($0, "distance_meter") })
+                distanceMetre: score.flatMap { num($0, "distance_meter") },
+                zonePercents: zonePercents(score, durationS: end.timeIntervalSince(start)))
         }
     }
 

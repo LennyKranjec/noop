@@ -1821,7 +1821,7 @@ struct LiquidTodayView: View {
 
         let key = selectedDayKey
         // NOOP's own VO₂max from training, once a day, before anything reads the level.
-        await repo.bankNoopVo2Max(age: profile.age)
+        await repo.bankNoopVo2Max(age: profile.age, sex: profile.sex, waistCm: profile.waistCm)
         let own = await repo.noopScores(day: key)
         noopCharge = own.charge
         noopEffort = own.effort

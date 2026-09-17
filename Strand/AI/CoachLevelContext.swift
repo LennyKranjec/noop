@@ -49,7 +49,7 @@ enum CoachLevelContext {
         s += "- A LEVEL OF STATE: every physiological input is a 7-day mean, strength a 12-week best, training load a 42-day chronic figure, meditation a 28-day share — one bad day barely moves it.\n"
         s += "- sleep = 0.60 × deep+REM minutes + 0.25 × night HRV + 0.15 × bedtime/wake regularity (minutes moved vs the night before, lower is better).\n"
         s += "- heart = 0.5 × HRV + 0.5 × resting HR (lower is better).\n"
-        s += "- lungs = 0.75 × VO2max (NOOP's own estimate from runs and walks: speed against heart-rate reserve) + 0.25 × respiratory rate (lower is better).\n"
+        s += "- lungs = 0.75 × VO2max (NOOP's own estimate: runs and walks — speed against heart-rate reserve — blended with the HUNT model from the weekly training days, minutes and zone-4–5 share) + 0.25 × respiratory rate (lower is better).\n"
         s += "- muscle = 0.60 × strength (estimated-1RM index: each exercise's best e1RM over 12 weeks as a ratio of its own median) + 0.40 × chronic training load (42-day exponentially weighted volume).\n"
         s += "- focus = 0.75 × daytime calm (RMSSD of still waking hours) + 0.25 × meditation (weighted share of the last 28 days with at least 5 minutes).\n"
         s += "- steps (7-day average): below \(LevelEngine.stepsFloor) the level is multiplied down, linearly, by up to \(Int(LevelEngine.stepsMaxPenalty * 100))% at zero steps.\n"

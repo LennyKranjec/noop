@@ -21,8 +21,16 @@ import Foundation
 // answer: it takes the MEDIAN of the most recent valid sessions, and an effort outside the band where
 // the method holds (too easy, near-maximal, implausible speeds, too short) is not used at all.
 //
-// WITH NO USABLE SESSION it falls back to Uth et al. 2004 — 15.3 × HRmax / resting HR — which needs no
-// training at all and is rougher, and says so in its method.
+// THE WEEKLY ZONES ENTER THROUGH A SECOND, INDEPENDENT MODEL. The HUNT fitness study's non-exercise
+// equation (Nes et al. 2011) predicts VO₂max from age, sex, waist, resting HR and a physical-activity
+// index built from how many days a week the wearer trains, for how long, and how much of it is in the
+// hard zones (4–5). On its own it is rougher (SEE ≈ 5–6 ml/kg/min); but its errors come from different
+// places than the run-based figure's — a hilly route, a hot day, a mis-measured distance do not touch it
+// — so a weighted blend of the two is steadier than either. The more valid runs there are, the more
+// the run-based figure counts: n / (n + 2).
+//
+// WITH NO USABLE SESSION it uses the zone-based model alone, and with neither (no waist measurement,
+// no runs) it falls back to Uth et al. 2004 — 15.3 × HRmax / resting HR — the roughest of the three.
 
 public enum VO2MaxEstimator {
 
@@ -41,6 +49,10 @@ public enum VO2MaxEstimator {
     }
 
     public enum Method: String, Sendable {
+        /// Runs / walks blended with the zone-based HUNT model.
+        case blended
+        /// HUNT (Nes 2011) from age, sex, waist, resting HR and the weekly zone activity index.
+        case activityModel
         /// From runs / walks: speed against heart-rate reserve.
         case submaximal
         /// Uth 2004: HRmax / resting HR.
@@ -91,6 +103,47 @@ public enum VO2MaxEstimator {
     public static func hrRatio(restingHr: Double, hrMax: Double) -> Double? {
         guard restingHr > 25, hrMax > restingHr else { return nil }
         return 15.3 * hrMax / restingHr
+    }
+
+    /// A week of training as the HUNT activity index reads it: training days per week, minutes per
+    /// training day, and the share of that time in zones 4–5. Averaged by the caller over four weeks.
+    public struct ActivityWeek: Equatable, Sendable {
+        public let activeDays: Int
+        public let minutesPerActiveDay: Double
+        public let highIntensityFraction: Double
+        public init(activeDays: Int, minutesPerActiveDay: Double, highIntensityFraction: Double) {
+            self.activeDays = activeDays
+            self.minutesPerActiveDay = minutesPerActiveDay
+            self.highIntensityFraction = highIntensityFraction
+        }
+    }
+
+    /// The HUNT non-exercise estimate, or nil without the waist measurement it needs.
+    public static func activityModel(age: Double, sex: String, waistCm: Double, restingHr: Double,
+                                     week: ActivityWeek) -> Double? {
+        guard age > 0, waistCm > 0, restingHr > 0 else { return nil }
+        let pai = FitnessAgeEngine.physicalActivityIndex(activeDaysPerWeek: week.activeDays,
+                                                         avgActiveMinutesPerDay: week.minutesPerActiveDay,
+                                                         highIntensityFraction: week.highIntensityFraction)
+        let v = FitnessAgeEngine.estimateVO2max(age: age, sex: sex, waistCm: waistCm,
+                                                restingHR: restingHr, paIndex: pai)
+        return (15...90).contains(v) ? v : nil
+    }
+
+    /// The estimate as of `now`: runs blended with the zone model, whichever of them exists, else the
+    /// HR ratio.
+    public static func estimate(sessions: [Session], restingHr: Double?, hrMax: Double?,
+                                activityModel: Double?, now: Date = Date()) -> Estimate? {
+        let runs = estimate(sessions: sessions, restingHr: restingHr, hrMax: hrMax, now: now)
+        switch (runs, activityModel) {
+        case let (r?, a?) where r.method == .submaximal:
+            let w = Double(r.sessions) / Double(r.sessions + 2)
+            return Estimate(vo2max: w * r.vo2max + (1 - w) * a, method: .blended, sessions: r.sessions)
+        case let (_, a?):
+            return Estimate(vo2max: a, method: .activityModel, sessions: 0)
+        default:
+            return runs
+        }
     }
 
     /// The estimate as of `now`: the median of the newest valid sessions, or the HR-ratio fallback.

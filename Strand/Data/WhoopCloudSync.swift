@@ -196,7 +196,12 @@ enum WhoopCloudSync {
                 // display scale as 2.4. The same factor the importer uses, so the round trip is exact.
                 strain: w.strain.map { $0 * WhoopExportImporter.dayStrainToEffortScale },
                 distanceM: w.distanceMetre,
-                zonesJSON: nil,
+                // Zones in the export's own shape ("z1"…"z5", percent), so the zone readers treat a
+                // cloud session exactly like an imported one.
+                zonesJSON: w.zonePercents.flatMap { p in
+                    let dict = Dictionary(uniqueKeysWithValues: p.enumerated().map { ("z\($0.offset + 1)", $0.element) })
+                    return (try? JSONSerialization.data(withJSONObject: dict)).flatMap { String(data: $0, encoding: .utf8) }
+                },
                 notes: nil,
                 steps: nil)
         }
