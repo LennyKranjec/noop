@@ -1,231 +1,186 @@
 import SwiftUI
 import StrandDesign
+import StrandAnalytics
+import WhoopStore
 
 // MeditationCardView.swift — the meditation log, at the top of Focus.
 //
-// SwiftUI twin of the Android `MeditationCard`. Three things, in the order they answer: how long you
-// have sat ALTOGETHER, whether you have sat on each of the last three days, and a way to sit now.
+// THE DAILY MEDITATION IS AN ACTIVITY, not a timer on this card. The wearer logs a "Meditation" session
+// the way they log any other — Start workout, the WHOOP app, Apple Health — and this card reads those
+// sessions back (`Repository.meditationMinutesByDay`). Three things, in the order they answer: how long
+// they have sat altogether, how many of the last 28 days carried a meditation (the share the level's
+// focus part reads), and the most recent sessions themselves.
 //
-// THE THREE CIRCLES ARE THE LEVEL'S OWN WINDOW. They are not a streak — a streak breaks and shames, and
-// this is a rolling three days: the oldest circle empties as it falls past the third, which is exactly
-// part of what `LevelEngine.focus` reads — though the level itself now counts the minutes of the unbroken daily run. What is on screen IS the input, so the
-// wearer can see why their focus score moved rather than being told.
+// THE PLAY BUTTON STARTS THAT ACTIVITY. It opens the in-exercise screen with the sport already set to
+// Meditation, so sitting from here is the same recording as Start workout → Meditation — heart rate,
+// duration, saved as a workout when it ends.
 //
-// THE TIMER MEASURES, IT DOES NOT COUNT DOWN. There is no target length here and inventing one would be
-// a prescription nobody asked for: start it, sit, stop it, and what was actually sat is what is logged.
-//
-// IT IS A WALL-CLOCK DIFFERENCE, not an accumulated tick count, so a second the phone spent asleep or
-// the app spent backgrounded is still a second the wearer spent sitting.
-//
-// THE BIN DELETES THE DAY, and it is the wearer's own request — they wanted to be able to throw away a
-// session that went wrong and sit it again properly. It clears the day rather than the last session,
-// because the store holds a day's total and subtracting a session it does not remember would be
-// arithmetic on a guess.
+// A DAY COUNTS FROM `LevelEngine.meditationMinMinutes`. The circles light on exactly the rule the level
+// uses, so what is on screen IS the input.
 
 private let dayCircleSize: CGFloat = 26
 private let dayDotSize: CGFloat = 12
-private let roundButtonSize: CGFloat = 40
+private let playButtonSize: CGFloat = 40
+private let meditationSport = "Meditation"
 
 struct MeditationCardView: View {
     @EnvironmentObject var repo: Repository
+    @EnvironmentObject var model: AppModel
 
-    /// The breathing ring is decoration, and decoration stills on request. `poseStill` is the composed
-    /// gate — Reduce Motion, Low Power Mode and the app's own quiet-motion toggle — not the OS flag
-    /// alone, so a wearer who asked for a still screen in any of the three ways gets one.
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @ObservedObject private var motion = NoopMotionState.shared
+    @State private var showLiveWorkout = false
 
     @State private var lifetime: Double = 0
-    @State private var window: [Double] = Array(repeating: 0, count: MeditationLog.windowDays)
-    @State private var runningSince: Date?
-    @State private var elapsed = 0
-    /// What the last stop did. Nil until they have stopped one, and cleared the moment they start
-    /// another — a stale "too short" hanging over a session in progress would be the wrong news.
-    @State private var lastOutcome: MeditationLog.Outcome?
+    /// Minutes per day for the last seven days, oldest first.
+    @State private var week: [Double] = Array(repeating: 0, count: 7)
+    /// Days in the level's 28-day window that carried a meditation.
+    @State private var daysInWindow = 0
+    @State private var recent: [WorkoutRow] = []
 
-    private var running: Bool { runningSince != nil }
-    private var doneToday: Bool { (window.last ?? 0) > 0 }
-
-    /// The 4 Hz tick that moves the stopwatch. It exists only while a session runs.
-    private let ticker = Timer.publish(every: 0.25, on: .main, in: .common).autoconnect()
+    private var doneToday: Bool { (week.last ?? 0) >= LevelEngine.meditationMinMinutes }
 
     var body: some View {
         StrandCard {
             VStack(alignment: .leading, spacing: 14) {
                 headline
-                controls
+                circles
+                if !recent.isEmpty { sessions }
                 footer
             }
         }
-        // THE CARD BREATHES WHILE A SESSION RUNS. A stopwatch that looks identical running and stopped
-        // is one people check to find out which it is doing; a faint accent ring says it at a glance
-        // from across the room, which is where a phone sits during a meditation.
-        .overlay(
-            RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous)
-                .strokeBorder(StrandPalette.statusPositive.opacity(running ? 0.55 : 0), lineWidth: 1.5)
-                .animation(StrandMotion.breathe(reduced: motion.poseStill(reduceMotion)), value: running)
-                .allowsHitTesting(false)
-        )
         .task(id: repo.refreshSeq) { await reload() }
-        .onReceive(ticker) { _ in
-            guard let start = runningSince else {
-                if elapsed != 0 { elapsed = 0 }
-                return
-            }
-            elapsed = Int(Date().timeIntervalSince(start))
+        .sheet(isPresented: $showLiveWorkout) {
+            LiveWorkoutView(onClose: {
+                showLiveWorkout = false
+                Task { await reload() }
+            })
+            .environmentObject(model)
+            .environmentObject(model.live)
         }
     }
 
-    // MARK: - 1 · The headline: everything ever sat
+    // MARK: - 1 · The headline: everything ever sat, and the level's window
 
-    /// While the timer runs this shows the total PLUS the seconds so far, so the figure the wearer is
-    /// watching is the one the session is adding to. That is a live reading, not a stored one — nothing
-    /// is written until they stop.
     private var headline: some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("TOTAL MEDITATED")
                     .font(StrandFont.overline)
                     .tracking(1.2)
                     .foregroundStyle(StrandPalette.textSecondary)
                 HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text("\(Int((lifetime + (running ? Double(elapsed) / 60 : 0)).rounded()))")
+                    Text("\(Int(lifetime.rounded()))")
                         .font(StrandFont.title1)
                         .monospacedDigit()
                         .foregroundStyle(StrandPalette.textPrimary)
-                        .contentTransitionNumericIfAvailable()
                     Text("min")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textSecondary)
                 }
             }
-
             Spacer(minLength: 0)
-
-            // THE RUNNING CLOCK GETS ITS OWN PLATE, so the two numbers stop competing. The lifetime
-            // total is the headline and barely moves; the stopwatch moves every second and was
-            // stealing the eye from it by sitting in the same row at the same weight.
-            if running {
-                Text(clock(elapsed))
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("LAST \(LevelEngine.meditationWindowDays) DAYS")
+                    .font(StrandFont.overline)
+                    .tracking(1.2)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                Text("\(daysInWindow)/\(LevelEngine.meditationWindowDays)")
                     .font(StrandFont.title2)
                     .monospacedDigit()
-                    .foregroundStyle(StrandPalette.statusPositive)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
-                    .background(StrandPalette.statusPositive.opacity(0.12),
-                                in: Capsule())
-                    .overlay(Capsule().strokeBorder(StrandPalette.statusPositive.opacity(0.35),
-                                                    lineWidth: 1))
-                    .transition(.scale.combined(with: .opacity))
+                    .foregroundStyle(StrandPalette.textPrimary)
             }
         }
-        .animation(.easeOut(duration: 0.25), value: running)
     }
 
-    // MARK: - 2 · The window, and the controls that fill it
+    // MARK: - 2 · The last seven days
 
-    private var controls: some View {
+    private var circles: some View {
         HStack(spacing: 8) {
-            ForEach(Array(window.enumerated()), id: \.offset) { i, minutes in
-                // The last circle is today, and it is the one the buttons act on.
-                DayCircle(lit: minutes > 0, isToday: i == window.count - 1)
+            ForEach(Array(week.enumerated()), id: \.offset) { i, minutes in
+                DayCircle(lit: minutes >= LevelEngine.meditationMinMinutes, isToday: i == week.count - 1)
             }
             Spacer(minLength: 8)
+            playButton
+        }
+    }
 
-            // START / STOP. Disabled once the day is logged — the wearer asked for exactly one
-            // meditation a day to count, and a button that runs a timer whose result is thrown away
-            // would be a control that lies about what it does.
-            RoundAction(
-                icon: running ? "stop.fill" : "play.fill",
-                tint: running ? StrandPalette.statusWarning : StrandPalette.statusPositive,
-                enabled: running || !doneToday,
-                label: running ? "Stop meditation" : "Start meditation"
-            ) {
-                toggleTimer()
-            }
+    /// Starts a Meditation activity and opens the in-exercise screen — or, when a session is already
+    /// running, just reopens it rather than starting a second one.
+    private var playButton: some View {
+        let running = model.activeWorkout != nil
+        return Button {
+            SystemHaptics.play(.tap)
+            if !running { model.startWorkout(sport: meditationSport) }
+            showLiveWorkout = true
+        } label: {
+            Circle()
+                .fill(StrandPalette.statusPositive.opacity(0.14))
+                .overlay(Circle().strokeBorder(StrandPalette.statusPositive.opacity(0.55), lineWidth: 1))
+                .overlay {
+                    Image(systemName: running ? "waveform.path.ecg" : "play.fill")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(StrandPalette.statusPositive)
+                }
+                .frame(width: playButtonSize, height: playButtonSize)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(running ? "Open the running session" : "Start a meditation"))
+    }
 
-            // THE BIN. Only live when there is something to throw away, and never while the timer is
-            // running — stopping is what the stop button is for.
-            RoundAction(
-                icon: "trash.fill",
-                tint: StrandPalette.statusCritical,
-                enabled: doneToday && !running,
-                label: "Delete today's meditation"
-            ) {
-                SystemHaptics.play(.select)
-                Task {
-                    lastOutcome = nil
-                    await repo.clearMeditation()
-                    await reload()
+    // MARK: - 3 · The sessions themselves
+
+    private var sessions: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(recent.prefix(3).enumerated()), id: \.offset) { _, w in
+                HStack(spacing: 8) {
+                    Image(systemName: "figure.mind.and.body")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(StrandPalette.statusPositive)
+                    Text(Self.when(w))
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                    Spacer(minLength: 0)
+                    Text("\(Int(((w.durationS ?? Double(max(0, w.endTs - w.startTs))) / 60).rounded())) min")
+                        .font(StrandFont.caption)
+                        .monospacedDigit()
+                        .foregroundStyle(StrandPalette.textPrimary)
                 }
             }
         }
     }
 
-    // MARK: - 3 · What just happened
-
-    /// The two FAILURE cases outrank the standing hints: a session that was not stored has to say so, or
-    /// the button reads as broken. That is not hypothetical — it is how the Android one was reported.
     private var footer: some View {
-        Text(footerText)
+        Text(doneToday
+             ? "Meditated today. A day counts from \(Int(LevelEngine.meditationMinMinutes)) minutes."
+             : "Press play to start a Meditation activity, or log one in the WHOOP app or Apple Health. A day counts from \(Int(LevelEngine.meditationMinMinutes)) minutes.")
             .font(StrandFont.caption)
-            .foregroundStyle(footerTint)
-    }
-
-    private var footerText: String {
-        if running { return "Sitting. Stop when you are done — what you actually sat is what is logged." }
-        switch lastOutcome {
-        case .tooShort:
-            return "Under \(MeditationLog.minSessionSeconds) seconds, so it was not logged."
-        case .failed:
-            return "That session could not be saved."
-        default:
-            return doneToday
-                ? "Logged for today. The circle stays lit for three days, then frees up again."
-                : "Three days in a row is what the focus score reads. Sit one today."
-        }
-    }
-
-    private var footerTint: Color {
-        switch lastOutcome {
-        case .tooShort, .failed: return running ? StrandPalette.textTertiary : StrandPalette.statusWarning
-        default: return StrandPalette.textTertiary
-        }
+            .foregroundStyle(StrandPalette.textTertiary)
     }
 
     // MARK: - Behaviour
 
-    private func toggleTimer() {
-        guard let start = runningSince else {
-            SystemHaptics.play(.tap)
-            lastOutcome = nil
-            elapsed = 0
-            runningSince = Date()
-            return
-        }
-        let seconds = Int(Date().timeIntervalSince(start))
-        runningSince = nil
-        elapsed = 0
-        SystemHaptics.play(.confirm)
-        Task {
-            lastOutcome = await repo.logMeditation(seconds: seconds).outcome
-            await reload()
-        }
-    }
-
     private func reload() async {
-        lifetime = await repo.meditationLifetimeMinutes()
-        window = await repo.meditationWindow()
+        let byDay = await repo.meditationMinutesByDay()
+        lifetime = byDay.values.reduce(0, +)
+        let calendar = Calendar.current
+        let now = Date()
+        func minutes(back: Int) -> Double {
+            guard let d = calendar.date(byAdding: .day, value: -back, to: now) else { return 0 }
+            return byDay[Repository.localDayKey(d)] ?? 0
+        }
+        week = (0..<7).reversed().map { minutes(back: $0) }
+        daysInWindow = (0..<LevelEngine.meditationWindowDays)
+            .filter { minutes(back: $0) >= LevelEngine.meditationMinMinutes }.count
+        recent = Array(await repo.meditationSessions(days: 60).prefix(3))
     }
 
-    /// `m:ss`, or `h:mm:ss` once a session runs past the hour.
-    private func clock(_ seconds: Int) -> String {
-        let h = seconds / 3600
-        let m = (seconds % 3600) / 60
-        let s = seconds % 60
-        return h > 0
-            ? String(format: "%d:%02d:%02d", h, m, s)
-            : String(format: "%d:%02d", m, s)
+    private static let whenFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("EEE d MMM HH:mm")
+        return f
+    }()
+
+    private static func when(_ w: WorkoutRow) -> String {
+        whenFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(w.startTs)))
     }
 }
 
@@ -250,45 +205,5 @@ private struct DayCircle: View {
                 }
             }
             .frame(width: dayCircleSize, height: dayCircleSize)
-    }
-}
-
-/// A circular icon button. Dim and inert when disabled rather than absent, so the control can be learnt.
-private struct RoundAction: View {
-    let icon: String
-    let tint: Color
-    let enabled: Bool
-    let label: String
-    let action: () -> Void
-
-    private var alpha: Double { enabled ? 1 : 0.28 }
-
-    var body: some View {
-        Button(action: action) {
-            Circle()
-                .fill(tint.opacity(0.14 * alpha))
-                .overlay(Circle().strokeBorder(tint.opacity(0.55 * alpha), lineWidth: 1))
-                .overlay {
-                    Image(systemName: icon)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(tint.opacity(alpha))
-                }
-                .frame(width: roundButtonSize, height: roundButtonSize)
-        }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
-        .accessibilityLabel(Text(label))
-    }
-}
-
-private extension View {
-    /// The digits roll rather than jump when a session lands, where the OS can do it.
-    @ViewBuilder
-    func contentTransitionNumericIfAvailable() -> some View {
-        if #available(iOS 17.0, macOS 14.0, *) {
-            self.contentTransition(.numericText())
-        } else {
-            self
-        }
     }
 }

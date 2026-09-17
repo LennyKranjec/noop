@@ -179,10 +179,7 @@ final class LevelBarModel: ObservableObject {
             for row in rows { muscle[row.day, default: 0] += row.value }
         }
 
-        var meditation: [String: Double] = [:]
-        for row in await repo.series(key: MeditationLog.key, source: MeditationLog.source, fullHistory: true) {
-            meditation[row.day] = row.value
-        }
+        let meditation = await repo.meditationMinutesByDay()
 
         return LevelSeries(vo2max: vo2, muscleByDay: muscle, meditation: meditation,
                            sleepTimings: await repo.sleepTimingsByDay(),

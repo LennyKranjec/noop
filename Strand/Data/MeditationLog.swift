@@ -34,6 +34,13 @@ enum MeditationLog {
     /// A session shorter than this is not logged: a mis-tap should not light the day's circle.
     static let minSessionSeconds = 30
 
+    /// Whether a logged activity is a meditation. The name is matched loosely, because WHOOP, Apple
+    /// Health and the in-app catalog each spell it their own way ("Meditation", "Mindfulness", …).
+    static func isMeditation(sport: String) -> Bool {
+        let s = sport.lowercased()
+        return s.contains("meditat") || s.contains("mindful")
+    }
+
     /// Whether a session of `seconds` is long enough to store.
     ///
     /// Pure, and separate from any write, so the threshold can be tested without a database behind it —
@@ -68,6 +75,34 @@ enum MeditationLog {
 // re-upserts the sum, exactly as hydration does.
 
 extension Repository {
+
+    // MARK: THE DAILY MEDITATION IS AN ACTIVITY
+    //
+    // The wearer logs a meditation as an activity — "Meditation" in Start workout, the WHOOP app or
+    // Apple Health — not with a stopwatch on the Focus screen. Those sessions are the source now. Days
+    // banked by the old timer still count where no activity covers them, so history does not vanish.
+
+    /// Meditation activities in the last `days`, newest first.
+    func meditationSessions(days: Int = 4000) async -> [WorkoutRow] {
+        await workoutRows(days: days)
+            .filter { MeditationLog.isMeditation(sport: $0.sport) }
+            .sorted { $0.startTs > $1.startTs }
+    }
+
+    /// Minutes meditated per local day: meditation activities summed by the day they started, and the
+    /// old timer's figure only where it is larger.
+    func meditationMinutesByDay(days: Int = 4000) async -> [String: Double] {
+        var byDay: [String: Double] = [:]
+        for w in await meditationSessions(days: days) {
+            let key = Repository.localDayKey(Date(timeIntervalSince1970: TimeInterval(w.startTs)))
+            byDay[key, default: 0] += (w.durationS ?? Double(max(0, w.endTs - w.startTs))) / 60
+        }
+        for row in await series(key: MeditationLog.key, source: MeditationLog.source, fullHistory: true)
+            where row.value > (byDay[row.day] ?? 0) {
+            byDay[row.day] = row.value
+        }
+        return byDay
+    }
 
     /// Today's local calendar day, as the rows are keyed.
     var meditationToday: String { Repository.localDayKey(Date()) }

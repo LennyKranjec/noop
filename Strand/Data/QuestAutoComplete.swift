@@ -66,8 +66,7 @@ enum QuestAutoComplete {
             .reduce(0.0) { $0 + (($1.durationS ?? Double(max(0, $1.endTs - $1.startTs))) / 60) }
         e.workoutMinutes = minutes
 
-        e.meditationMinutes = await repo.series(
-            key: MeditationLog.key, source: MeditationLog.source, from: day, to: day).last?.value ?? 0
+        e.meditationMinutes = await repo.meditationMinutesByDay(days: 4)[day] ?? 0
         e.waterMl = await repo.hydrationTotal(day: day)
         e.journaled = await repo.journalDays(days: 5).contains(day)
 
