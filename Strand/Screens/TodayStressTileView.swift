@@ -14,12 +14,21 @@ import StrandDesign
 // across SCORED hours only: an hour the motion gate masked as activity carries no level and is skipped
 // rather than counted as calm.
 //
+// THE DIAL IS LIVE. It shows the stress of the last ten minutes (`DaytimeStress.live`), re-read every
+// minute while the tile is on screen, against the same calm reference the day's hours are scored on.
+// When the last ten minutes cannot be read — too little heart rate, or the wearer was moving — it shows
+// the latest scored hour, and the caption says which of the two it is.
+//
 // WITH NO HOUR SCORED YET the dial takes the app's own DAILY stress — the 0–3 figure the Stress screen
 // headlines — and the caption says it is the day's, not this moment's. Highest / Lowest / Average stay
 // blank then, because those genuinely need hours.
 
-/// How often the tile re-asks while it is on screen. The curve is hourly-grain, so faster buys nothing.
-private let stressRescoreSeconds: UInt64 = 5 * 60
+/// How often the hourly curve is re-asked. It is hourly-grain, so faster buys nothing.
+private let stressRescoreSeconds: TimeInterval = 5 * 60
+
+/// How often the live reading is re-taken, and the window it reads.
+private let liveEverySeconds: UInt64 = 60
+private let liveWindowSeconds = 10 * 60
 
 struct TodayStressTileView: View {
     @EnvironmentObject var repo: Repository
@@ -29,6 +38,9 @@ struct TodayStressTileView: View {
     let onOpen: () -> Void
 
     @State private var hours: [DaytimeStress.HourPoint] = []
+    @State private var dayHours: [DaytimeStress.HourPoint] = []
+    @State private var liveLevel: Double?
+    @State private var liveAt: Date?
 
     private var scored: [(ts: Int, level: Double)] {
         hours.compactMap { h in h.level.map { (h.startTs, $0) } }
@@ -39,12 +51,15 @@ struct TodayStressTileView: View {
         scored.isEmpty ? nil : scored.map(\.level).reduce(0, +) / Double(scored.count)
     }
     private var latest: (ts: Int, level: Double)? { scored.max { $0.ts < $1.ts } }
-    private var shown: Double? { latest?.level ?? dailyFallback }
+    private var shown: Double? { liveLevel ?? latest?.level ?? dailyFallback }
 
     private var caption: String {
+        let f = DateFormatter()
+        f.timeStyle = .short
+        if liveLevel != nil, let liveAt {
+            return "Live · last 10 min, " + f.string(from: liveAt)
+        }
         if let latest {
-            let f = DateFormatter()
-            f.timeStyle = .short
             return "Last updated at " + f.string(from: Date(timeIntervalSince1970: TimeInterval(latest.ts)))
         }
         return dailyFallback != nil ? "Today's score, no hour scored yet" : "No reading yet"
@@ -58,6 +73,8 @@ struct TodayStressTileView: View {
                         Circle()
                             .fill(shown.map(StressRamp.color) ?? StrandPalette.textTertiary)
                             .frame(width: 8, height: 8)
+                            // Full strength while the dial is live, dimmer when it is showing an earlier hour.
+                            .opacity(liveLevel != nil ? 1 : 0.7)
                         Text("Today's stress")
                             .font(StrandFont.headline)
                             .foregroundStyle(StrandPalette.textPrimary)
@@ -94,14 +111,32 @@ struct TodayStressTileView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel(Text("Today's stress, \(shown.map { String(format: "%.1f", $0) } ?? "no reading")"))
         .task {
-            // One loop for as long as the tile is on screen; cancelled with it.
+            // One loop for as long as the tile is on screen; cancelled with it. The hourly curve every
+            // five minutes, the live window every minute.
+            var curveAt = Date.distantPast
             while !Task.isCancelled {
-                if let curve = await StressDayCurve.today(repo: repo) {
+                if Date().timeIntervalSince(curveAt) >= stressRescoreSeconds,
+                   let curve = await StressDayCurve.today(repo: repo) {
                     hours = curve.result.timeline
+                    dayHours = curve.result.hours
+                    curveAt = Date()
+                    await repo.bankDaytimeRmssd(hours: curve.result.hours)
                 }
-                try? await Task.sleep(nanoseconds: stressRescoreSeconds * 1_000_000_000)
+                await readLive()
+                try? await Task.sleep(nanoseconds: liveEverySeconds * 1_000_000_000)
             }
         }
+    }
+
+    private func readLive() async {
+        let to = Int(Date().timeIntervalSince1970)
+        let from = to - liveWindowSeconds
+        let hr = await repo.hrSamples(from: from, to: to, limit: 5_000)
+        let rr = await repo.rrIntervals(from: from, to: to, limit: 10_000)
+        let gravity = await repo.gravitySamplesUnion(from: from, to: to, limit: 20_000)
+        let level = DaytimeStress.live(hr: hr, rr: rr, gravity: gravity, dayHours: dayHours)
+        liveLevel = level
+        liveAt = level == nil ? nil : Date()
     }
 
     private func stat(_ label: String, _ value: Double?) -> some View {

@@ -108,9 +108,13 @@ struct LevelRadarView: View {
                 }
                 guard scores.contains(where: { $0 != nil }) else { return }
 
+                // NO CEILING ON THE SCORES, so none on the drawing: the outer grid ring is still the
+                // wearer's own 100, and a part past it draws past it — up to the edge of the plate, where
+                // the geometry has to stop. Below 0 collapses to the centre.
+                let reach: Double = 1.25
                 var web = Path()
                 for i in radarParts.indices {
-                    let frac = min(max((scores[i] ?? 0) / 100 * reveal, 0), 1)
+                    let frac = min(max((scores[i] ?? 0) / 100 * reveal, 0), reach)
                     let point = radarVertex(centre: centre, radius: radius * frac, index: i)
                     if i == 0 { web.move(to: point) } else { web.addLine(to: point) }
                 }
@@ -123,7 +127,7 @@ struct LevelRadarView: View {
                 if let best {
                     var crown = Path()
                     for i in radarParts.indices {
-                        let frac = min(max((best[radarParts[i]] ?? 0) / 100 * reveal, 0), 1)
+                        let frac = min(max((best[radarParts[i]] ?? 0) / 100 * reveal, 0), reach)
                         let point = radarVertex(centre: centre, radius: radius * frac, index: i)
                         if i == 0 { crown.move(to: point) } else { crown.addLine(to: point) }
                     }
@@ -228,14 +232,15 @@ func levelPartTint(_ part: LevelPart) -> Color {
 /// The metric a lever names, in the wearer's language.
 func levelDriverLabel(_ driver: LevelDriver) -> LocalizedStringKey {
     switch driver {
-    case .sleepScore: return "score"
-    case .sleepConsistency: return "consistency"
+    case .restorativeSleep: return "deep + rem"
+    case .sleepHrv: return "night hrv"
+    case .sleepRegularity: return "regularity"
     case .hrv: return "hrv"
     case .rhr: return "rhr"
     case .vo2max: return "vo₂max"
     case .respRate: return "resp. rate"
     case .muscleVolume: return "volume"
-    case .stress: return "stress"
+    case .daytimeCalm: return "calm"
     case .meditation: return "meditation"
     }
 }

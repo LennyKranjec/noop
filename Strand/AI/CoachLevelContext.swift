@@ -20,8 +20,8 @@ enum CoachLevelContext {
 
         if let frozen = LevelDayFreeze.stored() {
             let b = frozen.breakdown
-            s += String(format: "Level for %@: %.1f / 100 (set at 06:40 and held all day).\n", frozen.day, b.level)
-            s += "Parts (score 0-100 · effective weight · points contributed · points still available):\n"
+            s += String(format: "Level for %@: %.1f (no upper limit; 100 = every part at the wearer's own 95th percentile; set at 06:40 and held all day).\n", frozen.day, b.level)
+            s += "Parts (score, 50 = average and 100 = own 95th percentile · effective weight · points contributed · points still missing to 100):\n"
             for c in b.components {
                 let name = c.part.rawValue
                 let driver = frozen.drivers[c.part].map { " · driven by \($0.rawValue)" } ?? ""
@@ -41,17 +41,19 @@ enum CoachLevelContext {
             s += "Today's level has not been computed yet.\n"
         }
 
-        s += "HOW IT IS CALCULATED:\n"
-        s += "- level = (sum of part score × weight, weights re-shared over the parts that have data) × step multiplier, clamped 0-100.\n"
+        s += "HOW IT IS CALCULATED (no ceiling, no floor):\n"
+        s += "- Every input is scored against the wearer's own frozen baseline: 50 = their average day, 100 = their own 95th-percentile day in the good direction, linear and UNBOUNDED both ways. Beating their 95th percentile scores above 100.\n"
+        s += "- level = (sum of part score × weight, weights re-shared over the parts that have data) × step multiplier. Not clamped: all five parts at their own 100 with no step penalty is a level of 100, more is more.\n"
         s += "- Weights: " + LevelPart.allCases.map { "\($0.rawValue) \(Int(($0.weight * 100).rounded()))%" }
             .joined(separator: ", ") + ".\n"
-        s += "- sleep = 0.8 × mean of the last 3 sleep scores + 0.2 × mean of the last 3 sleep-consistency figures.\n"
-        s += "- heart = 50 + 25 × (z(HRV) − z(RHR)) against the wearer's frozen baselines, z clipped to ±\(Int(LevelEngine.zClip)).\n"
-        s += "- lungs = 0.6 × VO2max scaled the same way + 0.4 × (100 − respiratory rate scaled), whichever exist.\n"
-        s += String(format: "- muscle = the last 3 training sessions' volume load placed between the wearer's lightest and heaviest, weighted by e^(−%.1f × days ago).\n", LevelEngine.muscleDecay)
-        s += String(format: "- focus = (100 − mean stress of the last 3 days) × (0.5 + %.2f × meditation days in the last 3), capped at 100.\n", LevelEngine.meditationBonusPerDay)
+        s += "- sleep = 0.60 × deep+REM minutes (3-night mean) + 0.25 × night HRV (3-night mean) + 0.15 × bedtime/wake regularity (minutes moved vs the night before, lower is better).\n"
+        s += "- heart = 0.5 × HRV + 0.5 × resting HR (lower is better).\n"
+        s += "- lungs = 0.6 × VO2max + 0.4 × respiratory rate (lower is better).\n"
+        s += String(format: "- muscle = the last 3 training sessions' volume load, each scored against the baseline, weighted by e^(−%.1f × days ago).\n", LevelEngine.muscleDecay)
+        s += String(format: "- focus = 0.5 × daytime calm (RMSSD of still waking hours, 3-day mean) + 0.5 × meditation, where meditation = 100 × (1 − e^(−minutes/%.0f)) over the UNBROKEN run of consecutive days meditated — one missed day resets it to 0.\n", LevelEngine.meditationTauMin)
         s += "- steps: below \(LevelEngine.stepsFloor) the level is multiplied down, linearly, by up to \(Int(LevelEngine.stepsMaxPenalty * 100))% at zero steps.\n"
-        s += "- The day's level is fixed at 06:40 from the night that ended that morning and the previous full day's activity, so what they do TODAY shows up in TOMORROW's level."
+        s += "- The day's level is fixed at 06:40 from the night that ended that morning and the previous full day's activity (steps, calm, meditation run, training), so what they do TODAY shows up in TOMORROW's level.\n"
+        s += "The cheapest points are usually: never breaking the daily meditation run, deep+REM sleep, and bedtime regularity."
         return s
     }
 }

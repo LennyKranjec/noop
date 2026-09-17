@@ -1,5 +1,6 @@
 import Foundation
 import WhoopStore
+import StrandAnalytics
 
 // StressDailyLog.swift — banking the day's non-activity high-stress minutes.
 //
@@ -30,6 +31,9 @@ enum StressDailyLog {
     /// Its own local-only source: this is a COMPUTED figure, not one any device reported.
     static let source = "stress-daily"
 
+    /// The day's mean RMSSD over its still, scored waking hours.
+    static let daytimeRmssdKey = "daytime_rmssd"
+
     /// How far back the streak strip reads. A year of streak plus slack for a stale clock.
     static let lookbackDays = 400
 }
@@ -49,6 +53,29 @@ extension Repository {
         _ = try? await store.upsertMetricSeries(
             [MetricPoint(day: day, key: StressDailyLog.key, value: Double(minutes))],
             deviceId: StressDailyLog.source)
+    }
+
+    /// Bank the day's daytime calm: mean RMSSD over the still, scored waking hours.
+    ///
+    /// The level's focus part reads it (`LevelMetric.daytimeRmssd`). Written whenever the day's curve is
+    /// scored, REPLACING the day's value, so the figure the frozen level reads tomorrow is the whole of
+    /// today. Nothing is written when no still hour carried R-R.
+    func bankDaytimeRmssd(hours: [DaytimeStress.HourPoint], day: Date = Date()) async {
+        let values = hours.filter { $0.level != nil }.compactMap(\.rmssd)
+        guard !values.isEmpty, let store = await storeHandle() else { return }
+        let mean = values.reduce(0, +) / Double(values.count)
+        _ = try? await store.upsertMetricSeries(
+            [MetricPoint(day: Repository.localDayKey(day), key: StressDailyLog.daytimeRmssdKey, value: mean)],
+            deviceId: StressDailyLog.source)
+    }
+
+    /// Every banked day's daytime calm.
+    func bankedDaytimeRmssd() async -> [String: Double] {
+        let rows = await series(key: StressDailyLog.daytimeRmssdKey, source: StressDailyLog.source,
+                                days: StressDailyLog.lookbackDays)
+        var out: [String: Double] = [:]
+        for row in rows { out[row.day] = row.value }
+        return out
     }
 
     /// Every banked day in the lookback, keyed by local day. Empty when nothing has been banked.

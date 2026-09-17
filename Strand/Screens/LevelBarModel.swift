@@ -163,12 +163,6 @@ final class LevelBarModel: ObservableObject {
 
     /// ONE READ PER SERIES, for the whole span — see the note in `LevelWiring`.
     private func readSeries(repo: Repository) async -> LevelSeries {
-        let stressRows = await repo.series(key: "stress", source: "my-whoop", fullHistory: true)
-        var stress: [String: Double] = [:]
-        for row in stressRows {
-            stress[row.day] = Swift.min(Swift.max(row.value / LevelWiring.stressSeriesMax * 100, 0), 100)
-        }
-
         let vo2 = await repo.series(key: "vo2max_est", source: "\(repo.deviceId)-noop", fullHistory: true)
             .sorted { $0.day < $1.day }
 
@@ -183,6 +177,9 @@ final class LevelBarModel: ObservableObject {
             meditation[row.day] = row.value
         }
 
-        return LevelSeries(stress: stress, vo2max: vo2, muscleByDay: muscle, meditation: meditation)
+        return LevelSeries(vo2max: vo2, muscleByDay: muscle, meditation: meditation,
+                           sleepTimings: await repo.sleepTimingsByDay(),
+                           daytimeRmssd: await repo.bankedDaytimeRmssd())
     }
+
 }

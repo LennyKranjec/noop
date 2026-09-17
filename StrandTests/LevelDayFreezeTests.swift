@@ -44,9 +44,11 @@ final class LevelDayFreezeTests: XCTestCase {
                         strain: nil, exerciseCount: nil, steps: steps)
         }
         let days = [row("2026-09-15", steps: 11_400, sleep: 420), row("2026-09-16", steps: 300, sleep: 450)]
-        let series = LevelSeries(stress: [:], vo2max: [], muscleByDay: [:], meditation: [:])
+        let series = LevelSeries(vo2max: [], muscleByDay: [:], meditation: ["2026-09-14": 10, "2026-09-15": 12, "2026-09-16": 30])
         let inputs = LevelWiring.dayInputs(days: days, day: "2026-09-16", series: series, calendar: calendar)
         XCTAssertEqual(inputs.stepsToday, 11_400)
+        // The meditation run is also the previous complete day's: 10 + 12 minutes, not today's 30.
+        XCTAssertEqual(inputs.meditationStreakMin, 22, accuracy: 1e-9)
         // The night is this morning's.
         XCTAssertEqual(inputs.hrv, 60)
         XCTAssertTrue(LevelWiring.nightLanded(days: days, day: "2026-09-16"))

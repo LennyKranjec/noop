@@ -653,4 +653,40 @@ public enum DaytimeStress {
         let frac = pos - Double(lo)
         return sorted[lo] + frac * (sorted[hi] - sorted[lo])
     }
+
+    // MARK: - Live
+
+    /// How much recent heart rate a live read needs: a minute of samples at the strap's 1 Hz.
+    public static let liveMinHRSamples = 60
+
+    /// Stress RIGHT NOW, on the same 0–3 scale as the hours: the last few minutes of heart rate and R-R,
+    /// z-scored against the day's OWN calm reference taken from its scored hours.
+    ///
+    /// The same arithmetic as an hour — the calm-quartile anchor, the across-hour spread, the shared
+    /// squash — at a window of minutes, so a live reading of 2.1 means what an hour of 2.1 means.
+    ///
+    /// NIL, NOT A GUESS, when there is too little signal to say: under a minute of heart rate, no scored
+    /// hour yet to take a reference from, or a window in which the wearer was MOVING — the motion gate
+    /// the hours use, applied to the window, because a flight of stairs is exertion and not stress.
+    public static func live(hr: [HRSample], rr: [RRInterval], gravity: [GravitySample] = [],
+                            dayHours: [HourPoint]) -> Double? {
+        guard hr.count >= liveMinHRSamples else { return nil }
+        if !gravity.isEmpty {
+            let activity = WorkoutDetector.activitySeries(gravity)
+            if !activity.isEmpty {
+                let active = activity.filter { $0.intensity > WorkoutDetector.motionThreshold }.count
+                if Double(active) / Double(activity.count) >= activityMaskFraction { return nil }
+            }
+        }
+        let reference = dayHours.filter { $0.level != nil }
+        let hrMeans = reference.compactMap(\.meanHR)
+        let rmssds = reference.compactMap(\.rmssd)
+        guard !hrMeans.isEmpty, let liveHR = mean(hr.map { Double($0.bpm) }) else { return nil }
+        let liveRMSSD = HRVAnalyzer.analyze(rawRR: rr.map { Double($0.rrMs) }).rmssd
+        return squash(rawScore(
+            hr: liveHR, meanHR: calmReference(hrMeans, calmIsLow: true), sdHR: std(hrMeans, mean: mean(hrMeans)),
+            rmssd: liveRMSSD, meanRMSSD: calmReference(rmssds, calmIsLow: false),
+            sdRMSSD: std(rmssds, mean: mean(rmssds))))
+    }
+
 }

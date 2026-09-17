@@ -3,29 +3,22 @@ import StrandAnalytics
 
 // LevelBaselineStore.swift — keeping the yardstick still.
 //
-// Swift twin of the Android `LevelBaselineStore`. The baselines are derived once and then persisted
-// verbatim. Every later read returns exactly what was written, so the level means the same thing in
-// December as it did in March.
+// The baselines are derived from the wearer's own history and then persisted verbatim, so the level
+// means the same thing in December as it did in March.
 //
-// WRITTEN ONCE, DELIBERATELY. `resolve` derives only when nothing is stored; it never re-derives, even
-// when far more history is now available. A caller that wants a fresh scale has to say so through
-// `refreeze`, which is a visible, explicit act — the wearer should know their yardstick moved, because
-// every level they remember was measured against the old one.
+// FROZEN PER METRIC, ONCE EACH METRIC IS WORTH FREEZING. A metric with fewer than two weeks of readings
+// is scored against the table for now and NOT written down; the first load on which it has enough of
+// its own history freezes it. That matters more than it used to: daytime calm, for instance, only
+// starts being recorded when this build first runs, and freezing it on day one would measure it against
+// a stranger forever.
 //
-// STORED AS NUMBERS, NOT AS A SNAPSHOT DATE. What matters is the scale itself; when it was taken is
-// recorded alongside only so the app can tell the wearer how thin the history behind it was.
+// v3: the level was rebuilt with no ceiling and new inputs (see `LevelEngine`); every older scale was
+// for metrics that no longer exist.
 
 enum LevelBaselineStore {
 
-    /// Version 2, and the reason is the one case where a frozen scale MUST be thrown away.
-    ///
-    /// The first iOS scales were frozen on the app's very first level computation — before the WHOOP
-    /// cloud sync had landed any history at all — so HRV, resting HR and the sleep score all fell back
-    /// to the table. Every level measured since was measured against a stranger's numbers. A scale is
-    /// frozen so a colour keeps its meaning, not so a wrong one does. See `MuscleBaselineStore` for the
-    /// same decision taken for the same reason.
-    private static let key = "level.baselines.v2"
-    private static let frozenAtKey = "level.baselinesFrozenAt"
+    private static let key = "level.baselines.v3"
+    private static let frozenAtKey = "level.baselinesFrozenAt.v3"
 
     private struct Stored: Codable {
         let mean: Double
@@ -34,68 +27,71 @@ enum LevelBaselineStore {
         let max: Double
     }
 
-    /// The frozen baselines, deriving and storing them on the first call.
-    ///
-    /// `history` is only consulted when there is nothing stored, so the (potentially expensive) read of
-    /// a whole metric history can be a closure the caller never pays for on a warm start.
-    /// NOT FROZEN UNTIL IT IS WORTH FREEZING. A scale derived before the history arrived is a scale made
-    /// of table entries, and freezing that would measure the wearer against a stranger forever — which is
-    /// exactly what happened on the first iOS builds. Below the bar the derived set is still RETURNED, so
-    /// today has a usable number; it is simply not written down, and the next call with real history
-    /// freezes the real thing.
+    /// The baselines: every frozen metric as stored, every other one derived from `history` now — and
+    /// frozen on the spot if its history has become deep enough.
     static func resolve(history: () -> [LevelMetric: [Double]]) -> [LevelMetric: Baseline] {
-        if let stored = read() { return stored }
-        let readings = history()
-        let derived = LevelBaselines.deriveAll(history: readings)
-        if LevelBaselines.isDerivable(history: readings) { write(derived) }
-        return derived
-    }
-
-    /// Whether the scale on disk is the frozen one, as opposed to today's provisional table fallback.
-    static var isFrozen: Bool { read() != nil }
-
-    /// The stored set, or nil when the scale has never been frozen.
-    static func read() -> [LevelMetric: Baseline]? {
-        guard let data = UserDefaults.standard.data(forKey: key),
-              let decoded = try? JSONDecoder().decode([String: Stored].self, from: data)
-        else { return nil }
+        var stored = readStored()
         var out: [LevelMetric: Baseline] = [:]
+        var missing: [LevelMetric] = []
         for metric in LevelMetric.allCases {
-            // A metric missing from the payload falls back to the table rather than being dropped — a
-            // set with a hole in it would silently stop scoring that component, and the wearer would
-            // see their level move for no reason they could observe.
-            if let s = decoded[metric.rawValue] {
+            if let s = stored[metric.rawValue] {
                 out[metric] = Baseline(mean: s.mean, sd: s.sd, min: s.min, max: s.max)
-            } else if let fallback = LevelBaselines.table[metric] {
-                out[metric] = fallback
+            } else {
+                missing.append(metric)
             }
         }
-        return out.count == LevelMetric.allCases.count ? out : nil
+        guard !missing.isEmpty else { return out }
+
+        let readings = history()
+        var changed = false
+        for metric in missing {
+            let h = readings[metric] ?? []
+            let b = LevelBaselines.derive(metric, history: h)
+            out[metric] = b
+            if LevelBaselines.isDerivable(h) {
+                stored[metric.rawValue] = Stored(mean: b.mean, sd: b.sd, min: b.min, max: b.max)
+                changed = true
+            }
+        }
+        if changed { write(stored) }
+        return out
     }
 
-    /// When the scale was frozen, or nil when it never was.
+    /// Whether every metric's scale is frozen.
+    static var isFrozen: Bool { readStored().count == LevelMetric.allCases.count }
+
     static var frozenAt: Date? {
         let t = UserDefaults.standard.double(forKey: frozenAtKey)
         return t > 0 ? Date(timeIntervalSince1970: t) : nil
     }
 
-    /// Derive the scale again from current history, replacing what was stored.
-    ///
-    /// The ONLY way the yardstick moves. Every level the wearer has seen was measured against the old
-    /// scale, so a caller must treat this as a visible change and not as maintenance.
+    /// Derive every metric again from current history, replacing what was stored. The ONLY way a frozen
+    /// yardstick moves.
     @discardableResult
     static func refreeze(history: [LevelMetric: [Double]]) -> [LevelMetric: Baseline] {
-        let derived = LevelBaselines.deriveAll(history: history)
-        write(derived)
-        return derived
+        var stored: [String: Stored] = [:]
+        var out: [LevelMetric: Baseline] = [:]
+        for metric in LevelMetric.allCases {
+            let h = history[metric] ?? []
+            let b = LevelBaselines.derive(metric, history: h)
+            out[metric] = b
+            if LevelBaselines.isDerivable(h) {
+                stored[metric.rawValue] = Stored(mean: b.mean, sd: b.sd, min: b.min, max: b.max)
+            }
+        }
+        write(stored)
+        return out
     }
 
-    private static func write(_ baselines: [LevelMetric: Baseline]) {
-        var payload: [String: Stored] = [:]
-        for (metric, b) in baselines {
-            payload[metric.rawValue] = Stored(mean: b.mean, sd: b.sd, min: b.min, max: b.max)
-        }
-        guard let data = try? JSONEncoder().encode(payload) else { return }
+    private static func readStored() -> [String: Stored] {
+        guard let data = UserDefaults.standard.data(forKey: key),
+              let decoded = try? JSONDecoder().decode([String: Stored].self, from: data)
+        else { return [:] }
+        return decoded
+    }
+
+    private static func write(_ stored: [String: Stored]) {
+        guard let data = try? JSONEncoder().encode(stored) else { return }
         UserDefaults.standard.set(data, forKey: key)
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: frozenAtKey)
     }

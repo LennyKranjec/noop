@@ -323,11 +323,20 @@ struct LevelTimelineSheetView: View {
 
     /// The y pixel for a level, on the plot's own inset — the same inset the line is drawn with, so a
     /// rule and the curve cannot sit at different heights for the same number.
+    /// The plotted domain: at least 0–100, widened to whatever the span actually reached, because the
+    /// level has no ceiling or floor any more and a clamped axis would flatten the best days onto the
+    /// top rule.
+    private var domain: (lo: Double, hi: Double) {
+        let levels = model.history.map(\.level)
+        return (Swift.min(0, levels.min() ?? 0), Swift.max(100, levels.max() ?? 100))
+    }
+
     private func yFor(_ value: Double, in height: CGFloat) -> CGFloat {
         let inset: CGFloat = 6
         let usable = Swift.max(height - inset * 2, 1)
-        let clamped = Swift.min(Swift.max(value, 0), 100)
-        return inset + (1 - CGFloat(clamped / 100)) * usable
+        let d = domain
+        let t = (value - d.lo) / Swift.max(d.hi - d.lo, 1)
+        return inset + (1 - CGFloat(t)) * usable
     }
 
     private func placeholder(_ text: String) -> some View {
@@ -367,6 +376,12 @@ private struct PartSparkView: View {
 
     private var values: [Double] { history.compactMap { $0.parts[part] } }
 
+    /// At least 0–100, widened to what the part actually reached — a part has no ceiling any more.
+    private var partDomain: (lo: Double, hi: Double) {
+        let all = values + (best.map { [$0] } ?? [])
+        return (Swift.min(0, all.min() ?? 0), Swift.max(100, all.max() ?? 100))
+    }
+
     var body: some View {
         HStack(spacing: 10) {
             HStack(spacing: 5) {
@@ -389,12 +404,12 @@ private struct PartSparkView: View {
                                 .fill(radarBestGold.opacity(0.55))
                                 .frame(height: 1)
                                 .position(x: geo.size.width / 2,
-                                          y: (1 - CGFloat(min(max(best, 0), 100) / 100)) * geo.size.height)
+                                          y: (1 - CGFloat((best - partDomain.lo) / max(partDomain.hi - partDomain.lo, 1))) * geo.size.height)
                         }
                         Path { path in
                             for (i, v) in values.enumerated() {
                                 let x = geo.size.width * CGFloat(i) / CGFloat(Swift.max(values.count - 1, 1))
-                                let y = (1 - CGFloat(min(max(v, 0), 100) / 100)) * geo.size.height
+                                let y = (1 - CGFloat((v - partDomain.lo) / max(partDomain.hi - partDomain.lo, 1))) * geo.size.height
                                 if i == 0 { path.move(to: CGPoint(x: x, y: y)) }
                                 else { path.addLine(to: CGPoint(x: x, y: y)) }
                             }

@@ -71,7 +71,7 @@ enum LevelDayFreeze {
 
     /// v1 of the stored shape. Bumped if `FrozenLevel` changes, so an old record is recomputed rather
     /// than half-decoded.
-    private static let key = "level.frozenDay.v1"
+    private static let key = "level.frozenDay.v2"
 
     /// The day whose level is current at `now`: today from 06:40, yesterday before it.
     static func levelDay(now: Date = Date(), calendar: Calendar = .current) -> Date {

@@ -8,7 +8,7 @@ import StrandDesign
 //
 // THE THREE CIRCLES ARE THE LEVEL'S OWN WINDOW. They are not a streak — a streak breaks and shames, and
 // this is a rolling three days: the oldest circle empties as it falls past the third, which is exactly
-// the figure `LevelEngine.focus` multiplies the calm score by. What is on screen IS the input, so the
+// part of what `LevelEngine.focus` reads — though the level itself now counts the minutes of the unbroken daily run. What is on screen IS the input, so the
 // wearer can see why their focus score moved rather than being told.
 //
 // THE TIMER MEASURES, IT DOES NOT COUNT DOWN. There is no target length here and inventing one would be

@@ -2,85 +2,101 @@ import Foundation
 
 // LevelEngine.swift — the level.
 //
-// Swift twin of the Android `com.noop.analytics.LevelEngine` (the cross-platform parity contract):
-// same weights, same clipping, same decay, same redistribution, so the two platforms cannot disagree
-// about a wearer's level.
+// iOS lane. The Android `LevelEngine` is unchanged and no longer matches this one: on iOS the level was
+// rebuilt to have NO CEILING, at the wearer's request.
 //
-// One number, 0–100, for how the wearer is doing. It replaced an XP system entirely: XP was a
-// placeholder that measured nothing, and a level derived from the body's own metrics is the thing that
-// was always meant to be there.
+// WHAT 100 MEANS. Every input is scored against the wearer's own frozen baseline: 50 is their average
+// day, 100 is their own 95th-percentile day in the good direction (see `Baseline.score`). A day on which
+// every part sits at its own 95th percentile, with no step penalty, is a level of 100. Beyond that the
+// level keeps rising — nothing is clipped, anywhere — and a bad enough day falls below 0. The only
+// ceiling left is the body's.
 //
-// EVERY INPUT IS MEASURED. Nothing is awarded for using the app, and nothing is invented when a metric
-// is missing — a component with no data is EXCLUDED and its weight redistributed over the ones that
-// do, so a wearer with no VO2max reading is scored on what was actually recorded rather than against a
-// guess. `coverage` says how much of the weight was real.
+// NO BOUNDED PROXIES. A score that is itself a percentage has a ceiling baked in: a sleep score cannot
+// pass 100 %, a stress score cannot fall below 0, three days of meditation cannot become four. So the
+// parts are built from the measured quantities underneath, which only biology bounds:
 //
-// NORMALISED AGAINST THE WEARER, AND THEN FROZEN. Each raw metric becomes a z-score against that
-// wearer's own mean and spread — an HRV of 65 ms is excellent for one person and unremarkable for
-// another, and a fixed table would be scoring them against a stranger. But the scale is derived ONCE
-// and never moves: see `LevelBaselines` for the full argument and its cost.
+//   · SLEEP  — deep + REM minutes (0.60), HRV through the night (0.25), and how far bedtime and wake
+//              time moved against the night before (0.15, lower is better).
+//   · HEART  — HRV (0.5) and resting heart rate (0.5, lower is better).
+//   · LUNGS  — VO₂max (0.6) and respiratory rate (0.4, lower is better).
+//   · MUSCLE — the last three sessions' volume load, weighted by how recent they were.
+//   · FOCUS  — daytime calm, the RMSSD of the still waking hours (0.5), and meditation (0.5).
 //
-// STEPS ARE A PENALTY, NOT A COMPONENT. At or above `stepsFloor` they add nothing, and below it they
-// scale the whole score down. An earlier draft also scored them, which put a 72-point cliff between
-// 5,999 and 6,000 steps; there is no score curve here, so there is no cliff.
+// MEDITATION IS THE ONE EXCEPTION, AND THE EXCEPTION IS DELIBERATE. It has no biological ceiling — an
+// hour a day would simply out-score everything else — so it is not scored against a baseline at all.
+// It is the minutes meditated over the UNBROKEN run of consecutive days, approaching 100 along
+// 100 × (1 − e^(−minutes / τ)). A single missed day resets the run to zero, which is what makes the
+// daily habit the point rather than the minutes: ten minutes a day for a month is worth far more than
+// two hours once.
+//
+// EVERY INPUT IS MEASURED. A component with no data is EXCLUDED and its weight redistributed over the
+// ones that do; inside a part, a missing sub-metric is redistributed the same way. `coverage` says how
+// much of the weight was real.
+//
+// STEPS ARE A PENALTY, NOT A COMPONENT. At or above `stepsFloor` they add nothing; below it they scale
+// the whole level down, by at most `stepsMaxPenalty`.
 
 /// Everything the level is computed from, already extracted from the stores.
 ///
-/// Three-day figures are arrays so the engine can average them itself and report how many days it
-/// actually had — a "3-day mean" over one day is not the same claim, and the UI says so.
+/// Three-day figures are arrays, newest last; the engine averages the last three it is given.
 public struct LevelInputs: Equatable, Sendable {
-    /// Sleep score 0–100, newest last, up to 3 entries.
-    public var sleepScores: [Double]
-    /// Sleep consistency 0–100, newest last, up to 3 entries.
-    public var consistencyScores: [Double]
+    /// Deep + REM minutes per night.
+    public var restorativeMin: [Double]
+    /// HRV through the night, per night.
+    public var sleepHrv: [Double]
+    /// Minutes bedtime and wake time moved against the night before, per night (mean of the two ends).
+    public var regularityMin: [Double]
     public var hrv: Double?
     public var rhr: Double?
     public var vo2max: Double?
     public var respRate: Double?
     /// Recent training sessions as (raw volume load, days ago). Only the last 3 are read.
     public var muscleSessions: [(load: Double, daysAgo: Int)]
-    /// Stress 0–100, newest last, up to 3 entries.
-    public var stressScores: [Double]
-    /// Days with a logged meditation in the last three, 0–3.
-    public var meditationDays: Int
-    /// Today's step count. Nil when steps are not being recorded at all.
+    /// Daytime calm: mean RMSSD over the still, scored waking hours, per day.
+    public var daytimeRmssd: [Double]
+    /// Minutes meditated across the unbroken run of consecutive days ending on the scored day.
+    public var meditationStreakMin: Double
+    /// The day's step count. Nil when steps are not being recorded at all.
     public var stepsToday: Int?
 
     public init(
-        sleepScores: [Double] = [],
-        consistencyScores: [Double] = [],
+        restorativeMin: [Double] = [],
+        sleepHrv: [Double] = [],
+        regularityMin: [Double] = [],
         hrv: Double? = nil,
         rhr: Double? = nil,
         vo2max: Double? = nil,
         respRate: Double? = nil,
         muscleSessions: [(load: Double, daysAgo: Int)] = [],
-        stressScores: [Double] = [],
-        meditationDays: Int = 0,
+        daytimeRmssd: [Double] = [],
+        meditationStreakMin: Double = 0,
         stepsToday: Int? = nil
     ) {
-        self.sleepScores = sleepScores
-        self.consistencyScores = consistencyScores
+        self.restorativeMin = restorativeMin
+        self.sleepHrv = sleepHrv
+        self.regularityMin = regularityMin
         self.hrv = hrv
         self.rhr = rhr
         self.vo2max = vo2max
         self.respRate = respRate
         self.muscleSessions = muscleSessions
-        self.stressScores = stressScores
-        self.meditationDays = meditationDays
+        self.daytimeRmssd = daytimeRmssd
+        self.meditationStreakMin = meditationStreakMin
         self.stepsToday = stepsToday
     }
 
     public static func == (lhs: LevelInputs, rhs: LevelInputs) -> Bool {
-        lhs.sleepScores == rhs.sleepScores
-            && lhs.consistencyScores == rhs.consistencyScores
+        lhs.restorativeMin == rhs.restorativeMin
+            && lhs.sleepHrv == rhs.sleepHrv
+            && lhs.regularityMin == rhs.regularityMin
             && lhs.hrv == rhs.hrv
             && lhs.rhr == rhs.rhr
             && lhs.vo2max == rhs.vo2max
             && lhs.respRate == rhs.respRate
             && lhs.muscleSessions.map(\.load) == rhs.muscleSessions.map(\.load)
             && lhs.muscleSessions.map(\.daysAgo) == rhs.muscleSessions.map(\.daysAgo)
-            && lhs.stressScores == rhs.stressScores
-            && lhs.meditationDays == rhs.meditationDays
+            && lhs.daytimeRmssd == rhs.daytimeRmssd
+            && lhs.meditationStreakMin == rhs.meditationStreakMin
             && lhs.stepsToday == rhs.stepsToday
     }
 }
@@ -104,10 +120,10 @@ public enum LevelPart: String, CaseIterable, Sendable, Codable {
     }
 }
 
-/// One weighted part of the level, and how much room it has left.
+/// One weighted part of the level.
 public struct LevelComponent: Equatable, Sendable {
     public let part: LevelPart
-    /// 0–100, or nil when there was no data for it.
+    /// Unbounded: 50 is the wearer's average, 100 their own 95th percentile. Nil when there was no data.
     public let score: Double?
     /// The weight it carried in THIS calculation, after redistribution. Zero when it had no data.
     public let effectiveWeight: Double
@@ -118,10 +134,12 @@ public struct LevelComponent: Equatable, Sendable {
         self.effectiveWeight = effectiveWeight
     }
 
-    /// Points of final level that would be gained by taking this component to 100.
-    public var headroom: Double { score.map { (100 - $0) * effectiveWeight } ?? 0 }
+    /// Points of level between today's score and the wearer's own 95th-percentile (100) for this part.
+    /// Zero once the part is at or above it — past that there is still more to gain, but no longer a
+    /// gap to close.
+    public var headroom: Double { score.map { Swift.max(0, 100 - $0) * effectiveWeight } ?? 0 }
 
-    /// Points of final level this component currently contributes.
+    /// Points of level this component currently contributes.
     public var contribution: Double { (score ?? 0) * effectiveWeight }
 }
 
@@ -132,18 +150,12 @@ public struct LevelBreakdown: Equatable, Sendable {
     public let raw: Double
     /// The multiplier steps applied, 1.0 when at or above the floor or not recorded.
     public let stepPenalty: Double
-    /// The level itself, 0–100.
+    /// The level itself. Unbounded.
     public let level: Double
     /// How much of the total weight had data behind it, 0–1.
     public let coverage: Double
 
-    public init(
-        components: [LevelComponent],
-        raw: Double,
-        stepPenalty: Double,
-        level: Double,
-        coverage: Double
-    ) {
+    public init(components: [LevelComponent], raw: Double, stepPenalty: Double, level: Double, coverage: Double) {
         self.components = components
         self.raw = raw
         self.stepPenalty = stepPenalty
@@ -151,15 +163,8 @@ public struct LevelBreakdown: Equatable, Sendable {
         self.coverage = coverage
     }
 
-    /// The components most worth improving, best first.
-    ///
-    /// Ranked by HEADROOM — weight times the distance to 100 — not by how low the score is. A lungs
-    /// score of 20 is a worse number than a sleep score of 60, but at a weight of 0.07 against 0.30
-    /// fixing sleep is worth more than twice as much level. Ranking by the low score would keep
-    /// pointing at the metric that matters least.
-    ///
-    /// Sorted STABLY: Swift's `sorted(by:)` gives no stability guarantee while Kotlin's
-    /// `sortedByDescending` does, so ties break on the original index to keep the platforms in step.
+    /// The components most worth improving, best first: ranked by HEADROOM (weight × distance to the
+    /// wearer's own 100), stable on ties.
     public func levers() -> [LevelComponent] {
         components
             .enumerated()
@@ -181,70 +186,94 @@ public enum LevelEngine {
     /// The most the step penalty can take away, at zero steps.
     public static let stepsMaxPenalty: Double = 0.15
 
-    /// z is clipped to this many SDs before scaling, so one freak reading cannot dominate.
-    public static let zClip: Double = 3
-
     /// How fast an older training session stops counting, per day.
     public static let muscleDecay: Double = 0.3
 
-    /// Meditation's share of the focus score: 0.5 with none, 1.01 with three days.
-    public static let meditationBonusPerDay: Double = 0.17
-
-    public static func z(_ value: Double, _ baseline: Baseline) -> Double {
-        let raw = (value - baseline.mean) / baseline.safeSd
-        return Swift.min(Swift.max(raw, -zClip), zClip)
-    }
-
-    public static func toScale(_ z: Double) -> Double {
-        Swift.min(Swift.max(50 + 25 * z, 0), 100)
-    }
-
-    /// Sleep: mostly the score itself, with consistency as a modifier.
+    /// The meditation curve's time constant, in minutes of an unbroken daily run.
     ///
-    /// Both are already 0–100 and are used RAW, not z-scored — the metrics that get normalised are the
-    /// ones with no natural scale, and a sleep score already is one.
-    public static func sleep(scores: [Double], consistency: [Double]) -> Double? {
-        let s = Array(scores.suffix(3))
-        guard !s.isEmpty else { return nil }
-        let c = Array(consistency.suffix(3))
-        let sMean = s.reduce(0, +) / Double(s.count)
-        // Consistency missing is not consistency zero: with no reading, sleep is scored on its score
-        // alone rather than being marked down for a measurement that was never taken.
-        guard !c.isEmpty else { return sMean }
-        return 0.8 * sMean + 0.2 * (c.reduce(0, +) / Double(c.count))
+    /// 100 minutes: ten minutes a day reaches 50 after a week, 95 after a month; twenty a day reaches
+    /// 94 after two weeks. A single long session on a broken run cannot get there.
+    public static let meditationTauMin: Double = 100
+
+    /// The shares inside each part.
+    public static let sleepShares = (restorative: 0.60, hrv: 0.25, regularity: 0.15)
+    public static let heartShares = (hrv: 0.5, rhr: 0.5)
+    public static let lungsShares = (vo2max: 0.6, respRate: 0.4)
+    public static let focusShares = (calm: 0.5, meditation: 0.5)
+
+    /// The mean of the last three values, or nil when there are none.
+    static func mean3(_ xs: [Double]) -> Double? {
+        let s = Array(xs.filter(\.isFinite).suffix(3))
+        return s.isEmpty ? nil : s.reduce(0, +) / Double(s.count)
     }
 
-    /// Heart: HRV above baseline and RHR below it, as one figure.
-    public static func heart(hrv: Double?, rhr: Double?, baselines: [LevelMetric: Baseline]) -> Double? {
-        guard let hrv, let rhr,
-              let hrvBase = baselines[.hrv], let rhrBase = baselines[.rhr] else { return nil }
-        return toScale(z(hrv, hrvBase) - z(rhr, rhrBase))
+    /// Weighted average over the sub-scores that are present, their shares re-normalised.
+    static func blend(_ parts: [(score: Double?, share: Double)]) -> Double? {
+        let present = parts.compactMap { p in p.score.map { ($0, p.share) } }
+        let total = present.reduce(0) { $0 + $1.1 }
+        guard total > 0 else { return nil }
+        return present.reduce(0) { $0 + $1.0 * $1.1 } / total
     }
 
-    /// Lungs: VO2max, plus a slow respiratory rate.
-    public static func lungs(vo2max: Double?, respRate: Double?, baselines: [LevelMetric: Baseline]) -> Double? {
-        if vo2max == nil && respRate == nil { return nil }
-        let sVo2 = vo2max.flatMap { v in baselines[.vo2max].map { toScale(z(v, $0)) } }
-        // Inverted: a HIGH respiratory rate is the bad direction, so its scale is flipped.
-        let sRr = respRate.flatMap { r in baselines[.respRate].map { 100 - toScale(z(r, $0)) } }
-        switch (sVo2, sRr) {
-        case let (v?, r?): return 0.6 * v + 0.4 * r
-        case let (v?, nil): return v
-        case let (nil, r?): return r
-        default: return nil
-        }
+    static func scored(_ value: Double?, _ metric: LevelMetric, _ baselines: [LevelMetric: Baseline],
+                       higherIsBetter: Bool) -> Double? {
+        guard let value, let b = baselines[metric] ?? LevelBaselines.table[metric] else { return nil }
+        return b.score(value, higherIsBetter: higherIsBetter)
     }
 
-    /// Muscle: the last three sessions, weighted so today's counts most.
-    ///
-    /// Exponential decay rather than a flat mean, because a hard session four days ago is not the same
-    /// evidence of current training load as one this morning.
-    ///
-    /// STANDARDISED BY RANGE, NOT BY DEVIATION. The other metrics are z-scored against a mean, which
-    /// asks "how unusual is this for you". Volume load has no meaningful centre to deviate from — a
-    /// zero is a rest day, not an abnormal reading, and half the distribution sits at or near it. The
-    /// frozen min and max answer the question that does apply: where does this session sit between the
-    /// lightest and heaviest the wearer actually does.
+    /// The meditation sub-score: 100 × (1 − e^(−minutes / τ)) over an unbroken daily run.
+    public static func meditationScore(streakMinutes: Double) -> Double {
+        100 * (1 - exp(-Swift.max(streakMinutes, 0) / meditationTauMin))
+    }
+
+    // MARK: - Sub-scores, exposed for the drivers and the coach
+
+    public static func sleepSubScores(_ i: LevelInputs, _ b: [LevelMetric: Baseline]) -> [(LevelDriver, Double?, Double)] {
+        [
+            (.restorativeSleep, scored(mean3(i.restorativeMin), .restorativeMin, b, higherIsBetter: true), sleepShares.restorative),
+            (.sleepHrv, scored(mean3(i.sleepHrv), .hrv, b, higherIsBetter: true), sleepShares.hrv),
+            (.sleepRegularity, scored(mean3(i.regularityMin), .sleepRegularityMin, b, higherIsBetter: false), sleepShares.regularity),
+        ]
+    }
+
+    public static func heartSubScores(_ i: LevelInputs, _ b: [LevelMetric: Baseline]) -> [(LevelDriver, Double?, Double)] {
+        [
+            (.hrv, scored(i.hrv, .hrv, b, higherIsBetter: true), heartShares.hrv),
+            (.rhr, scored(i.rhr, .rhr, b, higherIsBetter: false), heartShares.rhr),
+        ]
+    }
+
+    public static func lungsSubScores(_ i: LevelInputs, _ b: [LevelMetric: Baseline]) -> [(LevelDriver, Double?, Double)] {
+        [
+            (.vo2max, scored(i.vo2max, .vo2max, b, higherIsBetter: true), lungsShares.vo2max),
+            (.respRate, scored(i.respRate, .respRate, b, higherIsBetter: false), lungsShares.respRate),
+        ]
+    }
+
+    public static func focusSubScores(_ i: LevelInputs, _ b: [LevelMetric: Baseline]) -> [(LevelDriver, Double?, Double)] {
+        [
+            (.daytimeCalm, scored(mean3(i.daytimeRmssd), .daytimeRmssd, b, higherIsBetter: true), focusShares.calm),
+            // Always present: not meditating is a measured zero, not a missing reading.
+            (.meditation, meditationScore(streakMinutes: i.meditationStreakMin), focusShares.meditation),
+        ]
+    }
+
+    // MARK: - Parts
+
+    public static func sleep(_ i: LevelInputs, _ b: [LevelMetric: Baseline]) -> Double? {
+        blend(sleepSubScores(i, b).map { ($0.1, $0.2) })
+    }
+
+    public static func heart(_ i: LevelInputs, _ b: [LevelMetric: Baseline]) -> Double? {
+        blend(heartSubScores(i, b).map { ($0.1, $0.2) })
+    }
+
+    public static func lungs(_ i: LevelInputs, _ b: [LevelMetric: Baseline]) -> Double? {
+        blend(lungsSubScores(i, b).map { ($0.1, $0.2) })
+    }
+
+    /// The last three sessions' volume load, each scored against the wearer's baseline, weighted by
+    /// e^(−decay × days ago).
     public static func muscle(sessions: [(load: Double, daysAgo: Int)], baseline: Baseline) -> Double? {
         let recent = Array(sessions.suffix(3))
         guard !recent.isEmpty else { return nil }
@@ -252,51 +281,35 @@ public enum LevelEngine {
         var den: Double = 0
         for session in recent {
             let w = exp(-muscleDecay * Double(session.daysAgo))
-            num += baseline.position(session.load) * w
+            num += baseline.score(session.load, higherIsBetter: true) * w
             den += w
         }
         return den > 0 ? num / den : nil
     }
 
-    /// Focus: low stress, lifted by having meditated.
-    ///
-    /// The bonus runs 0.5 to 1.01, so three days of meditation roughly doubles the score a calm day
-    /// earns.
-    public static func focus(stressScores: [Double], meditationDays: Int) -> Double? {
-        let s = Array(stressScores.suffix(3))
-        guard !s.isEmpty else { return nil }
-        let days = Swift.min(Swift.max(meditationDays, 0), 3)
-        let bonus = 0.5 + meditationBonusPerDay * Double(days)
-        let value = (100 - (s.reduce(0, +) / Double(s.count))) * bonus
-        return Swift.min(Swift.max(value, 0), 100)
+    public static func focus(_ i: LevelInputs, _ b: [LevelMetric: Baseline]) -> Double? {
+        blend(focusSubScores(i, b).map { ($0.1, $0.2) })
     }
 
-    /// What steps do to the score.
-    ///
-    /// A multiplier, never a component. Nil steps means steps are not being recorded, which must not be
-    /// punished as a still day — the wearer cannot fix a sensor they do not have.
+    /// What steps do to the score. Nil steps is "not recorded", which must not be punished.
     public static func stepPenalty(_ steps: Int?) -> Double {
         guard let steps, steps < stepsFloor else { return 1 }
         let shortfall = Double(stepsFloor - steps) / Double(stepsFloor)
         return Swift.max(1 - stepsMaxPenalty * shortfall, 1 - stepsMaxPenalty)
     }
 
-    /// The level.
-    ///
-    /// Weights are redistributed over the components that have data, so a missing VO2max does not drag
-    /// the level down as if lungs scored zero. With NOTHING measured the level is nil rather than 0: a
-    /// zero would read as "you are in terrible shape" when it means "nothing was recorded".
+    /// The level. Weights redistributed over the parts that have data; nothing clamped.
     public static func compute(
         inputs: LevelInputs,
         baselines: [LevelMetric: Baseline] = LevelBaselines.table
     ) -> LevelBreakdown? {
         let muscleBaseline = baselines[.muscleLoad] ?? LevelBaselines.table[.muscleLoad]!
         let scores: [LevelPart: Double?] = [
-            .sleep: sleep(scores: inputs.sleepScores, consistency: inputs.consistencyScores),
-            .heart: heart(hrv: inputs.hrv, rhr: inputs.rhr, baselines: baselines),
-            .lungs: lungs(vo2max: inputs.vo2max, respRate: inputs.respRate, baselines: baselines),
+            .sleep: sleep(inputs, baselines),
+            .heart: heart(inputs, baselines),
+            .lungs: lungs(inputs, baselines),
             .muscle: muscle(sessions: inputs.muscleSessions, baseline: muscleBaseline),
-            .focus: focus(stressScores: inputs.stressScores, meditationDays: inputs.meditationDays),
+            .focus: focus(inputs, baselines),
         ]
         let presentWeight = LevelPart.allCases.reduce(0.0) { acc, part in
             acc + ((scores[part] ?? nil) != nil ? part.weight : 0)
@@ -305,20 +318,12 @@ public enum LevelEngine {
 
         let components = LevelPart.allCases.map { part -> LevelComponent in
             let score = scores[part] ?? nil
-            return LevelComponent(
-                part: part,
-                score: score,
-                effectiveWeight: score != nil ? part.weight / presentWeight : 0
-            )
+            return LevelComponent(part: part, score: score,
+                                  effectiveWeight: score != nil ? part.weight / presentWeight : 0)
         }
         let raw = components.reduce(0) { $0 + $1.contribution }
         let penalty = stepPenalty(inputs.stepsToday)
-        return LevelBreakdown(
-            components: components,
-            raw: raw,
-            stepPenalty: penalty,
-            level: Swift.min(Swift.max(raw * penalty, 0), 100),
-            coverage: presentWeight
-        )
+        return LevelBreakdown(components: components, raw: raw, stepPenalty: penalty,
+                              level: raw * penalty, coverage: presentWeight)
     }
 }

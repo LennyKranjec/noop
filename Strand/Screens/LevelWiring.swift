@@ -34,14 +34,16 @@ struct LevelPoint: Equatable, Sendable {
 
 /// Every per-day series the level needs, read once over a whole span.
 struct LevelSeries {
-    /// Stress 0–100 by day.
-    let stress: [String: Double]
     /// VO2max estimates by day, oldest first; the newest at-or-before a day wins.
     let vo2max: [(day: String, value: Double)]
     /// Total muscle volume load by day, summed across groups.
     let muscleByDay: [String: Double]
     /// Minutes meditated by day.
     let meditation: [String: Double]
+    /// When each night began and ended, keyed by the day it ended on.
+    var sleepTimings: [String: SleepTiming] = [:]
+    /// Daytime calm (mean RMSSD over the still, scored waking hours) by day.
+    var daytimeRmssd: [String: Double] = [:]
 
     /// The newest VO2max at or before `day`, or nil when none was recorded by then.
     func vo2maxAsOf(_ day: String) -> Double? {
@@ -58,28 +60,43 @@ struct LevelSeries {
             guard ago >= 0, ago <= windowDays else { continue }
             out.append((load: load, daysAgo: ago))
         }
-        // Oldest first, matching the Android lane: the engine reads the LAST three.
         return out.sorted { $0.daysAgo > $1.daysAgo }
     }
 
-    /// Days with a meditation in the three ending `asOf`.
-    func meditationDays(asOf: String, calendar: Calendar) -> Int {
-        guard let asOfDate = LevelWiring.date(from: asOf, calendar: calendar) else { return 0 }
-        var count = 0
-        for back in 0..<3 {
-            guard let date = calendar.date(byAdding: .day, value: -back, to: asOfDate) else { continue }
-            if (meditation[LevelWiring.key(from: date, calendar: calendar)] ?? 0) > 0 { count += 1 }
+    /// Minutes meditated over the UNBROKEN run of consecutive days ending on `asOf`. A day without
+    /// meditation ends the run, which is what makes the daily habit the point.
+    func meditationStreakMinutes(asOf: String, calendar: Calendar) -> Double {
+        guard var cursor = LevelWiring.date(from: asOf, calendar: calendar) else { return 0 }
+        var total = 0.0
+        for _ in 0..<400 {
+            guard let minutes = meditation[LevelWiring.key(from: cursor, calendar: calendar)], minutes > 0
+            else { break }
+            total += minutes
+            guard let previous = calendar.date(byAdding: .day, value: -1, to: cursor) else { break }
+            cursor = previous
         }
-        return count
+        return total
     }
 
-    /// The three stress readings ending `asOf`, oldest first.
-    func stressWindow(asOf: String, calendar: Calendar) -> [Double] {
+    /// How far bedtime and wake time moved against the night before, in minutes (the mean of the two
+    /// ends), for the night that ended on `day`. Nil unless both nights have a timing.
+    func regularityMinutes(day: String, calendar: Calendar) -> Double? {
+        guard let tonight = sleepTimings[day],
+              let date = LevelWiring.date(from: day, calendar: calendar),
+              let prev = calendar.date(byAdding: .day, value: -1, to: date),
+              let lastNight = sleepTimings[LevelWiring.key(from: prev, calendar: calendar)]
+        else { return nil }
+        return (Streaks.clockDistance(tonight.onsetMinute, lastNight.onsetMinute)
+                + Streaks.clockDistance(tonight.wakeMinute, lastNight.wakeMinute)) / 2
+    }
+
+    /// The daytime-calm readings of the three days ending `asOf`, oldest first.
+    func daytimeRmssdWindow(asOf: String, calendar: Calendar) -> [Double] {
         guard let asOfDate = LevelWiring.date(from: asOf, calendar: calendar) else { return [] }
         var out: [Double] = []
         for back in stride(from: 2, through: 0, by: -1) {
             guard let date = calendar.date(byAdding: .day, value: -back, to: asOfDate) else { continue }
-            if let v = stress[LevelWiring.key(from: date, calendar: calendar)] { out.append(v) }
+            if let v = daytimeRmssd[LevelWiring.key(from: date, calendar: calendar)] { out.append(v) }
         }
         return out
     }
@@ -87,19 +104,35 @@ struct LevelSeries {
 
 enum LevelWiring {
 
-    /// The stress series is stored 0–3 (WHOOP's own scale); the formula wants 0–100.
-    static let stressSeriesMax: Double = 3
-
     /// The window the muscle term reads sessions from.
     static let muscleWindowDays = 7
 
-    /// How many nights the sleep-consistency figure is measured over.
-    static let consistencyWindowNights = 28
+    static func baselineHistory(
+        days: [DailyMetric],
+        series: LevelSeries,
+        calendar: Calendar = .current
+    ) -> [LevelMetric: [Double]] {
+        [
+            .restorativeMin: days.compactMap(restorative),
+            .sleepRegularityMin: days.compactMap { series.regularityMinutes(day: $0.day, calendar: calendar) },
+            .hrv: days.compactMap(\.avgHrv),
+            .rhr: days.compactMap { $0.restingHr.map(Double.init) },
+            .vo2max: series.vo2max.map(\.value),
+            .respRate: days.compactMap(\.respRateBpm),
+            .muscleLoad: Array(series.muscleByDay.values),
+            .daytimeRmssd: Array(series.daytimeRmssd.values),
+        ]
+    }
+
+    /// Deep + REM minutes for a night, or nil when the night was not staged.
+    static func restorative(_ d: DailyMetric) -> Double? {
+        switch (d.deepMin, d.remMin) {
+        case let (deep?, rem?): return deep + rem
+        default: return nil
+        }
+    }
 
     /// Build the engine's inputs as of `asOf`, from prefetched series.
-    ///
-    /// `days` is the merged daily history, oldest first. Passing it in rather than reading it here lets
-    /// one read serve today, three days ago and a month ago.
     static func inputs(
         days: [DailyMetric],
         asOf: String,
@@ -108,30 +141,18 @@ enum LevelWiring {
     ) -> LevelInputs {
         let upTo = days.filter { $0.day <= asOf }
         let window = Array(upTo.suffix(3))
-
-        // Sleep consistency needs a longer run than the three days it is averaged over: it IS the
-        // spread of the last few weeks, so it is computed per day from the 28 nights before it.
-        var consistency: [Double] = []
-        for day in window {
-            guard let idx = upTo.firstIndex(where: { $0.day == day.day }) else { continue }
-            let from = Swift.max(0, idx - (consistencyWindowNights - 1))
-            let nights = upTo[from...idx].compactMap { $0.totalSleepMin.map { $0 / 60 } }
-            if let c = VitalityEngine.sleepConsistency(nightlyHours: nights) {
-                consistency.append(c * 100)
-            }
-        }
-
         let today = upTo.last
         return LevelInputs(
-            sleepScores: window.compactMap { AnalyticsEngine.Rest.composite(daily: $0) },
-            consistencyScores: consistency,
+            restorativeMin: window.compactMap(restorative),
+            sleepHrv: window.compactMap(\.avgHrv),
+            regularityMin: window.compactMap { series.regularityMinutes(day: $0.day, calendar: calendar) },
             hrv: today?.avgHrv,
             rhr: today?.restingHr.map(Double.init),
             vo2max: series.vo2maxAsOf(asOf),
             respRate: today?.respRateBpm,
             muscleSessions: series.muscleSessions(asOf: asOf, windowDays: muscleWindowDays, calendar: calendar),
-            stressScores: series.stressWindow(asOf: asOf, calendar: calendar),
-            meditationDays: series.meditationDays(asOf: asOf, calendar: calendar),
+            daytimeRmssd: series.daytimeRmssdWindow(asOf: asOf, calendar: calendar),
+            meditationStreakMin: series.meditationStreakMinutes(asOf: asOf, calendar: calendar),
             stepsToday: today?.steps
         )
     }
@@ -156,8 +177,8 @@ enum LevelWiring {
         let previous = self.inputs(days: days, asOf: key(from: previousDate, calendar: calendar),
                                    series: series, calendar: calendar)
         inputs.stepsToday = previous.stepsToday
-        inputs.stressScores = previous.stressScores
-        inputs.meditationDays = previous.meditationDays
+        inputs.daytimeRmssd = previous.daytimeRmssd
+        inputs.meditationStreakMin = previous.meditationStreakMin
         inputs.muscleSessions = previous.muscleSessions
         return inputs
     }
@@ -187,31 +208,4 @@ enum LevelWiring {
         return formatter.date(from: key)
     }
 
-    /// The whole-history readings each baseline is derived from, ONCE.
-    ///
-    /// Everything available is used: the wider the history, the better the permanent yardstick.
-    static func baselineHistory(
-        days: [DailyMetric],
-        series: LevelSeries,
-        calendar: Calendar = .current
-    ) -> [LevelMetric: [Double]] {
-        var consistencyRun: [Double] = []
-        for i in days.indices {
-            let from = Swift.max(0, i - (consistencyWindowNights - 1))
-            let run = days[from...i].compactMap { $0.totalSleepMin.map { $0 / 60 } }
-            if let c = VitalityEngine.sleepConsistency(nightlyHours: run) {
-                consistencyRun.append(c * 100)
-            }
-        }
-        return [
-            .sleepScore: days.compactMap { AnalyticsEngine.Rest.composite(daily: $0) },
-            .sleepConsistency: consistencyRun,
-            .hrv: days.compactMap(\.avgHrv),
-            .rhr: days.compactMap { $0.restingHr.map(Double.init) },
-            .vo2max: series.vo2max.map(\.value),
-            .respRate: days.compactMap(\.respRateBpm),
-            .muscleLoad: Array(series.muscleByDay.values),
-            .stress: Array(series.stress.values),
-        ]
-    }
 }

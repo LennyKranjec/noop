@@ -1,170 +1,169 @@
 import XCTest
 @testable import StrandAnalytics
 
-/// The level, and the two things about it that are easy to get quietly wrong.
+/// The level, iOS lane: no ceiling, 50 = your average, 100 = your own 95th-percentile day.
 ///
-/// A MISSING COMPONENT MUST NOT SCORE ZERO. Weight is redistributed over the parts that have data, so a
-/// wearer with no VO2max is scored on what was recorded rather than marked down for a sensor they do
-/// not own. Every variation of getting that wrong produces a plausible, lower number that nothing on
-/// screen contradicts.
-///
-/// THE SCALE IS FROZEN, and these pin the arithmetic that rests on it: population SD, interpolated
-/// percentiles, clipped z. A one-sample disagreement with the Android lane would be permanent, because
-/// the baselines are derived once and never re-derived.
+/// What these pin:
+///   · THE SCALE. Mean → 50, the good-end percentile → 100, linear and unbounded both ways.
+///   · ALL FIVE PARTS AT THEIR OWN 100, NO STEP PENALTY, IS A LEVEL OF 100 — and more is more.
+///   · A MISSING COMPONENT IS EXCLUDED, NOT SCORED ZERO, at the part level and inside a part.
+///   · MEDITATION approaches 100 along an e-curve over an unbroken daily run, and not meditating is a
+///     measured zero.
 final class LevelEngineTests: XCTestCase {
 
-    private let baselines = LevelBaselines.table
+    /// A baseline with mean 50 and a 95th-percentile best of 100 (5th percentile 0), so scores read off
+    /// directly: 50 → 50, 100 → 100, 150 → 150.
+    private let unit = Baseline(mean: 50, sd: 30, min: 0, max: 100)
 
-    // MARK: - redistribution
+    private var allUnit: [LevelMetric: Baseline] {
+        Dictionary(uniqueKeysWithValues: LevelMetric.allCases.map { ($0, unit) })
+    }
+
+    // MARK: - the scale
+
+    func testTheMeanIsFiftyAndTheGoodEndIsAHundredWithNoCapEitherWay() {
+        XCTAssertEqual(unit.score(50, higherIsBetter: true), 50, accuracy: 1e-9)
+        XCTAssertEqual(unit.score(100, higherIsBetter: true), 100, accuracy: 1e-9)
+        XCTAssertEqual(unit.score(150, higherIsBetter: true), 150, accuracy: 1e-9)
+        XCTAssertEqual(unit.score(-50, higherIsBetter: true), -50, accuracy: 1e-9)
+    }
+
+    func testLowerIsBetterScoresAgainstTheBottomOfTheRange() {
+        // Resting HR: mean 60, 5th percentile 50. 50 bpm is your 100; 45 bpm is above it.
+        let rhr = Baseline(mean: 60, sd: 6, min: 50, max: 70)
+        XCTAssertEqual(rhr.score(60, higherIsBetter: false), 50, accuracy: 1e-9)
+        XCTAssertEqual(rhr.score(50, higherIsBetter: false), 100, accuracy: 1e-9)
+        XCTAssertEqual(rhr.score(45, higherIsBetter: false), 125, accuracy: 1e-9)
+        XCTAssertEqual(rhr.score(70, higherIsBetter: false), 0, accuracy: 1e-9)
+    }
+
+    func testADegenerateRangeStillHasASlope() {
+        let flat = Baseline(mean: 50, sd: 0, min: 50, max: 50)
+        XCTAssertTrue(flat.score(60, higherIsBetter: true).isFinite)
+        XCTAssertGreaterThan(flat.score(60, higherIsBetter: true), 50)
+    }
+
+    // MARK: - the level
+
+    private func atBest(meditationMinutes: Double = .infinity) -> LevelInputs {
+        LevelInputs(
+            restorativeMin: [100], sleepHrv: [100], regularityMin: [0],
+            hrv: 100, rhr: 0, vo2max: 100, respRate: 0,
+            muscleSessions: [(load: 100, daysAgo: 0)],
+            daytimeRmssd: [100],
+            meditationStreakMin: meditationMinutes,
+            stepsToday: 10_000)
+    }
+
+    func testEveryPartAtItsOwnHundredIsALevelOfAHundred() throws {
+        // Meditation approaches 100 but never reaches it on a finite run, so the exact-100 case is
+        // pinned with an unbounded run.
+        let b = try XCTUnwrap(LevelEngine.compute(inputs: atBest(), baselines: allUnit))
+        XCTAssertEqual(b.level, 100, accuracy: 1e-6)
+        for c in b.components { XCTAssertEqual(c.score ?? 0, 100, accuracy: 1e-6) }
+    }
+
+    func testBeyondYourBestTheLevelKeepsRising() throws {
+        var better = atBest()
+        better.hrv = 160
+        better.rhr = -30
+        let b = try XCTUnwrap(LevelEngine.compute(inputs: better, baselines: allUnit))
+        XCTAssertGreaterThan(b.level, 100)
+    }
+
+    func testABadEnoughDayGoesBelowZero() throws {
+        let awful = LevelInputs(hrv: -200, rhr: 300)
+        let b = try XCTUnwrap(LevelEngine.compute(inputs: awful, baselines: allUnit))
+        XCTAssertLessThan(b.level, 0)
+    }
 
     func testAMissingComponentIsExcludedRatherThanScoredZero() throws {
-        // Sleep alone, at 80. With redistribution the level IS 80: sleep carries the whole weight
-        // because it is the only thing measured. Scored as zeroes elsewhere it would read 24.
-        let inputs = LevelInputs(sleepScores: [80])
-        let breakdown = try XCTUnwrap(LevelEngine.compute(inputs: inputs, baselines: baselines))
-        XCTAssertEqual(breakdown.level, 80, accuracy: 1e-9)
-        XCTAssertEqual(breakdown.coverage, LevelPart.sleep.weight, accuracy: 1e-9)
+        let b = try XCTUnwrap(LevelEngine.compute(inputs: LevelInputs(hrv: 80, rhr: 20), baselines: allUnit))
+        // Heart alone at 80 — and meditation, which is always measured, at 0. Focus therefore scores 0
+        // and the level is heart and focus blended by their weights, not dragged by three empty parts.
+        let heart = 0.23 / (0.23 + 0.16)
+        XCTAssertEqual(b.level, 80 * heart, accuracy: 1e-6)
+        XCTAssertNil(b.components.first { $0.part == .sleep }?.score)
     }
 
-    func testNothingMeasuredIsNilNotZero() {
-        // A zero would read as "you are in terrible shape" when it means "nothing was recorded".
-        XCTAssertNil(LevelEngine.compute(inputs: LevelInputs(), baselines: baselines))
+    func testAMissingSubMetricIsRedistributedInsideItsPart() {
+        // Only deep+REM minutes measured: sleep IS that sub-score.
+        let s = LevelEngine.sleep(LevelInputs(restorativeMin: [75]), allUnit)
+        XCTAssertEqual(s ?? 0, 75, accuracy: 1e-9)
     }
 
-    func testEveryPartIsListedEvenWhenUnmeasured() throws {
-        let breakdown = try XCTUnwrap(LevelEngine.compute(inputs: LevelInputs(sleepScores: [50]), baselines: baselines))
-        XCTAssertEqual(breakdown.components.count, LevelPart.allCases.count)
-        let lungs = try XCTUnwrap(breakdown.components.first { $0.part == .lungs })
-        XCTAssertNil(lungs.score)
-        XCTAssertEqual(lungs.effectiveWeight, 0, accuracy: 1e-9)
+    func testTheSleepSharesAreSixtyTwentyFiveFifteen() {
+        let s = LevelEngine.sleep(LevelInputs(restorativeMin: [100], sleepHrv: [50], regularityMin: [50]), allUnit)
+        XCTAssertEqual(s ?? 0, 0.60 * 100 + 0.25 * 50 + 0.15 * 50, accuracy: 1e-9)
     }
 
-    // MARK: - the parts
+    // MARK: - meditation
 
-    func testConsistencyMissingIsNotConsistencyZero() {
-        // Scored on its own score alone, rather than marked down for a measurement never taken.
-        XCTAssertEqual(LevelEngine.sleep(scores: [70], consistency: []), 70)
-        // With a reading it is the documented 80/20 blend.
-        XCTAssertEqual(LevelEngine.sleep(scores: [70], consistency: [20]), 0.8 * 70 + 0.2 * 20)
+    func testMeditationFollowsTheECurveAndStartsAtZero() {
+        XCTAssertEqual(LevelEngine.meditationScore(streakMinutes: 0), 0, accuracy: 1e-9)
+        XCTAssertEqual(LevelEngine.meditationScore(streakMinutes: LevelEngine.meditationTauMin),
+                       100 * (1 - exp(-1)), accuracy: 1e-9)
+        XCTAssertLessThan(LevelEngine.meditationScore(streakMinutes: 10_000), 100.0001)
+        // Ten minutes a day for a month is past 95.
+        XCTAssertGreaterThan(LevelEngine.meditationScore(streakMinutes: 300), 95)
     }
 
-    func testAHighRespiratoryRateIsTheBadDirection() throws {
-        // Inverted on purpose: fast breathing is worse, and a naive scale would reward it.
-        let fast = try XCTUnwrap(LevelEngine.lungs(vo2max: nil, respRate: 22, baselines: baselines))
-        let slow = try XCTUnwrap(LevelEngine.lungs(vo2max: nil, respRate: 12, baselines: baselines))
-        XCTAssertLessThan(fast, slow)
-    }
+    // MARK: - muscle
 
-    func testTodaysSessionOutweighsAnOlderOne() throws {
-        let base = Baseline(mean: 4000, sd: 1000, min: 0, max: 8000)
-        let today = try XCTUnwrap(LevelEngine.muscle(sessions: [(load: 8000, daysAgo: 0)], baseline: base))
-        let old = try XCTUnwrap(LevelEngine.muscle(sessions: [(load: 8000, daysAgo: 4)], baseline: base))
-        // A single session is its own weighted mean whatever its age, so the DECAY shows when an old
-        // heavy day competes with a recent light one.
-        XCTAssertEqual(today, old, accuracy: 1e-9)
-        let mixed = try XCTUnwrap(
-            LevelEngine.muscle(
-                sessions: [(load: 8000, daysAgo: 4), (load: 0, daysAgo: 0)],
-                baseline: base
-            )
-        )
-        XCTAssertLessThan(mixed, 50, "today's rest should dominate a session four days old")
-    }
-
-    func testMeditationLiftsFocusAndIsCappedAtThreeDays() throws {
-        let none = try XCTUnwrap(LevelEngine.focus(stressScores: [20], meditationDays: 0))
-        let three = try XCTUnwrap(LevelEngine.focus(stressScores: [20], meditationDays: 3))
-        let ten = try XCTUnwrap(LevelEngine.focus(stressScores: [20], meditationDays: 10))
-        XCTAssertLessThan(none, three)
-        XCTAssertEqual(three, ten, accuracy: 1e-9, "the bonus is capped at three days")
+    func testRecentSessionsCountMoreThanOldOnes() throws {
+        let today = try XCTUnwrap(LevelEngine.muscle(sessions: [(load: 30, daysAgo: 4), (load: 90, daysAgo: 0)], baseline: unit))
+        let old = try XCTUnwrap(LevelEngine.muscle(sessions: [(load: 90, daysAgo: 4), (load: 30, daysAgo: 0)], baseline: unit))
+        XCTAssertGreaterThan(today, old)
     }
 
     // MARK: - the step penalty
 
     func testStepsAtOrAboveTheFloorTakeNothingAway() {
         XCTAssertEqual(LevelEngine.stepPenalty(LevelEngine.stepsFloor), 1, accuracy: 1e-9)
-        XCTAssertEqual(LevelEngine.stepPenalty(20_000), 1, accuracy: 1e-9)
-    }
-
-    func testUnrecordedStepsAreNotPunished() {
-        // The wearer cannot fix a sensor they do not have, and a still day and a missing pedometer are
-        // different statements.
         XCTAssertEqual(LevelEngine.stepPenalty(nil), 1, accuracy: 1e-9)
-    }
-
-    func testTheWorstStepPenaltyIsBounded() {
         XCTAssertEqual(LevelEngine.stepPenalty(0), 1 - LevelEngine.stepsMaxPenalty, accuracy: 1e-9)
     }
 
-    func testThereIsNoCliffAtTheFloor() {
-        // An earlier draft scored steps as a component, which put a 72-point cliff between 5,999 and
-        // 6,000. The penalty is continuous, so the step across the floor is a rounding error.
-        let below = LevelEngine.stepPenalty(LevelEngine.stepsFloor - 1)
-        let at = LevelEngine.stepPenalty(LevelEngine.stepsFloor)
-        XCTAssertEqual(below, at, accuracy: 1e-4)
+    // MARK: - levers and drivers
+
+    func testLeversRankByWhatTheyAreWorth() throws {
+        let inputs = LevelInputs(restorativeMin: [60], vo2max: 20, respRate: 50)
+        let b = try XCTUnwrap(LevelEngine.compute(inputs: inputs, baselines: allUnit))
+        // Focus (meditation 0) and sleep both have room; lungs has little weight.
+        XCTAssertNotEqual(b.levers().first?.part, .lungs)
     }
 
-    // MARK: - levers
-
-    func testLeversRankByWhatTheyAreWorthNotByTheLowestScore() throws {
-        // Lungs 20 looks worse than sleep 60, and is worth a third as much level. Ranking by the low
-        // score would keep pointing at the metric that matters least.
-        let inputs = LevelInputs(
-            sleepScores: [60],
-            consistencyScores: [60],
-            vo2max: 20,
-            respRate: 16
-        )
-        let breakdown = try XCTUnwrap(LevelEngine.compute(inputs: inputs, baselines: baselines))
-        XCTAssertEqual(breakdown.levers().first?.part, .sleep)
+    func testTheDriverIsTheSubMetricWithTheMostRoom() {
+        let inputs = LevelInputs(restorativeMin: [95], sleepHrv: [40], regularityMin: [50])
+        // Restorative 95 → room 5 × 0.60 = 3; HRV 40 → 60 × 0.25 = 15; regularity 50 (lower is better,
+        // mean 50) → 50 × 0.15 = 7.5.
+        XCTAssertEqual(LevelDrivers.driver(for: .sleep, inputs: inputs, baselines: allUnit), .sleepHrv)
     }
 
-    func testAnUnmeasuredPartIsNeverALever() throws {
-        let breakdown = try XCTUnwrap(LevelEngine.compute(inputs: LevelInputs(sleepScores: [50]), baselines: baselines))
-        XCTAssertEqual(breakdown.levers().map(\.part), [.sleep])
+    func testPastEveryHundredTheLowestSubMetricIsStillNamed() {
+        let inputs = LevelInputs(hrv: 140, rhr: -10)
+        // HRV 140; RHR −10 on a lower-is-better scale with mean 50 and best 0 scores 110.
+        XCTAssertEqual(LevelDrivers.driver(for: .heart, inputs: inputs, baselines: allUnit), .rhr)
     }
 
-    // MARK: - the frozen scale
+    // MARK: - baselines
 
     func testTooLittleHistoryFallsBackToTheTable() {
         let thin = LevelBaselines.derive(.hrv, history: Array(repeating: 55, count: LevelBaselines.minSamples - 1))
         XCTAssertEqual(thin, LevelBaselines.table[.hrv])
     }
 
-    func testTheSpreadIsThePopulationForm() {
-        // Divide by n, not n−1. The sample form would put the two platforms a fraction apart on every
-        // score, which is exactly the drift the parity contract exists to catch.
-        let xs = Array(repeating: 40.0, count: 10) + Array(repeating: 60.0, count: 10)
-        let derived = LevelBaselines.derive(.hrv, history: xs)
-        XCTAssertEqual(derived.mean, 50, accuracy: 1e-9)
-        XCTAssertEqual(derived.sd, 10, accuracy: 1e-9)
+    func testTheRangeIsTheFifthToNinetyFifthPercentile() {
+        let xs = (0...100).map(Double.init)
+        let b = LevelBaselines.derive(.hrv, history: xs)
+        XCTAssertEqual(b.mean, 50, accuracy: 1e-9)
+        XCTAssertEqual(b.min, 5, accuracy: 1e-9)
+        XCTAssertEqual(b.max, 95, accuracy: 1e-9)
     }
 
     func testPercentilesAreInterpolatedNotNearestRank() {
-        // With the result frozen, a one-sample disagreement between platforms would be permanent.
         let sorted: [Double] = [0, 10, 20, 30, 40]
         XCTAssertEqual(LevelBaselines.percentile(sorted, 50), 20, accuracy: 1e-9)
-        XCTAssertEqual(LevelBaselines.percentile(sorted, 25), 10, accuracy: 1e-9)
         XCTAssertEqual(LevelBaselines.percentile(sorted, 10), 4, accuracy: 1e-9)
-    }
-
-    func testZIsClippedSoOneFreakReadingCannotDominate() {
-        let base = Baseline(mean: 50, sd: 10, min: 30, max: 70)
-        XCTAssertEqual(LevelEngine.z(1_000, base), LevelEngine.zClip, accuracy: 1e-9)
-        XCTAssertEqual(LevelEngine.z(-1_000, base), -LevelEngine.zClip, accuracy: 1e-9)
-    }
-
-    func testPositionClipsToTheFrozenRange() {
-        // The range is fixed; readings are not. A season past the frozen top is still 100.
-        let base = Baseline(mean: 50, sd: 10, min: 0, max: 100)
-        XCTAssertEqual(base.position(150), 100, accuracy: 1e-9)
-        XCTAssertEqual(base.position(-50), 0, accuracy: 1e-9)
-    }
-
-    func testADegenerateSpreadDoesNotDivideByZero() {
-        let flat = Baseline(mean: 50, sd: 0, min: 50, max: 50)
-        XCTAssertEqual(flat.safeSd, 1, accuracy: 1e-9)
-        XCTAssertEqual(flat.safeSpan, 1, accuracy: 1e-9)
-        XCTAssertTrue(LevelEngine.z(60, flat).isFinite)
     }
 }
