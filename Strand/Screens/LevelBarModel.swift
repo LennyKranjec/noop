@@ -104,10 +104,18 @@ final class LevelBarModel: ObservableObject {
         // The comparisons are measured from the day SHOWN, with the same inputs, so a delta compares a
         // frozen level with frozen levels rather than with live ones.
         let base = shown?.day ?? dayKey
+        /// The mean level over the `span` days before `base`, or nil when fewer than `need` scored.
+        func mean(over span: Int, need: Int) -> Double? {
+            let levels = (1...span).compactMap { shifted(base, by: -$0).flatMap { score($0).0?.level } }
+            guard levels.count >= need else { return nil }
+            return levels.reduce(0, +) / Double(levels.count)
+        }
         trend = LevelTrendSnapshot(
             now: shown?.breakdown,
             threeDaysAgo: shifted(base, by: -3).flatMap { score($0).0 },
             monthAgo: shifted(base, by: -30).flatMap { score($0).0 },
+            threeDayMean: mean(over: 3, need: 2),
+            monthMean: mean(over: 30, need: 10),
             drivers: shown?.drivers ?? [:]
         )
     }

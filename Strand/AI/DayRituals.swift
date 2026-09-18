@@ -94,9 +94,9 @@ enum DayRitual: String, CaseIterable, Identifiable, Sendable {
         case .evening:
             s += "This is the EVENING REVISIT. The day cannot be changed now, so do not prescribe "
             s += "anything for it. Under 100 words: what actually happened, what it cost, and the one "
-            s += "thing worth carrying into tomorrow. End with a single short question for them to "
-            s += "answer in their journal — something only they can tell you, not something in the "
-            s += "data.\n"
+            s += "thing worth carrying into tomorrow. Where TODAY'S JOURNAL below explains a figure, "
+            s += "say so. End with a single short question for them to answer in their journal — "
+            s += "something only they can tell you, not something in the data or already logged.\n"
         }
 
         s += "\nNo heading, no preamble, no markdown, no lists.\n\n"

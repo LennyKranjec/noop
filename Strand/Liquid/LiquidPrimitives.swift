@@ -277,6 +277,7 @@ struct LiquidVessel: View {
     var tapPassesThrough: Bool = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.noopBackgroundCovered) private var covered
     @ObservedObject private var motion = NoopMotionState.shared
     @State private var sim: LiquidSim
     @State private var splashes = 0
@@ -299,7 +300,7 @@ struct LiquidVessel: View {
         // 60fps: on the 120Hz ProMotion panel a 30fps cap updated the fluid only every 4th refresh,
         // which read as juddery slosh. Only the 3 hero gauges + HR thread run live now (the small ones
         // are static), so the higher rate is affordable and the liquid actually flows.
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { tl in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: covered)) { tl in
             let now = liquidSeconds(tl.date)
             Canvas { context, size in
                 sim.step(now: now, tilt: LiquidMotion.shared.tilt, target: value ?? 0)
@@ -337,6 +338,7 @@ struct LiquidTube: View {
     var usesCleanFill: Bool = false
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.noopBackgroundCovered) private var covered
     @ObservedObject private var motion = NoopMotionState.shared
     @State private var sim = LiquidSim(target: 0)
 
@@ -345,7 +347,7 @@ struct LiquidTube: View {
     }
 
     private var liveTube: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { tl in
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: covered)) { tl in
             let now = liquidSeconds(tl.date)
             Canvas { context, size in
                 sim.step(now: now, tilt: LiquidMotion.shared.tilt, target: frac)
@@ -381,6 +383,7 @@ struct LiquidThread: View {
     var animated: Bool = true
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.noopBackgroundCovered) private var covered
     @ObservedObject private var motion = NoopMotionState.shared
 
     var body: some View {
@@ -388,7 +391,7 @@ struct LiquidThread: View {
     }
 
     private var liveThread: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0)) { tl in   // 60fps to flow smoothly on ProMotion
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: covered)) { tl in   // 60fps to flow smoothly on ProMotion
             let now = liquidSeconds(tl.date)
             Canvas { context, size in
                 LiquidRender.thread(context, size, values: bpm, now: now, tint: tint, segments: segments)

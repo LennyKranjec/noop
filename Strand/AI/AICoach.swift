@@ -1034,9 +1034,11 @@ final class AICoachEngine: ObservableObject {
     /// NOOP's three scores (primary) and WHOOP's (secondary), per recent day.
     func threeScoresBlock() async -> String {
         func pct(_ v: Double?) -> String { v.map { "\(Int($0.rounded()))" } ?? "—" }
-        var s = "THE THREE DAILY SCORES — use NOOP's own figures FIRST. They are Charge (recovery/readiness, "
-        s += "0-100), Effort (cardiovascular load, 0-100) and Rest (sleep quality, 0-100), calculated by this "
-        s += "app. Call them Charge, Effort and Rest.\n"
+        var s = "THE THREE DAILY SCORES. NOOP's are Charge (recovery/readiness, 0-100), Effort (cardiovascular "
+        s += "load, 0-100) and Rest (sleep quality, 0-100); call them Charge, Effort and Rest. FOR SLEEP AND "
+        s += "RECOVERY, WHOOP's own figure WINS on any day WHOOP scored it: WHOOP can hold the strap overnight, "
+        s += "and NOOP's Rest and Charge for such a night are computed from too little data and are wrong. "
+        s += "Use NOOP's Charge/Rest only for days WHOOP has no recovery/sleep score. Effort: NOOP's first.\n"
         let own = await repo.noopRecentDays()
         if own.isEmpty {
             s += "NOOP's own scores: none computed for the last week.\n"
@@ -1048,8 +1050,8 @@ final class AICoachEngine: ObservableObject {
         }
         let whoop = await repo.whoopRecentDays()
         if !whoop.isEmpty {
-            s += "WHOOP's own figures (secondary reference — only where NOOP has none, and always with WHOOP's "
-            s += "names and scales: Recovery %, Strain 0-21, Sleep Score %):\n"
+            s += "WHOOP's own figures (PRIMARY for recovery and sleep on the days listed; strain only where NOOP "
+            s += "has no effort; always with WHOOP's names and scales: Recovery %, Strain 0-21, Sleep Score %):\n"
             for d in whoop.reversed() {
                 s += "  \(d.day): recovery \(pct(d.recovery)), strain "
                 s += (d.strain.map { String(format: "%.1f", $0) } ?? "—")

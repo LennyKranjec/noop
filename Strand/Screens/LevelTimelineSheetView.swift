@@ -152,7 +152,7 @@ struct LevelTimelineSheetView: View {
     private var readout: some View {
         HStack {
             if let touched {
-                Text(dayLabel(touched.day))
+                Text(scrubLabel(touched.day))
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                 Spacer()
@@ -359,10 +359,27 @@ struct LevelTimelineSheetView: View {
 
     private func dayLabel(_ key: String) -> String {
         guard let date = LevelWiring.date(from: key) else { return key }
-        let formatter = DateFormatter()
-        formatter.dateFormat = "d MMM"
-        return formatter.string(from: date)
+        return Self.axisFormatter.string(from: date)
     }
+
+    /// The day under the finger, WITH its weekday: a level read back while scrubbing is mostly asked
+    /// "was that the Monday after the long run", and a bare date makes the wearer count.
+    private func scrubLabel(_ key: String) -> String {
+        guard let date = LevelWiring.date(from: key) else { return key }
+        return Self.scrubFormatter.string(from: date)
+    }
+
+    private static let axisFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.dateFormat = "d MMM"
+        return f
+    }()
+
+    private static let scrubFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.setLocalizedDateFormatFromTemplate("EEE d MMM")
+        return f
+    }()
 }
 
 /// One part's line, at a glance.

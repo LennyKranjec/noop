@@ -126,7 +126,13 @@ enum DayRitualScheduler {
         }
         guard coach.isConfigured, coach.dataConsent else { return nil }
 
-        let block = grounding.text
+        var block = grounding.text
+        // THE EVENING READS THE JOURNAL. What the wearer logged today — the coffee at four, the drink
+        // with dinner, the late screen — is the half of the day the data cannot see, and the revisit is
+        // the one slot that is ABOUT the day as a whole. Handed over as logged, never summarised.
+        if ritual == .evening, let journal = await journalBlock(repo: repo, day: today) {
+            block += "\n\n" + journal
+        }
         guard let prose = await coach.generateOneShot(
             systemPrompt: ritual.systemPrompt(grounding: block),
             question: ritual.question)
@@ -143,6 +149,23 @@ enum DayRitualScheduler {
                                       grounding: block, dayKey: today)
         }
         return RitualResult(ritual: ritual, text: prose, quest: raised)
+    }
+
+    /// The day's own journal entries, as lines the model can cite. Nil when nothing was logged.
+    static func journalBlock(repo: Repository, day: String) async -> String? {
+        let answers = await repo.nativeJournalAnswers(day: day)
+        let numeric = await repo.nativeJournalNumeric(day: day)
+        var lines: [String] = []
+        for (question, yes) in answers.sorted(by: { $0.key < $1.key }) {
+            lines.append("- \(question): \(yes ? "yes" : "no")")
+        }
+        for (question, value) in numeric.sorted(by: { $0.key < $1.key }) {
+            let shown = value == value.rounded() ? String(Int(value)) : String(format: "%.1f", value)
+            lines.append("- \(question): \(shown)")
+        }
+        guard !lines.isEmpty else { return nil }
+        return "TODAY'S JOURNAL (logged by the wearer; connect it to the figures where it explains "
+            + "them, and never invent an entry):\n" + lines.joined(separator: "\n")
     }
 
     /// Ask for this slot's quest and offer it.

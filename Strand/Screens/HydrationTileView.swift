@@ -163,6 +163,7 @@ private struct WaterFill: View {
     let fraction: Double
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.noopBackgroundCovered) private var covered
     @ObservedObject private var motion = NoopMotionState.shared
 
     private var still: Bool { motion.poseStill(reduceMotion) }
@@ -174,7 +175,7 @@ private struct WaterFill: View {
     private var bright: Color { Color(.sRGB, red: 0.30, green: 0.71, blue: 0.96, opacity: 1) }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: still ? nil : 1.0 / 30, paused: still)) { timeline in
+        TimelineView(.animation(minimumInterval: still ? nil : 1.0 / 30, paused: still || covered)) { timeline in
             Canvas { context, size in
                 let t = still ? 0 : timeline.date.timeIntervalSinceReferenceDate
                 let clamped = min(max(fraction, 0), 1)

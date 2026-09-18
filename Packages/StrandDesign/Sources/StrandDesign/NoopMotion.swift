@@ -99,6 +99,24 @@ public enum QuietMotionPrefs {
 /// simulator seeded with a real 746 MB store, the default Today screen sitting idle costs ~18% of a
 /// CPU core in BOTH Debug and Release, and 0.0% once the live surfaces pose still.
 @MainActor
+/// True for a screen that a sheet is currently covering.
+///
+/// SET BY THE SHELL ON ITS TAB CONTENT, not on the sheet: an environment value flows down to the view it
+/// is applied to, and a sheet attached further out does not inherit it — so the screen behind freezes
+/// and the one in the sheet keeps moving. The frame-driven views read it as a pause: nothing behind a
+/// sheet can be seen moving, and drawing the three liquid heroes, the heart-rate thread and the sky at up
+/// to 60 fps underneath the sheet as it slid up is what made the sheet itself stutter on Today.
+private struct NoopBackgroundCoveredKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+public extension EnvironmentValues {
+    var noopBackgroundCovered: Bool {
+        get { self[NoopBackgroundCoveredKey.self] }
+        set { self[NoopBackgroundCoveredKey.self] = newValue }
+    }
+}
+
 public final class NoopMotionState: ObservableObject {
     public static let shared = NoopMotionState()
 

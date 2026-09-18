@@ -100,6 +100,11 @@ struct RootTabView: View {
         )
     }
 
+    /// Whether one of the shell's own sheets is up over the tabs.
+    private var backgroundCovered: Bool {
+        quickAction != nil || showDevices || routedPillar != nil || showLevelTimeline
+    }
+
     private func reselectTab(_ tag: Int) {
         Task { await repo.refresh() }
         if !tabPaths[tag].isEmpty {
@@ -147,6 +152,9 @@ struct RootTabView: View {
             moreTab(path: $tabPaths[4], scrollSignal: scrollTop[4]).tag(4)
         }
         .tint(StrandPalette.accent)
+        // THE TABS BEHIND A SHEET STAND STILL. Applied here, on the TabView itself, so it reaches every
+        // tab root and none of the sheets below — they are attached further out and do not inherit it.
+        .environment(\.noopBackgroundCovered, backgroundCovered)
         // THE LEVEL STRIP, over every tab. An overlay rather than a toolbar: the radar hangs a third of
         // its own height past the bar's bottom edge, and a toolbar clips its content.
         //
@@ -207,7 +215,7 @@ struct RootTabView: View {
         // the easing is applied where `quickAction` is set (see `presentQuickAction`), keeping the
         // animation scoped to the sheet rather than the whole shell.
         .sheet(item: $quickAction) { action in
-            quickActionDestination(action)
+            QuickActionHost(initial: action) { quickActionDestination($0) }
         }
         // Live's "Manage devices" affordance (and any future cross-screen link to Devices) routes here:
         // present the Devices manager in its own nav stack, the same way the quick-action screens do.
@@ -242,7 +250,7 @@ struct RootTabView: View {
                 // The Today active-workout indicator opens Live through the quick-action Live sheet; once
                 // it's up, LiveView consumes the one-shot `presentActiveWorkout` flag and presents the
                 // in-exercise screen. Calm sheet easing, matching the other quick-action presents.
-                withAnimation(Self.sheetEase) { quickAction = .live }
+                quickAction = .live
                 router.requestedDestination = nil
             case .liveSession:
                 // Live Sessions is presented from Today's own Start entry (a cover, not a routed sheet),
@@ -257,7 +265,7 @@ struct RootTabView: View {
             case .journal:
                 // The #627 Today journal widget opens the journal through the quick-action Journal sheet
                 // (InsightsView), matching the FAB's "Log journal" action. Calm sheet easing.
-                withAnimation(Self.sheetEase) { quickAction = .journal }
+                quickAction = .journal
                 router.requestedDestination = nil
             case nil:
                 break
@@ -266,7 +274,7 @@ struct RootTabView: View {
         // A screen's top-bar "+" routes here: open the quick-action sheet, then clear the flag.
         .onChange(of: router.quickActionsRequested) { _, req in
             if req {
-                withAnimation(Self.sheetEase) { quickAction = .menu }
+                quickAction = .menu
                 router.quickActionsRequested = false
             }
         }
@@ -362,16 +370,8 @@ struct RootTabView: View {
     private func quickActionDestination(_ action: QuickAction) -> some View {
         switch action {
         case .menu:
-            QuickActionSheet { picked in
-                // Swap the menu for the chosen destination on the next runloop so the sheet
-                // re-presents cleanly (avoids dismiss/re-present races). Calm easing on re-present.
-                quickAction = nil
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-                    withAnimation(Self.sheetEase) { quickAction = picked }
-                }
-            }
-            .presentationDetents([.height(344)])
-            .presentationDragIndicator(.hidden)
+            // The menu itself is drawn by `QuickActionHost`, which owns the swap to a destination.
+            EmptyView()
         case .live:
             quickScreen(LiveView())
         case .workout:
@@ -706,6 +706,44 @@ private struct MoreRow: View {
 private enum QuickAction: Int, Identifiable {
     case menu, live, workout, journal, breathe
     var id: Int { rawValue }
+}
+
+/// ONE SHEET FOR THE MENU AND WHAT IT OPENS.
+///
+/// Picking an action used to DISMISS the menu sheet and present a second one 50 ms later. UIKit will not
+/// present over a sheet that is still animating away, so the second one waited out the whole dismissal
+/// — the menu slid down, the screen sat there, and only then did the destination slide up. That wait is
+/// what read as lag. The destination now replaces the menu inside the same sheet, which grows from the
+/// menu's height to full height in one movement.
+private struct QuickActionHost<Destination: View>: View {
+    @State private var current: QuickAction
+    @State private var detent: PresentationDetent
+    let destination: (QuickAction) -> Destination
+
+    private static var menuDetent: PresentationDetent { .height(344) }
+
+    init(initial: QuickAction, @ViewBuilder destination: @escaping (QuickAction) -> Destination) {
+        _current = State(initialValue: initial)
+        _detent = State(initialValue: initial == .menu ? Self.menuDetent : .large)
+        self.destination = destination
+    }
+
+    var body: some View {
+        Group {
+            if current == .menu {
+                QuickActionSheet { picked in
+                    withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.36)) {
+                        detent = .large
+                        current = picked
+                    }
+                }
+                .presentationDragIndicator(.hidden)
+            } else {
+                destination(current)
+            }
+        }
+        .presentationDetents(current == .menu ? [Self.menuDetent] : [.large], selection: $detent)
+    }
 }
 
 /// The bottom sheet of quick actions presented by the centre FAB. Spec bottom sheet: surfaceOverlay

@@ -26,6 +26,11 @@ struct RitualSheetView: View {
     @State private var mood: Int?
     @State private var soreness: Int?
     @State private var motivation: Int?
+    /// The day's journal, logged right here under the revisit rather than on another screen.
+    @State private var importedQuestions: [String] = []
+    @State private var journalAnswers: [String: Bool] = [:]
+    @State private var journalNumeric: [String: Double] = [:]
+    @State private var journalDayOffset = 0
 
     var body: some View {
         NavigationStack {
@@ -37,7 +42,17 @@ struct RitualSheetView: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                     if let quest = result.quest { questCard(quest) }
-                    if result.ritual == .evening { journalCard }
+                    if result.ritual == .evening {
+                        journalCard
+                        // THE WHOLE JOURNAL, not only tonight's question. The revisit is where the day
+                        // is looked back on, and the behaviours the journal asks about — caffeine,
+                        // alcohol, screens — are exactly what that look back turns up.
+                        JournalLogCard(importedQuestions: importedQuestions,
+                                       answers: journalAnswers,
+                                       numericAnswers: journalNumeric,
+                                       dayOffset: $journalDayOffset,
+                                       onChanged: { Task { await loadJournal() } })
+                    }
 
                     Spacer(minLength: 0)
                 }
@@ -55,6 +70,29 @@ struct RitualSheetView: View {
             }
         }
         .presentationDetentsCompat()
+        .task(id: journalDayOffset) {
+            if result.ritual == .evening { await loadJournal() }
+        }
+    }
+
+    /// The question the revisit ended on, if it ended on one — the prompt tonight's entry answers.
+    private var closingQuestion: String? {
+        let text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text.hasSuffix("?") else { return nil }
+        let body = text.dropLast()
+        let start = body.lastIndex(where: { ".!?\n".contains($0) }).map { body.index(after: $0) }
+            ?? body.startIndex
+        let q = String(text[start...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        return q.isEmpty ? nil : q
+    }
+
+    private func loadJournal() async {
+        let imported = await repo.importedJournalEntries()
+        importedQuestions = NSOrderedSet(array: imported.map(\.question)).array as? [String] ?? []
+        let day = Repository.localDayKey(
+            Calendar.current.date(byAdding: .day, value: -journalDayOffset, to: Date()) ?? Date())
+        journalAnswers = await repo.nativeJournalAnswers(day: day)
+        journalNumeric = await repo.nativeJournalNumeric(day: day)
     }
 
     /// The quest this slot raised, as a read-only card — accepting it happens in the pop-up the shell
@@ -84,6 +122,12 @@ struct RitualSheetView: View {
                     .font(StrandFont.overline)
                     .tracking(1.2)
                     .foregroundStyle(StrandPalette.textSecondary)
+                if let closingQuestion {
+                    Text(closingQuestion)
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
 
                 TextEditor(text: $answer)
                     .font(StrandFont.body)
@@ -155,8 +199,11 @@ struct RitualSheetView: View {
         let day = DailyMissionStore.dayKey()
         let text = answer.trimmingCharacters(in: .whitespacesAndNewlines)
         if !text.isEmpty {
+            // The question travels WITH the answer, so the entry still makes sense read back a month
+            // later, when the revisit that asked it is long gone.
+            let notes = closingQuestion.map { "\($0)\n\n\(text)" } ?? text
             await repo.saveJournalAnswer(day: day, question: "Evening revisit",
-                                         answeredYes: true, notes: text)
+                                         answeredYes: true, notes: notes)
         }
         // Each reading is its own numeric entry, so the behaviour engine can correlate them separately
         // — a single blended "how was today" number correlates with nothing.

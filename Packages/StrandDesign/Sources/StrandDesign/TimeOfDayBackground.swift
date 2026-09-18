@@ -239,11 +239,13 @@ private struct FloatingLayer: View {
     let isLight: Bool
     let size: CGSize
     let drift: Bool
+    @Environment(\.noopBackgroundCovered) private var covered
 
     var body: some View {
         // One animation clock drives every shape's horizontal phase. The system pauses this
-        // TimelineView while off-screen, so it costs nothing when not visible.
-        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: !drift)) { timeline in
+        // TimelineView while off-screen, so it costs nothing when not visible — and while a sheet
+        // covers it, which the system does NOT count as off-screen.
+        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: !drift || covered)) { timeline in
             let t = drift ? timeline.date.timeIntervalSinceReferenceDate : 0
             ZStack {
                 ForEach(shapes.indices, id: \.self) { i in

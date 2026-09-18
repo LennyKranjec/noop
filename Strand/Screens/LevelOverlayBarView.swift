@@ -89,14 +89,17 @@ struct LevelOverlayBarView: View {
         .frame(height: levelBarHeight, alignment: .top)
     }
 
-    /// Where the level has come from: three days, then a month.
+    /// Where the level sits against its own recent mean: the three days before, then the month before.
     ///
     /// Both, because they answer different questions — three days is "did last night help", a month is
     /// "am I actually getting anywhere". A single figure would hide whichever one the wearer needed.
     private var trendCluster: some View {
-        VStack(alignment: .leading, spacing: 1) {
-            DeltaChipView(delta: trend?.deltaThreeDays, span: "3d")
-            DeltaChipView(delta: trend?.deltaMonth, span: "1mo")
+        VStack(alignment: .leading, spacing: 0) {
+            DeltaChipView(delta: trend?.deltaThreeDays, span: "Ø3d")
+            DeltaChipView(delta: trend?.deltaMonth, span: "Ø1mo")
+            if let breakdown {
+                StepMultiplierChipView(multiplier: breakdown.stepPenalty)
+            }
         }
     }
 
@@ -153,6 +156,34 @@ private struct DeltaChipView: View {
     }
 }
 
+/// The step multiplier the level was taken with: the one factor that scales the whole figure rather
+/// than one part of it.
+///
+/// ALWAYS SHOWN, not only when it bites. At ×1.00 it says the steps are covered and costing nothing;
+/// the moment the week's average drops under the floor it turns amber and says by how much — which is
+/// the one lever on the level that a walk after dinner moves by tomorrow morning.
+private struct StepMultiplierChipView: View {
+    let multiplier: Double
+
+    var body: some View {
+        let biting = multiplier < 0.995
+        let tint = biting ? StrandPalette.statusWarning : StrandPalette.textTertiary
+        return HStack(spacing: 2) {
+            Image(systemName: "shoeprints.fill")
+                .font(.system(size: 8, weight: .semibold))
+                .foregroundStyle(tint)
+            Text(String(format: "×%.2f", multiplier))
+                .font(.system(size: 10, weight: .medium))
+                .monospacedDigit()
+                .foregroundStyle(tint)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(biting
+            ? "Steps multiply the level by \(String(format: "%.2f", multiplier))"
+            : "Steps cost the level nothing"))
+    }
+}
+
 private struct LeverRowView: View {
     let part: LevelPart
     let driver: LevelDriver?
@@ -184,28 +215,39 @@ struct LevelTrendSnapshot {
     let now: LevelBreakdown?
     let threeDaysAgo: LevelBreakdown?
     let monthAgo: LevelBreakdown?
+    /// The mean level over the three days before the one shown, and over the thirty before it.
+    ///
+    /// THE CHIPS COMPARE AGAINST THESE, not against a single day. One day three days back is one night's
+    /// sleep and one day's training; a bad night there made today read as a gain it was not. The mean
+    /// asks the question the wearer meant — am I above or below where I have been sitting.
+    let threeDayMean: Double?
+    let monthMean: Double?
     let drivers: [LevelPart: LevelDriver]
 
     init(
         now: LevelBreakdown?,
         threeDaysAgo: LevelBreakdown?,
         monthAgo: LevelBreakdown?,
+        threeDayMean: Double? = nil,
+        monthMean: Double? = nil,
         drivers: [LevelPart: LevelDriver] = [:]
     ) {
         self.now = now
         self.threeDaysAgo = threeDaysAgo
         self.monthAgo = monthAgo
+        self.threeDayMean = threeDayMean
+        self.monthMean = monthMean
         self.drivers = drivers
     }
 
-    /// Points gained or lost since three days ago, or nil when that day cannot be scored.
-    var deltaThreeDays: Double? { delta(threeDaysAgo) }
+    /// Points above or below the three-day mean, or nil when too few of those days could be scored.
+    var deltaThreeDays: Double? { delta(threeDayMean) }
 
-    /// Points gained or lost since a month ago, or nil when that day cannot be scored.
-    var deltaMonth: Double? { delta(monthAgo) }
+    /// Points above or below the month's mean, or nil when too few of those days could be scored.
+    var deltaMonth: Double? { delta(monthMean) }
 
-    private func delta(_ then: LevelBreakdown?) -> Double? {
-        guard let a = now?.level, let b = then?.level else { return nil }
+    private func delta(_ mean: Double?) -> Double? {
+        guard let a = now?.level, let b = mean else { return nil }
         return a - b
     }
 }

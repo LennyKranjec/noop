@@ -98,8 +98,16 @@ extension WidgetSnapshot {
         // would decode the App Group blob twice on any publish that could not score, and this file
         // already went to the trouble of removing one such decode from the live path.
         let storedStress: WidgetSnapshot? = stress == nil ? load() : nil
+        // WHOOP'S NIGHT FIRST, as Today does: where WHOOP scored the anchor day's recovery or sleep, its
+        // figure wins over the app's own, which is computed from scraps on a night WHOOP held the strap.
+        var whoopRecovery: Double?
+        if let day {
+            whoopRecovery = await model.repo.whoopCloudDay(day.day)?.recovery
+            if let whoopSleep = await model.repo.whoopCloudSleepScore(day: day.day) { restScore = whoopSleep }
+        }
+        let recovery = whoopRecovery ?? day?.recovery
         let snap = WidgetSnapshot(
-            recovery: day?.recovery.map { Int($0.rounded()) },
+            recovery: recovery.map { Int($0.rounded()) },
             bpm: model.bpm ?? model.live.heartRate,
             batteryPct: activeBatteryPct(from: model),
             bonded: model.live.bonded,

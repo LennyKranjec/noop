@@ -835,13 +835,21 @@ struct LiquidTodayView: View {
     /// the quests, the coach — is built on, and a hero that disagreed with every screen below it was the
     /// one number on Today that could not be explained from inside the app. Order: the computed lane,
     /// then the merged day, and WHOOP's figure only when the app has nothing of its own for the day.
-    private var heroCharge: Double? { noopCharge ?? displayDay?.recovery ?? cloudDay?.recovery }
+    ///
+    /// EXCEPT FOR THE NIGHT. Rest and Charge are made from the night, and WHOOP can hold the strap for
+    /// itself overnight — then this app records nothing, and its own Rest and Charge are computed from
+    /// scraps and read badly wrong. So where WHOOP has scored THIS day's sleep or recovery (its own row,
+    /// not one carried from yesterday), its figure wins; the app's own is used where WHOOP has none.
+    /// Effort is the app's own either way: the day's load is measured all day, not overnight.
+    private var whoopChargeToday: Double? { cloudIsCarried ? nil : cloudDay?.recovery }
+    private var whoopRestToday: Double? { cloudIsCarried ? nil : cloudSleepScore }
+    private var heroCharge: Double? { whoopChargeToday ?? noopCharge ?? displayDay?.recovery ?? cloudDay?.recovery }
     private var heroEffort: Double? {
         let own = StrainScorer.effectiveEffort(live: selectedDayOffset == 0 ? liveTodayStrain : nil,
                                                stored: noopEffort ?? displayDay?.strain)
         return own ?? cloudDay?.strain.map { $0 * WhoopExportImporter.dayStrainToEffortScale }
     }
-    private var heroRest: Double? { noopRest ?? restScore ?? cloudSleepScore }
+    private var heroRest: Double? { whoopRestToday ?? noopRest ?? restScore ?? cloudSleepScore }
 
     /// Whether the rings are showing the carried cloud row — i.e. the app has nothing of its own.
     private var heroIsCarried: Bool {
