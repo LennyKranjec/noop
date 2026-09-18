@@ -326,88 +326,142 @@ struct QuestFailedPopupView: View {
     let onDismiss: () -> Void
 
     @State private var typed = 0
+    @State private var hapticsOn = SystemHaptics.enabled
 
     private var quest: Quest { failure.quest }
+    private var full: String { failure.summary }
+    private var done: Bool { typed >= full.count }
+    private var red: Color { StrandPalette.statusCritical }
 
-    // The completion card's twin in red: the same card, the same typed line, saying the window closed
-    // and the quest is gone. Nothing to accept or retry — the quest is already cancelled when it shows.
+    // THE DIRECTIVE POP-UP, IN RED. The same card the quest was offered on — the same header, the same
+    // panel with the typed line, the same systems it touched, the same clock — now saying the clock ran
+    // out. The quest is already cancelled when this shows; the only button acknowledges it.
     var body: some View {
         ZStack {
             StrandPalette.surfaceBase.opacity(questScrimAlpha)
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
-                .onTapGesture { typed = failure.summary.count }
+                .onTapGesture { if !done { typed = full.count } }
 
-            VStack(alignment: .leading, spacing: 14) {
+            card
+                .padding(questScreenMargin)
+        }
+        .task(id: failure.id) { await run() }
+    }
+
+    /// The summon, then the typing, exactly as the offer does it.
+    private func run() async {
+        SystemHaptics.play(.summon)
+        typed = 0
+        let letters = Array(full)
+        if hapticsOn { SystemHaptics.holdTickEngine(true) }
+        defer { if hapticsOn { SystemHaptics.holdTickEngine(false) } }
+        while typed < letters.count {
+            try? await Task.sleep(nanoseconds: UInt64(typeInterval * 1_000_000_000))
+            if Task.isCancelled { return }
+            guard typed < letters.count else { return }
+            let next = letters[typed]
+            typed += 1
+            if hapticsOn, !next.isWhitespace { SystemHaptics.tick() }
+        }
+    }
+
+    private var card: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(red)
+                Text("DIRECTIVE FAILED")
+                    .font(StrandFont.headline.weight(.bold))
+                    .tracking(3)
+                    .foregroundStyle(StrandPalette.textPrimary)
+            }
+
+            VStack(spacing: 0) {
+                Text(quest.title.uppercased())
+                    .font(StrandFont.title2)
+                    .tracking(2)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .multilineTextAlignment(.center)
+                Spacer().frame(height: 12)
+                TypedLine(text: full, shown: typed)
+                Spacer().frame(height: 14)
+                Text(quest.target)
+                    .font(StrandFont.headline)
+                    .foregroundStyle(red)
+                    .strikethrough(true, color: red.opacity(0.7))
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(14)
+            .overlay(
+                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                    .strokeBorder(red.opacity(0.35), lineWidth: 1)
+            )
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("WHAT IT WOULD HAVE TOUCHED")
+                    .font(StrandFont.overline)
+                    .tracking(1.4)
+                    .foregroundStyle(StrandPalette.textTertiary)
                 HStack(spacing: 12) {
-                    Image(systemName: "xmark.octagon.fill")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(StrandPalette.statusCritical)
-                    Text("QUEST FAILED")
-                        .font(StrandFont.headline.weight(.bold))
-                        .tracking(3)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                }
-
-                VStack(spacing: 12) {
-                    Text(quest.title.uppercased())
-                        .font(StrandFont.title2)
-                        .tracking(2)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .multilineTextAlignment(.center)
-                    Text(quest.target)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .multilineTextAlignment(.center)
-                    TypewriterText(text: failure.summary, shown: $typed)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .multilineTextAlignment(.center)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(14)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(StrandPalette.statusCritical.opacity(0.35), lineWidth: 1)
-                )
-
-                HStack {
+                    ForEach(quest.rewards, id: \.rawValue) { reward in
+                        Image(systemName: questRewardIcon(reward))
+                            .font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(questRewardTint(reward).opacity(0.45))
+                            .frame(width: 34, height: 34)
+                            .background(StrandPalette.surfaceInset, in: Capsule())
+                            .accessibilityLabel(Text(questRewardLabel(reward)))
+                    }
                     Spacer(minLength: 0)
                     Text("+0 XP")
                         .font(StrandFont.headline.weight(.bold))
-                        .foregroundStyle(StrandPalette.statusCritical)
+                        .foregroundStyle(red)
                 }
-
-                Button {
-                    SystemHaptics.play(.tap)
-                    onDismiss()
-                } label: {
-                    Text("UNDERSTOOD")
-                        .font(StrandFont.headline.weight(.bold))
-                        .tracking(4)
-                        .foregroundStyle(StrandPalette.surfaceBase)
-                        .frame(maxWidth: .infinity, minHeight: 56)
-                        .background(StrandPalette.statusCritical,
-                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                }
-                .buttonStyle(.plain)
             }
-            .padding(16)
-            .background(
-                LinearGradient(
-                    colors: [StrandPalette.statusCritical.opacity(0.16), StrandPalette.surfaceBase],
-                    startPoint: .top, endPoint: .bottom)
-                    .background(StrandPalette.surfaceRaised)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(StrandPalette.statusCritical.opacity(0.70), lineWidth: 1)
-            )
-            .shadow(color: StrandPalette.statusCritical.opacity(0.45), radius: questGlowRadius)
-            .padding(questScreenMargin)
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            VStack(spacing: 6) {
+                Text("The window has closed.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(red)
+                Text("00:00:00")
+                    .font(.system(size: 20, weight: .bold, design: .monospaced))
+                    .foregroundStyle(red)
+            }
+            .frame(maxWidth: .infinity)
+
+            Button {
+                SystemHaptics.play(.tap)
+                onDismiss()
+            } label: {
+                Text("UNDERSTOOD")
+                    .font(StrandFont.headline.weight(.bold))
+                    .tracking(4)
+                    .foregroundStyle(done ? StrandPalette.surfaceBase : StrandPalette.textTertiary)
+                    .frame(maxWidth: .infinity, minHeight: 56)
+                    .background(done ? red : StrandPalette.surfaceInset,
+                                in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .opacity(done ? 1 : 0.55)
+                    .animation(.easeOut(duration: 0.25), value: done)
+            }
+            .buttonStyle(.plain)
+            .disabled(!done)
         }
-        .task(id: failure.id) { SystemHaptics.play(.summon) }
+        .padding(16)
+        .background(
+            LinearGradient(
+                colors: [red.opacity(0.16), StrandPalette.surfaceBase],
+                startPoint: .top, endPoint: .bottom)
+                .background(StrandPalette.surfaceRaised)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(red.opacity(0.70), lineWidth: 1)
+        )
+        .shadow(color: red.opacity(0.55), radius: questGlowRadius)
     }
 }
 
