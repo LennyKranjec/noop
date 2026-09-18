@@ -67,6 +67,8 @@ struct LiquidTodayView: View {
     @State private var noopCharge: Double?
     @State private var noopEffort: Double?
     @State private var noopRest: Double?
+    /// Before/after stress of the recovery sessions in LAST WORKOUTS, keyed by `WorkoutStressDelta.key`.
+    @State private var workoutStress: [String: WorkoutStressDelta.Delta] = [:]
     /// WHOOP's own `sleep_performance_percentage`, banked on the series seam.
     ///
     /// BANKED, NOT RE-SCORED. An earlier cut ran this app's own scorer over the night instead, which
@@ -392,15 +394,17 @@ struct LiquidTodayView: View {
                     ForEach(sectionOrder) { section in
                         switch section {
                         case .hero:
-                            // THE MISSION, as a running line directly above the scores. Today only: a
-                            // mission is a thing to do now, and one hanging over a past day's numbers
-                            // would be an instruction for a day that is already over.
-                            if selectedDayOffset == 0, let mission = dailyMission {
-                                MissionMarqueeView(text: mission)
-                            }
                             heroCard
                         case .liveSession: if liveSessionsBeta { liveSessionStartRow }
-                        case .synthesis: synthesisSection
+                        case .synthesis:
+                            synthesisSection
+                            // THE MISSION, as still text directly under the STATE card. It used to run as
+                            // a scrolling line over the scores, and a line that moves every frame is one
+                            // the whole screen has to redraw for — it made Today stutter on scroll. Today
+                            // only: a mission for a day that is over is an instruction nobody can follow.
+                            if selectedDayOffset == 0, let mission = dailyMission {
+                                missionNote(mission)
+                            }
                         case .keyMetrics: keyMetricsSection
                         case .workouts: lastWorkoutsSection
                         case .heartRate: heartRateSection
@@ -1746,10 +1750,31 @@ struct LiquidTodayView: View {
                 }
             }
         }
+        .task(id: workouts.map(WorkoutStressDelta.key).joined(separator: ",")) {
+            await loadWorkoutStress(workouts)
+        }
+    }
+
+    /// Today's mission, whole and still, under the STATE card.
+    private func missionNote(_ mission: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("MISSION")
+                .font(StrandFont.overline)
+                .tracking(1.6)
+                .foregroundStyle(StrandPalette.textTertiary)
+            Text(mission)
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 4)
     }
 
     private func workoutCard(_ w: WorkoutRow) -> some View {
-        card {
+        let recovery = WorkoutCatalog.isRecovery(w.sport)
+        let delta = recovery ? workoutStress[WorkoutStressDelta.key(w)] : nil
+        return card {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -1758,16 +1783,44 @@ struct LiquidTodayView: View {
                         Text(workoutSub(w)).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
                     }
                     Spacer()
-                    // EFFORT, on the wearer's own Effort scale, like the hero ring above it. A WHOOP
-                    // session still carries WHOOP's measured strain (see `WorkoutSource.preferred`);
-                    // it is only shown in the app's units.
-                    (Text(effortText(w.strain)).font(StrandFont.number(15))
-                        + Text(" EFFORT").font(StrandFont.overlineScaled(9)))
-                        .foregroundStyle(StrandPalette.textPrimary)
+                    if recovery {
+                        // A RECOVERY SESSION IS READ BY WHAT IT DID TO STRESS: the opening five minutes
+                        // against the closing five. Its effort is near zero by design, and showing it as
+                        // a weak workout would read the session backwards.
+                        (Text(delta.map { String(format: "%+.1f", $0.change) } ?? "–").font(StrandFont.number(15))
+                            + Text(" STRESS").font(StrandFont.overlineScaled(9)))
+                            .foregroundStyle(delta.map { $0.change <= 0 ? StrandPalette.statusPositive
+                                                                       : StrandPalette.statusWarning }
+                                             ?? StrandPalette.textPrimary)
+                    } else {
+                        // EFFORT, on the wearer's own Effort scale, like the hero ring above it. A WHOOP
+                        // session still carries WHOOP's measured strain (see `WorkoutSource.preferred`);
+                        // it is only shown in the app's units.
+                        (Text(effortText(w.strain)).font(StrandFont.number(15))
+                            + Text(" EFFORT").font(StrandFont.overlineScaled(9)))
+                            .foregroundStyle(StrandPalette.textPrimary)
+                    }
                 }
-                LiquidTube(frac: (w.strain ?? 0) / 100, tint: StrandPalette.effortColor, height: 12, animated: false)
+                if recovery {
+                    Text(delta.map { String(format: "Stress %.1f at the start → %.1f at the end", $0.start, $0.end) }
+                         ?? "Stress change needs the strap's heart rate through the session.")
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                } else {
+                    LiquidTube(frac: (w.strain ?? 0) / 100, tint: StrandPalette.effortColor, height: 12, animated: false)
+                }
             }
         }
+    }
+
+    /// Reads the before/after stress of every recovery session in the list, off the load path.
+    private func loadWorkoutStress(_ rows: [WorkoutRow]) async {
+        var out: [String: WorkoutStressDelta.Delta] = [:]
+        for w in rows where WorkoutCatalog.isRecovery(w.sport) {
+            if Task.isCancelled { return }
+            if let d = await WorkoutStressDelta.compute(repo: repo, row: w) { out[WorkoutStressDelta.key(w)] = d }
+        }
+        workoutStress = out
     }
 
     // MARK: - Data sources

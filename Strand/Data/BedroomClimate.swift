@@ -95,6 +95,12 @@ final class BedroomClimate: NSObject, ObservableObject {
     /// hundreds of callbacks a second, and on the main queue each one competed with the frame the app
     /// was drawing. Discovery is parsed here and only a Govee reading is handed to the main actor.
     private let bleQueue = DispatchQueue(label: "noop.bedroom.ble", qos: .utility)
+
+    /// DUPLICATES ON. A sensor's first packet often carries neither its name nor a fresh reading — the
+    /// name comes in the scan response, the figures in each later broadcast — and with duplicates off
+    /// iOS reports a device once and never again, so the thermometer was never recognised. The cost of
+    /// duplicates is paid on `bleQueue`, where everything that is not a Govee sensor is dropped.
+    nonisolated static var scanOptions: [String: Any] { [CBCentralManagerScanOptionAllowDuplicatesKey: true] }
     #endif
     private var scanEndsAt: Date?
 
@@ -162,7 +168,7 @@ final class BedroomClimate: NSObject, ObservableObject {
             central = CBCentralManager(delegate: self, queue: bleQueue,
                                        options: [CBCentralManagerOptionShowPowerAlertKey: false])
         } else if central?.state == .poweredOn {
-            central?.scanForPeripherals(withServices: nil, options: nil)
+            central?.scanForPeripherals(withServices: nil, options: Self.scanOptions)
         }
         try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
         central?.stopScan()
@@ -242,7 +248,7 @@ extension BedroomClimate: CBCentralManagerDelegate {
                 if central.state == .unauthorized { self.lastError = "Bluetooth access is off for this app." }
                 return
             }
-            central.scanForPeripherals(withServices: nil, options: nil)
+            central.scanForPeripherals(withServices: nil, options: Self.scanOptions)
         }
     }
 
@@ -254,10 +260,29 @@ extension BedroomClimate: CBCentralManagerDelegate {
         // sensor — which is most of what a scan hears — is dropped without ever touching the main actor.
         guard let parsed = GoveeAdvertisement.parse(name: name, manufacturerData: data) else { return }
         let id = peripheral.identifier.uuidString
-        Task { @MainActor in self.heard(id: id, name: name, parsed: parsed) }
+        // One hand-over per sensor every two seconds: a Govee broadcasts several times a second, and
+        // the picker and the reading need none of the repeats.
+        guard GoveeHopThrottle.admit(id) else { return }
+        let shownName = name.isEmpty ? "Govee sensor" : name
+        Task { @MainActor in self.heard(id: id, name: shownName, parsed: parsed) }
     }
 }
 #endif
+
+/// One hand-over to the main actor per sensor per interval. Touched only from the central's serial
+/// queue, and locked anyway so a second central could never race it.
+final class GoveeHopThrottle: @unchecked Sendable {
+    private static let lock = NSLock()
+    private static var last: [String: Date] = [:]
+    static let interval: TimeInterval = 2
+
+    static func admit(_ id: String, now: Date = Date()) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if let at = last[id], now.timeIntervalSince(at) < interval { return false }
+        last[id] = now
+        return true
+    }
+}
 
 // MARK: - Reading a Govee advertisement
 
@@ -284,25 +309,30 @@ enum GoveeAdvertisement {
     static func parse(name: String, manufacturerData d: Data) -> Parsed? {
         let b = [UInt8](d)
         let model = name.uppercased()
+        let company: UInt16 = b.count >= 2 ? UInt16(b[0]) | (UInt16(b[1]) << 8) : 0
+        // A PACKET WITHOUT A NAME IS STILL READ. iOS often delivers the manufacturer data before the
+        // scan response that carries the name, and an unnamed packet under Govee's own company id is a
+        // Govee sensor; the layout is then told apart by length. A packet WITH a name that is not a
+        // model this understands is still refused — a named speaker is not a thermometer.
+        let unnamed = model.trimmingCharacters(in: .whitespaces).isEmpty
         // H5179 — the Wi-Fi model — advertises under a different company id (0x8801) with its own
         // layout: signed 16-bit temperature ×100 and 16-bit humidity ×100, little-endian, from byte 6,
-        // battery at byte 10.
-        if model.contains("5179") {
-            guard b.count >= 11, UInt16(b[0]) | (UInt16(b[1]) << 8) == h5179CompanyId else { return nil }
+        // battery at byte 10. The company id alone identifies it.
+        if model.contains("5179") || company == h5179CompanyId {
+            guard b.count >= 11, company == h5179CompanyId else { return nil }
             let rawT = Int16(bitPattern: UInt16(b[6]) | (UInt16(b[7]) << 8))
             let rawH = UInt16(b[8]) | (UInt16(b[9]) << 8)
             return sane(Double(rawT) / 100, Double(rawH) / 100, battery: Int(b[10]))
         }
-        guard b.count >= 7, UInt16(b[0]) | (UInt16(b[1]) << 8) == companyId else { return nil }
-        if model.contains("5074") || model.contains("5051") {
+        guard b.count >= 7, company == companyId else { return nil }
+        if model.contains("5074") || model.contains("5051") || (unnamed && b.count >= 9) {
             guard b.count >= 8 else { return nil }
             let rawT = Int16(bitPattern: UInt16(b[3]) | (UInt16(b[4]) << 8))
             let rawH = UInt16(b[5]) | (UInt16(b[6]) << 8)
             return sane(Double(rawT) / 100, Double(rawH) / 100, battery: Int(b[7]))
         }
-        guard ["5072", "5075", "5101", "5102", "5174", "5177"].contains(where: { model.contains($0) }) else {
-            return nil
-        }
+        guard unnamed || ["5072", "5075", "5101", "5102", "5174", "5177"].contains(where: { model.contains($0) })
+        else { return nil }
         let packed = (Int(b[3]) << 16) | (Int(b[4]) << 8) | Int(b[5])
         let negative = packed & 0x800000 != 0
         let value = packed & 0x7FFFFF

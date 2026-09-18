@@ -2,6 +2,24 @@
 import Foundation
 
 extension AppModel {
+    /// Write the water widget's queued taps into the real log, then republish the widget.
+    ///
+    /// Each tap keeps the day it was made on. An add goes in as a drink; a removal takes back from the
+    /// newest drinks first, as the Today tile's minus does.
+    @MainActor
+    func drainPendingWater() async {
+        let items = WaterWidgetStore.drain()
+        guard !items.isEmpty else { return }
+        for item in items {
+            if item.ml > 0 {
+                await repo.logHydration(amountMl: item.ml, day: item.day)
+            } else {
+                await repo.removeHydration(amountMl: -item.ml, day: item.day)
+            }
+        }
+        await WidgetSnapshot.publishWater(from: self)
+    }
+
     /// Execute any actions queued by App Intents while the app was suspended (mark moment, buzz,
     /// ask coach). Call when the app becomes active. The optional `router` lets the ask-coach
     /// intent navigate to the Coach tab after sending the question.

@@ -1,6 +1,8 @@
 #if os(iOS)
 import Foundation
 import WidgetKit
+import StrandAnalytics
+import StrandImport
 
 extension WidgetSnapshot {
     /// The ACTIVE device's charge for the widget (#2075).
@@ -40,8 +42,8 @@ extension WidgetSnapshot {
     /// recovery-derived fields (the same carry-over Today does), so the widget never blanks right after
     /// the rollover yet always describes today.
     @MainActor
-    static func publish(from model: AppModel) async {
-        await refreshWidgetPresence()
+    static func publish(from model: AppModel, reload: Bool = true) async {
+        if reload { await refreshWidgetPresence() }
         let days = model.repo.days
         let now = Date()
         // The recovery-derived anchor: today's row when it's scored, else the freshest STRICTLY-PRIOR
@@ -124,7 +126,78 @@ extension WidgetSnapshot {
             stressSeries: stressPoints ?? storedStress?.stressSeries,
             stressDay: stress?.day ?? storedStress?.stressDay
         )
-        saveAndReloadIfChanged(snap)
+        var full = snap
+        await fillStrip(&full, model: model, recovery: recovery, effortScale: effortScale,
+                        dayHours: stress?.result.hours, now: now)
+        fillWater(&full, model: model, now: now)
+        full.waterMl = Int((await model.repo.hydrationTotal(day: Repository.localDayKey(now))).rounded())
+        saveAndReloadIfChanged(full, reload: reload)
+    }
+
+    /// THE LOCK-SCREEN STRIP'S FIGURES: today's steps, today's effort and its target, stress now.
+    ///
+    /// TODAY'S, not the anchor day's. The anchor carries yesterday's scored row over the rollover so the
+    /// rings are never blank; a step count or an effort carried from yesterday would be a wrong number
+    /// under today's clock, so these read today's own row and are empty until it exists.
+    @MainActor
+    private static func fillStrip(_ snap: inout WidgetSnapshot, model: AppModel, recovery: Double?,
+                                  effortScale: EffortScale, dayHours: [DaytimeStress.HourPoint]?,
+                                  now: Date) async {
+        let todayKey = Repository.localDayKey(now)
+        let row = model.repo.days.first { $0.day == todayKey }
+        var steps = row?.steps
+        if steps == nil {
+            steps = await model.repo.series(key: "steps_est", source: "my-whoop", from: todayKey, to: todayKey)
+                .last.map { Int($0.value.rounded()) }
+        }
+        snap.stepsToday = steps
+        var effort = row?.strain
+        if effort == nil, let cloud = await model.repo.whoopCloudDay(todayKey)?.strain {
+            effort = cloud * WhoopExportImporter.dayStrainToEffortScale
+        }
+        snap.effortToday = effort.map { Int($0.rounded()) }
+        snap.effortTodayDisplay = effort.map { stored in
+            effortScale == .whoop
+                ? String(format: "%.1f", UnitFormatter.effortValue(stored, scale: .whoop))
+                : "\(Int(stored.rounded()))"
+        }
+        // The top of today's recommended band, the same ceiling Today's hero ring marks.
+        snap.effortTarget = CoupledView.optimalStrainRange(recovery: recovery)
+            .map { Int((Double($0.upperBound) * WhoopExportImporter.dayStrainToEffortScale).rounded()) }
+        if let dayHours, let level = await WindowStress.now(repo: model.repo, dayHours: dayHours) {
+            snap.stressNow = level
+            snap.stressNowAt = now
+        } else if let previous = load(), let at = previous.stressNowAt,
+                  now.timeIntervalSince(at) < 45 * 60 {
+            // A publish that could not read the last ten minutes keeps the last reading while it is
+            // recent, rather than blanking a figure that was true a moment ago.
+            snap.stressNow = previous.stressNow
+            snap.stressNowAt = at
+        }
+    }
+
+    /// THE WATER WIDGET'S FIGURES: whether tracking is on, today's total and the day's goal.
+    @MainActor
+    private static func fillWater(_ snap: inout WidgetSnapshot, model: AppModel, now: Date) {
+        snap.waterEnabled = UserDefaults.standard.bool(forKey: HydrationStore.enabledKey)
+        snap.waterDay = Repository.localDayKey(now)
+        snap.waterGoalMl = model.repo.hydrationGoalML(profileSex: model.profile.sex)
+    }
+
+    /// Republish only the water, after a drink was logged or the widget's own taps were drained.
+    @MainActor
+    static func publishWater(from model: AppModel) async {
+        guard var snap = load() else {
+            await publish(from: model)
+            return
+        }
+        let previous = snap
+        let now = Date()
+        fillWater(&snap, model: model, now: now)
+        snap.waterMl = Int((await model.repo.hydrationTotal(day: Repository.localDayKey(now))).rounded())
+        // A water write does not bump the day, so `updated` stays — the strip still knows whose figures
+        // it is holding.
+        saveAndReloadIfChanged(snap, previous: previous)
     }
 
     /// Publish fields that come directly from the live BLE state without re-reading the Rest metric
@@ -158,8 +231,19 @@ extension WidgetSnapshot {
     /// `previous` lets the live fast path pass the snapshot it already loaded (it runs on the main actor,
     /// so that value is still current); the full publish path omits it and this loads once for the dedup.
     @MainActor
-    private static func saveAndReloadIfChanged(_ snap: WidgetSnapshot, previous: WidgetSnapshot? = nil) {
+    private static func saveAndReloadIfChanged(_ snap: WidgetSnapshot, previous: WidgetSnapshot? = nil,
+                                               reload: Bool = true) {
         let previous = previous ?? load()
+        if !reload {
+            // THE QUIET PATH, for the background. The figures are written where the widgets read them,
+            // and no reload is asked for: a background reload spends the day's WidgetKit budget, and
+            // every widget here already redraws itself on its own timeline — which now finds fresh
+            // figures waiting instead of the last foreground's.
+            if renderedContentChanged(from: previous, to: snap) {
+                snap.save(previousSeries: previous?.hrSeries ?? [])
+            }
+            return
+        }
         if renderedContentChanged(from: previous, to: snap) {
             snap.save(previousSeries: previous?.hrSeries ?? [])
             WidgetCenter.shared.reloadAllTimelines()

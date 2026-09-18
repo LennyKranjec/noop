@@ -39,6 +39,21 @@ final class GoveeAdvertisementTests: XCTestCase {
         XCTAssertEqual(p?.battery, 94)
     }
 
+    func testAnUnnamedPacketIsReadByItsCompanyIdAndLength() {
+        // The H5179 with no name at all: its own company id says what it is.
+        let h5179 = Data([0x01, 0x88, 0xEC, 0x00, 0x01, 0x01, 0x1B, 0x08, 0x78, 0x14, 94])
+        XCTAssertEqual(GoveeAdvertisement.parse(name: "", manufacturerData: h5179)?.temperatureC ?? 0,
+                       20.75, accuracy: 0.001)
+        // Govee's company id, 8 bytes: the packed H5075 layout.
+        let packed = Data([0x88, 0xEC, 0x00, 0x03, 0x49, 0xBB, 87, 0x00])
+        XCTAssertEqual(GoveeAdvertisement.parse(name: "", manufacturerData: packed)?.temperatureC ?? 0,
+                       21.5, accuracy: 0.001)
+        // Govee's company id, 9 bytes: the little-endian H5074 layout.
+        let little = Data([0x88, 0xEC, 0x00, 0x85, 0x07, 0x86, 0x15, 100, 0x02])
+        XCTAssertEqual(GoveeAdvertisement.parse(name: "", manufacturerData: little)?.temperatureC ?? 0,
+                       19.25, accuracy: 0.001)
+    }
+
     func testAnythingElseIsNotRead() {
         // Wrong company, unknown model, too short.
         XCTAssertNil(GoveeAdvertisement.parse(name: "GVH5075", manufacturerData: Data([0x4C, 0x00, 0, 3, 0x49, 0xBB, 87, 0])))

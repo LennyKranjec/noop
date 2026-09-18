@@ -16,6 +16,63 @@ import WhoopStore
 // IT NEVER THROWS AND NEVER BLOCKS THE BAR. Every read is best-effort: a store that is not ready yet
 // produces no snapshot, and the strip draws its empty state rather than a zero.
 
+/// One input the level was computed WITHOUT, and what would bring it in.
+///
+/// The engine hands a missing metric's weight to the ones that have data, which is honest arithmetic but
+/// invisible: a level missing VO₂max and strength reads exactly like one that has them. The sheet names
+/// what is absent so the wearer can tell a level that is low from one that is merely partial.
+enum LevelMissingInput: String, CaseIterable, Identifiable {
+    case restorativeSleep, hrv, regularity, rhr, vo2max, respRate, strength, trainingLoad, daytimeCalm, steps
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .restorativeSleep: return "Deep + REM sleep"
+        case .hrv: return "Night HRV"
+        case .regularity: return "Sleep regularity"
+        case .rhr: return "Resting heart rate"
+        case .vo2max: return "VO₂max"
+        case .respRate: return "Respiratory rate"
+        case .strength: return "Strength"
+        case .trainingLoad: return "Training load"
+        case .daytimeCalm: return "Daytime calm"
+        case .steps: return "Steps"
+        }
+    }
+
+    var hint: String {
+        switch self {
+        case .restorativeSleep: return "No staged night in the last 7 days."
+        case .hrv: return "No night HRV in the last 7 days."
+        case .regularity: return "Needs two nights in a row with bed and wake times."
+        case .rhr: return "No resting heart rate in the last 7 days."
+        case .vo2max: return "No estimate yet: record runs or brisk walks with GPS, or add your waist in the profile."
+        case .respRate: return "No respiratory rate in the last 7 days."
+        case .strength: return "No lifting in the last 12 weeks: import your lifting log."
+        case .trainingLoad: return "No lifting volume logged in the last 6 months."
+        case .daytimeCalm: return "Wear the strap during the day so calm hours can be scored."
+        case .steps: return "No step count, so the step multiplier is not applied."
+        }
+    }
+
+    /// What `inputs` is missing. Meditation is never listed: a day without one is a zero, not a gap.
+    static func from(_ inputs: LevelInputs) -> [LevelMissingInput] {
+        var out: [LevelMissingInput] = []
+        if inputs.restorativeMin == nil { out.append(.restorativeSleep) }
+        if inputs.hrv == nil && inputs.sleepHrv == nil { out.append(.hrv) }
+        if inputs.regularityMin == nil { out.append(.regularity) }
+        if inputs.rhr == nil { out.append(.rhr) }
+        if inputs.vo2max == nil { out.append(.vo2max) }
+        if inputs.respRate == nil { out.append(.respRate) }
+        if inputs.strengthIndex == nil { out.append(.strength) }
+        if inputs.chronicLoad == nil { out.append(.trainingLoad) }
+        if inputs.daytimeRmssd == nil { out.append(.daytimeCalm) }
+        if inputs.steps == nil { out.append(.steps) }
+        return out
+    }
+}
+
 @MainActor
 final class LevelBarModel: ObservableObject {
 
@@ -25,6 +82,8 @@ final class LevelBarModel: ObservableObject {
     @Published private(set) var loadingHistory = false
     /// The best each part reached over the span the timeline last loaded. Empty until it has.
     @Published private(set) var partBests: [LevelPart: Double] = [:]
+    /// The inputs the shown day's level was computed without.
+    @Published private(set) var missing: [LevelMissingInput] = []
 
     private var lastLoadedTick: Int = -1
 
@@ -104,6 +163,8 @@ final class LevelBarModel: ObservableObject {
         // The comparisons are measured from the day SHOWN, with the same inputs, so a delta compares a
         // frozen level with frozen levels rather than with live ones.
         let base = shown?.day ?? dayKey
+        missing = LevelMissingInput.from(
+            LevelWiring.dayInputs(byDay: byDay, day: base, series: series, calendar: calendar))
         /// The mean level over the `span` days before `base`, or nil when fewer than `need` scored.
         func mean(over span: Int, need: Int) -> Double? {
             let levels = (1...span).compactMap { shifted(base, by: -$0).flatMap { score($0).0?.level } }

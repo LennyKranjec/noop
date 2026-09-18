@@ -12,5 +12,7 @@ struct NOOPWidgetBundle: WidgetBundle {
         CoachBriefWidget()
         HeartRateWidget()
         StressWidget()
+        TelosStripWidget()
+        WaterWidget()
     }
 }

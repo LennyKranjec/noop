@@ -25,6 +25,8 @@ struct StrandiOSApp: App {
     /// observes it and presents the Devices manager.
     @StateObject private var router: NavRouter
     @State private var liveActivity = LiveActivityController()
+    /// The session in progress, as the Live Activity shows it (see `WorkoutLiveTracker`).
+    @State private var workoutTracker = WorkoutLiveTracker()
     @Environment(\.scenePhase) private var scenePhase
     /// Appearance preference (System/Light/Dark). Default follows the OS; the Settings picker writes it.
     @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
@@ -188,7 +190,21 @@ struct StrandiOSApp: App {
                         bpm: model.live.connected ? (model.bpm ?? model.live.heartRate) : nil,
                         recovery: day?.recovery.map { Int($0.rounded()) },
                         connected: model.live.connected,
-                        effort: day?.strain.map { Int($0.rounded()) }
+                        effort: day?.strain.map { Int($0.rounded()) },
+                        workout: workoutTracker.workout(for: model)
+                    )
+                }
+                // A SESSION STARTING, ENDING OR PAUSING reaches the Live Activity at once, not on the next
+                // heart-rate tick: the banner turning into the session's own is the confirmation the
+                // wearer is looking at the lock screen for.
+                .onReceive(model.$activeWorkout) { _ in
+                    let day = model.repo.cachedWidgetAnchor()
+                    liveActivity.update(
+                        bpm: model.live.connected ? (model.bpm ?? model.live.heartRate) : nil,
+                        recovery: day?.recovery.map { Int($0.rounded()) },
+                        connected: model.live.connected,
+                        effort: day?.strain.map { Int($0.rounded()) },
+                        workout: workoutTracker.workout(for: model)
                     )
                 }
                 // End the Live Activity the moment the link drops, even if no further HR tick arrives.
@@ -201,7 +217,8 @@ struct StrandiOSApp: App {
                         bpm: isConnected ? (model.bpm ?? model.live.heartRate) : nil,
                         recovery: day?.recovery.map { Int($0.rounded()) },
                         connected: isConnected,
-                        effort: day?.strain.map { Int($0.rounded()) }
+                        effort: day?.strain.map { Int($0.rounded()) },
+                        workout: workoutTracker.workout(for: model)
                     )
                 }
                 // #911/#759: republish the Home/Lock-Screen widget whenever the dashboard caches actually
@@ -218,7 +235,14 @@ struct StrandiOSApp: App {
                 // exempt); a background bump is covered by the widget's own 15-minute timeline policy and
                 // by the .active republish on return.
                 .onReceive(model.repo.$refreshSeq.dropFirst()) { _ in
-                    guard scenePhase == .active else { return }
+                    // IN THE BACKGROUND, WRITE BUT DO NOT RELOAD. The lock-screen strip is the widget
+                    // that is looked at while the app is NOT in front; with the publish gated to the
+                    // foreground it drew the figures of the last time the app was opened. The quiet
+                    // path writes the fresh ones for the widget's own fifteen-minute redraw to find.
+                    guard scenePhase == .active else {
+                        Task { await WidgetSnapshot.publish(from: model, reload: false) }
+                        return
+                    }
                     Task { await WidgetSnapshot.publish(from: model) }
                     // The watch rides the same active-only hook because the bridge now SELF-THROTTLES
                     // (30-minute spacing + headline-change dedup, both must pass, see WatchSessionBridge),
@@ -251,6 +275,15 @@ struct StrandiOSApp: App {
                     guard scenePhase == .active else { return }
                     guard WidgetSnapshot.HRPublishThrottle.admit() else { return }
                     Task { await WidgetSnapshot.publishLive(from: model) }
+                }
+                // THE WATER WIDGET. A drink logged anywhere in the app moves the widget; a glass tapped
+                // on the widget is drained into the real log the moment the app hears of it — it keeps
+                // running in the background for the strap, so that is usually at once.
+                .onReceive(model.repo.$hydrationSeq.dropFirst()) { _ in
+                    Task { await WidgetSnapshot.publishWater(from: model) }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: WaterWidgetBridge.pendingNotification)) { _ in
+                    Task { await model.drainPendingWater() }
                 }
                 .onChange(of: effortScaleRaw) { _, _ in
                     guard scenePhase == .active else { return }
@@ -294,6 +327,7 @@ struct StrandiOSApp: App {
         .onChange(of: scenePhase) { _, phase in
             if phase == .active {
                 model.drainPendingIntents(router: router)
+                Task { await model.drainPendingWater() }
                 // Re-arm the strap's smart alarm on foreground: the firmware alarm is a single instant
                 // and iOS can't re-arm it while suspended, so it would otherwise fire once and stop.
                 model.applySmartAlarm()

@@ -84,8 +84,11 @@ enum WhoopCloudSync {
     // v2: bumped when cycles moved to the day they cover (see `WhoopCloudApi.cycleDay`), so the first
     // launch of that build rewrites every stored day immediately instead of waiting out the interval
     // with strain filed a day early.
-    private static let lastSyncAtKey = "whoop.cloud.lastSyncAt.v2"
-    private static let lastFullSyncAtKey = "whoop.cloud.lastFullSyncAt.v2"
+    // v3: bumped when workouts started carrying WHOOP's zone split, so every session already stored
+    // without one is rewritten WITH one on the next launch — otherwise the zone bar on every past WHOOP
+    // workout stayed empty until the six-hour full sync happened to come round.
+    private static let lastSyncAtKey = "whoop.cloud.lastSyncAt.v3"
+    private static let lastFullSyncAtKey = "whoop.cloud.lastFullSyncAt.v3"
 
     /// What one sync managed, and what each endpoint actually said.
     struct Result {

@@ -83,6 +83,7 @@ struct LevelTimelineSheetView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     radar
                     header
+                    if !model.missing.isEmpty { missingCard }
 
                     Picker("", selection: $span) {
                         ForEach(LevelSpan.allCases) { s in Text(s.label).tag(s) }
@@ -123,6 +124,42 @@ struct LevelTimelineSheetView: View {
         .presentationDetentsCompat()
         .task(id: span.rawValue) { await model.loadHistory(repo: repo, spanDays: span.rawValue) }
         .task(id: model.trend?.now?.level) { await loadNote() }
+    }
+
+    /// What the level was computed without, and what would bring each one in.
+    private var missingCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(StrandPalette.statusWarning)
+                Text("MISSING VALUES")
+                    .font(StrandFont.overline)
+                    .tracking(1.2)
+                    .foregroundStyle(StrandPalette.statusWarning)
+            }
+            Text("Today's level is computed without these. Their weight goes to the parts that have data, so the level is partial rather than low.")
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            ForEach(model.missing) { item in
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(item.label)
+                        .font(StrandFont.footnote.weight(.semibold))
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    Text(item.hint)
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(StrandPalette.statusWarning.opacity(0.08),
+                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
+            .strokeBorder(StrandPalette.statusWarning.opacity(0.3), lineWidth: 1))
     }
 
     /// The radar, at its full size, with the personal best around it.

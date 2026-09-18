@@ -41,6 +41,27 @@ public struct WidgetSnapshot: Codable, Equatable {
     /// scorable hour after midnight.
     public var stressDay: Int?
 
+    // THE LOCK-SCREEN STRIP. All optional for the same reason as every field above: a snapshot written
+    // by an older build must still decode.
+    /// Today's steps so far — TODAY's, never the carried anchor day's.
+    public var stepsToday: Int?
+    /// Today's effort so far on the 0–100 axis, and its display string on the wearer's scale.
+    public var effortToday: Int?
+    public var effortTodayDisplay: String?
+    /// The top of today's recommended effort band, on the 0–100 axis.
+    public var effortTarget: Int?
+    /// Stress over the last ten minutes (0–3) and when it was read.
+    public var stressNow: Double?
+    public var stressNowAt: Date?
+
+    // THE WATER WIDGET.
+    /// Whether hydration tracking is on in the app.
+    public var waterEnabled: Bool?
+    /// The day the water figures belong to (`yyyy-MM-dd`), the total logged, and the day's goal, in ml.
+    public var waterDay: String?
+    public var waterMl: Int?
+    public var waterGoalMl: Int?
+
     public init(recovery: Int?, bpm: Int?, batteryPct: Int?, bonded: Bool, updated: Date,
                 effort: Int? = nil, rest: Int? = nil, hrv: Int? = nil, restingHr: Int? = nil,
                 effortDisplay: String? = nil, effortWhoop: Bool? = nil,
@@ -229,6 +250,32 @@ public struct WidgetSnapshot: Codable, Equatable {
             // midnight still reaches WidgetKit even when the new day has no scored hour yet.
             || previous.stressSeries != next.stressSeries
             || previous.stressDay != next.stressDay
+            || previous.stepsToday != next.stepsToday
+            || previous.effortToday != next.effortToday
+            || previous.effortTodayDisplay != next.effortTodayDisplay
+            || previous.effortTarget != next.effortTarget
+            || previous.stressNow != next.stressNow
+            || previous.waterEnabled != next.waterEnabled
+            || previous.waterDay != next.waterDay
+            || previous.waterMl != next.waterMl
+            || previous.waterGoalMl != next.waterGoalMl
+    }
+
+    /// The stress the strip shows: the live ten-minute read while it is recent, else the latest scored
+    /// half-hour of today's curve, else nothing.
+    public func stressForStrip(now: Date = Date(), calendar: Calendar = .current) -> Double? {
+        if let stressNow, let at = stressNowAt, now.timeIntervalSince(at) < 45 * 60 { return stressNow }
+        return stressCurve(now: now, calendar: calendar).last(where: { $0.level != nil })?.level
+    }
+
+    /// Today's key, `yyyy-MM-dd`, built without a formatter so the widget can call it every render.
+    public static func dayKey(_ date: Date = Date(), calendar: Calendar = .current) -> String {
+        let c = calendar.dateComponents([.year, .month, .day], from: date)
+        func pad(_ v: Int, _ w: Int) -> String {
+            let s = String(v)
+            return s.count >= w ? s : String(repeating: "0", count: w - s.count) + s
+        }
+        return pad(c.year ?? 0, 4) + "-" + pad(c.month ?? 0, 2) + "-" + pad(c.day ?? 0, 2)
     }
 
     /// A live-only update may reuse score fields only within the same local calendar day. At rollover,

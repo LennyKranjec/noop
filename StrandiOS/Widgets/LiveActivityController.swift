@@ -23,10 +23,28 @@ final class LiveActivityController {
     /// on top of the connected-driven end below).
     private static let staleAfter: TimeInterval = 120
 
+    /// A session in progress, as the banner shows it.
+    struct Workout: Equatable {
+        var name: String
+        /// The start with the pauses removed, for the lock screen's self-ticking clock.
+        var clockStart: Date
+        /// The frozen active seconds while paused; nil while running.
+        var pausedSeconds: Int?
+        var effort: String?
+        var effortFraction: Double?
+        var recovery: Bool
+        var stressStart: Double?
+        var stressNow: Double?
+    }
+
+    /// What the last push carried about the session, so a start, an end or a pause goes out AT ONCE
+    /// instead of waiting out the two-second throttle.
+    private var lastWorkoutShape: String = ""
+
     /// Drive the activity from the latest live values. Lazily starts when the strap is CONNECTED (the
     /// live link, not the sticky "paired" flag) and a heart rate is present; ends the moment the link
     /// drops. Throttled to ~once every 2 s so we stay well under the Live Activity update budget.
-    func update(bpm: Int?, recovery: Int?, connected: Bool, effort: Int? = nil) {
+    func update(bpm: Int?, recovery: Int?, connected: Bool, effort: Int? = nil, workout: Workout? = nil) {
         guard authInfo.areActivitiesEnabled else { return }
 
         // Re-adopt an activity that outlived a previous app session. ActivityKit keeps Live Activities
@@ -53,12 +71,25 @@ final class LiveActivityController {
         }
         guard bpm != nil else { return }
 
-        let state = NOOPActivityAttributes.ContentState(bpm: bpm, recovery: recovery, bonded: connected,
+        var state = NOOPActivityAttributes.ContentState(bpm: bpm, recovery: recovery, bonded: connected,
                                                         effort: effort)
+        if let workout {
+            state.workoutName = workout.name
+            state.workoutClockStart = workout.clockStart
+            state.workoutPausedSeconds = workout.pausedSeconds
+            state.workoutEffort = workout.effort
+            state.workoutEffortFraction = workout.effortFraction
+            state.workoutRecovery = workout.recovery
+            state.stressStart = workout.stressStart
+            state.stressNow = workout.stressNow
+        }
         let staleDate = Date().addingTimeInterval(Self.staleAfter)
+        let shape = workout.map { "\($0.name)|\($0.pausedSeconds != nil)" } ?? ""
+        let shapeChanged = shape != lastWorkoutShape
 
         if let activity {
-            guard Date().timeIntervalSince(lastPush) > 2 else { return }
+            guard shapeChanged || Date().timeIntervalSince(lastPush) > 2 else { return }
+            lastWorkoutShape = shape
             lastPush = Date()
             Task { await activity.update(ActivityContent(state: state, staleDate: staleDate)) }
         } else {
@@ -74,6 +105,7 @@ final class LiveActivityController {
                     pushType: nil
                 )
                 lastPush = Date()
+                lastWorkoutShape = shape
             } catch {
                 activity = nil
             }
