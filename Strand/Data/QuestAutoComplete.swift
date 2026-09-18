@@ -29,6 +29,7 @@ enum QuestAutoComplete {
         let now = nowMs()
         let open = store.quests.filter { $0.state == .active || $0.state == .offered }
         guard !open.isEmpty else { return }
+        defer { store.sweepExpired() }
 
         // One gather per DAY, not per quest: two quests from the same day read the same evidence.
         var evidenceByDay: [String: QuestEvidence] = [:]
@@ -45,6 +46,8 @@ enum QuestAutoComplete {
                 store.complete(quest, summary: goal.summary(evidence))
             }
         }
+        // Whatever the data did not close in time is cancelled now, and says so in red.
+        store.sweepExpired()
     }
 
     /// Everything a goal can be checked against, for one local day.

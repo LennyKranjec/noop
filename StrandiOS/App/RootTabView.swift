@@ -31,6 +31,17 @@ struct RootTabView: View {
     @Environment(\.scenePhase) private var scenePhase
     /// The morning flow — dream, the night's questions, the daily brief — on the day's first open.
     @State private var showMorning = false
+    @ObservedObject private var stressMonitor = LiveStressMonitor.shared
+    @EnvironmentObject private var appModel: AppModel
+
+    /// High stress AT REST: the monitor's reading when it is in the top third and no workout is running.
+    /// The reading is motion-gated already; a workout in progress is exertion by definition, even when
+    /// it is a still one like a plank.
+    private var stressAlert: Double? {
+        guard appModel.activeWorkout == nil, let level = stressMonitor.current,
+              level >= LiveStressMonitor.highThreshold else { return nil }
+        return level
+    }
     /// The health store, for today's macros.
     @EnvironmentObject private var health: HealthKitBridge
 
@@ -176,7 +187,9 @@ struct RootTabView: View {
             LevelOverlayBarView(
                 trend: levelBar.trend,
                 countUpKey: levelCountUpKey,
-                onOpenTimeline: { showLevelTimeline = true }
+                onOpenTimeline: { showLevelTimeline = true },
+                stressAlert: stressAlert,
+                onStressAlert: { quickAction = .breathe }
             )
             .allowsHitTesting(true)
         }
@@ -207,6 +220,8 @@ struct RootTabView: View {
             BedroomClimate.shared.startPolling()
             // The lights' morning and evening automations, checked once a minute while the app runs.
             WizLightStore.shared.startAutomation()
+            // Stress right now, for the warning beside the level.
+            LiveStressMonitor.shared.start(repo: repo)
             await repo.refresh()
             // TODAY'S MACROS, from whichever app the wearer keeps their food diary in. A live read
             // rather than an import: a diary is filled in across the day, so a figure banked once is
@@ -236,6 +251,7 @@ struct RootTabView: View {
         }
         .onAppear { presentMorningIfDue() }
         .onChange(of: scenePhase) { _, phase in
+            LiveStressMonitor.shared.foreground = phase == .active
             if phase == .active { presentMorningIfDue() }
         }
         .sheet(item: $quickAction) { action in

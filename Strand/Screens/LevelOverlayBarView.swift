@@ -51,6 +51,10 @@ struct LevelOverlayBarView: View {
     /// Flipped once per launch by the shell, so the count-up runs on opening and not on every tab change.
     let countUpKey: Int
     let onOpenTimeline: () -> Void
+    /// Stress at rest right now, when it is high enough to warn about; nil otherwise.
+    var stressAlert: Double? = nil
+    /// Tapping the warning: somewhere to bring it down — the breathing exercise.
+    var onStressAlert: () -> Void = {}
 
     private var breakdown: LevelBreakdown? { trend?.now }
 
@@ -85,6 +89,16 @@ struct LevelOverlayBarView: View {
                 onOpenTimeline()
             }
         }
+        // THE STRESS WARNING, beside the pentagon in the overhang: red, because it is the one thing on
+        // this strip that asks for something now. Tapping it opens a breathing exercise.
+        .overlay(alignment: .top) {
+            if let stressAlert {
+                StressAlertPillView(level: stressAlert, action: onStressAlert)
+                    .offset(x: levelRadarDiameter / 2 + 46, y: levelBarHeight - 4)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.25), value: stressAlert == nil)
         // The overhang is drawn OUTSIDE the strip's own height, which is the whole point of it.
         .frame(height: levelBarHeight, alignment: .top)
     }
@@ -162,6 +176,36 @@ private struct DeltaChipView: View {
 /// ALWAYS SHOWN, not only when it bites. At ×1.00 it says the steps are covered and costing nothing;
 /// the moment the week's average drops under the floor it turns amber and says by how much — which is
 /// the one lever on the level that a walk after dinner moves by tomorrow morning.
+/// "Stress 2.4" in red, with a warning glyph. A button: it leads to the breathing exercise.
+private struct StressAlertPillView: View {
+    let level: Double
+    let action: () -> Void
+
+    var body: some View {
+        Button {
+            SystemHaptics.play(.tap)
+            action()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 10, weight: .bold))
+                Text(String(format: "Stress %.1f", level))
+                    .font(.system(size: 11, weight: .bold))
+                    .monospacedDigit()
+                Image(systemName: "wind")
+                    .font(.system(size: 10, weight: .bold))
+            }
+            .foregroundStyle(.white)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(StrandPalette.statusCritical, in: Capsule())
+            .shadow(color: StrandPalette.statusCritical.opacity(0.5), radius: 8)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(String(format: "Stress is high at rest, %.1f of 3. Opens a breathing exercise.", level)))
+    }
+}
+
 private struct StepMultiplierChipView: View {
     let multiplier: Double
 

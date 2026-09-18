@@ -207,6 +207,13 @@ struct BedroomClimateSettingsView: View {
         if let list = await GoveeCloud.devices(apiKey: key) {
             cloudDevices = list
             cloudStatus = list.isEmpty ? "No temperature sensors on this account." : nil
+            // Nothing chosen yet: choose the first, so a loaded list is a connected sensor rather than
+            // a list waiting for a tap nobody knew was needed.
+            if climate.cloudDevice == nil, let first = list.first {
+                climate.setCloudDevice(sku: first.sku, device: first.device)
+                climate.bleDeviceId = nil
+                await climate.refresh()
+            }
         } else {
             cloudStatus = "Govee did not accept the key, or could not be reached."
         }

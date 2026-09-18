@@ -143,12 +143,19 @@ final class BedroomClimate: NSObject, ObservableObject {
         }
     }
 
-    var isConfigured: Bool { bleDeviceId != nil || (apiKey != nil && cloudDevice != nil) }
+    /// A saved API key counts on its own: the device is picked automatically on the next read when the
+    /// wearer loaded the list but never tapped one — which left a working key invisible everywhere.
+    var isConfigured: Bool { bleDeviceId != nil || apiKey != nil }
 
     // MARK: - Refresh
 
     /// Read the configured sensor, whichever way it is configured, and act on the result.
     func refresh() async {
+        // A key with no device chosen: take the account's sensor. With several, the first one — the
+        // wearer can still pick another in More → Bedroom.
+        if let key = apiKey, cloudDevice == nil, let first = await GoveeCloud.devices(apiKey: key)?.first {
+            setCloudDevice(sku: first.sku, device: first.device)
+        }
         if let key = apiKey, let device = cloudDevice {
             if let r = await GoveeCloud.read(apiKey: key, sku: device.sku, device: device.device) {
                 accept(r)

@@ -88,6 +88,36 @@ final class QuestStore: ObservableObject {
         if !completions.isEmpty { completions.removeFirst() }
     }
 
+    /// Quests whose window closed with the goal unmet, waiting to be shown in red. A queue for the same
+    /// reason completions are one.
+    @Published private(set) var failures: [Completion] = []
+
+    /// CANCEL EVERY QUEST WHOSE WINDOW HAS CLOSED. An accepted quest that runs out is cancelled and its
+    /// failure queued for the red pop-up — a commitment that quietly vanished from the strip would be the
+    /// system pretending it never asked. One only ever offered and never accepted is withdrawn silently:
+    /// nothing was promised, so there is nothing to fail.
+    ///
+    /// Runs after the completion check, so a goal met in the last minute closes as done, not as failed.
+    func sweepExpired(now: Date = Date()) {
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        for quest in quests where quest.state == .active || quest.state == .offered {
+            guard nowMs >= quest.checkableUntilMs() else { continue }
+            setState(id: quest.id, state: .declined)
+            // Only a window that closed in the last day is news. A quest that ran out weeks ago — from
+            // before quests could fail — is cancelled quietly rather than joining a queue of red cards.
+            if quest.state == .active, nowMs - quest.checkableUntilMs() < 24 * 3_600_000 {
+                failures.append(Completion(
+                    quest: quest.with(state: .declined),
+                    summary: "The window closed before the data showed it done, so the quest has been cancelled."))
+            }
+        }
+    }
+
+    /// The front failure has been seen.
+    func dismissFailure() {
+        if !failures.isEmpty { failures.removeFirst() }
+    }
+
     /// Re-read from storage. For a screen that has been away while a background pass wrote one.
     func reload() { quests = QuestStore.read() }
 

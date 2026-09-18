@@ -288,6 +288,10 @@ struct QuestHostModifier: ViewModifier {
                 QuestCompletedPopupView(completion: completion) { store.dismissCompletion() }
                     .id(completion.id)
                     .transition(.opacity)
+            } else if let failure = store.failures.first {
+                QuestFailedPopupView(failure: failure) { store.dismissFailure() }
+                    .id("failed-" + failure.id)
+                    .transition(.opacity)
             } else if let quest = store.offered {
                 QuestPopupView(
                     quest: quest,
@@ -299,6 +303,110 @@ struct QuestHostModifier: ViewModifier {
         }
         .animation(.easeOut(duration: 0.25), value: store.offered?.id)
         .animation(.easeOut(duration: 0.25), value: store.completions.first?.id)
+        .animation(.easeOut(duration: 0.25), value: store.failures.first?.id)
+        // A WINDOW CAN CLOSE WITH NOTHING ELSE HAPPENING — no refresh, no sync — so the host checks the
+        // clock itself once a minute while the app is open. Cheap: it only compares timestamps.
+        .task {
+            while !Task.isCancelled {
+                store.sweepExpired()
+                try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
+            }
+        }
+    }
+}
+
+// MARK: - The quest running out
+//
+// The completion card's twin in red: the same card, the same typed line, saying the window closed and
+// the quest is gone. Nothing to accept or retry — the pop-up is the notice, and the quest has already
+// been cancelled by the time it shows.
+
+struct QuestFailedPopupView: View {
+    let failure: QuestStore.Completion
+    let onDismiss: () -> Void
+
+    @State private var typed = 0
+
+    private var quest: Quest { failure.quest }
+
+    var body: some View {
+        ZStack {
+            StrandPalette.surfaceBase.opacity(questScrimAlpha)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { typed = failure.summary.count }
+
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 12) {
+                    Image(systemName: "xmark.octagon.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(StrandPalette.statusCritical)
+                    Text("QUEST FAILED")
+                        .font(StrandFont.headline.weight(.bold))
+                        .tracking(3)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                }
+
+                VStack(spacing: 12) {
+                    Text(quest.title.uppercased())
+                        .font(StrandFont.title2)
+                        .tracking(2)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .multilineTextAlignment(.center)
+                    Text(quest.target)
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .multilineTextAlignment(.center)
+                    TypewriterText(text: failure.summary, shown: $typed)
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(14)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(StrandPalette.statusCritical.opacity(0.35), lineWidth: 1)
+                )
+
+                HStack {
+                    Spacer(minLength: 0)
+                    Text("+0 XP")
+                        .font(StrandFont.headline.weight(.bold))
+                        .foregroundStyle(StrandPalette.statusCritical)
+                }
+
+                Button {
+                    SystemHaptics.play(.tap)
+                    onDismiss()
+                } label: {
+                    Text("UNDERSTOOD")
+                        .font(StrandFont.headline.weight(.bold))
+                        .tracking(4)
+                        .foregroundStyle(StrandPalette.surfaceBase)
+                        .frame(maxWidth: .infinity, minHeight: 56)
+                        .background(StrandPalette.statusCritical,
+                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(16)
+            .background(
+                LinearGradient(
+                    colors: [StrandPalette.statusCritical.opacity(0.16), StrandPalette.surfaceBase],
+                    startPoint: .top, endPoint: .bottom)
+                    .background(StrandPalette.surfaceRaised)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(StrandPalette.statusCritical.opacity(0.70), lineWidth: 1)
+            )
+            .shadow(color: StrandPalette.statusCritical.opacity(0.45), radius: questGlowRadius)
+            .padding(questScreenMargin)
+        }
+        // The warning cue: this is the system reporting a miss, not asking for anything.
+        .task(id: failure.id) { SystemHaptics.play(.summon) }
     }
 }
 
