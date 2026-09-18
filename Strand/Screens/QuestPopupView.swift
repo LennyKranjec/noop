@@ -480,6 +480,8 @@ struct DiagnosticAlertView: View {
     let message: String
     let primary: (label: String, action: () -> Void)
     var secondary: (label: String, action: () -> Void)? = nil
+    /// Draw the symbol inside a thin glowing ring, the gauge look.
+    var ringed = false
 
     @State private var typed = 0
 
@@ -511,11 +513,29 @@ struct DiagnosticAlertView: View {
 
                 Spacer(minLength: 24)
 
-                Image(systemName: symbol)
-                    .font(.system(size: 130, weight: .ultraLight))
-                    .foregroundStyle(red)
-                    .shadow(color: red.opacity(0.9), radius: 14)
-                    .shadow(color: red.opacity(0.5), radius: 30)
+                if ringed {
+                    ZStack {
+                        Circle()
+                            .fill(RadialGradient(colors: [red.opacity(0.18), .clear], center: .center,
+                                                 startRadius: 0, endRadius: 130))
+                        Circle()
+                            .strokeBorder(red.opacity(0.7), lineWidth: 2)
+                            .shadow(color: red.opacity(0.6), radius: 10)
+                        Image(systemName: symbol)
+                            .font(.system(size: 92, weight: .light))
+                            .symbolRenderingMode(.monochrome)
+                            .foregroundStyle(red)
+                            .shadow(color: red.opacity(0.9), radius: 12)
+                            .shadow(color: red.opacity(0.5), radius: 26)
+                    }
+                    .frame(width: 250, height: 250)
+                } else {
+                    Image(systemName: symbol)
+                        .font(.system(size: 130, weight: .ultraLight))
+                        .foregroundStyle(red)
+                        .shadow(color: red.opacity(0.9), radius: 14)
+                        .shadow(color: red.opacity(0.5), radius: 30)
+                }
 
                 Spacer(minLength: 24)
 

@@ -553,6 +553,10 @@ struct LiquidTodayView: View {
         // without bumping `refreshSeq` — the first cut keyed the hero on the day alone and the rings
         // stayed blank until something else happened to reload the screen.
         .task(id: "\(selectedDayKey)-\(repo.whoopCloudSeq)") { await loadCloudDay() }
+        // THE OPTIMUM, checked whenever the day's effort or its ceiling moves.
+        .task(id: "\(Int(heroEffort ?? -1))-\(Int(optimalStrainCeiling ?? -1))-\(selectedDayOffset)") {
+            checkOptimum()
+        }
         // THE THREE SLOTS. Registered once, then run on appearance for any slot whose time has passed
         // and which has not run today — see `DayRitualScheduler` on why the generation happens here
         // rather than in the notification body.
@@ -1825,6 +1829,16 @@ struct LiquidTodayView: View {
                 }
             }
         }
+    }
+
+    /// Raise the day's optimum notice once effort reaches the top of today's recommended band.
+    private func checkOptimum() {
+        guard selectedDayOffset == 0, let effort = heroEffort,
+              let ceiling = optimalStrainCeiling.map({ $0 * WhoopExportImporter.dayStrainToEffortScale }),
+              ceiling > 0, effort >= ceiling else { return }
+        DayAlerts.shared.reachOptimum(
+            effort: UnitFormatter.effortDisplay(effort, scale: effortScale),
+            target: UnitFormatter.effortDisplay(ceiling, scale: effortScale))
     }
 
     /// Reads the before/after stress of every recovery session in the list, off the load path.

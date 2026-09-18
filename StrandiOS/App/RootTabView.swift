@@ -32,6 +32,7 @@ struct RootTabView: View {
     /// The morning flow — dream, the night's questions, the daily brief — on the day's first open.
     @State private var showMorning = false
     @ObservedObject private var stressMonitor = LiveStressMonitor.shared
+    @ObservedObject private var dayAlerts = DayAlerts.shared
     /// The full-screen stress alarm. Separate from the pill in the level strip, which follows the live
     /// reading alone — ignoring the screen does not hide the pill.
     @State private var showStressScreen = false
@@ -287,6 +288,22 @@ struct RootTabView: View {
             }
         }
         .animation(.easeOut(duration: 0.25), value: showStressScreen)
+        // THE DAY'S OPTIMUM, reached: the effort the night's recovery can carry has been spent.
+        .overlay {
+            if let optimum = dayAlerts.optimum {
+                DiagnosticAlertView(
+                    overline: "SYSTEM DIAGNOSTICS",
+                    symbol: "battery.25percent",
+                    title: "Optimum reached",
+                    subtitle: "Effort \(optimum.effort) of \(optimum.target) recommended",
+                    message: "Today's load has reached what last night's recovery can carry. Anything more now is paid for tomorrow: keep the rest of the day easy and get to bed on time.",
+                    primary: ("UNDERSTOOD", { dayAlerts.dismissOptimum() }),
+                    ringed: true)
+                .transition(.opacity)
+                .task { SystemHaptics.play(.summon) }
+            }
+        }
+        .animation(.easeOut(duration: 0.25), value: dayAlerts.optimum)
         .onChange(of: stressAlert != nil) { _, high in
             if high { presentStressScreenIfDue() } else { showStressScreen = false }
         }
