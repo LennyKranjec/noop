@@ -329,26 +329,108 @@ struct QuestFailedPopupView: View {
 
     private var quest: Quest { failure.quest }
 
+    // The completion card's twin in red: the same card, the same typed line, saying the window closed
+    // and the quest is gone. Nothing to accept or retry — the quest is already cancelled when it shows.
+    var body: some View {
+        ZStack {
+            StrandPalette.surfaceBase.opacity(questScrimAlpha)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { typed = failure.summary.count }
+
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 12) {
+                    Image(systemName: "xmark.octagon.fill")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(StrandPalette.statusCritical)
+                    Text("QUEST FAILED")
+                        .font(StrandFont.headline.weight(.bold))
+                        .tracking(3)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                }
+
+                VStack(spacing: 12) {
+                    Text(quest.title.uppercased())
+                        .font(StrandFont.title2)
+                        .tracking(2)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .multilineTextAlignment(.center)
+                    Text(quest.target)
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .multilineTextAlignment(.center)
+                    TypewriterText(text: failure.summary, shown: $typed)
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .multilineTextAlignment(.center)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(14)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(StrandPalette.statusCritical.opacity(0.35), lineWidth: 1)
+                )
+
+                HStack {
+                    Spacer(minLength: 0)
+                    Text("+0 XP")
+                        .font(StrandFont.headline.weight(.bold))
+                        .foregroundStyle(StrandPalette.statusCritical)
+                }
+
+                Button {
+                    SystemHaptics.play(.tap)
+                    onDismiss()
+                } label: {
+                    Text("UNDERSTOOD")
+                        .font(StrandFont.headline.weight(.bold))
+                        .tracking(4)
+                        .foregroundStyle(StrandPalette.surfaceBase)
+                        .frame(maxWidth: .infinity, minHeight: 56)
+                        .background(StrandPalette.statusCritical,
+                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(16)
+            .background(
+                LinearGradient(
+                    colors: [StrandPalette.statusCritical.opacity(0.16), StrandPalette.surfaceBase],
+                    startPoint: .top, endPoint: .bottom)
+                    .background(StrandPalette.surfaceRaised)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 22, style: .continuous)
+                    .strokeBorder(StrandPalette.statusCritical.opacity(0.70), lineWidth: 1)
+            )
+            .shadow(color: StrandPalette.statusCritical.opacity(0.45), radius: questGlowRadius)
+            .padding(questScreenMargin)
+        }
+        .task(id: failure.id) { SystemHaptics.play(.summon) }
+    }
+}
+
+// MARK: - The diagnostic screen
+//
+// THE WHOLE SCREEN, the way a diagnostic takes it: a dark, faintly red-gridded field, the warning line at
+// the top, one glowing outline symbol for the subject, the name in heavy wide capitals, the line under
+// it, one white button and a quieter second choice. The stress alarm uses it: high stress at rest is
+// the one thing that interrupts whatever the wearer was doing.
+
+struct DiagnosticAlertView: View {
+    let overline: String
+    let symbol: String
+    let title: String
+    let subtitle: String
+    let message: String
+    let primary: (label: String, action: () -> Void)
+    var secondary: (label: String, action: () -> Void)? = nil
+
+    @State private var typed = 0
+
     private let red = Color(.sRGB, red: 1.0, green: 0.23, blue: 0.23, opacity: 1)
 
-    /// The symbol for what the quest asked of the wearer.
-    private var symbol: String {
-        switch quest.effectiveGoal?.metric {
-        case .steps?: return "figure.walk"
-        case .workoutMinutes?: return "figure.run"
-        case .meditationMinutes?: return "brain.head.profile"
-        case .waterMl?: return "drop"
-        case .strain?: return "bolt.heart"
-        case .sleepHours?: return "bed.double"
-        case .bedtimeBy?, .bedtimeEarlier?: return "moon.zzz"
-        case .journal?: return "book.closed"
-        default: return "xmark.octagon"
-        }
-    }
-
-    // THE WHOLE SCREEN, the way a diagnostic takes it: a dark, faintly red-gridded field, the warning
-    // line at the top, one glowing outline symbol for what was asked, the quest's name in heavy wide
-    // capitals, the sentence under it, and one white button. A miss is not a toast.
     var body: some View {
         ZStack {
             Color(.sRGB, red: 0.07, green: 0.035, blue: 0.04, opacity: 1)
@@ -366,7 +448,7 @@ struct QuestFailedPopupView: View {
                 HStack(spacing: 10) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .font(.system(size: 18, weight: .bold))
-                    Text("QUEST FAILED")
+                    Text(overline)
                         .font(.system(size: 18, weight: .bold, design: .monospaced))
                         .tracking(5)
                 }
@@ -383,20 +465,20 @@ struct QuestFailedPopupView: View {
 
                 Spacer(minLength: 24)
 
-                Text(quest.title.uppercased())
+                Text(title.uppercased())
                     .font(.system(size: 38, weight: .black).width(.expanded))
                     .foregroundStyle(.white)
                     .multilineTextAlignment(.center)
                     .minimumScaleFactor(0.6)
                     .shadow(color: .white.opacity(0.45), radius: 10)
                     .padding(.horizontal, 20)
-                Text(quest.target)
+                Text(subtitle)
                     .font(.system(size: 17, weight: .semibold))
                     .foregroundStyle(red.opacity(0.9))
                     .multilineTextAlignment(.center)
                     .padding(.top, 12)
                     .padding(.horizontal, 28)
-                TypewriterText(text: failure.summary, shown: $typed)
+                TypewriterText(text: message, shown: $typed)
                     .font(.system(size: 18))
                     .foregroundStyle(Color(white: 0.72))
                     .multilineTextAlignment(.center)
@@ -407,9 +489,9 @@ struct QuestFailedPopupView: View {
 
                 Button {
                     SystemHaptics.play(.tap)
-                    onDismiss()
+                    primary.action()
                 } label: {
-                    Text("UNDERSTOOD")
+                    Text(primary.label)
                         .font(.system(size: 18, weight: .heavy))
                         .tracking(3)
                         .foregroundStyle(.black)
@@ -420,13 +502,27 @@ struct QuestFailedPopupView: View {
                 }
                 .buttonStyle(.plain)
                 .padding(.horizontal, 28)
-                .padding(.bottom, 20)
+                if let secondary {
+                    Button {
+                        SystemHaptics.play(.select)
+                        secondary.action()
+                    } label: {
+                        Text(secondary.label)
+                            .font(.system(size: 16, weight: .bold))
+                            .tracking(3)
+                            .foregroundStyle(Color(white: 0.7))
+                            .frame(maxWidth: .infinity)
+                            .frame(height: 48)
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.horizontal, 28)
+                    .padding(.top, 6)
+                }
+                Spacer().frame(height: 20)
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture { typed = failure.summary.count }
-        // The summon cue: the system reporting a miss, not asking for anything.
-        .task(id: failure.id) { SystemHaptics.play(.summon) }
+        .onTapGesture { typed = message.count }
     }
 }
 

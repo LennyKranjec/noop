@@ -32,6 +32,13 @@ struct RootTabView: View {
     /// The morning flow — dream, the night's questions, the daily brief — on the day's first open.
     @State private var showMorning = false
     @ObservedObject private var stressMonitor = LiveStressMonitor.shared
+    /// The full-screen stress alarm. Separate from the pill in the level strip, which follows the live
+    /// reading alone — ignoring the screen does not hide the pill.
+    @State private var showStressScreen = false
+    /// When the stress screen was last shown, so an ignored alarm does not come back two minutes later.
+    @AppStorage("stress.alertScreen.shownAt") private var stressScreenShownAt: Double = 0
+    /// Once an hour at most: often enough to catch a new spell, rarely enough not to nag through one.
+    private static let stressScreenEvery: TimeInterval = 60 * 60
     @EnvironmentObject private var appModel: AppModel
 
     /// High stress AT REST: the monitor's reading when it is in the top third and no workout is running.
@@ -119,6 +126,15 @@ struct RootTabView: View {
     private func presentMorningIfDue() {
         guard !showMorning, LevelDayFreeze.morningDue(), !backgroundCovered else { return }
         showMorning = true
+    }
+
+    /// Show the stress screen for a high reading, unless one was shown within the hour or the morning flow
+    /// or another sheet is up.
+    private func presentStressScreenIfDue() {
+        guard stressAlert != nil, !showStressScreen, !showMorning, !backgroundCovered,
+              Date().timeIntervalSince1970 - stressScreenShownAt > Self.stressScreenEvery else { return }
+        stressScreenShownAt = Date().timeIntervalSince1970
+        showStressScreen = true
     }
 
     /// Whether one of the shell's own sheets is up over the tabs.
@@ -250,6 +266,30 @@ struct RootTabView: View {
             MorningFlowView(levelBar: levelBar) { showMorning = false }
         }
         .onAppear { presentMorningIfDue() }
+        // THE STRESS ALARM, full screen, when the live reading turns high — on opening, on a refresh, or
+        // mid-session. The same diagnostic look as a failed quest, with a way out that helps and one that
+        // does not.
+        .overlay {
+            if showStressScreen, let level = stressAlert {
+                DiagnosticAlertView(
+                    overline: "STRESS ALERT",
+                    symbol: "bolt.heart",
+                    title: "High stress",
+                    subtitle: String(format: "%.1f of 3, at rest", level),
+                    message: "Your last ten minutes read high while you were still. A few minutes of slow breathing is the fastest way down.",
+                    primary: ("BREATHE", {
+                        showStressScreen = false
+                        quickAction = .breathe
+                    }),
+                    secondary: ("IGNORE", { showStressScreen = false }))
+                .transition(.opacity)
+                .task { SystemHaptics.play(.summon) }
+            }
+        }
+        .animation(.easeOut(duration: 0.25), value: showStressScreen)
+        .onChange(of: stressAlert != nil) { _, high in
+            if high { presentStressScreenIfDue() } else { showStressScreen = false }
+        }
         .onChange(of: scenePhase) { _, phase in
             LiveStressMonitor.shared.foreground = phase == .active
             if phase == .active { presentMorningIfDue() }
