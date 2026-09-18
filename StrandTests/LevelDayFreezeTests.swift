@@ -3,7 +3,7 @@ import StrandAnalytics
 import WhoopStore
 @testable import Strand
 
-/// The day's level is set at 06:40 and held. Two claims are pinned: which day is current at a given
+/// The day's level is set when the morning flow runs and held. Two claims are pinned: which day is current at a given
 /// minute, and that the frozen day reads a finished night plus the last COMPLETE day's activity — so a
 /// morning with 300 steps does not lock the full step penalty in for twenty-four hours.
 final class LevelDayFreezeTests: XCTestCase {
@@ -18,11 +18,20 @@ final class LevelDayFreezeTests: XCTestCase {
         calendar.date(from: DateComponents(year: 2026, month: 9, day: day, hour: hour, minute: minute))!
     }
 
-    func testTheDayTurnsAtSixForty() {
-        let before = LevelDayFreeze.levelDay(now: at(16, 6, 39), calendar: calendar)
-        let after = LevelDayFreeze.levelDay(now: at(16, 6, 40), calendar: calendar)
+    func testTheDayTurnsWhenTheMorningFlowRunsNotOnTheClock() throws {
+        let d = try XCTUnwrap(UserDefaults(suiteName: "LevelDayFreezeTests"))
+        d.removePersistentDomain(forName: "LevelDayFreezeTests")
+        // Late morning, flow not yet run: still yesterday's level, and the morning is due.
+        let before = LevelDayFreeze.levelDay(now: at(16, 11, 0), calendar: calendar, d)
         XCTAssertEqual(LevelWiring.key(from: before, calendar: calendar), "2026-09-15")
+        XCTAssertTrue(LevelDayFreeze.morningDue(now: at(16, 11, 0), calendar: calendar, d))
+        // An open at three in the morning is still the night before.
+        XCTAssertFalse(LevelDayFreeze.morningDue(now: at(16, 3, 0), calendar: calendar, d))
+        // The flow runs: today's level from here on, and the morning is no longer due.
+        LevelDayFreeze.beginDay(now: at(16, 11, 0), calendar: calendar, d)
+        let after = LevelDayFreeze.levelDay(now: at(16, 11, 1), calendar: calendar, d)
         XCTAssertEqual(LevelWiring.key(from: after, calendar: calendar), "2026-09-16")
+        XCTAssertFalse(LevelDayFreeze.morningDue(now: at(16, 12, 0), calendar: calendar, d))
     }
 
     func testAFrozenLevelRoundTripsExactly() {

@@ -222,6 +222,8 @@ struct LevelTrendSnapshot {
     /// asks the question the wearer meant — am I above or below where I have been sitting.
     let threeDayMean: Double?
     let monthMean: Double?
+    /// Yesterday's level, for the morning brief's arrow.
+    let yesterdayLevel: Double?
     let drivers: [LevelPart: LevelDriver]
 
     init(
@@ -230,8 +232,10 @@ struct LevelTrendSnapshot {
         monthAgo: LevelBreakdown?,
         threeDayMean: Double? = nil,
         monthMean: Double? = nil,
+        yesterdayLevel: Double? = nil,
         drivers: [LevelPart: LevelDriver] = [:]
     ) {
+        self.yesterdayLevel = yesterdayLevel
         self.now = now
         self.threeDaysAgo = threeDaysAgo
         self.monthAgo = monthAgo

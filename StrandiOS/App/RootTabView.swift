@@ -28,6 +28,9 @@ struct RootTabView: View {
     @EnvironmentObject private var homeScreenQuickActions: HomeScreenQuickActionSceneDelegate
     /// The coach, for the tab glyph's working state.
     @EnvironmentObject private var coach: AICoachEngine
+    @Environment(\.scenePhase) private var scenePhase
+    /// The morning flow — dream, the night's questions, the daily brief — on the day's first open.
+    @State private var showMorning = false
     /// The health store, for today's macros.
     @EnvironmentObject private var health: HealthKitBridge
 
@@ -98,6 +101,13 @@ struct RootTabView: View {
                 }
             }
         )
+    }
+
+    /// Open the morning flow when this is the day's first open. Not over another sheet that is already
+    /// up — it will be due again the next time the app comes to the front.
+    private func presentMorningIfDue() {
+        guard !showMorning, LevelDayFreeze.morningDue(), !backgroundCovered else { return }
+        showMorning = true
     }
 
     /// Whether one of the shell's own sheets is up over the tabs.
@@ -192,6 +202,11 @@ struct RootTabView: View {
             // easing cubic-bezier(0.22,1,0.36,1).
             .animation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24), value: selectedTab)
         .task {
+            // The room sensor is read every ten minutes for as long as the app runs, which is what the
+            // bedroom history is made of.
+            BedroomClimate.shared.startPolling()
+            // The lights' morning and evening automations, checked once a minute while the app runs.
+            WizLightStore.shared.startAutomation()
             await repo.refresh()
             // TODAY'S MACROS, from whichever app the wearer keeps their food diary in. A live read
             // rather than an import: a diary is filled in across the day, so a figure banked once is
@@ -214,6 +229,15 @@ struct RootTabView: View {
         // Quick-action sheet presents with the calm easing (~0.42s) per the README sheet spec —
         // the easing is applied where `quickAction` is set (see `presentQuickAction`), keeping the
         // animation scoped to the sheet rather than the whole shell.
+        // THE MORNING FLOW, on the first open of the day (after 04:00). Full screen, over every tab: it is
+        // the first thing the day says, and it is where today's level is scored and frozen.
+        .fullScreenCover(isPresented: $showMorning) {
+            MorningFlowView(levelBar: levelBar) { showMorning = false }
+        }
+        .onAppear { presentMorningIfDue() }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active { presentMorningIfDue() }
+        }
         .sheet(item: $quickAction) { action in
             QuickActionHost(initial: action) { quickActionDestination($0) }
         }
@@ -477,6 +501,8 @@ struct RootTabView: View {
                 moreSection("Body") {
                     MoreRow("Sleep", "bed.double.fill", .sleep)
                     MoreRow("Bedroom", "thermometer.medium", .bedroom)
+                    MoreRow("Dream Journal", "moon.stars.fill", .dreamJournal)
+                    MoreRow("Smart Lights", "lightbulb.2.fill", .smartLights)
                     MoreRow("Live", "waveform.path.ecg", .live)
                     MoreRow("Workouts", "figure.run", .workouts)
                     MoreRow("Health", "heart.text.square.fill", .health)
@@ -608,7 +634,7 @@ struct RootTabView: View {
 private enum MoreDestination: Hashable {
     case insightsHub, intelligence, coach, insights, explore, compare
     case live, workouts, health, labBook, sleep, stress, breathe, intervals, rhythm
-    case routines, bedroom
+    case routines, bedroom, dreamJournal, smartLights
     case fusedRecord, appleHealth, miBand, dataSources, backupSync, shortcutsExport, noopLimitations
     case alarms, automations, testCentre, siriShortcuts, powerSaving, settings
 
@@ -628,6 +654,8 @@ private enum MoreDestination: Hashable {
         // be reachable only as a link off another one.
         case .routines:        RoutinesView()
         case .bedroom:         BedroomClimateSettingsView()
+        case .dreamJournal:    DreamJournalView()
+        case .smartLights:     SmartLightsView()
         case .sleep:           SleepView()
         case .stress:          StressView()
         case .breathe:         BreathingView()

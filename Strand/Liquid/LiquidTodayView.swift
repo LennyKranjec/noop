@@ -63,6 +63,8 @@ struct LiquidTodayView: View {
     /// shows that day's date, which is what makes the carry honest rather than a silent substitution.
     @State private var cloudIsCarried = false
     @State private var showBedroomSettings = false
+    @State private var showClimateHistory = false
+    @ObservedObject private var climate = BedroomClimate.shared
     /// NOOP's own Charge / Effort / Rest for the selected day, each 0–100. The hero's first choice.
     @State private var noopCharge: Double?
     @State private var noopEffort: Double?
@@ -581,6 +583,9 @@ struct LiquidTodayView: View {
                 hostedCardsRaw: $hostedCardsRaw
             )
         }
+        .sheet(isPresented: $showClimateHistory) {
+            BedroomHistoryView()
+        }
         .sheet(isPresented: $showBedroomSettings) {
             NavigationStack { BedroomClimateSettingsView() }
         }
@@ -759,8 +764,17 @@ struct LiquidTodayView: View {
             // #today-layout: the hero + Start-session row moved OUT of the scene into the reorderable
             // section block below. The wordmark's bottom pad (10) + the section VStack's 12 spacing keeps
             // the default hero-under-wordmark gap at the original 22.
+            // THE ROOM, at a glance: the bedroom sensor's figures as a small chip under the date, which
+            // opens the room's history. Absent without a sensor, and then the wordmark keeps its gap.
+            if climate.isConfigured {
+                HStack {
+                    BedroomClimateChip(onOpen: { showClimateHistory = true })
+                    Spacer(minLength: 0)
+                }
+                .padding(.top, 8)
+            }
             LiquidWordmark()
-                .padding(.top, 30)
+                .padding(.top, climate.isConfigured ? 0 : 30)
                 .padding(.bottom, 10)
         }
     }
@@ -2006,10 +2020,8 @@ struct LiquidTodayView: View {
         // the briefing describes today and the hero stops carrying the moment there is something of
         // today's to show. Only the morning slot pays for it; midday and evening run on a day that has
         // already been scored.
-        if DayRitualScheduler.dueRituals().contains(.morning) {
-            await repo.refreshEverything(force: true)
-            await refreshPlatformHealth()
-        }
+        // THE MORNING SLOT IS THE DAILY BRIEF NOW. It runs in the morning flow on the day's first open
+        // (see `MorningFlowView`), which also does the forced refresh this used to do here.
         let grounding = RitualGrounding(
             recovery: heroCharge,
             sleepScore: heroRest,
@@ -2018,7 +2030,7 @@ struct LiquidTodayView: View {
             deficits: deficits,
             weather: weather,
             streaks: streaks)
-        for due in DayRitualScheduler.dueRituals() {
+        for due in DayRitualScheduler.dueRituals() where due != .morning {
             if let result = await DayRitualScheduler.runIfDue(
                 due, repo: repo, coach: coach, grounding: grounding) {
                 ritual = result

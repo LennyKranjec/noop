@@ -63,21 +63,43 @@ struct FrozenLevel: Codable, Equatable {
     }
 }
 
+// THE DAY NOW TURNS WHEN THE WEARER OPENS THE APP, not at 06:40. The first open of a day runs the morning
+// flow — the dream, the questions, the daily brief — and the brief is where the day's level is computed
+// and frozen, so the number is set at the moment it is first looked at, from a night that has had time to
+// sync. Until then the level shown is yesterday's. An open before 04:00 is still the night before and
+// does not count as the morning.
+
 enum LevelDayFreeze {
 
-    /// When a day's level is set. The same minute the morning briefing runs.
-    static let hour = 6
-    static let minute = 40
+    /// Before this hour an open is still last night, not this morning.
+    static let earliestHour = 4
+
+    /// The day the morning flow last ran for — the day whose level is current.
+    private static let briefDayKey = "level.briefDay.v1"
 
     /// v1 of the stored shape. Bumped if `FrozenLevel` changes, so an old record is recomputed rather
     /// than half-decoded.
     private static let key = "level.frozenDay.v3"
 
-    /// The day whose level is current at `now`: today from 06:40, yesterday before it.
-    static func levelDay(now: Date = Date(), calendar: Calendar = .current) -> Date {
+    /// The day whose level is current at `now`: today once this morning's flow has run, yesterday before.
+    static func levelDay(now: Date = Date(), calendar: Calendar = .current,
+                         _ d: UserDefaults = .standard) -> Date {
         let start = calendar.startOfDay(for: now)
-        let setAt = calendar.date(bySettingHour: hour, minute: minute, second: 0, of: start) ?? start
-        return now >= setAt ? start : (calendar.date(byAdding: .day, value: -1, to: start) ?? start)
+        let today = LevelWiring.key(from: start, calendar: calendar)
+        return d.string(forKey: briefDayKey) == today
+            ? start : (calendar.date(byAdding: .day, value: -1, to: start) ?? start)
+    }
+
+    /// Whether this morning's flow is still to come: past 04:00 and not yet run today.
+    static func morningDue(now: Date = Date(), calendar: Calendar = .current,
+                           _ d: UserDefaults = .standard) -> Bool {
+        guard calendar.component(.hour, from: now) >= earliestHour else { return false }
+        return d.string(forKey: briefDayKey) != LevelWiring.key(from: now, calendar: calendar)
+    }
+
+    /// Mark this morning's flow as run: from here on the level shown is today's.
+    static func beginDay(now: Date = Date(), calendar: Calendar = .current, _ d: UserDefaults = .standard) {
+        d.set(LevelWiring.key(from: now, calendar: calendar), forKey: briefDayKey)
     }
 
     static func stored(_ d: UserDefaults = .standard) -> FrozenLevel? {

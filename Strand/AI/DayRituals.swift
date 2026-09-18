@@ -82,11 +82,16 @@ enum DayRitual: String, CaseIterable, Identifiable, Sendable {
 
         switch self {
         case .morning:
-            s += "This is the MORNING BRIEFING. In three short parts, under 120 words total: "
-            s += "(1) what last night did, citing recovery and sleep; "
+            s += "This is the MORNING BRIEFING, the first thing they read today. In four short parts, "
+            s += "under 170 words total: "
+            s += "(1) what last night did, citing recovery, sleep and the night's figures against "
+            s += "yesterday, and their own answers about the night where given; "
             s += "(2) what that means for today's training — do not prescribe a hard session on a "
             s += "wrecked night; "
-            s += "(3) the one thing that would most improve tonight.\n"
+            s += "(3) DAYLIGHT: tell them to get outside light soon, within the first hour, and for how "
+            s += "long (about ten minutes in sun, twenty to thirty under cloud; use the weather if given); "
+            s += "(4) how to shape the day: when to train or recover, when to put the hardest focused "
+            s += "work, and when to start winding down tonight.\n"
         case .midday:
             s += "This is the MIDDAY REFRESH. Under 80 words. Compare how the day has ACTUALLY gone "
             s += "with how it was meant to go, and name ONE correction that still fits in the "
@@ -160,6 +165,9 @@ struct RitualGrounding {
     var deficits: [DayDeficit] = []
     var weather: WeatherNow?
     var streaks: [Streak] = []
+    /// Further lines, already written — the level, the night's figures against yesterday, the morning's
+    /// answers about the night. Handed over as they are.
+    var extra: [String] = []
 
     /// The block handed to the model.
     var text: String {
@@ -183,6 +191,7 @@ struct RitualGrounding {
                 .joined(separator: ", ")
             if !running.isEmpty { lines.append("- Streaks running: " + running) }
         }
+        lines += extra.map { "- " + $0 }
         return lines.joined(separator: "\n")
     }
 

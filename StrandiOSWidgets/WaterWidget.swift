@@ -50,6 +50,7 @@ struct WaterWidgetView: View {
 
     private var water: Color { Color(.sRGB, red: 0.30, green: 0.71, blue: 0.96, opacity: 1) }
 
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 4) {
@@ -110,16 +111,83 @@ struct WaterWidgetView: View {
         String(format: "%.2f L", Double(value) / 1000)
     }
 
-    /// The water itself, rising from the bottom of the tile to the day's fraction of its goal.
+    /// The water itself — the Today tile's own: three sheets, lit at the surface and dark at the floor,
+    /// the dashed quarter rules behind them and the glint along the waterline. Still rather than moving:
+    /// a widget is a picture, so it is posed at one moment of the tile's swell.
     var background: some View {
-        GeometryReader { geo in
-            ZStack(alignment: .bottom) {
-                StrandPalette.surfaceBase
-                LinearGradient(colors: [water.opacity(0.45), water.opacity(0.18)],
-                               startPoint: .bottom, endPoint: .top)
-                    .frame(height: geo.size.height * (enabled ? fraction : 0))
+        let level = enabled ? fraction : 0
+        return ZStack {
+            StrandPalette.surfaceRaised
+            WaterRules()
+                .stroke(StrandPalette.hairlineStrong, style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
+            WaterSheet(fraction: level, depth: 6, offset: 1.7, wobble: 0.6)
+                .fill(LinearGradient(colors: [bright.opacity(0.44), deep.opacity(0.38)],
+                                     startPoint: .top, endPoint: .bottom))
+            WaterSheet(fraction: level, depth: 3, offset: 0.6, wobble: 0.8)
+                .fill(LinearGradient(colors: [bright.opacity(0.60), deep.opacity(0.52)],
+                                     startPoint: .top, endPoint: .bottom))
+            WaterSheet(fraction: level, depth: 0, offset: 0, wobble: 1.0)
+                .fill(LinearGradient(colors: [bright.opacity(0.83), deep.opacity(0.72)],
+                                     startPoint: .top, endPoint: .bottom))
+            if level > 0.02 {
+                WaterSheet(fraction: level, depth: 0, offset: 0, wobble: 1.0, surfaceOnly: true)
+                    .stroke(Color.white.opacity(0.55), lineWidth: 1.2)
             }
         }
+    }
+
+    private var deep: Color { Color(.sRGB, red: 0.06, green: 0.36, blue: 0.62, opacity: 1) }
+    private var bright: Color { Color(.sRGB, red: 0.30, green: 0.71, blue: 0.96, opacity: 1) }
+}
+
+/// The dashed rules at a quarter, half and three quarters — a scale to judge the level against.
+private struct WaterRules: Shape {
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        for share in [0.25, 0.5, 0.75] {
+            let y = rect.height * (1 - share)
+            p.move(to: CGPoint(x: 0, y: y))
+            p.addLine(to: CGPoint(x: rect.width, y: y))
+        }
+        return p
+    }
+}
+
+/// One sheet of water up to `fraction` of the tile, its surface the Today tile's three-sine swell.
+private struct WaterSheet: Shape {
+    let fraction: Double
+    let depth: Double
+    let offset: Double
+    let wobble: Double
+    var surfaceOnly = false
+
+    func path(in rect: CGRect) -> Path {
+        let clamped = min(max(fraction, 0), 1)
+        let surfaceY = rect.height * (1 - clamped)
+        let amplitude = rect.height * 0.03
+        let steps = 48
+        var p = Path()
+        for i in 0...steps {
+            let x = rect.width * Double(i) / Double(steps)
+            let phase = x / rect.width * .pi * 2
+            let y = surfaceY + depth
+                + amplitude * wobble * sin(phase + offset)
+                + amplitude * wobble * 0.5 * sin(phase * 2.3)
+                + amplitude * wobble * 0.25 * sin(phase * 3.7 + offset)
+            if i == 0 {
+                if surfaceOnly { p.move(to: CGPoint(x: x, y: y)) } else {
+                    p.move(to: CGPoint(x: 0, y: rect.height))
+                    p.addLine(to: CGPoint(x: x, y: y))
+                }
+            } else {
+                p.addLine(to: CGPoint(x: x, y: y))
+            }
+        }
+        if !surfaceOnly {
+            p.addLine(to: CGPoint(x: rect.width, y: rect.height))
+            p.closeSubpath()
+        }
+        return p
     }
 }
 

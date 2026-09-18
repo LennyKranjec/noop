@@ -198,7 +198,33 @@ final class BedroomClimate: NSObject, ObservableObject {
     private func accept(_ r: ClimateReading) {
         latest = r
         if let data = try? JSONEncoder().encode(r) { UserDefaults.standard.set(data, forKey: Self.latestKey) }
+        ClimateHistory.record(r)
+        historyVersion &+= 1
         Task { await self.adviseIfEvening(r) }
+    }
+
+    /// Bumped whenever a reading is added to the history, so a chart re-reads.
+    @Published private(set) var historyVersion = 0
+
+    // MARK: - Polling
+
+    /// How often the sensor is read while the app runs. Govee's cloud refreshes a sensor's figure
+    /// roughly every ten minutes, so asking more often only reads the same number again.
+    static let pollSeconds: UInt64 = 10 * 60
+    private var polling = false
+
+    /// Read the sensor now and then every ten minutes for as long as the app runs — which, with the
+    /// strap connected, is in the background too. That is what builds the history the chart draws:
+    /// Govee's API returns the current figure only, never a past one.
+    func startPolling() {
+        guard !polling else { return }
+        polling = true
+        Task { [weak self] in
+            while let self, !Task.isCancelled {
+                if self.isConfigured { await self.refresh() }
+                try? await Task.sleep(nanoseconds: Self.pollSeconds * 1_000_000_000)
+            }
+        }
     }
 
     // MARK: - The evening tip
@@ -268,6 +294,48 @@ extension BedroomClimate: CBCentralManagerDelegate {
     }
 }
 #endif
+
+/// The room's readings over time, as this app has collected them.
+///
+/// Kept on the device in defaults — two weeks at one point per five minutes is a few thousand small
+/// records — because Govee's cloud offers the current reading only and a chart needs the past.
+enum ClimateHistory {
+    struct Point: Codable, Equatable, Identifiable {
+        let at: Date
+        let temperatureC: Double
+        let humidityPct: Double
+        var id: Date { at }
+    }
+
+    private static let key = "climate.history.v1"
+    static let keepDays = 14
+    /// Readings closer together than this replace the previous point rather than adding one.
+    static let minSpacing: TimeInterval = 5 * 60
+
+    static func all(_ d: UserDefaults = .standard) -> [Point] {
+        guard let data = d.data(forKey: key),
+              let points = try? JSONDecoder().decode([Point].self, from: data) else { return [] }
+        return points
+    }
+
+    static func record(_ r: ClimateReading, _ d: UserDefaults = .standard) {
+        var points = all(d)
+        let point = Point(at: r.at, temperatureC: r.temperatureC, humidityPct: r.humidityPct)
+        if let last = points.last, point.at.timeIntervalSince(last.at) < minSpacing {
+            points[points.count - 1] = point
+        } else {
+            points.append(point)
+        }
+        let floor = Date().addingTimeInterval(-Double(keepDays) * 86_400)
+        points.removeAll { $0.at < floor }
+        if let data = try? JSONEncoder().encode(points) { d.set(data, forKey: key) }
+    }
+
+    /// The points since `since`, oldest first.
+    static func since(_ since: Date, _ d: UserDefaults = .standard) -> [Point] {
+        all(d).filter { $0.at >= since }
+    }
+}
 
 /// One hand-over to the main actor per sensor per interval. Touched only from the central's serial
 /// queue, and locked anyway so a second central could never race it.

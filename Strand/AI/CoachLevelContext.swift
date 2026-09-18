@@ -20,7 +20,7 @@ enum CoachLevelContext {
 
         if let frozen = LevelDayFreeze.stored() {
             let b = frozen.breakdown
-            s += String(format: "Level for %@: %.1f (no upper limit; 100 = every part at the wearer's own 95th percentile; set at 06:40 and held all day).\n", frozen.day, b.level)
+            s += String(format: "Level for %@: %.1f (no upper limit; 100 = every part at the wearer's own 95th percentile; set on the first app open of the morning and held all day).\n", frozen.day, b.level)
             s += "Parts (score, 50 = average and 100 = own 95th percentile · effective weight · points contributed · points still missing to 100):\n"
             for c in b.components {
                 let name = c.part.rawValue
@@ -53,7 +53,7 @@ enum CoachLevelContext {
         s += "- muscle = 0.60 × strength (estimated-1RM index: each exercise's best e1RM over 12 weeks as a ratio of its own median) + 0.40 × chronic training load (42-day exponentially weighted volume).\n"
         s += "- focus = 0.75 × daytime calm (RMSSD of still waking hours) + 0.25 × meditation (weighted share of the last 28 days with at least 5 minutes).\n"
         s += "- steps (7-day average): below \(LevelEngine.stepsFloor) the level is multiplied down, linearly, by up to \(Int(LevelEngine.stepsMaxPenalty * 100))% at zero steps.\n"
-        s += "- The day's level is fixed at 06:40 from the night that ended that morning and the previous full day's activity (steps, calm, meditation, training load, strength), so what they do TODAY shows up in TOMORROW's level.\n"
+        s += "- The day's level is fixed when they first open the app in the morning, from the night that ended that morning and the previous full day's activity (steps, calm, meditation, training load, strength), so what they do TODAY shows up in TOMORROW's level.\n"
         s += "Because the level tracks state, advise for the weeks ahead — sustained sleep, progressive strength, aerobic base — rather than for tomorrow's number."
         return s
     }

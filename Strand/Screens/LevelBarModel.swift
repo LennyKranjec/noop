@@ -177,6 +177,7 @@ final class LevelBarModel: ObservableObject {
             monthAgo: shifted(base, by: -30).flatMap { score($0).0 },
             threeDayMean: mean(over: 3, need: 2),
             monthMean: mean(over: 30, need: 10),
+            yesterdayLevel: shifted(base, by: -1).flatMap { score($0).0?.level },
             drivers: shown?.drivers ?? [:]
         )
     }
