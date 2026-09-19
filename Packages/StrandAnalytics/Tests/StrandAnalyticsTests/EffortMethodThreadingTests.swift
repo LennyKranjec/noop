@@ -19,12 +19,16 @@ import WhoopStore
 final class EffortMethodThreadingTests: XCTestCase {
 
     private let day = "2026-08-23"
+    /// 2026-08-23 08:00:00 UTC.
+    private static let hourStart = 1_787_472_000
 
     /// A flat hour just UNDER Edwards' 50% HRmax floor (O6): it earns nothing there, real credit under
     /// Banister. 93 bpm = 49% of 190 — and 25% HRR against resting 60.
     private func subThresholdHour() -> [HRSample] {
         let bpm = Int((190.0 * 0.49).rounded())
-        return (0 ..< 3600).map { HRSample(ts: $0, bpm: bpm) }
+        // Inside `day` (08:00 UTC on 2026-08-23): Effort integrates only the day's own samples, so an
+        // hour stamped in 1970 would score as no data at all.
+        return (0 ..< 3600).map { HRSample(ts: Self.hourStart + $0, bpm: bpm) }
     }
 
     private func profile() -> UserProfile { UserProfile(age: 30, sex: "male") }
@@ -60,7 +64,7 @@ final class EffortMethodThreadingTests: XCTestCase {
     /// contradiction a user would notice long before they noticed either number being individually off.
     func testBanisterReachesTheWorkoutsDetectedInsideTheDay() {
         let hr = subThresholdHour()
-        let grav = (0 ..< 3600).map { GravitySample(ts: $0, x: 0.9, y: 0.1, z: 0.1) }
+        let grav = (0 ..< 3600).map { GravitySample(ts: Self.hourStart + $0, x: 0.9, y: 0.1, z: 0.1) }
         let edwards = WorkoutDetector.detect(hr: hr, gravity: grav, restingHR: 60, maxHR: 190,
                                              age: 30, profile: profile(), effortMethod: .edwards)
         let banister = WorkoutDetector.detect(hr: hr, gravity: grav, restingHR: 60, maxHR: 190,
