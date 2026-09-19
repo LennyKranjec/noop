@@ -873,8 +873,14 @@ struct LiquidTodayView: View {
     /// Kept apart so the O8 calibration is applied only to a number the app measured — WHOOP's strain is
     /// already on WHOOP's axis and must not be put through a curve fitted to map ours onto it.
     private var heroOwnEffort: Double? {
-        StrainScorer.effectiveEffort(live: selectedDayOffset == 0 ? liveTodayStrain : nil,
-                                     stored: noopEffort ?? displayDay?.strain)
+        let own = StrainScorer.effectiveEffort(live: selectedDayOffset == 0 ? liveTodayStrain : nil,
+                                               stored: noopEffort ?? displayDay?.strain)
+        // A ZERO THE STRAP DID NOT EARN. The app's own Effort reads 0 when it saw no heart rate above the
+        // floor — which on a day WHOOP held the strap, or the strap barely streamed, is absence, not rest.
+        // When WHOOP scored real strain for THIS day (its own row, not a carried one), that figure wins over
+        // an own zero instead of the ring showing a 0 over a day that plainly had load in it.
+        if let own, own < 0.5, !cloudIsCarried, let cloud = cloudDay?.strain, cloud > 0 { return nil }
+        return own
     }
     /// Today's Effort on WHOOP's 0–21 axis, for comparing with WHOOP's optimal-strain band: the app's own
     /// Effort through the calibration (linear ×21/100 without one), or WHOOP's own strain when the ring is
@@ -2029,8 +2035,12 @@ struct LiquidTodayView: View {
 
         // Days since the last counted session, for the training deficit. Capped at the window the
         // deficit rule cares about, so this never walks a whole history to answer "more than a week".
+        // E2: "real training" on the 0–100 Effort axis — the old `>= 8` was the 0–21 threshold and every
+        // day clears it now. One constant, shared with the idle-streak quest, so the two cannot drift.
         var since: Int?
-        if let last = repo.days.last(where: { ($0.exerciseCount ?? 0) > 0 || ($0.strain ?? 0) >= 8 }),
+        if let last = repo.days.last(where: {
+            ($0.exerciseCount ?? 0) > 0 || ($0.strain ?? 0) >= QuestTriggers.trainingDayEffort
+        }),
            let lastDate = WhoopCloudApi.localDayDate(last.day) {
             since = Calendar.current.dateComponents([.day], from: lastDate, to: Date()).day
         }
@@ -2184,8 +2194,13 @@ struct LiquidTodayView: View {
             let restHR = await repo.wakingRestingHR(day: selectedDayKey,
                                                     sleepRestingHR: day?.restingHr.map(Double.init))
                 ?? StrainScorer.defaultRestingHR
+            // E1: a whole-DAY integral, so zone 1 only pays while the wearer is MOVING — the same gravity
+            // gate the daily pass scores the stored row with, or `effectiveEffort`'s max would let the
+            // ungated live number win and the desk-day inflation would stay on the ring.
+            let todayGravity = await repo.gravitySamplesUnion(from: from, to: to, limit: 200_000)
             liveStrainLocal = StrainScorer.strain(todayHr, maxHR: maxHR, restingHR: restHR,
-                                                  method: PuffinExperiment.effortMethod, sex: profile.sex)
+                                                  method: PuffinExperiment.effortMethod, sex: profile.sex,
+                                                  zone1Gate: .day(StrainScorer.movingMinutes(gravity: todayGravity)))
         } else {
             liveStrainLocal = nil
         }

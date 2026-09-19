@@ -31,6 +31,8 @@ struct RootTabView: View {
     @Environment(\.scenePhase) private var scenePhase
     /// The morning flow — dream, the night's questions, the daily brief — on the day's first open.
     @State private var showMorning = false
+    /// When the morning flow was put up — the moment its day begins from (see `LevelDayFreeze.beginDay`).
+    @State private var morningPresentedAt = Date()
     @ObservedObject private var stressMonitor = LiveStressMonitor.shared
     @ObservedObject private var dayAlerts = DayAlerts.shared
     /// The full-screen stress alarm. Separate from the pill in the level strip, which follows the live
@@ -46,8 +48,10 @@ struct RootTabView: View {
     /// The reading is motion-gated already; a workout in progress is exertion by definition, even when
     /// it is a still one like a plank.
     private var stressAlert: Double? {
-        guard appModel.activeWorkout == nil, let level = stressMonitor.current,
-              level >= LiveStressMonitor.highThreshold else { return nil }
+        // `isHigh`, not one reading over the line: two consecutive high windows, so a phone call or a
+        // coffee does not trip the red warning and the full-screen alarm.
+        guard appModel.activeWorkout == nil, stressMonitor.isHigh,
+              let level = stressMonitor.current else { return nil }
         return level
     }
     /// The health store, for today's macros.
@@ -126,7 +130,9 @@ struct RootTabView: View {
     /// Open the morning flow when this is the day's first open. Not over another sheet that is already
     /// up — it will be due again the next time the app comes to the front.
     private func presentMorningIfDue() {
-        guard !showMorning, LevelDayFreeze.morningDue(), !backgroundCovered else { return }
+        let now = Date()
+        guard !showMorning, LevelDayFreeze.morningDue(now: now), !backgroundCovered else { return }
+        morningPresentedAt = now
         showMorning = true
     }
 
@@ -265,7 +271,12 @@ struct RootTabView: View {
         // THE MORNING FLOW, on the first open of the day (after 04:00). Full screen, over every tab: it is
         // the first thing the day says, and it is where today's level is scored and frozen.
         .fullScreenCover(isPresented: $showMorning) {
-            MorningFlowView(levelBar: levelBar) { showMorning = false }
+            MorningFlowView(levelBar: levelBar, presentedAt: morningPresentedAt) {
+                showMorning = false
+                // The day has turned: the strip redraws on today's level (or marks it pending) now, not at
+                // the next data refresh. The model owns the load, so the cover going away cannot stop it.
+                Task { await levelBar.reload(repo: repo) }
+            }
         }
         .onAppear { presentMorningIfDue() }
         // THE STRESS ALARM, full screen, when the live reading turns high — on opening, on a refresh, or

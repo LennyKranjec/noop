@@ -151,19 +151,32 @@ extension WidgetSnapshot {
                 .last.map { Int($0.value.rounded()) }
         }
         snap.stepsToday = steps
-        var effort = row?.strain
-        if effort == nil, let cloud = await model.repo.whoopCloudDay(todayKey)?.strain {
-            effort = cloud * WhoopExportImporter.dayStrainToEffortScale
-        }
+        // E5 — MIRRORS TODAY'S `heroOwnEffort`. The app's OWN Effort (0–100) is the one number the O8
+        // calibration may touch; WHOOP's cloud strain is already on WHOOP's axis, so on the 0–21 scale it is
+        // shown exactly as WHOOP gave it (10.0 reads 10.0) instead of being round-tripped through ×100/21 and
+        // a curve fitted to map OUR Effort onto WHOOP's.
+        // A ZERO THE STRAP DID NOT EARN yields to WHOOP's own strain for the day, as on Today.
+        let cloudToday = await model.repo.whoopCloudDay(todayKey)?.strain
+        var ownEffort = row?.strain
+        if let own = ownEffort, own < 0.5, let cloud = cloudToday, cloud > 0 { ownEffort = nil }
+        var cloudStrain21: Double?
+        if ownEffort == nil { cloudStrain21 = cloudToday }
+        let effort = ownEffort ?? cloudStrain21.map { $0 * WhoopExportImporter.dayStrainToEffortScale }
         snap.effortToday = effort.map { Int($0.rounded()) }
-        snap.effortTodayDisplay = effort.map { stored in
-            effortScale == .whoop
-                ? String(format: "%.1f", UnitFormatter.effortValue(stored, scale: .whoop))
-                : "\(Int(stored.rounded()))"
+        if effortScale == .whoop {
+            if let own = ownEffort {
+                snap.effortTodayDisplay = String(format: "%.1f", UnitFormatter.effortValue(own, scale: .whoop))
+            } else {
+                snap.effortTodayDisplay = cloudStrain21.map { String(format: "%.1f", $0) }
+            }
+        } else {
+            snap.effortTodayDisplay = effort.map { "\(Int($0.rounded()))" }
         }
-        // The top of today's recommended band, the same ceiling Today's hero ring marks.
+        // The top of today's recommended band, the same ceiling Today's hero ring marks — placed on the
+        // 0–100 axis through the INVERSE calibration, exactly as Today does, so the widget ring crosses the
+        // mark at the same moment the hero ring does (linear ×100/21 without a calibration, as before).
         snap.effortTarget = CoupledView.optimalStrainRange(recovery: recovery)
-            .map { Int((Double($0.upperBound) * WhoopExportImporter.dayStrainToEffortScale).rounded()) }
+            .map { Int(StrainCalibration.effort100(strain21: Double($0.upperBound)).rounded()) }
         if let dayHours, let level = await WindowStress.now(repo: model.repo, dayHours: dayHours) {
             snap.stressNow = level
             snap.stressNowAt = now
