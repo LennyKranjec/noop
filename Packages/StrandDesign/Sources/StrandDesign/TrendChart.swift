@@ -95,6 +95,12 @@ public struct TrendChart: View {
     public var height: CGFloat
     /// Whether hovering reveals a crosshair + tooltip for the nearest point.
     public var showsHover: Bool
+    /// iPhone touch scrub: when true (and `showsHover`), touch-and-hold pins the crosshair under the finger
+    /// and dragging scrubs it, driving the SAME readout the Mac pointer hover drives. The gesture and its
+    /// hold gate are `OverviewHRChart.touchScrub`'s verbatim, so a vertical swipe that starts on the chart
+    /// still scrolls the page (it moves past the hold's 8 pt before the 0.25 s elapse). Off by default:
+    /// a chart inside a NavigationLink (the hosted Today cards) keeps its tap-to-open unobstructed.
+    public var touchScrub: Bool
     /// Formats a point's value for the tooltip's bold line (default: rounded int).
     public var valueFormat: (Double) -> String
     /// Formats a point's date for the tooltip's secondary line.
@@ -129,6 +135,7 @@ public struct TrendChart: View {
         baselineValue: Double? = nil,
         height: CGFloat = 220,
         showsHover: Bool = true,
+        touchScrub: Bool = false,
         valueFormat: @escaping (Double) -> String = { String(Int($0.rounded())) },
         dateFormat: @escaping (Date) -> String = { TrendChart.defaultDateString($0) },
         accessibilityLabel: String? = nil,
@@ -144,6 +151,7 @@ public struct TrendChart: View {
         self.baselineValue = baselineValue
         self.height = height
         self.showsHover = showsHover
+        self.touchScrub = touchScrub
         self.valueFormat = valueFormat
         self.dateFormat = dateFormat
         self.accessibilityLabel = accessibilityLabel
@@ -173,6 +181,9 @@ public struct TrendChart: View {
     /// The x-position the cursor is hovering, in chart-local coordinates.
     @State private var hoverX: CGFloat? = nil
 
+    /// True while a touch scrub is engaged (the hold completed) — fires the engage haptic once per scrub.
+    @State private var scrubEngaged = false
+
     /// PERF: a 365-day (or longer) series feeds Swift Charts hundreds of LineMark/AreaMark vertices, each
     /// catmullRom-interpolated — far more than the ~360pt plot has pixels, so most are sub-pixel and pure
     /// draw cost. `displayPoints` is the point set actually handed to the marks: full resolution up to a
@@ -192,6 +203,27 @@ public struct TrendChart: View {
         sharedDateFormatter.string(from: date)
     }
 
+    private static let dayKeyDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.setLocalizedDateFormatFromTemplate("EEE d MMM")
+        return f
+    }()
+
+    /// Scrub/tooltip label for a point whose date is a DAY KEY parsed at UTC midnight (the Explore / Trends
+    /// series: "yyyy-MM-dd" through a UTC parser). Weekday + day + month in the device locale's own order
+    /// ("Fr., 18. Sept." / "Fri, Sep 18"). Formatting in UTC is what keeps the label on the day the point
+    /// belongs to: the local-zone default would render a UTC-midnight date as the PREVIOUS day anywhere
+    /// west of Greenwich. `locale` is injectable for tests only.
+    public static func dayKeyDateString(_ date: Date, locale: Locale? = nil) -> String {
+        guard let locale else { return dayKeyDateFormatter.string(from: date) }
+        let f = DateFormatter()
+        f.locale = locale
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.setLocalizedDateFormatFromTemplate("EEE d MMM")
+        return f.string(from: date)
+    }
+
     /// The point nearest a given chart-local x, using the proxy to map back.
     private func nearestPoint(toX x: CGFloat, proxy: ChartProxy, plot: CGRect) -> TrendPoint? {
         guard !points.isEmpty else { return nil }
@@ -203,6 +235,35 @@ public struct TrendChart: View {
             abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
         })
     }
+
+    #if os(iOS)
+    /// Touch-and-hold-then-drag scrub — `OverviewHRChart.touchScrubGesture` verbatim (#979 spin-off): the
+    /// stationary hold (0.25 s within 8 pt) separates a scrub from a scroll, then the drag moves the same
+    /// `hoverX` the pointer hover drives, and lifting clears it.
+    private var touchScrubGesture: some Gesture {
+        LongPressGesture(minimumDuration: 0.25, maximumDistance: 8)
+            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
+            .onChanged { value in
+                guard case .second(true, let drag) = value else { return }
+                if !scrubEngaged {
+                    scrubEngaged = true
+                    StrandHaptic.selection.play()
+                }
+                if let drag {
+                    // Non-animating transaction, same reason as hover (#104 flicker).
+                    var tx = Transaction()
+                    tx.disablesAnimations = true
+                    withTransaction(tx) { hoverX = drag.location.x }
+                }
+            }
+            .onEnded { _ in
+                scrubEngaged = false
+                var tx = Transaction()
+                tx.disablesAnimations = true
+                withTransaction(tx) { hoverX = nil }
+            }
+    }
+    #endif
 
     // Map data values onto the unit interval for gradient stops.
     private func unit(_ value: Double) -> Double {
@@ -384,6 +445,11 @@ public struct TrendChart: View {
                         }
                     }
                 }
+                #if os(iOS)
+                // Touch scrub (see `touchScrub`). `.subviews` masks the gesture entirely on the call sites
+                // that don't opt in, so their touch handling is exactly as before.
+                .gesture(touchScrubGesture, including: (touchScrub && showsHover) ? .all : .subviews)
+                #endif
             }
         }
         .frame(height: height)

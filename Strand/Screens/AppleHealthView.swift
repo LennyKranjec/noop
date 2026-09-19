@@ -662,7 +662,9 @@ struct AppleHealthView: View {
                         valueRange: valueRange(pts, fallback: fallback),
                         showsArea: true,
                         height: NoopMetrics.chartHeight,
-                        valueFormat: fmt
+                        touchScrub: true,
+                        valueFormat: fmt,
+                        dateFormat: { TrendChart.dayKeyDateString($0) }   // UTC day-key points
                     )
                 } else if let only = vals.last {
                     // A single point is not a line — present the lone reading,

@@ -2519,6 +2519,11 @@ final class IntelligenceEngine: ObservableObject {
                                                          consistency: sleepConsistency) {
                 restPoints.append(MetricPoint(day: daily.day, key: "sleep_performance", value: rest))
             }
+            // The Rest composite's own inputs (hours vs needed, the need, regularity, restorative/deep
+            // share), with the SAME need/regularity just scored, so Explore can chart what moved Rest.
+            // New keys only: every existing point above/below is written exactly as before.
+            restPoints.append(contentsOf: AnalyticsEngine.Rest.componentPoints(
+                daily: daily, needHours: sleepNeedHours, consistency: sleepConsistency))
             if let onset = physiologicalSteps.onsetByWakeDay[daily.day] {
                 restPoints.append(MetricPoint(day: daily.day,
                                               key: DayCycleIntelligenceIntegration.onsetKey,
@@ -2700,6 +2705,8 @@ final class IntelligenceEngine: ObservableObject {
                                                              consistency: sleepConsistency) {
                     restPoints.append(MetricPoint(day: w.day, key: "sleep_performance", value: rest))
                 }
+                restPoints.append(contentsOf: AnalyticsEngine.Rest.componentPoints(
+                    daily: scored, needHours: sleepNeedHours, consistency: sleepConsistency))
                 out.append(Computed(day: w.day, recovery: recovery, strain: scored.strain,
                                     sleepMin: scored.totalSleepMin, hrv: scored.avgHrv, rhr: scored.restingHr,
                                     source: .computed, confidence: w.confidence))

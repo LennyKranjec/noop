@@ -829,7 +829,13 @@ struct TrendsView: View {
         TrendChart(points: pts, gradient: gradient, valueRange: valueRange,
                    showsArea: true,
                    showsBars: TrendChartStyle(rawValue: trendChartStyleRaw) == .bar,
-                   height: NoopMetrics.chartHeight, valueFormat: valueFormat,
+                   height: NoopMetrics.chartHeight,
+                   // Hold-and-drag scrub (rule + weekday'd date + value). The hold gate is what leaves a
+                   // plain tap to the card's NavigationLink and a swipe to the page scroll.
+                   touchScrub: true,
+                   valueFormat: valueFormat,
+                   // Points are UTC-midnight day keys (`dayParser`), so label them in UTC.
+                   dateFormat: { TrendChart.dayKeyDateString($0) },
                    accessibilityLabel: accessibilityLabel, nowCapColor: tip)
     }
 

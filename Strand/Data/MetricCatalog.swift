@@ -128,6 +128,9 @@ enum MetricCatalog {
         d("vo2max_est", String(localized: "VO₂ Max (estimated)"), "Heart", "", "my-whoop", "lungs", 1, true),
         d("vitality", String(localized: "Vitality"), "Heart", "", "my-whoop", "sparkles", 0, true),
         d("body_age", String(localized: "Body Age"), "Heart", "yrs", "my-whoop", "figure.stand", 0, false),
+        // The measured daytime resting-HR floor the engine persists (O7) and feeds VO₂max / Fitness Age.
+        // Computed-only ("-noop"), so it reads through exploreSeries' computed layer like fitness_age.
+        d("rhr_waking", String(localized: "Waking Resting Heart Rate"), "Heart", "bpm", "my-whoop", "sun.max", 0, false),
 
         // ── Charge (was Recovery)
         d("recovery", String(localized: "Charge"), "Charge", "%", "my-whoop", "heart.circle", 0, true,
@@ -143,7 +146,8 @@ enum MetricCatalog {
           String(localized: "How restorative your sleep was: duration, efficiency, deep+REM, timing.")),
         d("in_bed_min", String(localized: "Time in Bed"), "Rest", "min", "my-whoop", "bed.double", 0, nil),
         d("sleep_total_min", String(localized: "Asleep Time"), "Rest", "min", "my-whoop", "moon.zzz", 0, true),
-        d("hours_vs_needed_pct", String(localized: "Hours vs Needed"), "Rest", "%", "my-whoop", "gauge.medium", 0, true),
+        d("hours_vs_needed_pct", String(localized: "Hours vs Needed"), "Rest", "%", "my-whoop", "gauge.medium", 0, true,
+          String(localized: "Hours asleep as a share of your personal sleep need, the largest part of Rest.")),
         d("sleep_consistency", String(localized: "Sleep Consistency"), "Rest", "%", "my-whoop", "calendar", 0, true),
         d("restorative_pct", String(localized: "Restorative Sleep"), "Rest", "%", "my-whoop", "sparkles", 0, true),
         d("restorative_min", String(localized: "Restorative Sleep"), "Rest", "min", "my-whoop", "sparkles", 0, true),
@@ -153,6 +157,11 @@ enum MetricCatalog {
         d("sleep_light_min", String(localized: "Light Sleep"), "Rest", "min", "my-whoop", "moon", 0, nil),
         d("sleep_need_min", String(localized: "Sleep Need"), "Rest", "min", "my-whoop", "gauge", 0, nil),
         d("sleep_debt_min", String(localized: "Sleep Debt"), "Rest", "min", "my-whoop", "exclamationmark.circle", 0, false),
+        // Rest composite inputs a strap-only wearer had no series for: the deep share
+        // the composite's deep-adequacy factor reads, and the night's disturbance count. Both resolve from
+        // the merged daily columns (and, for the deep share, the analysis pass's persisted points).
+        d("sleep_deep_pct", String(localized: "Deep Sleep Share"), "Rest", "%", "my-whoop", "moon.fill", 0, true),
+        d("sleep_disturbances", String(localized: "Sleep Disturbances"), "Rest", "", "my-whoop", "waveform.path", 0, false),
 
         // ── Effort (was Strain)
         d("strain", String(localized: "Effort"), "Effort", "/100", "my-whoop", "flame", 1, nil,

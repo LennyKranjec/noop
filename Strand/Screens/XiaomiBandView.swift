@@ -416,7 +416,9 @@ struct XiaomiBandView: View {
                 if pts.count >= 2 {
                     TrendChart(points: pts, gradient: gradient,
                                valueRange: valueRange(pts, fallback: fallback),
-                               showsArea: true, height: NoopMetrics.chartHeight, valueFormat: fmt)
+                               showsArea: true, height: NoopMetrics.chartHeight, touchScrub: true,
+                               valueFormat: fmt,
+                               dateFormat: { TrendChart.dayKeyDateString($0) })   // UTC day-key points
                 } else if let only = vals.last {
                     singlePoint(only, fmt: fmt, accent: StrandPalette.sample(stops: gradient.stops, at: 0.85))
                 } else {

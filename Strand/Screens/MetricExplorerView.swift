@@ -44,13 +44,13 @@ private func metricAccent(_ m: MetricDescriptor) -> Color {
     switch m.key {
     case "recovery", "sleep_performance", "hours_vs_needed_pct", "sleep_consistency",
          "restorative_pct", "restorative_min", "sleep_efficiency", "sleep_total_min",
-         "sleep_deep_min", "sleep_rem_min":
+         "sleep_deep_min", "sleep_rem_min", "sleep_deep_pct":
         return StrandPalette.accent
     case "strain", "hr_zones45_min", "hr_zones_all_min", "strength_min", "hr_zones13_min":
         return StrandPalette.strainColor(14)              // mid-strain hue
     case "hrv", "vo2max", "lean_mass":
         return StrandPalette.metricPurple
-    case "rhr", "stress", "sleep_debt_min", "body_fat", "max_hr":
+    case "rhr", "rhr_waking", "stress", "sleep_debt_min", "body_fat", "max_hr", "sleep_disturbances":
         return StrandPalette.metricRose
     case "spo2", "steps":
         return StrandPalette.metricCyan
@@ -1262,7 +1262,11 @@ struct MetricDetailView: View {
                 showsBars: TrendChartStyle(rawValue: trendChartStyleRaw) == .bar,
                 baselineValue: personalBaseline,
                 height: NoopMetrics.chartHeight,
-                valueFormat: { fmt($0) }
+                // Hold-and-drag reads any day: rule + callout with the weekday'd date and the value.
+                touchScrub: true,
+                valueFormat: { fmt($0) },
+                // Points are UTC-midnight day keys (`parseDay`), so label them in UTC.
+                dateFormat: { TrendChart.dayKeyDateString($0) }
             )
         } footer: {
             // #1662: the VO₂max line is SPLIT on purpose wherever the estimator changes, so two

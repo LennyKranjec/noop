@@ -2745,7 +2745,20 @@ final class Repository: ObservableObject {
         // real import always wins over the computed strap value.
         var byDay: [String: Double] = [:]
 
-        // Layer 3 (lowest): merged daily column for keys that have one. `self.days` is the published
+        // Layer 4 (lowest, `stress` / `sleep_debt_min` only): the Stress screen's own per-day figure, so a strap-only wearer's
+        // Day Stress charts in Explore instead of reading "no data" while the Stress screen draws a full
+        // trend. Same resolver the streak/flame use (`stressScoreByDay`); any stored series point still
+        // wins its day through the layers below.
+        if key == "stress" {
+            for (day, value) in await stressScoreByDay() where day >= from && day <= to { byDay[day] = value }
+        }
+        // Same for Sleep Debt: the Sleep screen's own ledger (`sleepDebtMinByDay`, imported/cloud debt
+        // winning its day), which a strap-only wearer otherwise never saw charted.
+        if key == "sleep_debt_min" {
+            for (day, value) in await sleepDebtMinByDay() where day >= from && day <= to { byDay[day] = value }
+        }
+
+        // Layer 3: merged daily column for keys that have one. `self.days` is the published
         // imported ∪ computed daily cache (parameter `days` is the lookback window, not this).
         for d in self.days where byDay[d.day] == nil {
             if let v = Self.dailyColumn(key: key, day: d) { byDay[d.day] = v }
@@ -2863,6 +2876,21 @@ final class Repository: ObservableObject {
         case "sleep_rem_min", "rem_min":   return d.remMin
         case "sleep_light_min", "core_min": return d.lightMin
         case "sleep_performance": return AnalyticsEngine.Rest.compositeWithEngineInputs(daily: d)
+        // The Rest composite's inputs, derived from the SAME banked totals and the SAME engine need
+        // `sleep_performance` above resolves with, for the days no analysis pass has persisted them on
+        // (history older than the pass window, or before the components were recorded). Regularity is
+        // deliberately absent: it is a pass-wide trait, so only the pass that scored a night can say
+        // which value that night used — it resolves from the persisted series alone.
+        case AnalyticsEngine.Rest.ComponentKey.hoursVsNeededPct,
+             AnalyticsEngine.Rest.ComponentKey.sleepNeedMin,
+             AnalyticsEngine.Rest.ComponentKey.restorativePct,
+             AnalyticsEngine.Rest.ComponentKey.restorativeMin,
+             AnalyticsEngine.Rest.ComponentKey.deepPct:
+            return AnalyticsEngine.Rest.componentValue(
+                key: key, daily: d,
+                needHours: AnalyticsEngine.Rest.engineNeedHours() ?? AnalyticsEngine.Rest.defaultNeedHours,
+                consistency: nil)
+        case "sleep_disturbances": return (d.totalSleepMin ?? 0) > 0 ? d.disturbances.map(Double.init) : nil
         case "steps":            return d.steps.map(Double.init)
         case "active_kcal", "energy_kcal": return d.activeKcalEst
         default:                 return nil
@@ -2926,6 +2954,11 @@ final class Repository: ObservableObject {
             if keysBySource[metric.source]?.contains(metric.key) == true { return true }
             // The daily-column fallback is WHOOP-only, exactly as `exploreSeries` gates it.
             guard metric.source == whoopSource else { return false }
+            // Day Stress also resolves from the Stress screen's derivation (`exploreSeries` layer 4),
+            // which needs only a resting HR or HRV night to score.
+            if metric.key == "stress" { return days.contains { $0.restingHr != nil || $0.avgHrv != nil } }
+            // Sleep Debt likewise resolves from the Sleep screen's ledger over the nights' asleep totals.
+            if metric.key == "sleep_debt_min" { return days.contains { ($0.totalSleepMin ?? 0) > 0 } }
             return days.contains { dailyColumn(key: metric.key, day: $0) != nil }
         }.map(\.id))
     }
