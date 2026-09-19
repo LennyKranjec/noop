@@ -57,4 +57,35 @@ final class GravityReadUnionTests: XCTestCase {
         let b = [sample(200, 3)]
         XCTAssertEqual(Repository.mergeGravityByTs([a, b]).map(\.ts), [100, 200, 300])
     }
+    /// PERF: the multi-id sample merges are a linear k-way merge of the store's ascending lists. Pinned
+    /// against the dictionary form they replaced (first list wins a timestamp, first sample within it,
+    /// sorted by ts) on random sorted AND unsorted inputs, with duplicate timestamps inside one list too.
+    func testLinearMergeMatchesTheDictionaryFormOnRandomLists() {
+        func reference(_ lists: [[HRSample]]) -> [HRSample] {
+            var byTs: [Int: HRSample] = [:]
+            for list in lists { for s in list where byTs[s.ts] == nil { byTs[s.ts] = s } }
+            return byTs.values.sorted { $0.ts < $1.ts }
+        }
+        var state: UInt64 = 0xD1B5_4A32_D192_ED03
+        func next(_ bound: Int) -> Int {
+            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Int((state >> 33) % UInt64(bound))
+        }
+        for trial in 0..<500 {
+            let listCount = 1 + next(3)
+            var lists: [[HRSample]] = []
+            for l in 0..<listCount {
+                var ts = next(20)
+                var list: [HRSample] = []
+                for k in 0..<next(40) {
+                    ts += next(3)   // 0 steps make duplicate timestamps inside one list
+                    // `bpm` records (list, position) so WHICH sample won a timestamp is compared, not just ts.
+                    list.append(HRSample(ts: ts, bpm: l * 1000 + k))
+                }
+                if trial % 7 == 0 { list.shuffle() }   // the fallback path: an unsorted list
+                lists.append(list)
+            }
+            XCTAssertEqual(Repository.mergeFirstWinsByTs(lists, ts: { $0.ts }), reference(lists), "trial \(trial)")
+        }
+    }
 }

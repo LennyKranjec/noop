@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import StrandDesign
 import StrandAnalytics
 
@@ -279,7 +280,13 @@ struct CycleAwarenessOptInCard: View {
 /// enabled, or local history exists.
 struct MenstrualCycleHomeCard: View {
     @EnvironmentObject private var repo: Repository
-    @EnvironmentObject private var model: AppModel
+    /// NOT observed: AppModel publishes 1–3×/s while a strap streams, and this card only renders
+    /// `cyclePhase` / `cycleCurve` — mirrored into @State from de-duplicated publishers. Actions use the
+    /// reference directly.
+    @Environment(\.appModelRef) private var modelRef
+    private var model: AppModel { requireAppModel(modelRef) }
+    @State private var cyclePhase: CyclePhaseEngine.Result?
+    @State private var cycleCurve: [Double] = []
     @EnvironmentObject private var profile: ProfileStore
 
     @AppStorage(AppModel.cycleAwarenessKey) private var cycleEnabled = false
@@ -316,12 +323,12 @@ struct MenstrualCycleHomeCard: View {
 
                         if cycleEnabled {
                             HStack(alignment: .firstTextBaseline) {
-                                Text(model.cyclePhase.map { phaseTitle($0.phase) }
+                                Text(cyclePhase.map { phaseTitle($0.phase) }
                                      ?? String(localized: "Learning your pattern"))
                                     .font(StrandFont.title2)
                                     .foregroundStyle(StrandPalette.textPrimary)
                                 Spacer()
-                                if let result = model.cyclePhase,
+                                if let result = cyclePhase,
                                    let lo = result.cycleDayLow,
                                    let hi = result.cycleDayHigh {
                                     // Return `Text` from each branch so the literal is a LocalizedStringKey
@@ -379,10 +386,17 @@ struct MenstrualCycleHomeCard: View {
             starts = await repo.periodStarts()
             if cycleEnabled, model.cyclePhase == nil { await model.refreshV5Signals() }
         }
+        // Both replay their current value on subscription, which seeds the mirrors on appear.
+        .onReceive(model.$cyclePhase.removeDuplicates()) { phase in
+            if cyclePhase != phase { cyclePhase = phase }
+        }
+        .onReceive(model.$cycleCurve.removeDuplicates()) { curve in
+            if cycleCurve != curve { cycleCurve = curve }
+        }
         .sheet(isPresented: $showingTracker) {
             Group {
-                if let result = model.cyclePhase {
-                    CycleTrackerView(result: result, curve: model.cycleCurve)
+                if let result = cyclePhase {
+                    CycleTrackerView(result: result, curve: cycleCurve)
                 } else {
                     ProgressView("Preparing cycle tracker…")
                         .task { await model.refreshV5Signals() }

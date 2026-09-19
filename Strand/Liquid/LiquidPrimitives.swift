@@ -385,19 +385,22 @@ struct LiquidThread: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.noopBackgroundCovered) private var covered
     @ObservedObject private var motion = NoopMotionState.shared
+    /// Scrolled fully out of view (iOS 18 / macOS 15+; always false before) — the 60 fps loop stands down.
+    @State private var offscreen = false
 
     var body: some View {
         if animated && !motion.poseStill(reduceMotion) { liveThread } else { staticThread }
     }
 
     private var liveThread: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: covered)) { tl in   // 60fps to flow smoothly on ProMotion
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: covered || offscreen)) { tl in   // 60fps to flow smoothly on ProMotion
             let now = liquidSeconds(tl.date)
             Canvas { context, size in
                 LiquidRender.thread(context, size, values: bpm, now: now, tint: tint, segments: segments)
             }
         }
         .frame(height: height)
+        .liquidOffscreen { offscreen = $0 }
     }
 
     /// One-shot render (no travelling glint / pulse) — used until first data load settles.
@@ -412,6 +415,17 @@ struct LiquidThread: View {
 // MARK: - Shared liquid components (cross-platform: used by Today AND the other liquid screens on iOS + mac)
 
 extension View {
+    /// Reports `true` when this view has scrolled fully out of its enclosing scroll view and `false` when
+    /// any of it is back, so a frame loop can pause while nobody can see it. iOS 18 / macOS 15+ only; a
+    /// no-op before that and outside a scroll view (the callback never fires, so the flag stays false).
+    @ViewBuilder func liquidOffscreen(_ action: @escaping (Bool) -> Void) -> some View {
+        if #available(iOS 18.0, macOS 15.0, *) {
+            self.onScrollVisibilityChange(threshold: 0.01) { visible in action(!visible) }
+        } else {
+            self
+        }
+    }
+
     /// A light selection/impact haptic, available only where `sensoryFeedback` is (iOS 17 / macOS 14);
     /// a no-op below that so the liquid primitives still compile on the macOS 13 deployment target.
     @ViewBuilder func liquidTapHaptic(trigger: some Equatable) -> some View {

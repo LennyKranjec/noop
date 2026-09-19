@@ -162,6 +162,10 @@ struct StrandiOSApp: App {
                 .environmentObject(model.behavior)
                 .environmentObject(model.intelligence)
                 .environmentObject(model.coach)
+                // Non-observing references (ModelReferenceEnvironment.swift) for views that need one value
+                // or only call these from actions — they must not re-render on every publish.
+                .environment(\.appModelRef, model)
+                .environment(\.coachEngine, model.coach)
                 .environmentObject(health)
                 .environmentObject(router)
                 .environmentObject(UpdateStore.shared)
@@ -197,7 +201,11 @@ struct StrandiOSApp: App {
                 // A SESSION STARTING, ENDING OR PAUSING reaches the Live Activity at once, not on the next
                 // heart-rate tick: the banner turning into the session's own is the confirmation the
                 // wearer is looking at the lock screen for.
-                .onReceive(model.$activeWorkout) { _ in
+                // Keyed on the session's SHAPE (none / running / paused, and its sport): `activeWorkout`
+                // republishes on every captured HR sample, and those ticks are the heart-rate site's job.
+                .onReceive(model.$activeWorkout
+                    .map { w -> String in w.map { "\($0.sport)|\($0.isPaused)" } ?? "" }
+                    .removeDuplicates()) { _ in
                     let day = model.repo.cachedWidgetAnchor()
                     liveActivity.update(
                         bpm: model.live.connected ? (model.bpm ?? model.live.heartRate) : nil,

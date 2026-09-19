@@ -242,21 +242,37 @@ extension WhoopStore {
     }
 
     /// Workouts overlapping [from, to] (by startTs), oldest first.
+    ///
+    /// THE NEWEST `limit` WORKOUTS when the window holds more than `limit`. The read used to be
+    /// `ORDER BY startTs ASC LIMIT`, so a source with a longer history than the limit silently dropped its
+    /// most RECENT sessions. A window that FITS is read exactly as before (the same statement, so the same
+    /// rows in the same order, ties included); only a read that comes back FULL — where rows may have been
+    /// cut — is re-read newest-first and handed back ascending. The fallback orders ties on the rest of the
+    /// primary key `(deviceId, startTs, sport)`, so equal-startTs rows keep the ascending-sport order the
+    /// primary-key walk gives the first read.
     public func workouts(deviceId: String, from: Int, to: Int, limit: Int) async throws -> [WorkoutRow] {
         try syncRead { db in
-            try Row.fetchAll(db, sql: """
+            var rows = try Row.fetchAll(db, sql: """
                 SELECT startTs, endTs, sport, source, durationS, energyKcal, avgHr, maxHr,
                        strain, distanceM, zonesJSON, notes, steps FROM workout
                 WHERE deviceId = ? AND startTs >= ? AND startTs <= ?
                 ORDER BY startTs ASC LIMIT ?
                 """, arguments: [deviceId, from, to, limit])
-                .map {
-                    WorkoutRow(startTs: $0["startTs"], endTs: $0["endTs"], sport: $0["sport"],
-                               source: $0["source"], durationS: $0["durationS"],
-                               energyKcal: $0["energyKcal"], avgHr: $0["avgHr"], maxHr: $0["maxHr"],
-                               strain: $0["strain"], distanceM: $0["distanceM"],
-                               zonesJSON: $0["zonesJSON"], notes: $0["notes"], steps: $0["steps"])
-                }
+            if limit > 0, rows.count >= limit {
+                rows = try Array(Row.fetchAll(db, sql: """
+                    SELECT startTs, endTs, sport, source, durationS, energyKcal, avgHr, maxHr,
+                           strain, distanceM, zonesJSON, notes, steps FROM workout
+                    WHERE deviceId = ? AND startTs >= ? AND startTs <= ?
+                    ORDER BY startTs DESC, sport DESC LIMIT ?
+                    """, arguments: [deviceId, from, to, limit]).reversed())
+            }
+            return rows.map {
+                WorkoutRow(startTs: $0["startTs"], endTs: $0["endTs"], sport: $0["sport"],
+                           source: $0["source"], durationS: $0["durationS"],
+                           energyKcal: $0["energyKcal"], avgHr: $0["avgHr"], maxHr: $0["maxHr"],
+                           strain: $0["strain"], distanceM: $0["distanceM"],
+                           zonesJSON: $0["zonesJSON"], notes: $0["notes"], steps: $0["steps"])
+            }
         }
     }
 

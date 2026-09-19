@@ -412,6 +412,8 @@ struct TodayView: View {
     @State private var hrZoomDomain: ClosedRange<Date>?
     /// Reduce Motion gates the Today HR reset animation (the pinch/pan frames are never animated).
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The day-nav hint loop only runs while the scene is active (see the `.task(id: scenePhase)` below).
+    @Environment(\.scenePhase) private var scenePhase
 
     // #829 follow-up: the HR chart's frame in the day-swipe coordinate space (see HRChartFrameKey). The
     // day-swipe gesture skips any drag that STARTS inside it, giving the chart's pinch/pan/double-tap
@@ -1404,8 +1406,10 @@ struct TodayView: View {
         }
         .frame(height: 46)
         // Cycle the swipe/tap hint: roughly every 10s flash a one-word hint for ~1.5s, alternating "Swipe" /
-        // "Tap", then return to the date. One async loop, auto-cancelled when Today goes away (no leaked timer).
-        .task {
+        // "Tap", then return to the date. One async loop, auto-cancelled when Today goes away (no leaked timer)
+        // and when the app leaves the foreground (restarted on return) so it does not tick in the background.
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
             var i = 0
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 10_000_000_000)

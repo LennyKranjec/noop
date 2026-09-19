@@ -62,4 +62,41 @@ final class ReadSpineUnionTests: XCTestCase {
         XCTAssertNil(merged.remMin)
         XCTAssertNil(merged.lightMin)
     }
+    /// Nightly SDNN is an independent column: the winner's stands, the filler's fills a nil. It used to be
+    /// dropped (nil) on every coalesced day. Matches the Kotlin twin, which carries it the same way.
+    func testNightlySdnnIsCoalescedNotDropped() {
+        let day = "2026-07-29"
+        let base = dm(day, avgHrv: 40)
+        func withSdnn(_ row: DailyMetric, _ sdnn: Double?) -> DailyMetric {
+            DailyMetric(day: row.day, totalSleepMin: row.totalSleepMin, efficiency: row.efficiency,
+                        deepMin: row.deepMin, remMin: row.remMin, lightMin: row.lightMin,
+                        disturbances: row.disturbances, restingHr: row.restingHr, avgHrv: row.avgHrv,
+                        recovery: row.recovery, strain: row.strain, exerciseCount: row.exerciseCount,
+                        avgSdnn: sdnn)
+        }
+        XCTAssertEqual(Repository.coalesceDay(withSdnn(base, 55), withSdnn(base, 70)).avgSdnn, 55)
+        XCTAssertEqual(Repository.coalesceDay(withSdnn(base, nil), withSdnn(base, 70)).avgSdnn, 70)
+        XCTAssertNil(Repository.coalesceDay(withSdnn(base, nil), withSdnn(base, nil)).avgSdnn)
+    }
+
+    /// Filling a day's steps from an activity file rebuilds the row; every other column must survive it,
+    /// including the nightly SDNN and the HR-only staging flag it used to drop.
+    func testActivityFileStepsKeepEveryOtherColumn() {
+        let day = "2026-07-29"
+        let existing = DailyMetric(day: day, totalSleepMin: 420, efficiency: 0.9, deepMin: 80, remMin: 100,
+                                   lightMin: 240, disturbances: 3, restingHr: 52, avgHrv: 61, recovery: 77,
+                                   strain: 9.5, exerciseCount: 1, spo2Pct: 97, skinTempDevC: 0.2,
+                                   respRateBpm: 14.5, steps: nil, activeKcalEst: 2100, spo2Red: 1000,
+                                   spo2Ir: 2000, avgSdnn: 58, skinTempC: 34.1, sleepHrOnly: true)
+        let file = DailyMetric(day: day, totalSleepMin: nil, efficiency: nil, deepMin: nil, remMin: nil,
+                               lightMin: nil, disturbances: nil, restingHr: nil, avgHrv: nil, recovery: nil,
+                               strain: nil, exerciseCount: nil, steps: 4321)
+        let merged = Repository.mergeActivityFileSteps(into: [existing], [file])
+        let expected = DailyMetric(day: day, totalSleepMin: 420, efficiency: 0.9, deepMin: 80, remMin: 100,
+                                   lightMin: 240, disturbances: 3, restingHr: 52, avgHrv: 61, recovery: 77,
+                                   strain: 9.5, exerciseCount: 1, spo2Pct: 97, skinTempDevC: 0.2,
+                                   respRateBpm: 14.5, steps: 4321, activeKcalEst: 2100, spo2Red: 1000,
+                                   spo2Ir: 2000, avgSdnn: 58, skinTempC: 34.1, sleepHrOnly: true)
+        XCTAssertEqual(merged, [expected])
+    }
 }

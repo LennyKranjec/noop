@@ -58,28 +58,148 @@ final class ActiveWorkoutPersistenceTests: XCTestCase {
         XCTAssertEqual(decoded!.sport, "Traditional Strength Training")
     }
 
-    // MARK: - UserDefaults store / load / clear
+    // MARK: - header + sample log store / load / clear
+
+    /// A throwaway sample-log file in the temp directory, removed at teardown.
+    private func freshLog() -> ActiveWorkoutPersistence.SampleLog {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("test.activeWorkout.\(UUID().uuidString).bin")
+        addTeardownBlock { try? FileManager.default.removeItem(at: url) }
+        return ActiveWorkoutPersistence.SampleLog(url: url)
+    }
+
+    private func header(startSec: Int = 1_700_000_000, sport: String = "Tennis",
+                        pausedAtSec: Int? = nil, pausedDurationSec: Int? = nil,
+                        lockedZone: Int? = nil) -> ActiveWorkoutPersistence.Header {
+        ActiveWorkoutPersistence.Header(startSec: startSec, sport: sport, pausedAtSec: pausedAtSec,
+                                        pausedDurationSec: pausedDurationSec, lockedZone: lockedZone)
+    }
 
     func testStoreLoadClearRoundTrip() {
         let defaults = freshDefaults()
-        XCTAssertNil(ActiveWorkoutPersistence.load(from: defaults))   // nothing yet
-        let snap = snapshot()
-        ActiveWorkoutPersistence.store(snap, into: defaults)
-        XCTAssertEqual(ActiveWorkoutPersistence.load(from: defaults), snap)
-        // Ending the session clears it — a relaunch then rehydrates nothing.
-        ActiveWorkoutPersistence.clear(from: defaults)
-        XCTAssertNil(ActiveWorkoutPersistence.load(from: defaults))
+        let log = freshLog()
+        XCTAssertNil(ActiveWorkoutPersistence.load(from: defaults, log: log))   // nothing yet
+        let h = header(pausedAtSec: 1_700_000_120, pausedDurationSec: 45, lockedZone: 3)
+        ActiveWorkoutPersistence.storeHeader(h, into: defaults)
+        log.replaceAll([])
+        let samples = [sample(1_700_000_001, 120), sample(1_700_000_002, 131), sample(1_700_000_061, 145)]
+        for s in samples { log.append(s) }
+        XCTAssertEqual(ActiveWorkoutPersistence.load(from: defaults, log: log),
+                       ActiveWorkoutPersistence.Restored(header: h, samples: samples, fromLegacy: false))
+        // Ending the session clears it — a relaunch then rehydrates nothing, and the file is gone.
+        ActiveWorkoutPersistence.clear(from: defaults, log: log)
+        XCTAssertNil(ActiveWorkoutPersistence.load(from: defaults, log: log))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: log.url!.path))
     }
 
-    func testStoreOverwritesPreviousSnapshot() {
-        // Each captured sample re-stores; the latest write wins (mirrors the per-sample persist).
+    func testHeaderWithNoSamplesStillRehydrates() {
+        // A kill right after Start, before any HR sample landed, must keep the start time.
         let defaults = freshDefaults()
-        ActiveWorkoutPersistence.store(snapshot(samples: [sample(1_700_000_001, 120)], avgHr: 120, peakHr: 120),
-                                       into: defaults)
-        let later = snapshot(samples: [sample(1_700_000_001, 120), sample(1_700_000_061, 150)],
-                             avgHr: 135, peakHr: 150, liveStrain: 9.1)
-        ActiveWorkoutPersistence.store(later, into: defaults)
-        XCTAssertEqual(ActiveWorkoutPersistence.load(from: defaults), later)
+        let log = freshLog()
+        ActiveWorkoutPersistence.storeHeader(header(), into: defaults)
+        let restored = ActiveWorkoutPersistence.load(from: defaults, log: log)
+        XCTAssertEqual(restored?.header.startSec, 1_700_000_000)
+        XCTAssertEqual(restored?.samples, [])
+        XCTAssertEqual(restored?.fromLegacy, false)
+    }
+
+    func testStoreHeaderOverwritesPreviousHeader() {
+        // Pause / resume / lock re-store the header; the latest write wins.
+        let defaults = freshDefaults()
+        ActiveWorkoutPersistence.storeHeader(header(), into: defaults)
+        let later = header(pausedAtSec: 1_700_000_300, pausedDurationSec: 12, lockedZone: 2)
+        ActiveWorkoutPersistence.storeHeader(later, into: defaults)
+        XCTAssertEqual(ActiveWorkoutPersistence.load(from: defaults, log: freshLog())?.header, later)
+    }
+
+    func testHeaderDecodeBoundChecks() {
+        XCTAssertNil(ActiveWorkoutPersistence.decodeHeader(nil))
+        XCTAssertNil(ActiveWorkoutPersistence.decodeHeader(Data("not json".utf8)))
+        XCTAssertNil(ActiveWorkoutPersistence.decodeHeader(
+            ActiveWorkoutPersistence.encodeHeader(header(startSec: 0))))
+        let dirty = ActiveWorkoutPersistence.decodeHeader(ActiveWorkoutPersistence.encodeHeader(
+            header(pausedAtSec: -1, pausedDurationSec: -5, lockedZone: 9)))
+        XCTAssertNotNil(dirty)
+        XCTAssertNil(dirty?.pausedAtSec)
+        XCTAssertEqual(dirty?.pausedDurationSec, 0)
+        XCTAssertNil(dirty?.lockedZone)
+    }
+
+    // MARK: - sample log
+
+    func testSampleLogRoundTripsAndDropsImplausibleOnLoad() {
+        let defaults = freshDefaults()
+        let log = freshLog()
+        ActiveWorkoutPersistence.storeHeader(header(), into: defaults)
+        log.append(sample(1_700_000_001, 150))
+        log.append(sample(1_700_000_002, 0))      // bpm 0 — rejected on load
+        log.append(sample(1_700_000_003, 400))    // bpm out of range — rejected on load
+        log.append(sample(1_700_000_004, 151))
+        XCTAssertEqual(log.readAll().count, 4)
+        XCTAssertEqual(ActiveWorkoutPersistence.load(from: defaults, log: log)?.samples,
+                       [sample(1_700_000_001, 150), sample(1_700_000_004, 151)])
+    }
+
+    func testSameSecondRecordsFoldToTheLaterReading() {
+        // The live capture overwrites a same-second sample; the append-only log carries both records.
+        let defaults = freshDefaults()
+        let log = freshLog()
+        ActiveWorkoutPersistence.storeHeader(header(), into: defaults)
+        for s in [sample(1_700_000_001, 120), sample(1_700_000_001, 124), sample(1_700_000_002, 126)] {
+            log.append(s)
+        }
+        XCTAssertEqual(ActiveWorkoutPersistence.load(from: defaults, log: log)?.samples,
+                       [sample(1_700_000_001, 124), sample(1_700_000_002, 126)])
+    }
+
+    func testTornTrailingRecordIsIgnoredAndTrimmedBeforeTheNextAppend() throws {
+        let log = freshLog()
+        log.append(sample(1_700_000_001, 120))
+        // A kill mid-write: a partial record at the tail.
+        let h = try FileHandle(forWritingTo: log.url!)
+        _ = try h.seekToEnd()
+        try h.write(contentsOf: Data([1, 2, 3, 4, 5]))
+        try h.close()
+        XCTAssertEqual(log.readAll(), [sample(1_700_000_001, 120)])
+        // A fresh handle (as after a relaunch) cuts the torn bytes, so the next record stays aligned.
+        let reopened = ActiveWorkoutPersistence.SampleLog(url: log.url)
+        reopened.append(sample(1_700_000_002, 130))
+        XCTAssertEqual(reopened.readAll(), [sample(1_700_000_001, 120), sample(1_700_000_002, 130)])
+    }
+
+    func testReplaceAllResetsTheLog() {
+        let log = freshLog()
+        log.append(sample(1_700_000_001, 120))
+        XCTAssertTrue(log.replaceAll([]))
+        XCTAssertEqual(log.readAll(), [])
+        log.append(sample(1_700_000_005, 140))
+        XCTAssertEqual(log.readAll(), [sample(1_700_000_005, 140)])
+    }
+
+    // MARK: - legacy migration
+
+    func testLegacySnapshotStillLoads() {
+        // A session written by the previous build (the whole thing JSON-encoded under the old key) must
+        // survive the update.
+        let defaults = freshDefaults()
+        let legacy = snapshot(pausedAtSec: 1_700_000_120, pausedDurationSec: 45)
+        defaults.set(ActiveWorkoutPersistence.encode(legacy), forKey: ActiveWorkoutPersistence.defaultsKey)
+        let restored = ActiveWorkoutPersistence.load(from: defaults, log: freshLog())
+        XCTAssertEqual(restored?.fromLegacy, true)
+        XCTAssertEqual(restored?.samples, legacy.samples)
+        XCTAssertEqual(restored?.header, header(pausedAtSec: 1_700_000_120, pausedDurationSec: 45))
+    }
+
+    func testHeaderWinsOverALeftoverLegacyBlobAndClearDropsBoth() {
+        let defaults = freshDefaults()
+        let log = freshLog()
+        defaults.set(ActiveWorkoutPersistence.encode(snapshot(sport: "Old")),
+                     forKey: ActiveWorkoutPersistence.defaultsKey)
+        ActiveWorkoutPersistence.storeHeader(header(sport: "New"), into: defaults)
+        XCTAssertEqual(ActiveWorkoutPersistence.load(from: defaults, log: log)?.header.sport, "New")
+        ActiveWorkoutPersistence.clear(from: defaults, log: log)
+        XCTAssertNil(defaults.data(forKey: ActiveWorkoutPersistence.defaultsKey))
+        XCTAssertNil(ActiveWorkoutPersistence.load(from: defaults, log: log))
     }
 
     // MARK: - honest failure (no revived bogus card)

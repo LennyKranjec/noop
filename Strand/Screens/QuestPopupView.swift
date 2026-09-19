@@ -279,6 +279,7 @@ private struct TypedLine: View {
 
 struct QuestHostModifier: ViewModifier {
     @ObservedObject private var store = QuestStore.shared
+    @Environment(\.scenePhase) private var scenePhase
 
     func body(content: Content) -> some View {
         content.overlay {
@@ -306,7 +307,11 @@ struct QuestHostModifier: ViewModifier {
         .animation(.easeOut(duration: 0.25), value: store.failures.first?.id)
         // A WINDOW CAN CLOSE WITH NOTHING ELSE HAPPENING — no refresh, no sync — so the host checks the
         // clock itself once a minute while the app is open. Cheap: it only compares timestamps.
-        .task {
+        // Tied to the scene: the loop stops when the app leaves the foreground (rather than waking the
+        // process every minute in the background) and restarts on return — with an immediate sweep, so
+        // anything that expired while away is caught at once.
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
             while !Task.isCancelled {
                 store.sweepExpired()
                 try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)

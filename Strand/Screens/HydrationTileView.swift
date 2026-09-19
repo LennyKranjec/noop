@@ -167,6 +167,8 @@ private struct WaterFill: View {
     @ObservedObject private var motion = NoopMotionState.shared
 
     private var still: Bool { motion.poseStill(reduceMotion) }
+    /// Scrolled fully out of view (iOS 18 / macOS 15+; always false before) — the frame loop stands down.
+    @State private var offscreen = false
 
     /// The water's own blue. Deeper than the palette's cyan and with a lift at the surface, because a
     /// flat fill reads as a coloured rectangle — the gradient is what makes it read as a body of liquid
@@ -175,7 +177,7 @@ private struct WaterFill: View {
     private var bright: Color { Color(.sRGB, red: 0.30, green: 0.71, blue: 0.96, opacity: 1) }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: still ? nil : 1.0 / 30, paused: still || covered)) { timeline in
+        TimelineView(.animation(minimumInterval: still ? nil : 1.0 / 30, paused: still || covered || offscreen)) { timeline in
             Canvas { context, size in
                 let t = still ? 0 : timeline.date.timeIntervalSinceReferenceDate
                 let clamped = min(max(fraction, 0), 1)
@@ -247,5 +249,6 @@ private struct WaterFill: View {
             }
         }
         .allowsHitTesting(false)
+        .liquidOffscreen { offscreen = $0 }
     }
 }

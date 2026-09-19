@@ -298,7 +298,12 @@ final class JournalWorkoutAppleCacheTests: XCTestCase {
         let ranged = try await store.workouts(deviceId: "devA", from: 400, to: 1000, limit: 100)
         XCTAssertEqual(ranged.map { $0.startTs }, [500, 900])
         let limited = try await store.workouts(deviceId: "devA", from: 0, to: 100_000, limit: 1)
-        XCTAssertEqual(limited.map { $0.startTs }, [100], "limit honoured, oldest first")
+        // A full read keeps the NEWEST rows (a long history must not drop its recent sessions), ascending.
+        XCTAssertEqual(limited.map { $0.startTs }, [900], "limit honoured, newest kept")
+        let two = try await store.workouts(deviceId: "devA", from: 0, to: 100_000, limit: 2)
+        XCTAssertEqual(two.map { $0.startTs }, [500, 900], "newest two, handed back oldest first")
+        let fits = try await store.workouts(deviceId: "devA", from: 0, to: 100_000, limit: 3)
+        XCTAssertEqual(fits.map { $0.startTs }, [100, 500, 900], "a window that fits reads exactly as before")
     }
 
     func testDeleteWorkoutsBySportAndRange() async throws {

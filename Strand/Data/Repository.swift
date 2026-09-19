@@ -216,7 +216,9 @@ final class Repository: ObservableObject {
     func noteWorkoutsChanged() {
         workoutsSeq += 1
         workoutRowsCache.removeAll()
+        workoutRowsCacheOrder.removeAll()
         workoutRowsInFlight.removeAll()
+        workoutReconcileMemo.removeAll()
     }
 
     /// PERF: `workoutRows` is the most expensive read in the app — up to seven 5 000-row store reads, a
@@ -227,9 +229,43 @@ final class Repository: ObservableObject {
     /// on the main actor. Memoised per (days, refreshSeq, workoutsSeq) with the in-flight read shared, so
     /// the first caller pays and the rest join it, and any workout write drops it.
     private var workoutRowsCache: [String: [WorkoutRow]] = [:]
+    /// `workoutRowsCache` keys, least recently used first. PERF: a full cache used to be emptied outright,
+    /// so with ~12 distinct windows in use every screen evicted every other screen's rows; now only the
+    /// stalest window goes (after any window from an older refresh/workout generation, which can never be
+    /// served again).
+    private var workoutRowsCacheOrder: [String] = []
     private var workoutRowsInFlight: [String: Task<[WorkoutRow], Never>] = [:]
     /// How many windows are kept. Small, because a full-history read is a few MB of rows.
     private static let workoutRowsCacheLimit = 3
+
+    /// PERF: the per-row HR reconcile (`reconcileWorkoutHrWithTrace`) result, SHARED across windows. Every
+    /// `days` window re-reconciled the same workouts from scratch — up to 300 `hrWindowStats` aggregates
+    /// (plus a sample read per strain fill) per miss — though a row's result depends only on the inputs in
+    /// `WorkoutReconcileKey` and the store's HR over its span. Scoped to the generation the rows cache is:
+    /// dropped whenever `refreshSeq` or `workoutsSeq` moves (`workoutReconcileMemoSeq`), so it serves no
+    /// result the rows cache would not have served itself.
+    private var workoutReconcileMemo: [WorkoutReconcileKey: WorkoutReconcileMemoValue] = [:]
+    private var workoutReconcileMemoSeq = ""
+    private static let workoutReconcileMemoLimit = 20_000
+
+    /// Everything one row's reconcile reads besides the HR store itself.
+    private struct WorkoutReconcileKey: Hashable {
+        let startTs: Int
+        let endTs: Int
+        let source: String
+        let sport: String
+        let strainIsNil: Bool
+        let hrIds: [String]
+        let profileHrMax: Double?
+        let profileSex: String?
+        let effortMethod: String
+        let minSamples: Int
+    }
+
+    /// One row's reconcile outcome: the reduction, or nil when the trace was too thin to use.
+    private struct WorkoutReconcileMemoValue {
+        let reduction: (avg: Int, peak: Int, strain: Double?)?
+    }
 
     /// The platform's own "read today's food log" hook, installed by the iOS shell at launch.
     ///
@@ -389,11 +425,49 @@ final class Repository: ObservableObject {
     /// without a store — the property that actually matters here is "active wins, nothing double-counts".
     nonisolated static func mergeGravityByTs(_ lists: [[GravitySample]]) -> [GravitySample] {
         if lists.count == 1 { return lists[0] }
-        var byTs: [Int: GravitySample] = [:]
-        for list in lists {
-            for s in list where byTs[s.ts] == nil { byTs[s.ts] = s }
+        return mergeFirstWinsByTs(lists, ts: { $0.ts })
+    }
+
+    /// Merge per-id sample lists into ONE ascending stream with one sample per timestamp, the FIRST list
+    /// holding a timestamp winning it (the active strap is listed first) and, inside that list, its first
+    /// sample at that timestamp. That is exactly what "insert into a `[ts: sample]` dictionary unless
+    /// present, list by list, then sort by ts" produced — the form every union here used.
+    ///
+    /// PERF: the store reads are `ORDER BY ts ASC`, so the lists arrive sorted and a k-way merge does it in
+    /// one linear pass instead of hashing every sample and sorting the lot (on the main actor, for a day of
+    /// 1 Hz HR). Proof of identity: at each step the smallest head timestamp `t` is taken from the lowest-
+    /// index list whose head is `t` — the first list containing `t`, since every list is ascending — and
+    /// that list's first sample at `t`; then every list skips all its samples at `t`. Timestamps come out
+    /// strictly ascending, one each. A list that is NOT ascending (never, from these reads) falls back to
+    /// the dictionary form, so the output is identical whatever arrives.
+    nonisolated static func mergeFirstWinsByTs<T>(_ lists: [[T]], ts: (T) -> Int) -> [T] {
+        let sorted = lists.allSatisfy { list in
+            list.indices.dropFirst().allSatisfy { ts(list[$0 - 1]) <= ts(list[$0]) }
         }
-        return byTs.values.sorted { $0.ts < $1.ts }
+        guard sorted else {
+            var byTs: [Int: T] = [:]
+            for list in lists {
+                for s in list where byTs[ts(s)] == nil { byTs[ts(s)] = s }
+            }
+            return byTs.sorted { $0.key < $1.key }.map { $0.value }
+        }
+        var heads = [Int](repeating: 0, count: lists.count)
+        var out: [T] = []
+        out.reserveCapacity(lists.map { $0.count }.max() ?? 0)
+        while true {
+            var best: Int?
+            var winner = -1
+            for (i, list) in lists.enumerated() where heads[i] < list.count {
+                let t = ts(list[heads[i]])
+                if best == nil || t < best! { best = t; winner = i }
+            }
+            guard let t = best else { break }
+            out.append(lists[winner][heads[winner]])
+            for (i, list) in lists.enumerated() {
+                while heads[i] < list.count, ts(list[heads[i]]) == t { heads[i] += 1 }
+            }
+        }
+        return out
     }
 
     /// Merge R-R reads without treating a timestamp as a beat identity. Several real beats can share a
@@ -457,6 +531,9 @@ final class Repository: ObservableObject {
             activeKcalEst: winner.activeKcalEst ?? filler.activeKcalEst,
             spo2Red: rawSpo2FromFiller ? filler.spo2Red : winner.spo2Red,
             spo2Ir: rawSpo2FromFiller ? filler.spo2Ir : winner.spo2Ir,
+            // Was dropped (nil) on every coalesced day, so a two-strap install lost its nightly SDNN in the
+            // merge. Independent column, like avgHrv: winner first. Matches Kotlin `coalesceDay`.
+            avgSdnn: winner.avgSdnn ?? filler.avgSdnn,
             // Strap-only, like raw SpO2: an imported winner carries no absolute skin temp, so take the
             // filler's rather than let the union blank a value the strap did record (#1636).
             skinTempC: winner.skinTempC ?? filler.skinTempC,
@@ -506,10 +583,17 @@ final class Repository: ObservableObject {
 
     /// ALL sleep blocks across `ids` for a ts range, concatenated (NOT collapsed to one per day, used by
     /// `allSleepSessions`, which expands split sleeps). Active strap first.
-    private func unionRawSleepBlocks(store: WhoopStore, ids: [String], from: Int, to: Int, limit: Int = 4000) async -> [CachedSleepSession] {
+    /// `timingsOnly` reads the same rows through `sleepSessionTimings` (no stagesJSON / avgHrv /
+    /// stagingSparse) for callers that only place nights in time.
+    private func unionRawSleepBlocks(store: WhoopStore, ids: [String], from: Int, to: Int, limit: Int = 4000,
+                                     timingsOnly: Bool = false) async -> [CachedSleepSession] {
         var blocks: [CachedSleepSession] = []
         for id in ids {
-            blocks += (try? await store.sleepSessions(deviceId: id, from: from, to: to, limit: limit)) ?? []
+            if timingsOnly {
+                blocks += (try? await store.sleepSessionTimings(deviceId: id, from: from, to: to, limit: limit)) ?? []
+            } else {
+                blocks += (try? await store.sleepSessions(deviceId: id, from: from, to: to, limit: limit)) ?? []
+            }
         }
         return blocks
     }
@@ -955,7 +1039,51 @@ final class Repository: ObservableObject {
         await refresh()
     }
 
+    /// SINGLE-FLIGHT per window (PERF). ~45 call sites ask for a refresh, often several in one burst (a
+    /// sync tail, an import, an analysis pass ending), and each one used to run the whole 10–14-read,
+    /// full-history reload on its own. Now, per `nDays`:
+    ///   - with none running, the call runs one reload and returns when it ends (as before);
+    ///   - with one running, the call queues ONE follow-up reload and waits for it. Every call arriving
+    ///     while that follow-up is still queued joins it, so a burst of N calls costs at most two reloads;
+    ///   - the follow-up starts only after the running reload has ended, and after every call that joined
+    ///     it was made, so EVERY caller returns only after a reload that STARTED after its call — it
+    ///     reads the store as its call found it, or later, exactly the guarantee a private reload gave.
+    /// Different windows (a 120-day backfill refresh and the 4000-day tail) never share a flight; the
+    /// `refreshGen` publish token below still orders them exactly as before.
     func refresh(days nDays: Int = 4000) async {
+        // A queued follow-up has not started yet, so it starts after this call: join it.
+        if let queued = refreshQueued[nDays] {
+            await queued.value
+            return
+        }
+        if let running = refreshRunning[nDays] {
+            let queued = Task { @MainActor [weak self] in
+                await running.value
+                guard let self else { return }
+                // Promote: from here on this is the running reload, and a new caller queues behind it.
+                self.refreshQueued[nDays] = nil
+                let run = Task { @MainActor [weak self] in await self?.performRefresh(days: nDays) }
+                self.refreshRunning[nDays] = run
+                await run.value
+                if self.refreshRunning[nDays] == run { self.refreshRunning[nDays] = nil }
+            }
+            refreshQueued[nDays] = queued
+            await queued.value
+            return
+        }
+        let run = Task { @MainActor [weak self] in await self?.performRefresh(days: nDays) }
+        refreshRunning[nDays] = run
+        await run.value
+        if refreshRunning[nDays] == run { refreshRunning[nDays] = nil }
+    }
+
+    /// The reload `refresh(days:)` currently running, and the one follow-up queued behind it, per window.
+    /// Main-actor state like everything else here, so the check-then-set above cannot race.
+    private var refreshRunning: [Int: Task<Void, Never>] = [:]
+    private var refreshQueued: [Int: Task<Void, Never>] = [:]
+
+    /// One reload of the dashboard caches — the body `refresh(days:)` coalesces. Never call it directly.
+    private func performRefresh(days nDays: Int) async {
         guard let store = await ensureStore() else { return }
         refreshGen &+= 1
         let myGen = refreshGen
@@ -982,10 +1110,19 @@ final class Repository: ObservableObject {
         let need = await unionMetricSeries(store: store, key: "sleep_need_min", from: fromDay, to: toDay)
         let debt = await unionMetricSeries(store: store, key: "sleep_debt_min", from: fromDay, to: toDay)
 
+        // The caches as they stand, for the "nothing changed" diff below — which now runs OFF the main actor
+        // too (PERF): comparing thousands of rows is O(n) work that used to sit on the main actor after
+        // every refresh. Snapshotted with the `refreshSeq` they belong to, so the main actor only has to
+        // confirm nothing was published since (see the diff).
+        let wasLoaded = loaded
+        let seqAtSnapshot = refreshSeq
+        let currentDays = days, currentSleeps = sleeps, currentImportedSleep = importedSleep
+        let currentVitalRows = vitalRows, currentFreshness = freshness
+
         // Merge + sort OFF the main actor (FIX 3): the figures build, the two O(n log n) daily/sleep merges,
         // the source-row sort, and the freshness counts are all pure over the rows just read, so they run in
         // a detached task and the main actor stays free for SwiftUI during a deep-history refresh.
-        let merged: MergedCaches = await Task.detached(priority: .utility) {
+        let (merged, sameAsSnapshot): (MergedCaches, Bool) = await Task.detached(priority: .utility) {
             var fig: [String: ImportedSleepFigures] = [:]
             for p in perf { fig[p.day, default: ImportedSleepFigures()].performancePct = p.value }
             for p in cons { fig[p.day, default: ImportedSleepFigures()].consistencyPct = p.value }
@@ -996,7 +1133,7 @@ final class Repository: ObservableObject {
             // and IntelligenceEngine re-keys the computed DAILY row from it; collect those edited days so the
             // merge lets the computed row's SLEEP fields win there (imports still win on every un-edited day).
             let editedDays = Self.userEditedDays(compSleep)
-            return MergedCaches(
+            let built = MergedCaches(
                 importedSleep: fig,
                 days: Self.mergeActivityFileSteps(
                     into: Self.mergeDaily(imported: imported, computed: computed, userEditedDays: editedDays),
@@ -1006,6 +1143,14 @@ final class Repository: ObservableObject {
                 vitalRows: Self.sourceRows(imported: imported, computed: computed, apple: apple),
                 freshness: Self.computeFreshness(imported: imported, computed: computed, apple: apple,
                                                  importedSleeps: impSleep, computedSleeps: compSleep))
+            // The same comparison, in the same order, the main actor used to run — against the snapshot.
+            let same = wasLoaded
+                && built.days == currentDays
+                && built.sleeps == currentSleeps
+                && built.importedSleep == currentImportedSleep
+                && built.vitalRows == currentVitalRows
+                && built.freshness == currentFreshness
+            return (built, same)
         }.value
 
         // Generation guard (#review): if a newer refresh() started while this one merged off-actor, drop
@@ -1016,12 +1161,22 @@ final class Repository: ObservableObject {
         // loaded once, skip the re-publish and the `refreshSeq` bump entirely , assigning an equal value to
         // an @Published prop still fires objectWillChange, so the skip must cover the assignments too. This
         // is what stops the analyze-tail's burst of refresh() calls each re-firing TodayView.loadAll().
-        let unchanged = loaded
-            && merged.days == days
-            && merged.sleeps == sleeps
-            && merged.importedSleep == importedSleep
-            && merged.vitalRows == vitalRows
-            && merged.freshness == freshness
+        //
+        // The row comparison ran off the main actor against the snapshot. The snapshot is still what is
+        // published exactly when `refreshSeq` has not moved (every publish bumps it, in this one block), so
+        // then its answer IS the answer. If anything was published meanwhile, compare against the live
+        // caches here, as this always did.
+        let unchanged: Bool
+        if refreshSeq == seqAtSnapshot, loaded == wasLoaded {
+            unchanged = loaded && sameAsSnapshot
+        } else {
+            unchanged = loaded
+                && merged.days == days
+                && merged.sleeps == sleeps
+                && merged.importedSleep == importedSleep
+                && merged.vitalRows == vitalRows
+                && merged.freshness == freshness
+        }
         guard !unchanged else { return }
 
         // One consistent publish per refresh: assign every cache, flip `loaded`, then bump `refreshSeq` so
@@ -1161,7 +1316,12 @@ final class Repository: ObservableObject {
                         activeKcalEst: existing.activeKcalEst,
                         spo2Red: existing.spo2Red,
                         spo2Ir: existing.spo2Ir,
-                        skinTempC: existing.skinTempC
+                        // Carried like every other column: the rebuild used to drop both, so a day that took
+                        // its steps from an activity file lost its SDNN and its HR-only staging caption.
+                        // (The Kotlin twin copies the row, which keeps them.)
+                        avgSdnn: existing.avgSdnn,
+                        skinTempC: existing.skinTempC,
+                        sleepHrOnly: existing.sleepHrOnly
                     )
                 }
             } else {
@@ -1232,14 +1392,11 @@ final class Repository: ObservableObject {
             return (try? await store.hrSamples(deviceId: deviceIds[0], from: from, to: to,
                                                limit: limit)) ?? []
         }
-        var byTs: [Int: HRSample] = [:]
+        var lists: [[HRSample]] = []
         for id in deviceIds {
-            for s in (try? await store.hrSamples(deviceId: id, from: from, to: to,
-                                                 limit: limit)) ?? [] where byTs[s.ts] == nil {
-                byTs[s.ts] = s
-            }
+            lists.append((try? await store.hrSamples(deviceId: id, from: from, to: to, limit: limit)) ?? [])
         }
-        return byTs.values.sorted { $0.ts < $1.ts }
+        return Self.mergeFirstWinsByTs(lists, ts: { $0.ts })
     }
 
     func hrSamples(from: Int, to: Int, limit: Int = 8000) async -> [HRSample] {
@@ -1251,13 +1408,11 @@ final class Repository: ObservableObject {
         guard ids.count != 1 else {
             return (try? await store.hrSamples(deviceId: deviceId, from: from, to: to, limit: limit)) ?? []
         }
-        var byTs: [Int: HRSample] = [:]
+        var lists: [[HRSample]] = []
         for id in ids {
-            for s in (try? await store.hrSamples(deviceId: id, from: from, to: to, limit: limit)) ?? [] where byTs[s.ts] == nil {
-                byTs[s.ts] = s
-            }
+            lists.append((try? await store.hrSamples(deviceId: id, from: from, to: to, limit: limit)) ?? [])
         }
-        return byTs.values.sorted { $0.ts < $1.ts }
+        return Self.mergeFirstWinsByTs(lists, ts: { $0.ts })
     }
 
     /// Cheap change-detector over a window of heart rate: a COUNT and a MAX on an indexed column, no
@@ -1398,8 +1553,20 @@ final class Repository: ObservableObject {
         // old WHOOP export imported has imported sessions for the export's months and computed ones for
         // every night since — and the either/or read took the import and saw none of the recent nights,
         // which are the only ones the streak is ever about.
-        let sessions = await sleepSessions(from: lo, to: now + 86_400, limit: 5000)
-            + (await computedSleepSessions(from: lo, to: now + 86_400, limit: 5000))
+        //
+        // PERF: the SAME two reads `sleepSessions(from:to:limit:)` + `computedSleepSessions(from:to:limit:)`
+        // make (same ids, window, limit, dedup and sort), through the timing-only store read: this loop
+        // reads nothing but `effectiveStartTs` and `endTs`, and a year of staging blobs was the bulk of it.
+        var sessions: [CachedSleepSession] = []
+        if let store = await ensureStore() {
+            sessions = Self.dedupBlocks(await unionRawSleepBlocks(
+                store: store, ids: rawPhysiologyReadIds(store: store), from: lo, to: now + 86_400, limit: 5000,
+                timingsOnly: true))
+            sessions += Self.dedupBlocks(await unionRawSleepBlocks(
+                store: store, ids: rawComputedReadIds(store: store), from: lo, to: now + 86_400, limit: 5000,
+                timingsOnly: true))
+                .sorted { $0.startTs < $1.startTs }
+        }
         let calendar = Calendar.current
         var longest: [String: Int] = [:]
         for s in sessions {
@@ -3101,30 +3268,58 @@ final class Repository: ObservableObject {
     /// are filtered HERE so every consumer (Workouts screen, Today, Coach context) agrees: the engine
     /// re-derives the detected rows each run, so a plain delete would resurrect them; the dismissed
     /// span list is the durable "not a workout" record.
-    func workoutRows(days: Int = 4000) async -> [WorkoutRow] {
-        let key = "\(days)|\(refreshSeq)|\(workoutsSeq)"
-        if let hit = workoutRowsCache[key] { return hit }
+    ///
+    /// `asOf` anchors the window at that instant instead of now — `[asOf - days, asOf + 1 day]` — for the
+    /// historical chunks of the one-shot full-history rescore, which score old days as if the clock read
+    /// `asOf` and used to be handed TODAY's workouts (none of which fall in their days). Nil, the default
+    /// and every screen's call, is the window it always was. An anchored read is not kept in the rows
+    /// cache (each chunk asks once, and would only evict the screens' windows); its per-row reconcile is
+    /// still shared through `workoutReconcileMemo`.
+    func workoutRows(days: Int = 4000, asOf: Int? = nil) async -> [WorkoutRow] {
+        if let asOf { return await readWorkoutRows(days: days, asOf: asOf) }
+        let seqKey = "\(refreshSeq)|\(workoutsSeq)"
+        let key = "\(days)|" + seqKey
+        if let hit = workoutRowsCache[key] {
+            touchWorkoutRowsCacheKey(key)
+            return hit
+        }
         if let running = workoutRowsInFlight[key] { return await running.value }
         let task = Task { @MainActor [weak self] in
             guard let self else { return [WorkoutRow]() }
-            return await self.readWorkoutRows(days: days)
+            return await self.readWorkoutRows(days: days, asOf: nil)
         }
         workoutRowsInFlight[key] = task
         let rows = await task.value
         workoutRowsInFlight[key] = nil
         // Only cache what is still current: a write that landed while the read ran cleared the cache, and
         // putting the now-stale rows back would undo that.
-        if key == "\(days)|\(refreshSeq)|\(workoutsSeq)" {
-            if workoutRowsCache.count >= Self.workoutRowsCacheLimit { workoutRowsCache.removeAll() }
+        let currentSeqKey = "\(refreshSeq)|\(workoutsSeq)"
+        if seqKey == currentSeqKey {
+            // Windows from an older generation can never hit again: drop them first, then the least
+            // recently used window if the cache is still full.
+            let suffix = "|" + currentSeqKey
+            let dead = workoutRowsCacheOrder.filter { !$0.hasSuffix(suffix) }
+            for k in dead { workoutRowsCache[k] = nil }
+            workoutRowsCacheOrder.removeAll { !$0.hasSuffix(suffix) }
+            while workoutRowsCache.count >= Self.workoutRowsCacheLimit, !workoutRowsCacheOrder.isEmpty {
+                workoutRowsCache[workoutRowsCacheOrder.removeFirst()] = nil
+            }
             workoutRowsCache[key] = rows
+            touchWorkoutRowsCacheKey(key)
         }
         return rows
     }
 
+    /// Mark `key` most recently used.
+    private func touchWorkoutRowsCacheKey(_ key: String) {
+        workoutRowsCacheOrder.removeAll { $0 == key }
+        workoutRowsCacheOrder.append(key)
+    }
+
     /// The read itself. Everything goes through `workoutRows`, which memoises it.
-    private func readWorkoutRows(days: Int) async -> [WorkoutRow] {
+    private func readWorkoutRows(days: Int, asOf: Int?) async -> [WorkoutRow] {
         guard let store = await ensureStore() else { return [] }
-        let now = Int(Date().timeIntervalSince1970)
+        let now = asOf ?? Int(Date().timeIntervalSince1970)
         let lo = now - days * 86_400, hi = now + 86_400
         // UNION every registered WHOOP + canonical (and computed siblings) so workouts banked before a
         // re-add remain visible alongside every retained strap's live workouts.
@@ -3203,6 +3398,15 @@ final class Repository: ObservableObject {
         // `reduceWorkoutHr` helper this comment used to describe. Rows are read only for a strain fill.
         let readChunk = 8
 
+        // PERF: the shared per-row memo (see `workoutReconcileMemo`). Dropped when the generation moved;
+        // results computed below are stored only if it has not moved again by the time they land.
+        let memoSeq = "\(refreshSeq)|\(workoutsSeq)"
+        if memoSeq != workoutReconcileMemoSeq {
+            workoutReconcileMemo.removeAll()
+            workoutReconcileMemoSeq = memoSeq
+        }
+        let effortMethod = PuffinExperiment.effortMethod
+
         // Phase 1 , resolve eligibility + spend the `cap` budget in ORIGINAL row order, exactly as the old
         // sequential loop did. Only these indices get a trace read; everything else passes through verbatim.
         // (Strap-native is recomputed in Phase 3 from the same `classify`, so it isn't carried here.)
@@ -3231,8 +3435,29 @@ final class Repository: ObservableObject {
         // backfill strain off the main actor. nil ⇒ no fill, and the strain slot always comes back nil.
         let strainProfile = self.strainProfile
         var reduced: [Int: (avg: Int, peak: Int, strain: Double?)] = [:]
-        for chunkStart in stride(from: 0, to: eligibleIndices.count, by: readChunk) {
-            let chunk = eligibleIndices[chunkStart..<min(chunkStart + readChunk, eligibleIndices.count)]
+        // Memo lookup, before any read: a row whose inputs were reconciled this generation takes that
+        // result (including "too thin", which leaves the row verbatim, exactly as a fresh read would).
+        var memoKeys: [Int: WorkoutReconcileKey] = [:]
+        var toRead: [Int] = []
+        for idx in eligibleIndices {
+            let row = rows[idx]
+            let key = WorkoutReconcileKey(
+                startTs: row.startTs, endTs: row.endTs, source: row.source, sport: row.sport,
+                strainIsNil: row.strain == nil,
+                hrIds: Self.workoutHrDeviceIds(source: row.source, activeStrapId: deviceId,
+                                               importedIds: importedReadIds),
+                profileHrMax: strainProfile?.hrMax, profileSex: strainProfile?.sex,
+                effortMethod: String(describing: effortMethod), minSamples: minSamples)
+            memoKeys[idx] = key
+            if let hit = workoutReconcileMemo[key] {
+                if let r = hit.reduction { reduced[idx] = r }
+            } else {
+                toRead.append(idx)
+            }
+        }
+        var freshlyRead: Set<Int> = []
+        for chunkStart in stride(from: 0, to: toRead.count, by: readChunk) {
+            let chunk = toRead[chunkStart..<min(chunkStart + readChunk, toRead.count)]
             await withTaskGroup(of: (index: Int, avg: Int, peak: Int, strain: Double?)?.self) { group in
                 for idx in chunk {
                     let startTs = rows[idx].startTs
@@ -3274,7 +3499,7 @@ final class Repository: ObservableObject {
                                                                       from: startTs, to: endTs,
                                                                       limit: 8000)) ?? []
                             strain = StrainScorer.strain(samples, maxHR: p.hrMax,
-                                                method: PuffinExperiment.effortMethod, sex: p.sex)
+                                                method: effortMethod, sex: p.sex)
                         } else {
                             strain = nil
                         }
@@ -3284,6 +3509,16 @@ final class Repository: ObservableObject {
                 for await result in group {
                     if let r = result { reduced[r.index] = (avg: r.avg, peak: r.peak, strain: r.strain) }
                 }
+            }
+            freshlyRead.formUnion(chunk)
+        }
+        // Bank what was just read — only while the generation it was read under is still current.
+        if memoSeq == "\(refreshSeq)|\(workoutsSeq)", memoSeq == workoutReconcileMemoSeq {
+            if workoutReconcileMemo.count + freshlyRead.count > Self.workoutReconcileMemoLimit {
+                workoutReconcileMemo.removeAll()
+            }
+            for idx in freshlyRead {
+                if let key = memoKeys[idx] { workoutReconcileMemo[key] = WorkoutReconcileMemoValue(reduction: reduced[idx]) }
             }
         }
 

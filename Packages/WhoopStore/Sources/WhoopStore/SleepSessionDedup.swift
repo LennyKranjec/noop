@@ -109,15 +109,55 @@ public enum SleepSessionDedup {
         let ordered = sessions.sorted { rankKey($0, freshStarts: freshStarts) > rankKey($1, freshStarts: freshStarts) }
         var kept: [CachedSleepSession] = []
         var dropped: [CachedSleepSession] = []
+        // PERF: the kept set was scanned in full for every candidate — O(n·k) over a multi-year window.
+        // Every duplicate rule needs the two EFFECTIVE spans to overlap (overlap > 0, which the absolute and
+        // the fractional rules both imply) or to sit within `nearAdjacentSeconds` of each other (the
+        // fragment rule's gap arm). Either way `max(starts) - min(ends) <= nearAdjacentSeconds`, so a kept
+        // session can only be a duplicate if its effective start lies in
+        //   [s.start - nearAdjacentSeconds - longestKeptSpan, s.end + nearAdjacentSeconds].
+        // `index` holds the kept sessions sorted by effective start, so only that slice is tested. The
+        // question asked is unchanged — "is `s` a duplicate of ANY kept session" — and `isDuplicate` is
+        // called with the same (kept, candidate) argument order, so `kept`/`dropped` (and their order) are
+        // identical to the full scan. Pinned against the full scan on random data in SleepSessionDedupTests.
+        var index: [CachedSleepSession] = []
+        var longestKeptSpan = 0
         for s in ordered {
-            if !s.userEdited, kept.contains(where: { isDuplicate($0, s) }) {
+            if !s.userEdited, keptContainsDuplicate(of: s, index: index, longestKeptSpan: longestKeptSpan) {
                 dropped.append(s)
             } else {
                 kept.append(s)
+                index.insert(s, at: firstIndex(inByEffectiveStart: index, notBefore: s.effectiveStartTs))
+                longestKeptSpan = max(longestKeptSpan, s.endTs - s.effectiveStartTs)
             }
         }
         return (kept.sorted { $0.startTs < $1.startTs },
                 dropped.sorted { $0.startTs < $1.startTs })
+    }
+
+    /// `index.contains { isDuplicate($0, s) }` restricted to the only kept sessions that CAN be duplicates
+    /// of `s` (see `dedupe`). `index` is sorted by `effectiveStartTs`; `longestKeptSpan` is the largest
+    /// `endTs - effectiveStartTs` among them (never below 0).
+    private static func keptContainsDuplicate(of s: CachedSleepSession, index: [CachedSleepSession],
+                                              longestKeptSpan: Int) -> Bool {
+        guard !index.isEmpty else { return false }
+        let lo = s.effectiveStartTs - nearAdjacentSeconds - longestKeptSpan
+        let hi = s.endTs + nearAdjacentSeconds
+        var i = firstIndex(inByEffectiveStart: index, notBefore: lo)
+        while i < index.count, index[i].effectiveStartTs <= hi {
+            if isDuplicate(index[i], s) { return true }
+            i += 1
+        }
+        return false
+    }
+
+    /// The first position in `index` (sorted by `effectiveStartTs`) whose effective start is `>= ts`.
+    private static func firstIndex(inByEffectiveStart index: [CachedSleepSession], notBefore ts: Int) -> Int {
+        var lo = 0, hi = index.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if index[mid].effectiveStartTs < ts { lo = mid + 1 } else { hi = mid }
+        }
+        return lo
     }
 
     // MARK: - #1284 residual 3: generation-side 0x49-onset keying (at-persist, no schema migration)

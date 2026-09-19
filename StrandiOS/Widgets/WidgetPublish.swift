@@ -42,6 +42,36 @@ extension WidgetSnapshot {
     /// row and, only when today isn't scored yet, carry over the last STRICTLY-PRIOR scored day for the
     /// recovery-derived fields (the same carry-over Today does), so the widget never blanks right after
     /// the rollover yet always describes today.
+    /// The Rest figure for the anchor day — `restByDay[anchor] ?? (anchorIsToday ? series.last : nil)` over
+    /// the full `exploreSeries("sleep_performance")` — without reading the full history for one number.
+    ///
+    /// PERF: a `recentDays` window is read first. `exploreSeries` builds every day INSIDE its window from
+    /// exactly the layers the full read uses (each layer is a per-day value filtered only by the window),
+    /// so on any day on or after the window's first day the two agree; outside it the window holds at most
+    /// the unwindowed daily-column layer. Hence the window's answer is the full read's answer when:
+    ///   - the anchor day is on or after the window start (its value, or its absence, is the same); and
+    ///   - when the tail is needed, the window's last point is on or after the window start — then it is
+    ///     the newest point of the full series too (every full-series day at or after the window start is
+    ///     in the window with the same value, and the full series has no day beyond `to` the window lacks).
+    /// Anything else falls back to the full read, so the result is identical either way. The bound used is
+    /// one day inside the window's own start, so a midnight between the two `Date()` reads cannot open a
+    /// gap.
+    @MainActor
+    private static func restForAnchor(repo: Repository, anchorDay: String, anchorIsToday: Bool) async -> Double? {
+        let recentDays = 3
+        let safeStart = Repository.dayString(Date().addingTimeInterval(-Double(recentDays - 1) * 86_400))
+        if anchorDay >= safeStart {
+            let recent = await repo.exploreSeries(key: "sleep_performance", source: "my-whoop", days: recentDays)
+            let recentByDay = Dictionary(recent.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
+            if let v = recentByDay[anchorDay] { return v }
+            if !anchorIsToday { return nil }
+            if let last = recent.last, last.day >= safeStart { return last.value }
+        }
+        let restSeries = await repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
+        let restByDay = Dictionary(restSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
+        return restByDay[anchorDay] ?? (anchorIsToday ? restSeries.last?.value : nil)
+    }
+
     @MainActor
     static func publish(from model: AppModel, reload: Bool = true) async {
         if reload { await refreshWidgetPresence() }
@@ -64,10 +94,8 @@ extension WidgetSnapshot {
         // matching guard in WatchSessionBridge.
         var restScore: Double?
         if let day {
-            let restSeries = await model.repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
-            let restByDay = Dictionary(restSeries.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
             let anchorIsToday = day.day == Repository.localDayKey(now)
-            restScore = restByDay[day.day] ?? (anchorIsToday ? restSeries.last?.value : nil)
+            restScore = await restForAnchor(repo: model.repo, anchorDay: day.day, anchorIsToday: anchorIsToday)
         }
         // #313: honour the user's Effort scale at publish time. The widget extension cannot read the
         // app's plain `@AppStorage(UnitPrefs.effortScaleKey)` (it is not in the App Group), so we

@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import Charts
 import StrandDesign
 import StrandAnalytics
@@ -29,7 +30,15 @@ struct WorkoutsView: View {
     /// #459: "Start Workout" used to live ONLY on the Live screen, so a user reaching Workouts (via the
     /// Quick-action FAB or the tab) had no way to begin one from the obvious place. Injected here so the
     /// header/empty-state can start a live session and present the in-exercise view directly.
-    @EnvironmentObject var model: AppModel
+    ///
+    /// NOT observed: AppModel publishes 1–3×/s while a strap streams, and this screen only needs whether a
+    /// workout is active (`workoutActive`, fed by a de-duplicated publisher). Actions use the reference.
+    @Environment(\.appModelRef) private var modelRef
+    private var model: AppModel { requireAppModel(modelRef) }
+    @State private var workoutActive = false
+    /// HRmax feeds the recovery trend. Observed directly (it changes only on a profile edit) — it used to
+    /// be picked up incidentally whenever AppModel re-rendered this screen.
+    @EnvironmentObject private var profile: ProfileStore
     @State private var showLiveWorkout = false
     @State private var showStartSport = false
 
@@ -242,6 +251,10 @@ struct WorkoutsView: View {
         .task(id: recoveryTrendInputKey) {
             await loadRecoveryTrend()
         }
+        // Replays the current value on subscription, which seeds `workoutActive` on appear.
+        .onReceive(workoutActivePublisher) { active in
+            if workoutActive != active { workoutActive = active }
+        }
         .sheet(item: $sheet) { target in
             ManualWorkoutSheet(editing: target.editing) { row, replacing in
                 Task {
@@ -324,7 +337,7 @@ struct WorkoutsView: View {
     /// Stable task identity: changing the range/filter/rows or HRmax cancels and rebuilds the trend.
     private var recoveryTrendInputKey: String {
         let rows = recoveryTrendRows
-        return "\(repo.refreshSeq)|\(model.profile.hrMax)|"
+        return "\(repo.refreshSeq)|\(profile.hrMax)|"
             + rows.map { "\($0.startTs):\($0.endTs)" }.joined(separator: ",")
     }
 
@@ -339,7 +352,7 @@ struct WorkoutsView: View {
         for row in recoveryTrendRows {
             if Task.isCancelled { return }
             if let result = await repo.workoutHeartRateRecovery(
-                from: row.startTs, to: row.endTs, maxHR: Double(model.profile.hrMax),
+                from: row.startTs, to: row.endTs, maxHR: Double(profile.hrMax),
                 source: row.source) {
                 built.append(WorkoutRecoveryTrendPoint(startTs: row.startTs, result: result))
             }
@@ -599,8 +612,8 @@ struct WorkoutsView: View {
     /// place people instinctively look — instead of only from the Live screen. Starts the session and
     /// presents the in-exercise view directly (no cross-view auto-present race with LiveView's sheet).
     private var startLiveWorkoutButton: some View {
-        NoopButton(model.activeWorkout == nil ? "Start workout" : "View active workout",
-                   systemImage: model.activeWorkout == nil ? "figure.run" : "timer",
+        NoopButton(!workoutActive ? "Start workout" : "View active workout",
+                   systemImage: !workoutActive ? "figure.run" : "timer",
                    kind: .primary,
                    fullWidth: true) {
             // No active session → pick a named sport first (#519), then the sheet's onStart begins it
@@ -608,7 +621,12 @@ struct WorkoutsView: View {
             if model.activeWorkout == nil { showStartSport = true }
             else { showLiveWorkout = true }
         }
-        .accessibilityLabel(model.activeWorkout == nil ? "Start a workout" : "View the active workout")
+        .accessibilityLabel(!workoutActive ? "Start a workout" : "View the active workout")
+    }
+
+    /// Whether AppModel has an active workout, as a de-duplicated stream.
+    private var workoutActivePublisher: AnyPublisher<Bool, Never> {
+        model.$activeWorkout.map { $0 != nil }.removeDuplicates().eraseToAnyPublisher()
     }
 
     /// Equal-width primary actions share the same content width as every card below them.

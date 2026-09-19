@@ -90,7 +90,19 @@ struct LiquidSky: View {
     @ObservedObject private var motion = NoopMotionState.shared
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 20.0,
+        // Frame rate follows the hour: only the starfield twinkle needs 20 fps. With no stars the only
+        // moving layer is the breath of light, whose opacity changes by at most 0.03·0.5·0.22 ≈ 0.0033/s
+        // — under one 8-bit colour step per second even white-over-dark — so 1 fps is visually
+        // identical there. A once-a-minute outer tick re-evaluates `starry` for the live hour (stars
+        // ramp in over hours and only draw once o ≥ 0.02, i.e. S.stars ≳ 0.04, so a ≤60 s lag is invisible).
+        TimelineView(.periodic(from: Date(timeIntervalSinceReferenceDate: 0), by: 60)) { _ in
+            let starry = liquidSkyAt(hour ?? liveHour(), light: scheme == .light).stars > 0.01
+            frames(interval: starry ? 1.0 / 20.0 : 1.0)
+        }
+    }
+
+    private func frames(interval: Double) -> some View {
+        TimelineView(.animation(minimumInterval: interval,
                                 paused: motion.poseStill(reduceMotion) || covered)) { tl in
             let now = liquidSeconds(tl.date)
             let h = hour ?? liveHour()

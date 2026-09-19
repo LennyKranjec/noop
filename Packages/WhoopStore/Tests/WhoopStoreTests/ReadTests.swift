@@ -138,6 +138,38 @@ final class ReadTests: XCTestCase {
         XCTAssertEqual(base, afterOutsideWindow, "an R-R beat outside the window is not this night's input")
     }
 
+    /// PERF: the R-R arms of both witnesses are now ONE scan with conditional aggregates instead of a
+    /// sub-select each. Pinned to the counts the old per-arm filters give on a day holding every case:
+    /// untagged beats, the excluded SpO2-IBI train, WHOOP 5 historical/standard/realtime beats, a
+    /// quarantined (future-stamped) beat, and another device's beat.
+    func testRRWitnessArmsCountExactlyWhatTheirFiltersSelect() async throws {
+        let store = try await seeded()   // dev1 already holds two untagged beats at ts 100
+        _ = try await store.insert(Streams(rr: [
+            RRInterval(ts: 300, rrMs: 800, srcChannel: .spo2Ibi),           // not a scored beat
+            RRInterval(ts: 301, rrMs: 810, srcChannel: .whoop5Historical),
+            RRInterval(ts: 302, rrMs: 820, srcChannel: .whoop5Historical),
+            RRInterval(ts: 303, rrMs: 830, srcChannel: .whoop5Standard),
+            RRInterval(ts: 304, rrMs: 840, srcChannel: .whoop5Realtime),
+            RRInterval(ts: 900, rrMs: 850, srcChannel: .whoop5Historical),  // quarantined below
+        ]), deviceId: "dev1")
+        _ = try await store.insert(Streams(rr: [RRInterval(ts: 310, rrMs: 800, srcChannel: .whoop5Standard)]),
+                                   deviceId: "other")
+        try await store.markFutureRrSuspectForTest(nowSeconds: 800)
+
+        let day = try await store.dayStreamFingerprint(deviceId: "dev1", from: 0, to: 1000)
+        // Scored beats: 2 untagged + 301, 302, 303, 304 (SpO2-IBI and the quarantined beat excluded).
+        XCTAssertTrue(day.contains("|r6:304|"), day)
+        XCTAssertTrue(day.contains("|w52|w71|"), day)
+        // An empty window reads zeros, as the old COUNT / COALESCE(MAX) did.
+        let empty = try await store.dayStreamFingerprint(deviceId: "dev1", from: 5000, to: 6000)
+        XCTAssertTrue(empty.contains("|r0:0|"), empty)
+        XCTAssertTrue(empty.contains("|w50|w70|"), empty)
+
+        let all = try await store.analysisFingerprint()
+        // w5: 301, 302 (900 is quarantined). w7: dev1 303 + other 310. Tagged: every 5/6/7 row, quarantined too.
+        XCTAssertTrue(all.contains("|w52|w72|tagged6|"), all)
+    }
+
     func testHrBucketsAveragePerBucketOrderedAndDeviceScoped() async throws {
         let store = try await seeded()
         // 200s buckets over dev1's ts 100/200/300 (bpm 60/61/62):

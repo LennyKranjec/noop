@@ -458,14 +458,19 @@ public enum StrainScorer {
                              durations: [Double], zone1Gate: Zone1Gate = .ungated) -> Double {
         var acc = 0.0
         for i in hr.indices {
-            let w = zoneWeight(Double(hr[i].bpm), restingHR: restingHR, hrReserve: hrReserve)
-            if w == 1 {
-                acc += zone1Credit(zone1Gate, ts: hr[i].ts) * durations[i]
-            } else {
-                acc += Double(w) * durations[i]
-            }
+            acc += edwardsSampleTRIMP(hr[i], restingHR: restingHR, hrReserve: hrReserve,
+                                      duration: durations[i], zone1Gate: zone1Gate)
         }
         return acc
+    }
+
+    /// One sample's Edwards contribution. Shared by `edwardsTRIMP` and `WorkoutStrainAccumulator`, so the
+    /// incremental live-workout sum adds the very same per-sample terms in the very same order.
+    static func edwardsSampleTRIMP(_ s: HRSample, restingHR: Double, hrReserve: Double,
+                                   duration: Double, zone1Gate: Zone1Gate) -> Double {
+        let w = zoneWeight(Double(s.bpm), restingHR: restingHR, hrReserve: hrReserve)
+        if w == 1 { return zone1Credit(zone1Gate, ts: s.ts) * duration }
+        return Double(w) * duration
     }
 
     /// - Parameter floorRatePerMinute: per-minute rate treated as "no effort" and subtracted from EVERY
@@ -482,13 +487,23 @@ public enum StrainScorer {
                               floorRatePerMinute: Double = 0.0) -> Double {
         var acc = 0.0
         for i in hr.indices {
-            let x = pctHRR(Double(hr[i].bpm), restingHR: restingHR, hrReserve: hrReserve) / 100.0
-            if x > 0 {
-                let rate = x * banisterScale * exp(b * x)
-                acc += durations[i] * max(rate - floorRatePerMinute, 0.0)
+            if let t = banisterSampleTRIMP(hr[i], restingHR: restingHR, hrReserve: hrReserve,
+                                           duration: durations[i], b: b,
+                                           floorRatePerMinute: floorRatePerMinute) {
+                acc += t
             }
         }
         return acc
+    }
+
+    /// One sample's Banister contribution, nil when it sits at or below resting (x ≤ 0) and adds nothing.
+    /// Shared with `WorkoutStrainAccumulator` for the same reason as `edwardsSampleTRIMP`.
+    static func banisterSampleTRIMP(_ s: HRSample, restingHR: Double, hrReserve: Double,
+                                    duration: Double, b: Double, floorRatePerMinute: Double) -> Double? {
+        let x = pctHRR(Double(s.bpm), restingHR: restingHR, hrReserve: hrReserve) / 100.0
+        guard x > 0 else { return nil }
+        let rate = x * banisterScale * exp(b * x)
+        return duration * max(rate - floorRatePerMinute, 0.0)
     }
 
     // MARK: - Logarithmic map

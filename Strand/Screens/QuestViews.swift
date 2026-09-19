@@ -27,35 +27,35 @@ struct QuestCountdownView: View {
     var fontSize: CGFloat = 18
     var showIcon = true
 
-    @State private var remaining: Int64 = 0
+    /// A once-a-second schedule on whole-second boundaries. A `TimelineView` rather than a
+    /// `Timer.publish(...).autoconnect()` created in `init`: that built (and connected) a fresh run-loop
+    /// timer every time a parent re-rendered this view, and kept firing while the app was in the
+    /// background. The fixed start date keeps the schedule identical across re-inits.
+    private static let everySecond = PeriodicTimelineSchedule(from: Date(timeIntervalSinceReferenceDate: 0), by: 1)
 
-    private let tick = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
-
-    private var tint: Color {
+    private func tint(_ remaining: Int64) -> Color {
         if remaining <= 0 { return StrandPalette.statusCritical }
         if remaining <= questUrgentMs { return StrandPalette.statusWarning }
         return StrandPalette.accent
     }
 
     var body: some View {
-        HStack(spacing: 6) {
-            if showIcon {
-                Image(systemName: "timer")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(tint)
-            }
-            Text(Quest.formatRemaining(remaining))
-                .font(.system(size: fontSize, weight: .medium, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(tint)
-        }
-        .onAppear { remaining = quest.remainingMs(now: nowMs()) }
-        .onReceive(tick) { _ in
+        TimelineView(Self.everySecond) { _ in
             // Re-read the clock rather than subtracting 1000: a doze, a long frame or a backgrounded app
             // would otherwise leave the countdown telling a comfortable lie.
-            remaining = quest.remainingMs(now: nowMs())
+            let remaining = quest.remainingMs(now: nowMs())
+            HStack(spacing: 6) {
+                if showIcon {
+                    Image(systemName: "timer")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(tint(remaining))
+                }
+                Text(Quest.formatRemaining(remaining))
+                    .font(.system(size: fontSize, weight: .medium, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(tint(remaining))
+            }
         }
-        .onChangeCompat(of: quest.id) { _ in remaining = quest.remainingMs(now: nowMs()) }
     }
 }
 

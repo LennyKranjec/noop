@@ -89,6 +89,20 @@ private struct StreakFlame: View {
                 flickering = true
             }
         }
+        // Stand the repeat-forever breath down while the strip is scrolled fully out of view (iOS 18 /
+        // macOS 15+; a no-op before), and pick it back up when it returns.
+        .liquidOffscreen { offscreen in
+            guard breathes else { return }
+            if offscreen {
+                var still = Transaction()
+                still.disablesAnimations = true
+                withTransaction(still) { flickering = false }
+            } else {
+                withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) {
+                    flickering = true
+                }
+            }
+        }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(accessibilityLabel))
     }

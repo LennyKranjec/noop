@@ -52,28 +52,26 @@ struct LiveWorkoutView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-                let cards: [AnyView] = [
-                    AnyView(header),
-                    AnyView(timeBlock),
-                    AnyView(heartRateBlock),
-                    AnyView(effortGauge),
-                    // Today's Effort so far (live) against the day's recommended ceiling — the same
-                    // target Today's hero ring marks — so a session can be paced against the whole day.
-                    AnyView(DayEffortTargetCard(sessionEffort: model.activeWorkout?.liveStrain ?? 0,
-                                                effortScale: effortScale)),
-                    // The whole session's HR since start against the zone lines (dashed), with a locked
-                    // zone's band raised — the history the zone slider below shows only the latest point of.
-                    AnyView(hrTraceCard),
-                    AnyView(zoneSection),
-                    AnyView(statsGrid),
-                    // Live GPS distance + pace (#1195) — a self-gating leaf owning its own recorder
-                    // observation, so a GPS fix re-renders only this card. Renders nothing until the first
-                    // accepted fix, so non-GPS / denied sessions leave the stack unchanged.
-                    AnyView(DistancePaceRowIfPresent(recorder: model.gpsRecorder)),
-                ]
-                ForEach(Array(cards.enumerated()), id: \.offset) { index, card in
-                    card.staggeredAppear(index: index)
-                }
+                // Listed directly (not an [AnyView] walked by a ForEach): SwiftUI keeps each card's static
+                // type, so it can diff them instead of rebuilding type-erased boxes on every live tick.
+                header.staggeredAppear(index: 0)
+                timeBlock.staggeredAppear(index: 1)
+                heartRateBlock.staggeredAppear(index: 2)
+                effortGauge.staggeredAppear(index: 3)
+                // Today's Effort so far (live) against the day's recommended ceiling — the same
+                // target Today's hero ring marks — so a session can be paced against the whole day.
+                DayEffortTargetCard(sessionEffort: model.activeWorkout?.liveStrain ?? 0,
+                                    effortScale: effortScale)
+                    .staggeredAppear(index: 4)
+                // The whole session's HR since start against the zone lines (dashed), with a locked
+                // zone's band raised — the history the zone slider below shows only the latest point of.
+                hrTraceCard.staggeredAppear(index: 5)
+                zoneSection.staggeredAppear(index: 6)
+                statsGrid.staggeredAppear(index: 7)
+                // Live GPS distance + pace (#1195) — a self-gating leaf owning its own recorder
+                // observation, so a GPS fix re-renders only this card. Renders nothing until the first
+                // accepted fix, so non-GPS / denied sessions leave the stack unchanged.
+                DistancePaceRowIfPresent(recorder: model.gpsRecorder).staggeredAppear(index: 8)
                 // Live-observing leaf: renders the sensor row (and its entrance stagger) only when a
                 // standard fitness sensor is feeding metrics, refreshing on its own packets without
                 // re-rendering the HR hero / effort gauge above (scroll-stutter isolation).
@@ -725,9 +723,15 @@ private struct WorkoutHRTraceCard: View {
 
     private static let chartHeight: CGFloat = 170
 
+    /// Memo of the shaped trace. The card re-renders on every live tick of the screen (bpm, the clock),
+    /// but its points only change when a sample lands; re-bucketing the whole session each render was
+    /// the cost. A reference held in @State, so filling it never invalidates the view.
+    @State private var cache = TraceCache()
+
     var body: some View {
-        let points = WorkoutHRTrace.downsample(samples, startSec: startSec)
-        let yDomain = WorkoutHRTrace.yDomain(bpms: points.map(\.bpm), zones: zoneSet, lockedZone: lockedZone)
+        let shaped = cache.shaped(samples: samples, startSec: startSec, zoneSet: zoneSet, lockedZone: lockedZone)
+        let points = shaped.points
+        let yDomain = shaped.yDomain
         let xMax = max(60, points.last?.offset ?? 0)
         NoopCard(padding: NoopMetrics.cardInnerPadding) {
             VStack(alignment: .leading, spacing: NoopMetrics.space2) {
@@ -835,6 +839,33 @@ private struct WorkoutHRTraceCard: View {
             return String(localized: "Waiting for heart rate.")
         }
         return String(localized: "\(Int(lo.rounded()))–\(Int(hi.rounded())) bpm")
+    }
+
+    /// `WorkoutHRTrace.downsample` + `yDomain`, recomputed only when an input moved. The samples are only
+    /// ever appended to or have their LAST reading overwritten (one sample per second), so their count
+    /// plus the last sample identifies them within a session; the start pins the session.
+    private final class TraceCache {
+        private struct Key: Equatable {
+            let count: Int
+            let last: HRSample?
+            let startSec: Int
+            let zoneSet: HRZoneSet
+            let lockedZone: Int?
+        }
+        private var key: Key?
+        private var value: (points: [WorkoutHRTrace.Point], yDomain: ClosedRange<Double>)?
+
+        func shaped(samples: [HRSample], startSec: Int, zoneSet: HRZoneSet,
+                    lockedZone: Int?) -> (points: [WorkoutHRTrace.Point], yDomain: ClosedRange<Double>) {
+            let k = Key(count: samples.count, last: samples.last, startSec: startSec, zoneSet: zoneSet,
+                        lockedZone: lockedZone)
+            if let value, key == k { return value }
+            let points = WorkoutHRTrace.downsample(samples, startSec: startSec)
+            let yDomain = WorkoutHRTrace.yDomain(bpms: points.map(\.bpm), zones: zoneSet, lockedZone: lockedZone)
+            key = k
+            value = (points, yDomain)
+            return (points, yDomain)
+        }
     }
 }
 

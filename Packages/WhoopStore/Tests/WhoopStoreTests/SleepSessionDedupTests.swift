@@ -362,4 +362,69 @@ final class SleepSessionDedupTests: XCTestCase {
                        "among equal-length re-anchors, the latest-waking row wins")
         XCTAssertEqual(result.dropped.count, 2)
     }
+    // MARK: - PERF: the windowed kept-set scan is the full scan
+
+    /// The pre-optimisation sweep, verbatim: every candidate tested against EVERY kept session.
+    private func referenceDedupe(_ sessions: [CachedSleepSession], freshStarts: Set<Int>)
+        -> (kept: [CachedSleepSession], dropped: [CachedSleepSession]) {
+        guard sessions.count > 1 else { return (sessions, []) }
+        let ordered = sessions.sorted {
+            SleepSessionDedup.rankKey($0, freshStarts: freshStarts) > SleepSessionDedup.rankKey($1, freshStarts: freshStarts)
+        }
+        var kept: [CachedSleepSession] = []
+        var dropped: [CachedSleepSession] = []
+        for s in ordered {
+            if !s.userEdited, kept.contains(where: { SleepSessionDedup.isDuplicate($0, s) }) {
+                dropped.append(s)
+            } else {
+                kept.append(s)
+            }
+        }
+        return (kept.sorted { $0.startTs < $1.startTs }, dropped.sorted { $0.startTs < $1.startTs })
+    }
+
+    func testWindowedDedupeMatchesTheFullScanOnRandomHistories() {
+        // A small deterministic LCG so the corpus is identical on every run and platform.
+        var state: UInt64 = 0x9E37_79B9_7F4A_7C15
+        func next(_ bound: Int) -> Int {
+            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Int((state >> 33) % UInt64(bound))
+        }
+        for trial in 0..<400 {
+            let count = 1 + next(60)
+            // Dense trials pile sessions on top of each other (many duplicates); sparse ones spread a
+            // multi-week history with naps, fragments and near-adjacent pieces around the 15-min seam.
+            let spread = trial % 3 == 0 ? 2 * 86_400 : 40 * 86_400
+            var sessions: [CachedSleepSession] = []
+            var used = Set<Int>()
+            for _ in 0..<count {
+                var start = midnight + next(spread)
+                while used.contains(start) { start += 1 }
+                used.insert(start)
+                let lengthKind = next(10)
+                let length: Int
+                switch lengthKind {
+                case 0: length = 60 + next(20 * 60)                 // fragment
+                case 1: length = 0                                   // degenerate
+                case 2: length = 20 * 3600 + next(40 * 3600)        // implausibly long block
+                default: length = 3 * 3600 + next(7 * 3600)         // a night
+                }
+                let adjusted: Int?
+                switch next(8) {
+                case 0: adjusted = start + next(90 * 60)             // onset moved later
+                case 1: adjusted = start - next(90 * 60)             // onset moved earlier
+                case 2: adjusted = start + length + next(3600)       // onset past the wake (negative span)
+                default: adjusted = nil
+                }
+                sessions.append(session(start: start, end: start + length,
+                                        edited: next(7) == 0, startAdjusted: adjusted))
+            }
+            var fresh = Set<Int>()
+            for s in sessions where next(4) == 0 { fresh.insert(s.startTs) }
+            let expected = referenceDedupe(sessions, freshStarts: fresh)
+            let actual = SleepSessionDedup.dedupe(sessions, freshStarts: fresh)
+            XCTAssertEqual(actual.kept, expected.kept, "trial \(trial): kept differs from the full scan")
+            XCTAssertEqual(actual.dropped, expected.dropped, "trial \(trial): dropped differs from the full scan")
+        }
+    }
 }

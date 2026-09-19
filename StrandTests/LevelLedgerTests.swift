@@ -309,6 +309,51 @@ final class LevelLedgerTests: XCTestCase {
         XCTAssertNil(reopened.entry("2026-09-16"))
     }
 
+    /// PERF: a backfill's forty-day commits stay in memory and the file is written once at the end. What
+    /// lands must be exactly what saving every commit wrote, and every read sees an unsaved commit at once.
+    func testUnsavedCommitsAreReadableAtOnceAndLandOnFlushAsIfEachWereSaved() throws {
+        let d = try defaults()
+        let batches: [[LevelSettlement]] = [
+            [.level(level("2026-09-01", 51)), .empty("2026-09-02"), .level(level("2026-09-03", 53))],
+            [.level(level("2026-09-04", 54)), .level(level("2026-09-01", 99))],   // 09-01 already settled
+            [.empty("2026-09-05"), .level(level("2026-09-06", 56))],
+        ]
+
+        let savedURL = tempURL()
+        let saved = LevelLedger(fileURL: savedURL, legacy: d)
+        for b in batches { saved.commit(b) }
+        saved.markSettled(from: "2026-09-01", through: "2026-09-06")
+
+        let deferredURL = tempURL()
+        let deferred = LevelLedger(fileURL: deferredURL, legacy: d)
+        for b in batches { deferred.commit(b, persist: false) }
+        // Readable at once, before any save.
+        XCTAssertEqual(deferred.entry("2026-09-01")?.level, 51)
+        XCTAssertTrue(deferred.isSettled("2026-09-02"))
+        // Not on disk yet.
+        XCTAssertNil(LevelLedger(fileURL: deferredURL, legacy: d).entry("2026-09-04"))
+        deferred.flush()
+        deferred.markSettled(from: "2026-09-01", through: "2026-09-06")
+
+        let a = LevelLedger(fileURL: savedURL, legacy: d)
+        let b = LevelLedger(fileURL: deferredURL, legacy: d)
+        XCTAssertEqual(a.entries(from: "2026-09-01", through: "2026-09-30"),
+                       b.entries(from: "2026-09-01", through: "2026-09-30"))
+        for day in 1...6 {
+            let key = String(format: "2026-09-%02d", day)
+            XCTAssertEqual(a.isSettled(key), b.isSettled(key), key)
+        }
+        XCTAssertEqual(a.settledSpan?.from, b.settledSpan?.from)
+        XCTAssertEqual(a.settledSpan?.through, b.settledSpan?.through)
+        XCTAssertEqual(a.hasBackfilled, b.hasBackfilled)
+        XCTAssertEqual(a.epoch, b.epoch)
+        // A flush with nothing unsaved is a no-op, and a later save carries earlier unsaved commits too.
+        deferred.flush()
+        deferred.commit([.level(level("2026-09-07", 57))], persist: false)
+        deferred.markBackfilled()
+        XCTAssertEqual(LevelLedger(fileURL: deferredURL, legacy: d).entry("2026-09-07")?.level, 57)
+    }
+
     func testTheSettledSpanIsKeptAndOnlyMovesForward() throws {
         let url = tempURL()
         let d = try defaults()

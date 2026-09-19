@@ -105,7 +105,10 @@ struct StateRecommendationRow: View {
     let tint: Color
     let navigate: (TabRoute) -> Void
     @EnvironmentObject private var router: NavRouter
-    @EnvironmentObject private var coach: AICoachEngine
+    // NOT observed: the coach publishes on every streamed chunk, and this view only calls it from
+    // actions/tasks (it never renders coach state), so a non-observing reference is enough.
+    @Environment(\.coachEngine) private var coachRef
+    private var coach: AICoachEngine { requireCoach(coachRef) }
 
     var body: some View {
         Button {
@@ -143,7 +146,10 @@ struct StateMissionNote: View {
     let mission: String
     let navigate: (TabRoute) -> Void
     @EnvironmentObject private var router: NavRouter
-    @EnvironmentObject private var coach: AICoachEngine
+    // NOT observed: the coach publishes on every streamed chunk, and this view only calls it from
+    // actions/tasks (it never renders coach state), so a non-observing reference is enough.
+    @Environment(\.coachEngine) private var coachRef
+    private var coach: AICoachEngine { requireCoach(coachRef) }
 
     private var recommendation: StateRecommendation {
         // The stored mission carries the goal line the text was written with; only trust it while it is
@@ -199,7 +205,10 @@ struct StateWorkoutsSection: View {
     @ObservedObject private var controller = StateCoachController.shared
     @EnvironmentObject private var repo: Repository
     @EnvironmentObject private var profile: ProfileStore
-    @EnvironmentObject private var coach: AICoachEngine
+    // NOT observed: the coach publishes on every streamed chunk, and this view only calls it from
+    // actions/tasks (it never renders coach state), so a non-observing reference is enough.
+    @Environment(\.coachEngine) private var coachRef
+    private var coach: AICoachEngine { requireCoach(coachRef) }
     @EnvironmentObject private var router: NavRouter
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
     private var effortScale: EffortScale { UnitPrefs.resolveEffortScale(effortScaleRaw) }
@@ -329,7 +338,10 @@ struct StateTilePresentationHost: ViewModifier {
     let navigate: (TabRoute) -> Void
     @ObservedObject private var controller = StateCoachController.shared
     @EnvironmentObject private var router: NavRouter
-    @EnvironmentObject private var coach: AICoachEngine
+    // NOT observed: the coach publishes on every streamed chunk, and this view only calls it from
+    // actions/tasks (it never renders coach state), so a non-observing reference is enough.
+    @Environment(\.coachEngine) private var coachRef
+    private var coach: AICoachEngine { requireCoach(coachRef) }
     @EnvironmentObject private var profile: ProfileStore
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
 

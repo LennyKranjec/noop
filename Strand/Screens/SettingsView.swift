@@ -18,7 +18,10 @@ import WhoopProtocol
 /// Grouped cards on surface.raised with a two-column form feel.
 struct SettingsView: View {
     @EnvironmentObject var model: AppModel
-    @EnvironmentObject var live: LiveState
+    /// NOT observed here: LiveState publishes on every strap tick, and the only rendered rows that read it
+    /// are the Strap card's — which is wrapped in `SettingsLiveReader` (the one observer). Everything else
+    /// (export actions, the dormant 5/MG card) reads the same instance without subscribing this screen.
+    private var live: LiveState { model.live }
     @EnvironmentObject var profile: ProfileStore
 
     /// Profile-photo picker selection (PhotosUI). Cleared back to nil once the bytes are loaded.
@@ -337,7 +340,7 @@ struct SettingsView: View {
                 profileCard.staggeredAppear(index: 0)
                 unitsCard.staggeredAppear(index: 1)
                 appearanceCard.staggeredAppear(index: 2)
-                strapCard.staggeredAppear(index: 3)
+                SettingsLiveReader { strapCard }.staggeredAppear(index: 3)
                 streakCard.staggeredAppear(index: 4)
                 featuresCard.staggeredAppear(index: 5)
 
@@ -3272,6 +3275,18 @@ enum SettingsDisclosureDefaults {
 /// removed: collapsed simply means the wrapped sections aren't drawn until the row is tapped open.
 /// A custom header (not SwiftUI's `DisclosureGroup`) is used so it matches NOOP's near-black
 /// instrument look, which the system control's tint and inset don't.
+/// Observes LiveState for exactly the Settings rows that render it, so a strap tick re-renders those rows
+/// instead of the whole Settings screen. The content reads `SettingsView.live` (the same instance the
+/// environment carries); this wrapper only supplies the subscription.
+private struct SettingsLiveReader<Content: View>: View {
+    @EnvironmentObject private var live: LiveState
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        content()
+    }
+}
+
 private struct SettingsDisclosureGroup<Content: View>: View {
     let title: LocalizedStringKey
     let subtitle: LocalizedStringKey

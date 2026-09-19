@@ -18,7 +18,8 @@ final class LiveActivityController {
     /// and create duplicate Live Activities.
     private var isStarting = false
     /// How long after the last push iOS may keep showing the activity as fresh. The activity is
-    /// refreshed every ~2 s while streaming, so this never bites a live session; it auto-greys a
+    /// refreshed every ~2 s while its content changes and at least every `refreshEvery` (60 s) while it
+    /// does not, so this never bites a live session; it auto-greys a
     /// frozen activity if the app is suspended/killed without an explicit end (a missed-tick safety net
     /// on top of the connected-driven end below).
     private static let staleAfter: TimeInterval = 120
@@ -40,6 +41,11 @@ final class LiveActivityController {
     /// What the last push carried about the session, so a start, an end or a pause goes out AT ONCE
     /// instead of waiting out the two-second throttle.
     private var lastWorkoutShape: String = ""
+    /// The content of the last push. An update whose content is identical is skipped — the Lock Screen
+    /// already shows it — except that one still goes out every `refreshEvery` so the stale date keeps
+    /// moving ahead of `staleAfter` while the stream is live.
+    private var lastPushedState: NOOPActivityAttributes.ContentState?
+    private static let refreshEvery: TimeInterval = 60
 
     /// Drive the activity from the latest live values. Lazily starts when the strap is CONNECTED (the
     /// live link, not the sticky "paired" flag) and a heart rate is present; ends the moment the link
@@ -71,6 +77,13 @@ final class LiveActivityController {
         }
         guard bpm != nil else { return }
 
+        // The 2-second throttle goes FIRST, before any content is built: most ~1 Hz ticks stop here.
+        let shape = workout.map { "\($0.name)|\($0.pausedSeconds != nil)" } ?? ""
+        let shapeChanged = shape != lastWorkoutShape
+        if activity != nil {
+            guard shapeChanged || Date().timeIntervalSince(lastPush) > 2 else { return }
+        }
+
         var state = NOOPActivityAttributes.ContentState(bpm: bpm, recovery: recovery, bonded: connected,
                                                         effort: effort)
         if let workout {
@@ -84,13 +97,14 @@ final class LiveActivityController {
             state.stressNow = workout.stressNow
         }
         let staleDate = Date().addingTimeInterval(Self.staleAfter)
-        let shape = workout.map { "\($0.name)|\($0.pausedSeconds != nil)" } ?? ""
-        let shapeChanged = shape != lastWorkoutShape
 
         if let activity {
-            guard shapeChanged || Date().timeIntervalSince(lastPush) > 2 else { return }
+            // Same content as the last push: nothing on screen would change, so spend no update — unless
+            // `refreshEvery` has passed, when it goes out anyway to carry the stale date forward.
+            if state == lastPushedState, Date().timeIntervalSince(lastPush) < Self.refreshEvery { return }
             lastWorkoutShape = shape
             lastPush = Date()
+            lastPushedState = state
             Task { await activity.update(ActivityContent(state: state, staleDate: staleDate)) }
         } else {
             // Set the start gate SYNCHRONOUSLY before any await so a second `update` arriving on the
@@ -106,6 +120,7 @@ final class LiveActivityController {
                 )
                 lastPush = Date()
                 lastWorkoutShape = shape
+                lastPushedState = state
             } catch {
                 activity = nil
             }
@@ -121,6 +136,7 @@ final class LiveActivityController {
             await act.end(nil, dismissalPolicy: .immediate)
         }
         self.activity = nil
+        self.lastPushedState = nil
     }
 }
 #endif

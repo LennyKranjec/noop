@@ -851,18 +851,27 @@ final class AICoachEngine: ObservableObject {
         let placeholder = ChatMessage(role: .assistant, text: "")
         appendMessage(placeholder)
         var accumulated = ""
+        // PERF: every `messages` write re-parses the whole reply as Markdown in the transcript, and
+        // providers stream many small chunks per frame. Coalesce to at most one write per ~16 ms; the
+        // final text is always written below (success and error paths alike), and `finish()` on exit
+        // guarantees a late flush can never overwrite it.
+        let throttle = CoachStreamThrottle { text in
+            // Replace the last message's text with the accumulated stream so far.
+            if let lastIdx = self.messages.indices.last,
+               self.messages[lastIdx].role == .assistant {
+                self.messages[lastIdx] = ChatMessage(
+                    id: placeholder.id, role: .assistant, text: text
+                )
+            }
+        }
+        defer { throttle.finish() }
 
         do {
             try await streamProvider(key: key, messages: wire, inlineImage: imageBase64) { delta in
                 accumulated += delta
-                // Replace the last message's text with the accumulated stream so far.
-                if let lastIdx = self.messages.indices.last,
-                   self.messages[lastIdx].role == .assistant {
-                    self.messages[lastIdx] = ChatMessage(
-                        id: placeholder.id, role: .assistant, text: accumulated
-                    )
-                }
+                throttle.submit(accumulated)
             }
+            throttle.finish()
             // Finalize: apply the memory commands the reply carried and strip them, then trim. If the
             // stream produced nothing, show "(no reply)".
             let clean = CoachMemory.shared.apply(reply: accumulated)
@@ -933,17 +942,24 @@ final class AICoachEngine: ObservableObject {
         let placeholder = ChatMessage(role: .assistant, text: prefix)
         appendMessage(placeholder)
         var accumulated = ""
+        // PERF: coalesced like `send` — at most one `messages` write per ~16 ms; the final text is
+        // always written below, and `finish()` on exit stops any late flush.
+        let throttle = CoachStreamThrottle { text in
+            if let lastIdx = self.messages.indices.last,
+               self.messages[lastIdx].role == .assistant {
+                self.messages[lastIdx] = ChatMessage(
+                    id: placeholder.id, role: .assistant, text: prefix + text
+                )
+            }
+        }
+        defer { throttle.finish() }
 
         do {
             try await streamProvider(key: key, messages: wire) { delta in
                 accumulated += delta
-                if let lastIdx = self.messages.indices.last,
-                   self.messages[lastIdx].role == .assistant {
-                    self.messages[lastIdx] = ChatMessage(
-                        id: placeholder.id, role: .assistant, text: prefix + accumulated
-                    )
-                }
+                throttle.submit(accumulated)
             }
+            throttle.finish()
             let clean = CoachMemory.shared.apply(reply: accumulated)
             if clean.isEmpty {
                 if let lastIdx = messages.indices.last, messages[lastIdx].role == .assistant {
@@ -1509,5 +1525,56 @@ final class AICoachEngine: ObservableObject {
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy-MM-dd"
         return f.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
+    }
+}
+
+/// Coalesces a streamed reply's `messages` writes to at most one per ~16 ms (one frame). Each write
+/// re-renders the transcript and re-parses the whole reply as Markdown, and providers deliver many small
+/// chunks per frame. A chunk that lands inside the window marks the latest text pending and schedules a
+/// single trailing flush, so a stream that pauses still shows everything it has sent. `finish()` stops
+/// all further writes — callers always write the FINAL text themselves after the stream ends, so the
+/// settled message is byte-identical to the unthrottled path.
+@MainActor
+final class CoachStreamThrottle {
+    private static let interval: TimeInterval = 0.016
+    private let publish: (String) -> Void
+    private var latest = ""
+    private var lastPublish: TimeInterval = -.infinity
+    private var pending = false
+    private var finished = false
+
+    init(publish: @escaping (String) -> Void) {
+        self.publish = publish
+    }
+
+    func submit(_ text: String) {
+        guard !finished else { return }
+        latest = text
+        guard !pending else { return }   // a trailing flush is already scheduled; it will take `latest`
+        let now = ProcessInfo.processInfo.systemUptime
+        let elapsed = now - lastPublish
+        if elapsed >= Self.interval {
+            lastPublish = now
+            publish(text)
+        } else {
+            pending = true
+            let delay = Self.interval - elapsed
+            Task { [weak self] in
+                try? await Task.sleep(nanoseconds: UInt64(max(0, delay) * 1_000_000_000))
+                self?.flushPending()
+            }
+        }
+    }
+
+    func finish() {
+        finished = true
+        pending = false
+    }
+
+    private func flushPending() {
+        guard pending, !finished else { return }
+        pending = false
+        lastPublish = ProcessInfo.processInfo.systemUptime
+        publish(latest)
     }
 }

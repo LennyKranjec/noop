@@ -320,6 +320,10 @@ final class LevelBarModel: ObservableObject {
         var settledThrough: String?
         var unbroken = true
         var since = 0
+        // The forty-day commits below stay in memory (PERF: each used to rewrite the whole ledger file);
+        // the file is written once when the walk ends — completed, handed to a retry, or superseded —
+        // by the final commit / markSettled / markBackfilled when they save, else by this flush.
+        defer { ledger.flush() }
         while cursor <= levelDate {
             let key = LevelWiring.key(from: cursor, calendar: calendar)
             var settled = ledger.isSettled(key)
@@ -359,7 +363,7 @@ final class LevelBarModel: ObservableObject {
             since += 1
             if since >= 40 {
                 since = 0
-                ledger.commit(batch)
+                ledger.commit(batch, persist: false)
                 batch = []
                 await Task.yield()
                 guard gen == generation else { return }

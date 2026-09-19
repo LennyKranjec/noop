@@ -1,5 +1,6 @@
 #if os(iOS)
 import SwiftUI
+import Combine
 import StrandDesign
 
 /// iOS navigation shell. macOS uses a `NavigationSplitView` sidebar (`RootView`); on iPhone the
@@ -26,8 +27,9 @@ struct RootTabView: View {
     @EnvironmentObject private var router: NavRouter
     /// The scene-local receiver for actions chosen from NOOP's Home Screen icon menu.
     @EnvironmentObject private var homeScreenQuickActions: HomeScreenQuickActionSceneDelegate
-    /// The coach, for the tab glyph's working state.
-    @EnvironmentObject private var coach: AICoachEngine
+    /// The coach, for the tab glyph's working state. NOT observed: the coach publishes on every streamed
+    /// chunk, and the shell needs one bool — kept in `coachWorking`, fed by a de-duplicated publisher.
+    @Environment(\.coachEngine) private var coachRef
     @Environment(\.scenePhase) private var scenePhase
     /// The morning flow — dream, the night's questions, the daily brief — on the day's first open.
     @State private var showMorning = false
@@ -42,7 +44,10 @@ struct RootTabView: View {
     @AppStorage("stress.alertScreen.shownAt") private var stressScreenShownAt: Double = 0
     /// Once an hour at most: often enough to catch a new spell, rarely enough not to nag through one.
     private static let stressScreenEvery: TimeInterval = 60 * 60
-    @EnvironmentObject private var appModel: AppModel
+    /// NOT observed: AppModel publishes 1–3×/s while streaming, and the shell only needs whether a
+    /// workout is running — kept in `workoutActive`, fed by a de-duplicated publisher.
+    @Environment(\.appModelRef) private var appModelRef
+    @State private var workoutActive = false
 
     /// High stress AT REST: the monitor's reading when it is in the top third and no workout is running.
     /// The reading is motion-gated already; a workout in progress is exertion by definition, even when
@@ -50,7 +55,7 @@ struct RootTabView: View {
     private var stressAlert: Double? {
         // `isHigh`, not one reading over the line: two consecutive high windows, so a phone call or a
         // coffee does not trip the red warning and the full-screen alarm.
-        guard appModel.activeWorkout == nil, stressMonitor.isHigh,
+        guard !workoutActive, stressMonitor.isHigh,
               let level = stressMonitor.current else { return nil }
         return level
     }
@@ -100,7 +105,22 @@ struct RootTabView: View {
     @AppStorage("noop.liquidTodayEnabled") private var liquidTodayEnabled = true
 
     /// True while the system is generating anything at all — chat or headless.
-    private var coachWorking: Bool { coach.isWorking }
+    @State private var coachWorking = false
+
+    /// `AICoachEngine.isWorking` (`sending || backgroundWork > 0`) as a de-duplicated stream.
+    private var coachWorkingPublisher: AnyPublisher<Bool, Never> {
+        guard let coach = resolvedCoach(coachRef) else { return Empty().eraseToAnyPublisher() }
+        return coach.$sending.combineLatest(coach.$backgroundWork)
+            .map { sending, background in sending || background > 0 }
+            .removeDuplicates()
+            .eraseToAnyPublisher()
+    }
+
+    /// Whether AppModel has an active workout, as a de-duplicated stream.
+    private var workoutActivePublisher: AnyPublisher<Bool, Never> {
+        guard let model = resolvedAppModel(appModelRef) else { return Empty().eraseToAnyPublisher() }
+        return model.$activeWorkout.map { $0 != nil }.removeDuplicates().eraseToAnyPublisher()
+    }
 
     /// Bumped when a generation ENDS while the wearer is looking somewhere else. The edge, not the
     /// level: a flag would re-fire on every re-render.
@@ -219,6 +239,13 @@ struct RootTabView: View {
         }
         .task(id: repo.refreshSeq) {
             await levelBar.refresh(repo: repo, tick: repo.refreshSeq)
+        }
+        // Both publishers replay their current value on subscription, which seeds the state on appear.
+        .onReceive(coachWorkingPublisher) { working in
+            if coachWorking != working { coachWorking = working }
+        }
+        .onReceive(workoutActivePublisher) { active in
+            if workoutActive != active { workoutActive = active }
         }
         .onChangeCompat(of: coachWorking) { working in
             // Only on the falling edge, and only when they are not already reading the answer.

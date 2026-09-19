@@ -862,6 +862,12 @@ public final class BLEManager: NSObject, ObservableObject {
     /// that banner. Any banked rows reset it; the productive auto-continue tail doesn't count. Twin of
     /// Android `consecutiveEmptyOffloads`.
     private var consecutiveEmptyOffloads = 0
+    /// Offload sessions this process has ENDED, and the sensor rows they persisted, both summed in
+    /// `exitBackfilling`. Monotonic; AppModel diffs them across its post-offload refreshes to skip the
+    /// widget publish and Health write-back when a WHOOP offload ran but banked nothing new. (The session
+    /// count is what tells "an empty WHOOP offload" apart from a refresh some other source triggered.)
+    private(set) var offloadSessionsEndedTotal = 0
+    private(set) var offloadRowsPersistedTotal = 0
     /// #364 spin-detector: the trim cursor as of the END of the previous backfill session this
     /// connection. exitBackfilling compares the current Backfiller.lastAckedTrim against this to decide
     /// whether the just-ended session actually advanced the strap's trim (progress) or froze (stop
@@ -2710,6 +2716,8 @@ public final class BLEManager: NSObject, ObservableObject {
         // never a fresh `backfiller.sessionRowsPersisted` re-read that a re-kicked session / trailing frames
         // could have mutated across the offload boundary.
         let persistedSensorRows = (backfiller?.sessionRowsPersisted ?? 0) > 0
+        offloadSessionsEndedTotal += 1
+        offloadRowsPersistedTotal += backfiller?.sessionRowsPersisted ?? 0
         if persistedSensorRows { consecutiveEmptyOffloads = 0 }
         else if consecutiveAutoContinues == 0 { consecutiveEmptyOffloads += 1 }
         if reason == "HISTORY_COMPLETE" {

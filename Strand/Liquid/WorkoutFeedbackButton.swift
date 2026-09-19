@@ -19,7 +19,10 @@ struct WorkoutFeedbackButton: View {
 
     @EnvironmentObject private var repo: Repository
     @EnvironmentObject private var profile: ProfileStore
-    @EnvironmentObject private var coach: AICoachEngine
+    // NOT observed: the coach publishes on every streamed chunk, and this view only calls it from
+    // actions/tasks (it never renders coach state), so a non-observing reference is enough.
+    @Environment(\.coachEngine) private var coachRef
+    private var coach: AICoachEngine { requireCoach(coachRef) }
     @EnvironmentObject private var router: NavRouter
 
     @State private var preparing = false

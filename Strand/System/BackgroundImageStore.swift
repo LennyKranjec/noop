@@ -33,8 +33,14 @@ final class BackgroundImageStore: ObservableObject {
     /// The active (recents[0]) decoded for the backdrop; nil = none stored. Drawn by ``BackgroundImageBackdrop``.
     @Published private(set) var image: Image?
 
-    /// Small preview images, index-aligned to ``recents`` (nil for a decode miss).
+    /// Small preview images, index-aligned to ``recents`` (nil for a decode miss, or while one is still
+    /// being built — see ``rebuildThumbnails()``).
     @Published private(set) var thumbnails: [Image?] = []
+
+    /// Built previews by file id. A file never changes under its id (every pick writes a new one), so a
+    /// cached preview cannot go stale.
+    private var thumbnailCache: [String: Image] = [:]
+    private var thumbnailTask: Task<Void, Never>?
 
     /// Master enable toggle (persisted under ``BackgroundImagePrefs/enabledKey``). When true AND an
     /// image is present, the custom image overrides the sky.
@@ -71,7 +77,7 @@ final class BackgroundImageStore: ObservableObject {
         // catches only the crash-before-persist case.)
         Self.gcOrphans(keeping: Set(capped.map(\.id)))
         image = capped.first.flatMap { Self.fullImage(id: $0.id) }
-        thumbnails = capped.map { Self.thumbnail(id: $0.id) }
+        rebuildThumbnails()
         persist()
     }
 
@@ -128,7 +134,31 @@ final class BackgroundImageStore: ObservableObject {
     /// Decode the active image + every recent's thumbnail.
     private func refresh() {
         image = recents.first.flatMap { Self.fullImage(id: $0.id) }
-        thumbnails = recents.map { Self.thumbnail(id: $0.id) }
+        rebuildThumbnails()
+    }
+
+    /// Publish the recents' previews, building any not yet cached OFF the main thread. Each one reads the
+    /// full (up to 2560 px) file and downscales it, which used to run synchronously — at launch, in this
+    /// singleton's init, for a strip only Settings ever shows. Cached previews publish at once; missing
+    /// ones follow when built.
+    private func rebuildThumbnails() {
+        let ids = recents.map(\.id)
+        thumbnails = ids.map { thumbnailCache[$0] }
+        let missing = ids.filter { thumbnailCache[$0] == nil }
+        thumbnailTask?.cancel()
+        guard !missing.isEmpty else { return }
+        thumbnailTask = Task { [weak self] in
+            let built: [(id: String, jpeg: Data)] = await Task.detached(priority: .utility) {
+                missing.compactMap { id in BackgroundImageStore.thumbnailJPEG(id: id).map { (id: id, jpeg: $0) } }
+            }.value
+            guard let self, !Task.isCancelled else { return }
+            for entry in built {
+                if let platform = PlatformImage(data: entry.jpeg) {
+                    self.thumbnailCache[entry.id] = Image(platformImage: platform)
+                }
+            }
+            self.thumbnails = self.recents.map { self.thumbnailCache[$0.id] }
+        }
     }
 
     private func persist() {
@@ -163,12 +193,11 @@ final class BackgroundImageStore: ObservableObject {
         return Image(platformImage: platform)
     }
 
-    private static func thumbnail(id: String) -> Image? {
+    /// A recent's 256 px preview JPEG. Pure file + ImageIO work, so it runs off the main actor.
+    nonisolated private static func thumbnailJPEG(id: String) -> Data? {
         guard let url = try? fileURL(id: id, create: false),
-              let data = try? Data(contentsOf: url),
-              let jpeg = AvatarImage.downscaledJPEG(from: data, maxDimension: 256, quality: 0.85),
-              let platform = PlatformImage(data: jpeg) else { return nil }
-        return Image(platformImage: platform)
+              let data = try? Data(contentsOf: url) else { return nil }
+        return AvatarImage.downscaledJPEG(from: data, maxDimension: 256, quality: 0.85)
     }
 
     private static func fileExists(_ id: String) -> Bool {
@@ -177,12 +206,12 @@ final class BackgroundImageStore: ObservableObject {
     }
 
     /// `<AppSupport>/OpenWhoop/<id>` (the same base folder the capture recorder uses).
-    private static func fileURL(id: String, create: Bool) throws -> URL {
+    nonisolated private static func fileURL(id: String, create: Bool) throws -> URL {
         let dir = try dirURL(create: create)
         return dir.appendingPathComponent(id, isDirectory: false)
     }
 
-    private static func dirURL(create: Bool = false) throws -> URL {
+    nonisolated private static func dirURL(create: Bool = false) throws -> URL {
         let fm = FileManager.default
         let dir = try fm.url(for: .applicationSupportDirectory, in: .userDomainMask,
                              appropriateFor: nil, create: create)

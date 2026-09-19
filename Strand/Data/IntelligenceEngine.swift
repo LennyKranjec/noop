@@ -701,11 +701,21 @@ final class IntelligenceEngine: ObservableObject {
         let completedThrough = UserDefaults.standard.string(forKey: Self.nightlyMetricsRescoreWatermarkKey)
         let plan = Self.rescorePlan(oldestFirst: days, firstDataAsOf: firstHrTs,
                                     completedThrough: completedThrough, chunkDays: Self.rescoreChunkDays)
+        // PERF: a historical chunk no longer reloads the dashboard caches itself (~30 full-history
+        // refreshes on a long history, one per chunk, each over caches no screen shows the old days of).
+        // The engine reads the store directly, never those caches, so the chunks score exactly as before;
+        // the caches are reloaded ONCE when the historical walk ends — or stops — below.
+        var historicalUnpublished = false
         for chunk in plan.historical {
-            guard await waitForIdlePass() else { return false }
-            guard await analyzeRecent(maxDays: chunk.maxDays, force: true, asOf: chunk.asOf) else { return false }
+            guard await waitForIdlePass(),
+                  await analyzeRecent(maxDays: chunk.maxDays, force: true, asOf: chunk.asOf) else {
+                if historicalUnpublished { await repo.refresh() }
+                return false
+            }
+            historicalUnpublished = true
             UserDefaults.standard.set(chunk.newestDay, forKey: Self.nightlyMetricsRescoreWatermarkKey)
         }
+        if historicalUnpublished { await repo.refresh() }
         if plan.finalDays > 0 {
             guard await waitForIdlePass() else { return false }
             guard await analyzeRecent(maxDays: plan.finalDays) else { return false }
@@ -2327,7 +2337,10 @@ final class IntelligenceEngine: ObservableObject {
         }.map(\.id) + [Repository.whoopSource]).reduce(into: [String]()) {
             if !$0.contains($1) { $0.append($1) }
         }
-        let cycleWorkouts = await repo.workoutRows(days: maxDays + 2)
+        // Anchored at `asOf` for a historical chunk (nil — now — for a normal pass, as before). Counting
+        // back from NOW handed an old chunk only today's workouts, none of which fall in its days, so the
+        // zone-1 motion gate and the rest of the day-cycle phase saw no workouts on re-scored history.
+        let cycleWorkouts = await repo.workoutRows(days: maxDays + 2, asOf: asOf)
         let physiologicalSteps = await DayCycleIntelligenceIntegration.compute(
             nights: scoredNights.map { night in
                 DayCycleIntelligenceIntegration.Night(
@@ -2940,9 +2953,10 @@ final class IntelligenceEngine: ObservableObject {
                                                          from: calOldest, to: newestDay)) ?? []
             var refSteps: [String: Double] = [:]
             for r in appleRows { if let s = r.steps, s > 0 { refSteps[r.day] = Double(s) } }
+            // Timing-only read: the spans need nothing but the effective onset and the wake.
             let sleepSpans: [(start: Int, end: Int)] =
-                ((try? await store.sleepSessions(deviceId: stepsSleepId, from: stepsScanFrom, to: now,
-                                                 limit: 4_000)) ?? [])
+                ((try? await store.sleepSessionTimings(deviceId: stepsSleepId, from: stepsScanFrom, to: now,
+                                                       limit: 4_000)) ?? [])
                 .map { (start: $0.effectiveStartTs, end: $0.endTs) }
             // Per-day motion volume over the calibration window, read from the owner-resolved strap streams.
             // (Owner resolution mirrors the scoring loop; one device installs resolve to `deviceId`.)
@@ -3125,9 +3139,6 @@ final class IntelligenceEngine: ObservableObject {
                 motionByStart[start] = motion
             }
         }
-        for (start, motion) in motionByStart {
-            _ = try? await store.persistSessionMotion(deviceId: computedId, sessionStart: start, motionEpochs: motion)
-        }
         // ── Persist per-epoch BAND sleep_state (#175) beside each kept session's stagesJSON ──────────────
         // This is the source `sessionSleepStateJSON` lacked (v7.7.0 finding: the write path had no producer
         // because the raw stream was dropped at extraction). Now analyzeDay grids the RAW `sleepStateSample`
@@ -3140,9 +3151,12 @@ final class IntelligenceEngine: ObservableObject {
                 sleepStateByStart[start] = states
             }
         }
-        for (start, states) in sleepStateByStart {
-            _ = try? await store.persistSessionSleepState(deviceId: computedId, sessionStart: start, states: states)
-        }
+        // PERF: both per-session series in ONE write transaction — the same UPDATEs, motion first then
+        // band state, as the two per-row loops issued them, instead of a transaction per row.
+        _ = try? await store.persistSessionAux(
+            deviceId: computedId,
+            motion: motionByStart.map { (sessionStart: $0.key, motionEpochs: $0.value) },
+            sleepStates: sleepStateByStart.map { (sessionStart: $0.key, states: $0.value) })
         markPostLoopPhase("sleepWrite")
         // ── Overlap-aware banked-sleep heal (#899) ────────────────────────────────────────────────────
         // An unstable strap clock re-banks the SAME night under a shifted timebase, so successive passes
@@ -3182,8 +3196,9 @@ final class IntelligenceEngine: ObservableObject {
                         for: Date(timeIntervalSince1970: TimeInterval($0.endTs)))))
             }
             let sweep = SleepSessionDedup.dedupe(healable, freshStarts: keptStarts)
+            // PERF: the stale copies go in ONE write transaction (the same single-row DELETEs, in order).
+            _ = try? await store.deleteSleepSessions(deviceId: healId, startTs: sweep.dropped.map { $0.startTs })
             for stale in sweep.dropped {
-                _ = try? await store.deleteSleepSession(deviceId: healId, startTs: stale.startTs)
                 // #1284: log which copy was dropped and which survived, so the corpus can confirm the heal
                 // keeps the fuller / end-correct row (the survivor the collapse resolved this stale into).
                 if let survivor = sweep.kept.first(where: { SleepSessionDedup.isDuplicate($0, stale) }) {
@@ -3259,7 +3274,9 @@ final class IntelligenceEngine: ObservableObject {
         // Reload the dashboard caches so the freshly computed scores show up immediately. A heal-only
         // pass (#899 dedup deleted stale session rows but no daily changed) must refresh too, so the
         // Sleep tab stops showing the removed duplicates right away.
-        if !dailies.isEmpty || !healDropped.isEmpty { await repo.refresh() }
+        // A HISTORICAL chunk leaves this to its caller, which reloads once after the last chunk (see
+        // `runNightlyMetricsRescoreIfNeeded`) instead of once per chunk.
+        if !historical, !dailies.isEmpty || !healDropped.isEmpty { await repo.refresh() }
 
         markPostLoopPhase("workouts")
         // #836/#sleep-sync: record the complete raw-analysis fingerprint this run scored against, so a later
@@ -3779,9 +3796,10 @@ final class IntelligenceEngine: ObservableObject {
         // re-banked copy of the night would otherwise feed "asleep" epochs at the OLD times into the H7
         // re-onset guard, letting the stale block keep confirming itself. Read-side only (no bank-recency
         // witness here); the store itself is healed post-upsert in analyzeRecent.
+        // Timing-only read: the dedup reads only bounds + `userEdited`, and the expansion below only `startTs`.
         let sessions = SleepSessionDedup.dedupe(
-            (try? await store.sleepSessions(deviceId: computedId, from: from, to: to,
-                                            limit: 4000)) ?? []).kept
+            (try? await store.sleepSessionTimings(deviceId: computedId, from: from, to: to,
+                                                  limit: 4000)) ?? []).kept
         // One range read of the window's banked band state, keyed by startTs, instead of a single-row SELECT
         // per kept session. We still expand ONLY the kept (deduped) sessions, in order, so the output is
         // identical to the old per-session loop — just without the N round-trips.
@@ -3814,10 +3832,11 @@ final class IntelligenceEngine: ObservableObject {
     private static func bankedSleepHRNights(
         store: WhoopStore, importedId: String, computedId: String, windowStart: Int, windowEnd: Int, limit: Int
     ) async -> [SleepHRNight] {
-        let imported = (try? await store.sleepSessions(deviceId: importedId, from: windowStart,
-                                                       to: windowEnd, limit: limit)) ?? []
-        let computed = (try? await store.sleepSessions(deviceId: computedId, from: windowStart,
-                                                       to: windowEnd, limit: limit)) ?? []
+        // Timing-only reads: the dedup reads bounds + `userEdited`, the nights bounds + `restingHr`.
+        let imported = (try? await store.sleepSessionTimings(deviceId: importedId, from: windowStart,
+                                                             to: windowEnd, limit: limit)) ?? []
+        let computed = (try? await store.sleepSessionTimings(deviceId: computedId, from: windowStart,
+                                                             to: windowEnd, limit: limit)) ?? []
         return SleepSessionDedup.dedupe(imported + computed).kept
             .map { SleepHRNight(start: $0.effectiveStartTs, end: $0.endTs, restingHR: $0.restingHr) }
             .sorted { $0.end < $1.end }
@@ -3851,10 +3870,11 @@ final class IntelligenceEngine: ObservableObject {
         store: WhoopStore, importedId: String, computedId: String,
         windowStart: Int, windowEnd: Int, offsetSec: Int
     ) async -> (midsleepSec: Int?, nightlyHours: [Double]) {
-        let imported = (try? await store.sleepSessions(deviceId: importedId, from: windowStart,
-                                                       to: windowEnd, limit: 4000)) ?? []
-        let computed = (try? await store.sleepSessions(deviceId: computedId, from: windowStart,
-                                                       to: windowEnd, limit: 4000)) ?? []
+        // Timing-only reads: the dedup reads bounds + `userEdited`, the learner bounds + `efficiency`.
+        let imported = (try? await store.sleepSessionTimings(deviceId: importedId, from: windowStart,
+                                                             to: windowEnd, limit: 4000)) ?? []
+        let computed = (try? await store.sleepSessionTimings(deviceId: computedId, from: windowStart,
+                                                             to: windowEnd, limit: 4000)) ?? []
         // #899: collapse overlapping timebase-shifted duplicates BEFORE the learner sees the history.
         // A stale re-banked copy of a night lands on a DIFFERENT day key, so the per-day longest-block
         // de-dup below never caught it and the learned midsleep drifted toward the stale timing, which

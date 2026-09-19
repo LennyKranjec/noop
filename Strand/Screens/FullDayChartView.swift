@@ -62,6 +62,9 @@ struct FullDayChartView: View {
     /// The visible window the chart's gestures mutate. nil → full day (the chart falls back to `dayBounds`).
     @State private var zoomDomain: ClosedRange<Date>? = nil
     @State private var loading = true
+    /// Set once the first series has landed; from then on `reload()` debounces (see there). The first
+    /// load stays immediate so the chart's opening frame is unchanged.
+    @State private var didLoadSeries = false
     /// Bumped on every settled zoom/metric change so the re-read task re-runs at the new resolution.
     @State private var reloadTick = 0
 
@@ -365,6 +368,12 @@ struct FullDayChartView: View {
     }
 
     private func reload() async {
+        // Debounce: a pinch/drag walks `taskKey` through many whole-second windows; `.task(id:)` cancels the
+        // previous task on each change, so only a window that settles for 120 ms reaches the DB.
+        if didLoadSeries {
+            try? await Task.sleep(nanoseconds: 120_000_000)
+            guard !Task.isCancelled else { return }
+        }
         loading = true
         let window = visibleWindow
         let result = await repo.timelineSeries(
@@ -377,6 +386,7 @@ struct FullDayChartView: View {
         guard !Task.isCancelled else { return }
         series = result
         loading = false
+        didLoadSeries = true
     }
 
     /// #979 spin-off — load the shown day's sleep + workouts and scope them EXACTLY like the classic

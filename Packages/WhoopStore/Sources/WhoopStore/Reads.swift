@@ -217,11 +217,9 @@ extension WhoopStore {
                   (SELECT COALESCE(MAX(ts), 0) FROM hrSample) AS hm,
                   (SELECT COALESCE(MAX(rowid), 0) FROM ppgHrSample) AS p,
                   (SELECT COALESCE(MAX(rowid), 0) FROM rrInterval) AS r,
-                  (SELECT COUNT(*) FROM rrInterval WHERE srcChannel = 5
-                     AND (tsSuspect IS NULL OR tsSuspect <> 1)) AS w5,
-                  (SELECT COUNT(*) FROM rrInterval WHERE srcChannel = 7
-                     AND (tsSuspect IS NULL OR tsSuspect <> 1)) AS w7,
-                  (SELECT COUNT(*) FROM rrInterval WHERE srcChannel IN (5, 6, 7)) AS w5tagged,
+                  w.w5 AS w5,
+                  w.w7 AS w7,
+                  w.w5tagged AS w5tagged,
                   (SELECT COALESCE(GROUP_CONCAT(identity, ';'), '') FROM
                     (SELECT QUOTE(id) || ':' || QUOTE(brand) || ':' || QUOTE(model) || ':' || QUOTE(status) AS identity
                      FROM pairedDevice ORDER BY id)) AS registry,
@@ -232,6 +230,20 @@ extension WhoopStore {
                   (SELECT COALESCE(MAX(rowid), 0) FROM spo2Sample) AS o,
                   (SELECT COALESCE(MAX(rowid), 0) FROM skinTempSample) AS t,
                   (SELECT COALESCE(MAX(rowid), 0) FROM stepSample) AS z
+                FROM (
+                  -- PERF: the three WHOOP 5 source counts in ONE walk of the (srcChannel, tsSuspect) index
+                  -- range for channels 5..7, instead of three. `w5`/`w7` are subsets of that range, so
+                  -- the conditional sums count exactly the rows their old `WHERE` did (a NULL srcChannel
+                  -- never matches `= 5`/`= 7`, exactly as it never matched the old filter). COALESCE only
+                  -- covers the empty range, where the old COUNT(*) returned 0.
+                  SELECT
+                    COALESCE(SUM(CASE WHEN srcChannel = 5 AND (tsSuspect IS NULL OR tsSuspect <> 1)
+                                      THEN 1 ELSE 0 END), 0) AS w5,
+                    COALESCE(SUM(CASE WHEN srcChannel = 7 AND (tsSuspect IS NULL OR tsSuspect <> 1)
+                                      THEN 1 ELSE 0 END), 0) AS w7,
+                    COUNT(*) AS w5tagged
+                  FROM rrInterval WHERE srcChannel IN (5, 6, 7)
+                ) AS w
                 """) else { return "" }
             let hc: Int = row["hc"], hm: Int = row["hm"]
             let keys = ["p", "r", "x", "g", "s", "e", "o", "t", "z"]
@@ -279,16 +291,10 @@ extension WhoopStore {
                 SELECT
                   (SELECT COUNT(*) FROM ppgHrSample WHERE deviceId = :d AND ts >= :f AND ts <= :t) AS pc,
                   (SELECT COALESCE(MAX(ts), 0) FROM ppgHrSample WHERE deviceId = :d AND ts >= :f AND ts <= :t) AS pm,
-                  (SELECT COUNT(*) FROM rrInterval WHERE deviceId = :d AND ts >= :f AND ts <= :t
-                     AND (srcChannel IS NULL OR srcChannel <> :rrx)
-                     AND (tsSuspect IS NULL OR tsSuspect <> 1)) AS rc,
-                  (SELECT COALESCE(MAX(ts), 0) FROM rrInterval WHERE deviceId = :d AND ts >= :f AND ts <= :t
-                     AND (srcChannel IS NULL OR srcChannel <> :rrx)
-                     AND (tsSuspect IS NULL OR tsSuspect <> 1)) AS rm,
-                  (SELECT COUNT(*) FROM rrInterval WHERE deviceId = :d AND ts >= :f AND ts <= :t
-                     AND srcChannel = 5 AND (tsSuspect IS NULL OR tsSuspect <> 1)) AS w5,
-                  (SELECT COUNT(*) FROM rrInterval WHERE deviceId = :d AND ts >= :f AND ts <= :t
-                     AND srcChannel = 7 AND (tsSuspect IS NULL OR tsSuspect <> 1)) AS w7,
+                  rr.rc AS rc,
+                  rr.rm AS rm,
+                  rr.w5 AS w5,
+                  rr.w7 AS w7,
                   EXISTS(SELECT 1 FROM rrInterval WHERE deviceId = :d AND srcChannel IN (5, 6, 7)) AS w5owner,
                   COALESCE((SELECT QUOTE(brand) || ':' || QUOTE(model) FROM pairedDevice
                             WHERE id = :d), 'absent') AS registry,
@@ -306,6 +312,21 @@ extension WhoopStore {
                   (SELECT COALESCE(MAX(ts), 0) FROM sleepStateSample WHERE deviceId = :d AND ts >= :f AND ts <= :t) AS bm,
                   (SELECT COUNT(*) FROM event WHERE deviceId = :d AND ts >= :f AND ts <= :t) AS ec,
                   (SELECT COALESCE(MAX(ts), 0) FROM event WHERE deviceId = :d AND ts >= :f AND ts <= :t) AS em
+                FROM (
+                  -- PERF: the four R-R witnesses share the day's range and the tsSuspect filter, so they
+                  -- are ONE walk of that range with conditional aggregates instead of four. Each CASE is
+                  -- the old sub-select's extra filter verbatim (a NULL srcChannel fails `= 5`/`= 7` and
+                  -- passes the spo2-IBI exclusion arm, as before); MAX ignores the non-matching NULLs.
+                  -- COALESCE covers the empty range, where the old COUNT(*) / COALESCE(MAX) gave 0.
+                  SELECT
+                    COALESCE(SUM(CASE WHEN srcChannel IS NULL OR srcChannel <> :rrx THEN 1 ELSE 0 END), 0) AS rc,
+                    COALESCE(MAX(CASE WHEN srcChannel IS NULL OR srcChannel <> :rrx THEN ts END), 0) AS rm,
+                    COALESCE(SUM(CASE WHEN srcChannel = 5 THEN 1 ELSE 0 END), 0) AS w5,
+                    COALESCE(SUM(CASE WHEN srcChannel = 7 THEN 1 ELSE 0 END), 0) AS w7
+                  FROM rrInterval
+                  WHERE deviceId = :d AND ts >= :f AND ts <= :t
+                    AND (tsSuspect IS NULL OR tsSuspect <> 1)
+                ) AS rr
                 """, arguments: ["d": deviceId, "f": from, "t": to,
                                  "rrx": RRSourceChannel.spo2Ibi.rawValue]) else { return "" }
             let keys = ["p", "r", "x", "o", "g", "z", "t", "b", "e"]

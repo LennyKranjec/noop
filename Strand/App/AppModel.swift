@@ -101,6 +101,12 @@ final class AppModel: ObservableObject {
     /// True while the active workout is a GPS-type session (drives the End-time route persist). Mirrors
     /// Android's `ActiveWorkout.gpsEnabled`.
     private var activeWorkoutIsGps = false
+    /// The active workout's Effort as a running sum (`WorkoutStrainAccumulator`), so a captured sample costs
+    /// O(1) instead of a re-score of the whole window. Rebuilt from `samples` whenever it is missing, was
+    /// built for another HRmax / sex / method, or has fallen out of step with the samples.
+    private var workoutStrain: WorkoutStrainAccumulator?
+    /// The active workout's durable HR samples (#529), appended one record per captured sample.
+    private let workoutSampleLog = ActiveWorkoutPersistence.SampleLog()
 
     /// ZONE LOCK decision state for the active workout (see `ZoneGuidance`). Rebuilt whenever the locked
     /// zone's bounds change, dropped (nil) whenever cueing must not run: no workout, no lock, paused.
@@ -264,8 +270,19 @@ final class AppModel: ObservableObject {
             }
         }.store(in: &hrCancellables)
         // Smooth HR centrally so it's solid everywhere it's shown.
-        live.$heartRate.sink { [weak self] _ in self?.ingestHR() }.store(in: &hrCancellables)
-        live.$rr.sink { [weak self] _ in self?.ingestHR() }.store(in: &hrCancellables)
+        //
+        // @Published emits in willSet: inside these sinks `live.heartRate` / `live.rr` still hold the
+        // PREVIOUS packet. So each sink passes the value it was handed and reads only the OTHER property
+        // from `live` (already committed by then). Reading both from `live` smoothed the prior packet's HR
+        // and fed the stress detector the prior R-R batch — once per sink, i.e. twice.
+        live.$heartRate.sink { [weak self] hr in
+            guard let self else { return }
+            self.ingestHR(heartRate: hr, rr: self.live.rr, freshRR: nil)
+        }.store(in: &hrCancellables)
+        live.$rr.sink { [weak self] rr in
+            guard let self else { return }
+            self.ingestHR(heartRate: self.live.heartRate, rr: rr, freshRR: rr)
+        }.store(in: &hrCancellables)
 
         // #2117: bank the device's R-R transport facts whenever a link comes up. Shell-independent on
         // purpose: the classic Today already reads these three for its own note, but the Liquid shell is
@@ -719,9 +736,27 @@ final class AppModel: ObservableObject {
         #endif
     }
 
+    /// `ble.offloadSessionsEndedTotal` / `ble.offloadRowsPersistedTotal` as of the previous post-offload
+    /// refresh, so the next one can tell whether a WHOOP offload ran and banked anything in between.
+    private var offloadSessionsAtLastRefresh = 0
+    private var offloadRowsAtLastRefresh = 0
+
     private func refreshAfterCompletedBackfill() async {
         live.append(log: "Backfill: refreshing dashboard cache from completed sync")
-        await repo.refresh(days: 120)
+        // Did a WHOOP offload run since the previous post-offload refresh (every session of a debounced
+        // slice storm, plus any timed-out one in between), and bank nothing? Only then is this refresh
+        // known-empty. A refresh with no WHOOP session behind it (an Oura drain stamps the same signal,
+        // and only when it banked something; the launch-time seed) keeps the full chain as before.
+        let sessionsTotal = ble.offloadSessionsEndedTotal
+        let rowsTotal = ble.offloadRowsPersistedTotal
+        let emptyOffload = sessionsTotal > offloadSessionsAtLastRefresh && rowsTotal == offloadRowsAtLastRefresh
+        offloadSessionsAtLastRefresh = sessionsTotal
+        offloadRowsAtLastRefresh = rowsTotal
+        // The FULL-history refresh, like every other caller. `refresh(days: 120)` swapped the dashboard's
+        // 4000-day history down to 120 days — a second publish of everything observing it, until the
+        // analyze pass below refreshed it back — and when that pass skipped (unchanged inputs) the
+        // dashboard was left holding only 120 days.
+        await repo.refresh()
         // Score the freshly-offloaded raw data RIGHT NOW rather than waiting for the next 15-minute
         // analyzeRecent tick , otherwise a just-synced night's Charge / Effort / Rest can take up to
         // 15 minutes to appear on a strap-only (no-import) dashboard. analyzeRecent no-ops if a tick is
@@ -742,7 +777,12 @@ final class AppModel: ObservableObject {
             await intelligence.analyzeRecent(skipIfUnchanged: true)
         }
         await refreshV5Signals()
+        if emptyOffload { live.append(log: "Backfill: offload banked no new rows since the last refresh") }
         #if os(iOS)
+        // An empty offload (a flapping link re-syncing a caught-up strap) changed nothing the widget or
+        // Apple Health would read — the analyze pass above already skipped for the same reason — so do
+        // not rewrite the snapshot, spend a widget reload, or run the Health write-back for it.
+        guard !emptyOffload else { return }
         // #980: a strap backfill routinely completes while the app is BACKGROUNDED (it runs as a
         // bluetooth-central, so it stays alive to receive the offload). The only other widget-publish
         // sites are gated on scenePhase == .active, so a background sync would rescore today's data but
@@ -761,12 +801,16 @@ final class AppModel: ObservableObject {
     /// Fold a fresh reading into the smoothing window and republish a stable bpm.
     /// Prefers the strap's reported HR; falls back to 60000/R-R. Clamps to a plausible
     /// 30–220 range (rejects 0 / garbage spikes) and publishes the window MEDIAN.
-    private func ingestHR() {
+    ///
+    /// `heartRate` / `rr` are the values as of THIS emission (see the sinks in `init`). `freshRR` is the
+    /// R-R batch that just arrived — non-nil only from the `rr` sink — so the stress detector takes each
+    /// batch exactly once.
+    private func ingestHR(heartRate: Int?, rr: [Int], freshRR: [Int]?) {
         var inst: Double?
-        if let hr = live.heartRate, hr >= 30, hr <= 220 {
+        if let hr = heartRate, hr >= 30, hr <= 220 {
             inst = Double(hr)
-        } else if let rr = live.rr.last, rr > 0 {
-            let v = 60_000.0 / Double(rr)
+        } else if let last = rr.last, last > 0 {
+            let v = 60_000.0 / Double(last)
             if v >= 30, v <= 220 { inst = v }
         }
         guard let inst else {
@@ -774,7 +818,7 @@ final class AppModel: ObservableObject {
             // median so screens that now prefer `bpm` fall through to "," instead of freezing on the
             // last value. Mirrors Android (_bpm = null on disconnect). A transient out-of-range sample
             // with the link still up (heartRate or rr still present) keeps the last median.
-            if live.heartRate == nil && live.rr.isEmpty { resetSmoothing() }
+            if heartRate == nil && rr.isEmpty { resetSmoothing() }
             return
         }
         let now = Date()
@@ -789,7 +833,7 @@ final class AppModel: ObservableObject {
         if bpm != smoothed { bpm = smoothed }
         captureWorkoutSample()
         evaluateZoneGuidance()
-        evaluateStress()
+        if let freshRR { evaluateStress(freshRR: freshRR) }
     }
 
     // MARK: - Manual workout tracking
@@ -815,7 +859,11 @@ final class AppModel: ObservableObject {
             gpsRecorder.start(startMs: Int64(started.timeIntervalSince1970 * 1000))
         }
         // Make the session durable from the first instant (#529): persist it now so an OS kill right
-        // after Start , before any HR sample lands , can still be rehydrated + ended on relaunch.
+        // after Start , before any HR sample lands , can still be rehydrated + ended on relaunch. The
+        // sample log starts empty (a leftover from a session that never reached End/Discard must not
+        // bleed into this one).
+        workoutStrain = nil
+        workoutSampleLog.replaceAll([])
         persistActiveWorkout()
         // Workouts & GPS test mode (Test Centre): one session-start line tagged `.workouts`. Zero-cost when
         // off (the gate is one UserDefaults bool read), so the lifecycle of a missing workout is visible.
@@ -859,41 +907,53 @@ final class AppModel: ObservableObject {
                     domain: .dataImport)
     }
 
-    /// Persist the in-flight manual workout to `UserDefaults` so it survives the app being killed mid-
-    /// session (#529). Called on start + each captured sample. A no-op when nothing is running. Apple has
-    /// no GPS-route session, so every manual workout is the "non-GPS" case and gets this durability ,
-    /// the Apple analogue of Android's `persistNonGpsWorkout`.
+    /// Persist the in-flight manual workout's HEADER (start, sport, pause state, zone lock) so it survives
+    /// the app being killed mid-session (#529). Called on start, pause / resume and zone-lock changes; the
+    /// samples go to `workoutSampleLog` as they are captured, so nothing here is per-sample. A no-op when
+    /// nothing is running. Apple has no GPS-route session, so every manual workout is the "non-GPS" case
+    /// and gets this durability , the Apple analogue of Android's `persistNonGpsWorkout`.
     private func persistActiveWorkout() {
         guard let w = activeWorkout else { return }
-        ActiveWorkoutPersistence.store(
-            ActiveWorkoutPersistence.Snapshot(
+        ActiveWorkoutPersistence.storeHeader(
+            ActiveWorkoutPersistence.Header(
                 startSec: Int(w.start.timeIntervalSince1970),
                 sport: w.sport,
-                samples: w.samples,
-                avgHr: w.avgHr,
-                peakHr: w.peakHr,
-                liveStrain: w.liveStrain,
                 pausedAtSec: w.pausedAt.map { Int($0.timeIntervalSince1970) },
                 pausedDurationSec: Int(w.pausedDuration),
                 lockedZone: w.lockedZone))
     }
 
     /// If a manual workout was in flight when iOS killed the app, rebuild `activeWorkout` from the durable
-    /// snapshot so reopening doesn't lose it , the session can still be ended + saved (#529). The Apple
-    /// analogue of Android's `rehydrateActiveNonGpsWorkout`. No-op when a workout is already live (a live
-    /// session wins over a stale snapshot) or nothing is stored. Called once from `init`.
+    /// header + sample log so reopening doesn't lose it , the session can still be ended + saved (#529).
+    /// The Apple analogue of Android's `rehydrateActiveNonGpsWorkout`. No-op when a workout is already live
+    /// (a live session wins over a stale snapshot) or nothing is stored. Called once from `init`.
+    ///
+    /// The running stats are recomputed from the samples with the same arithmetic the live capture uses,
+    /// so they match what the card showed before the kill. A session persisted by an older build (the
+    /// one-blob legacy format) is rewritten in the current layout here, then the blob is dropped.
     private func rehydrateActiveWorkout() {
-        guard activeWorkout == nil, let snap = ActiveWorkoutPersistence.load() else { return }
+        guard activeWorkout == nil,
+              let restored = ActiveWorkoutPersistence.load(log: workoutSampleLog) else { return }
+        let snap = restored.header
         var w = ActiveWorkout(start: Date(timeIntervalSince1970: TimeInterval(snap.startSec)),
                               sport: snap.sport)
-        w.samples = snap.samples
-        w.avgHr = snap.avgHr
-        w.peakHr = snap.peakHr
-        w.liveStrain = snap.liveStrain
+        let acc = WorkoutStrainAccumulator(samples: restored.samples, maxHR: Double(profile.hrMax),
+                                           method: PuffinExperiment.effortMethod, sex: profile.sex)
+        w.samples = restored.samples
+        w.avgHr = acc.count > 0 ? Int((Double(acc.bpmSum) / Double(acc.count)).rounded()) : 0
+        w.peakHr = restored.samples.map(\.bpm).max() ?? 0
+        w.liveStrain = acc.strain ?? 0
         w.pausedAt = snap.pausedAtSec.map { Date(timeIntervalSince1970: TimeInterval($0)) }
         w.pausedDuration = TimeInterval(snap.pausedDurationSec ?? 0)
         w.lockedZone = snap.lockedZone
+        workoutStrain = acc
         activeWorkout = w
+        // Migrate a legacy blob: samples first, then the header, and the blob goes only once both landed —
+        // a kill part-way leaves the blob as the source of truth for the next launch.
+        if restored.fromLegacy, workoutSampleLog.replaceAll(restored.samples) {
+            persistActiveWorkout()
+            ActiveWorkoutPersistence.clearLegacy()
+        }
 
         // Rebuild the transient GPS lifecycle flag as well as the durable workout value. Without this,
         // a distance workout restored after an OS kill resumes as a non-GPS workout: Resume never
@@ -965,7 +1025,8 @@ final class AppModel: ObservableObject {
         zoneGuidance = nil
         if activeWorkoutIsGps { gpsRecorder.stop() }
         activeWorkoutIsGps = false
-        ActiveWorkoutPersistence.clear()
+        workoutStrain = nil
+        ActiveWorkoutPersistence.clear(log: workoutSampleLog)
         lastWorkout = nil
     }
 
@@ -980,7 +1041,8 @@ final class AppModel: ObservableObject {
         activeWorkoutIsGps = false
         // Drop the durable snapshot the instant the session ends , whether it saves below or is discarded
         // as too-short , so a relaunch never rehydrates an already-finished session (#529).
-        ActiveWorkoutPersistence.clear()
+        workoutStrain = nil
+        ActiveWorkoutPersistence.clear(log: workoutSampleLog)
         // #524: finalize the GPS route. Stop the recorder and take its captured route , it kept
         // accumulating from CoreLocation independently of the HR window. `capturedRoute()` is nil unless
         // ≥2 points actually landed (honest: no route, no distance, when nothing was captured , e.g. a
@@ -1064,19 +1126,56 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Append the current smoothed `bpm` to the active workout and recompute its running strain. Called
-    /// from `ingestHR` on every fresh sample; a no-op when no workout is running. Recomputing strain
-    /// over the growing window each sample is cheap at the ~1 Hz live-HR cadence.
+    /// Append the current smoothed `bpm` to the active workout and update its running strain. Called
+    /// from `ingestHR` on every fresh sample; a no-op when no workout is running.
+    ///
+    /// ONE SAMPLE PER WHOLE SECOND. `ingestHR` runs on every HR change AND every R-R packet (a standard
+    /// strap sets both per packet), and samples are stamped in whole seconds, so at >= 2 Hz several
+    /// samples shared a timestamp. The scorer credits every zero gap with a full fallback second, so each
+    /// duplicate inflated the workout's Effort. A same-second sample now REPLACES the last one's bpm (the
+    /// newer smoothed reading wins) instead of appending.
+    ///
+    /// Strain is a running sum (`workoutStrain`) equal, bit for bit, to `StrainScorer.strain` over
+    /// `samples` — the full re-score per sample was O(n²) over a session.
     private func captureWorkoutSample() {
         guard var w = activeWorkout, !w.isPaused, let hr = bpm else { return }
-        w.samples.append(HRSample(ts: Int(Date().timeIntervalSince1970), bpm: hr))
-        w.peakHr = max(w.peakHr, hr)
-        w.avgHr = Int((Double(w.samples.map(\.bpm).reduce(0, +)) / Double(w.samples.count)).rounded())
-        w.liveStrain = StrainScorer.strain(w.samples, maxHR: Double(profile.hrMax),
-                                              method: PuffinExperiment.effortMethod, sex: profile.sex) ?? 0
+        let sample = HRSample(ts: Int(Date().timeIntervalSince1970), bpm: hr)
+        let lastSample = w.samples.last
+        // Same second, same bpm: the window is unchanged, so there is nothing to publish or persist.
+        if let lastSample, lastSample.ts == sample.ts, lastSample.bpm == hr { return }
+
+        let maxHR = Double(profile.hrMax)
+        let method = PuffinExperiment.effortMethod
+        let sex = profile.sex
+        var acc: WorkoutStrainAccumulator
+        if let existing = workoutStrain, existing.count == w.samples.count,
+           existing.matches(maxHR: maxHR, method: method, sex: sex) {
+            acc = existing
+        } else {
+            acc = WorkoutStrainAccumulator(samples: w.samples, maxHR: maxHR, method: method, sex: sex)
+        }
+
+        if let lastSample, lastSample.ts == sample.ts {
+            w.samples[w.samples.count - 1] = sample
+            acc.replaceLast(bpm: hr)
+            // The peak is the max over the samples; if the overwritten reading WAS the peak, re-derive it.
+            if hr >= w.peakHr {
+                w.peakHr = hr
+            } else if lastSample.bpm == w.peakHr {
+                w.peakHr = w.samples.map(\.bpm).max() ?? hr
+            }
+        } else {
+            w.samples.append(sample)
+            acc.append(sample)
+            w.peakHr = max(w.peakHr, hr)
+        }
+        w.avgHr = Int((Double(acc.bpmSum) / Double(acc.count)).rounded())
+        w.liveStrain = acc.strain ?? 0
+        workoutStrain = acc
         activeWorkout = w
-        // Re-snapshot the durable session so a kill keeps the latest accumulated HR window (#529).
-        persistActiveWorkout()
+        // Log the sample durably so a kill keeps the accumulated HR window (#529). A same-second overwrite
+        // is appended as a second record; the rehydrate folds it back (`collapseSameSecond`).
+        workoutSampleLog.append(sample)
     }
 
     /// Drop the smoothing window and blank the hero number so a resume / re-attach shows ","
@@ -1094,8 +1193,12 @@ final class AppModel: ObservableObject {
     /// passive nudge to `stressNudgeCenter`. The detector carries replay-safe state (de-dup + slow
     /// baseline + rate limit), persisted via `BiofeedbackPrefs` so a relaunch can't re-fire. Honest /
     /// non-clinical: "stress" is an autonomic proxy vs the user's own baseline, never a diagnosis.
-    private func evaluateStress() {
-        let fresh = live.rr.filter { $0 > 300 && $0 < 2000 }   // plausible R-R (30–200 bpm)
+    ///
+    /// Runs once per R-R packet, on that packet's batch. It used to run on every HR change AND every R-R
+    /// packet, each time appending `live.rr` — which, read inside a willSet sink, was the PREVIOUS batch —
+    /// so every batch landed in the buffer twice and the detector's RMSSD ran over duplicated beats.
+    private func evaluateStress(freshRR: [Int]) {
+        let fresh = freshRR.filter { $0 > 300 && $0 < 2000 }   // plausible R-R (30–200 bpm)
         guard !fresh.isEmpty else { return }
         rrBuf.append(contentsOf: fresh)
         if rrBuf.count > 120 { rrBuf.removeFirst(rrBuf.count - 120) }
@@ -1113,8 +1216,12 @@ final class AppModel: ObservableObject {
             config: cfg,
             nowSec: Int(Date().timeIntervalSince1970),
             tzOffsetSec: TimeZone.current.secondsFromGMT())
-        stressState = decision.nextState
-        BiofeedbackPrefs.saveStressState(decision.nextState)
+        // Persist only an actual state change: most ticks carry the same state forward (the gates return it
+        // untouched), and each save is a UserDefaults write at R-R packet rate.
+        if decision.nextState != stressState {
+            stressState = decision.nextState
+            BiofeedbackPrefs.saveStressState(decision.nextState)
+        }
         guard decision.shouldNudge else { return }
         if canBuzz { buzz(loops: UInt8(clamping: decision.buzzLoops)) }
         stressNudgeCenter.present(fastRMSSD: decision.fastRMSSD, baselineRMSSD: decision.baselineRMSSD)

@@ -28,6 +28,29 @@ enum CoachDaySnapshot {
 @MainActor
 enum CoachExtraContext {
 
+    /// `Repository.hydrationTotal(day:)` for each of `days`, from one range read per hydration series.
+    /// That call is `manual + imported`, each the FIRST row the single-day read returns for the day, or 0
+    /// (0 for every day when there is no store). A range read returns the same rows ordered by day, so
+    /// taking each day's first row gives the same two addends, summed in the same order.
+    private static func hydrationTotals(repo: Repository, days: [String]) async -> [String: Double] {
+        guard let lo = days.min(), let hi = days.max() else { return [:] }
+        guard let store = await repo.storeHandle() else {
+            return Dictionary(days.map { ($0, 0.0) }, uniquingKeysWith: { first, _ in first })
+        }
+        func firstPerDay(_ key: String) async -> [String: Double] {
+            let pts = (try? await store.metricSeries(deviceId: HydrationStore.sourceId, key: key,
+                                                     from: lo, to: hi)) ?? []
+            var out: [String: Double] = [:]
+            for p in pts where out[p.day] == nil { out[p.day] = p.value }
+            return out
+        }
+        let manual = await firstPerDay(HydrationStore.key)
+        let imported = await firstPerDay(HydrationStore.importedKey)
+        var totals: [String: Double] = [:]
+        for day in days { totals[day] = (manual[day] ?? 0) + (imported[day] ?? 0) }
+        return totals
+    }
+
     static func block(repo: Repository) async -> String {
         var sections: [String] = []
         let today = Repository.localDayKey(Date())
@@ -77,11 +100,16 @@ enum CoachExtraContext {
         var intake: [String] = []
         if UserDefaults.standard.bool(forKey: HydrationStore.enabledKey) {
             var water: [String] = []
-            for back in 0..<7 {
-                let ml = await repo.hydrationTotal(day: dayKey(back))
-                if ml > 0 { water.append("\(dayKey(back)) \(Int(ml)) ml") }
+            // PERF: the seven days + today in ONE range read per series, instead of two single-day reads
+            // per day. Each day's figure is `hydrationTotal`'s exactly: manual + imported, each the day's
+            // row or 0 (see `hydrationTotals`).
+            let waterDays = (0..<7).map { dayKey($0) }
+            let totals = await hydrationTotals(repo: repo, days: waterDays + [today])
+            for key in waterDays {
+                let ml = totals[key] ?? 0
+                if ml > 0 { water.append("\(key) \(Int(ml)) ml") }
             }
-            intake.append("  Water today: \(Int(await repo.hydrationTotal(day: today))) ml of a "
+            intake.append("  Water today: \(Int(totals[today] ?? 0)) ml of a "
                           + "\(repo.hydrationGoalML(profileSex: UserDefaults.standard.string(forKey: "profile.sex") ?? "")) ml goal")
             if !water.isEmpty { intake.append("  Water, last 7 days: " + water.joined(separator: ", ")) }
         }

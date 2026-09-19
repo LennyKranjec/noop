@@ -672,4 +672,85 @@ final class MetricsCacheTests: XCTestCase {
         let raw = try await store.cursor("read:hr")
         XCTAssertEqual(raw, 1_716_400_000)
     }
+    // MARK: - PERF / #limit: newest-N reads, timing-only reads, batched per-session writes
+
+    private func night(_ start: Int, adjusted: Int? = nil, edited: Bool = false) -> CachedSleepSession {
+        CachedSleepSession(startTs: start, endTs: start + 7 * 3600, efficiency: 0.9, restingHr: 50 + start % 7,
+                           avgHrv: 60, stagesJSON: "[{\"start\":\(start),\"end\":\(start + 60),\"stage\":\"deep\"}]",
+                           userEdited: edited, startTsAdjusted: adjusted, stagingSparse: false)
+    }
+
+    /// A window that fits reads exactly as before; one that does not keeps its NEWEST sessions (the old
+    /// `ASC LIMIT` kept the oldest and silently dropped the recent nights), handed back oldest first.
+    func testSleepSessionsKeepTheNewestWhenTheWindowOverflowsTheLimit() async throws {
+        let store = try await WhoopStore.inMemory()
+        let starts = [1_000, 90_000, 180_000, 270_000, 360_000]
+        try await store.upsertSleepSessions(starts.map { night($0) }, deviceId: "devA")
+        let fits = try await store.sleepSessions(deviceId: "devA", from: 0, to: 1_000_000, limit: 5)
+        XCTAssertEqual(fits.map(\.startTs), starts)
+        let over = try await store.sleepSessions(deviceId: "devA", from: 0, to: 1_000_000, limit: 3)
+        XCTAssertEqual(over.map(\.startTs), [180_000, 270_000, 360_000])
+    }
+
+    /// The timing-only read returns the SAME rows in the same order, with the same timing columns, and
+    /// nothing it does not read.
+    func testSleepSessionTimingsIsTheSameRowsWithoutTheBlob() async throws {
+        let store = try await WhoopStore.inMemory()
+        try await store.upsertSleepSessions([night(1_000), night(90_000), night(180_000)], deviceId: "devA")
+        _ = try await store.applySleepEdit(deviceId: "devA", detectedStartTs: 90_000, newStartTs: 91_000,
+                                           newEndTs: 110_000)
+        for limit in [1, 2, 3, 10] {
+            let full = try await store.sleepSessions(deviceId: "devA", from: 0, to: 1_000_000, limit: limit)
+            let lean = try await store.sleepSessionTimings(deviceId: "devA", from: 0, to: 1_000_000, limit: limit)
+            XCTAssertEqual(lean.map(\.startTs), full.map(\.startTs))
+            XCTAssertEqual(lean.map(\.endTs), full.map(\.endTs))
+            XCTAssertEqual(lean.map(\.startTsAdjusted), full.map(\.startTsAdjusted))
+            XCTAssertEqual(lean.map(\.userEdited), full.map(\.userEdited))
+            XCTAssertEqual(lean.map(\.efficiency), full.map(\.efficiency))
+            XCTAssertEqual(lean.map(\.restingHr), full.map(\.restingHr))
+            XCTAssertEqual(lean.map(\.deviceId), full.map(\.deviceId))
+            XCTAssertTrue(lean.allSatisfy { $0.stagesJSON == nil && $0.avgHrv == nil && $0.stagingSparse == nil })
+        }
+    }
+
+    /// The batched writes land exactly what the per-row calls land, including an empty series clearing
+    /// the column and a start with no session changing nothing.
+    func testBatchedSessionWritesMatchThePerRowCalls() async throws {
+        let one = try await WhoopStore.inMemory()
+        let batch = try await WhoopStore.inMemory()
+        let rows = [night(1_000), night(90_000), night(180_000)]
+        for store in [one, batch] {
+            try await store.upsertSleepSessions(rows, deviceId: "devA")
+            _ = try await store.persistSessionMotion(deviceId: "devA", sessionStart: 180_000, motionEpochs: [9])
+        }
+        let motion: [(sessionStart: Int, motionEpochs: [Double])] =
+            [(1_000, [0.1, 0.25]), (90_000, [1, 2, 3]), (180_000, []), (555, [4])]
+        let states: [(sessionStart: Int, states: [Int])] = [(1_000, [0, 1, 2]), (90_000, []), (777, [1])]
+        for m in motion {
+            _ = try await one.persistSessionMotion(deviceId: "devA", sessionStart: m.sessionStart,
+                                                   motionEpochs: m.motionEpochs)
+        }
+        for st in states {
+            _ = try await one.persistSessionSleepState(deviceId: "devA", sessionStart: st.sessionStart,
+                                                       states: st.states)
+        }
+        let changed = try await batch.persistSessionAux(deviceId: "devA", motion: motion, sleepStates: states)
+        XCTAssertEqual(changed, 5)   // the two starts with no session change nothing
+        for start in [1_000, 90_000, 180_000] {
+            let expectedMotion = try await one.sessionMotion(deviceId: "devA", sessionStart: start)
+            let actualMotion = try await batch.sessionMotion(deviceId: "devA", sessionStart: start)
+            XCTAssertEqual(actualMotion, expectedMotion)
+            let expectedState = try await one.sessionSleepState(deviceId: "devA", sessionStart: start)
+            let actualState = try await batch.sessionSleepState(deviceId: "devA", sessionStart: start)
+            XCTAssertEqual(actualState, expectedState)
+        }
+
+        _ = try await one.deleteSleepSession(deviceId: "devA", startTs: 1_000)
+        _ = try await one.deleteSleepSession(deviceId: "devA", startTs: 180_000)
+        let deleted = try await batch.deleteSleepSessions(deviceId: "devA", startTs: [1_000, 180_000, 42])
+        XCTAssertEqual(deleted, 2)
+        let left = try await batch.sleepSessions(deviceId: "devA", from: 0, to: 1_000_000, limit: 10)
+        let expected = try await one.sleepSessions(deviceId: "devA", from: 0, to: 1_000_000, limit: 10)
+        XCTAssertEqual(left, expected)
+    }
 }

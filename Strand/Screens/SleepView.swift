@@ -28,9 +28,8 @@ import UIKit
 
 struct SleepView: View {
     @EnvironmentObject var repo: Repository
-    /// For `circadianPhase` only (the body-clock dial). Named `appModel` because `model` on this screen is
-    /// already the built `SleepModel`.
-    @EnvironmentObject var appModel: AppModel
+    // AppModel is NOT observed here: it publishes 1–3×/s while a strap streams, and this screen only needs
+    // `circadianPhase` for the body-clock dial — read inside the tiny observing `SleepBodyClockDial` below.
     // NOTE: SleepView itself deliberately does NOT observe `LiveState`. A connected strap publishes
     // at ~1 Hz; observing here would re-evaluate this heavy body on every tick. The only two live
     // dependencies — the "going to sleep / awake" mark card (it appends to the strap log) and the
@@ -434,13 +433,9 @@ struct SleepView: View {
     /// night against, and an empty ring would read as a broken chart rather than as "not enough data". The
     /// card is a reorderable Sleep section, so anyone who does not want it hides it in Arrange — the same
     /// affordance every other card on this screen already has, rather than a new setting of its own.
-    @ViewBuilder
     private func bodyClockDial(_ model: SleepModel) -> some View {
-        if let phase = appModel.circadianPhase, phase.confidence != .unreadable {
-            BodyClockDialCard(estimate: phase,
-                              actualBedHour: Self.localClockHour(model.night.session.effectiveStartTs),
-                              actualWakeHour: Self.localClockHour(model.night.session.endTs))
-        }
+        SleepBodyClockDial(actualBedHour: Self.localClockHour(model.night.session.effectiveStartTs),
+                           actualWakeHour: Self.localClockHour(model.night.session.endTs))
     }
 
     /// A unix second as a fractional local clock hour — the dial's only input beyond the phase estimate.
@@ -2974,3 +2969,19 @@ private extension Repository {
     }
 }
 #endif
+
+/// The body-clock dial's AppModel read, isolated: only this leaf observes AppModel (for `circadianPhase`),
+/// so the Sleep screen's heavy body no longer re-evaluates on every AppModel publish.
+private struct SleepBodyClockDial: View {
+    @EnvironmentObject var appModel: AppModel
+    let actualBedHour: Double
+    let actualWakeHour: Double
+
+    var body: some View {
+        if let phase = appModel.circadianPhase, phase.confidence != .unreadable {
+            BodyClockDialCard(estimate: phase,
+                              actualBedHour: actualBedHour,
+                              actualWakeHour: actualWakeHour)
+        }
+    }
+}

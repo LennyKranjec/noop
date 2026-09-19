@@ -55,10 +55,25 @@ struct ProfileAvatarView: View {
 
     /// Decode the stored bytes through the platform bitmap type (`NSImage`/`UIImage`) into a
     /// SwiftUI `Image` via the shared `Image(platformImage:)` bridge. nil on no data / bad bytes.
+    ///
+    /// The decode is memoised on the bytes (one entry — there is one profile photo), so the header's
+    /// re-renders stop re-decoding the same JPEG every time. Same bytes → same bitmap as before.
     private var decodedImage: Image? {
-        guard let imageData, let platform = PlatformImage(data: imageData) else { return nil }
+        guard let imageData else { return nil }
+        if AvatarDecodeCache.data != imageData {
+            AvatarDecodeCache.image = PlatformImage(data: imageData)
+            AvatarDecodeCache.data = imageData
+        }
+        guard let platform = AvatarDecodeCache.image else { return nil }
         return Image(platformImage: platform)
     }
+}
+
+/// One-entry decode cache for `ProfileAvatarView`, keyed on the stored bytes. Main-thread only (it is
+/// read from `body`). A bad-bytes decode caches nil too, so a broken blob is not retried every render.
+private enum AvatarDecodeCache {
+    static var data: Data?
+    static var image: PlatformImage?
 }
 
 // MARK: - Avatar downscaling

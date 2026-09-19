@@ -395,6 +395,66 @@ extension WhoopStore {
         }
     }
 
+    /// Batched twin of `persistSessionMotion` + `persistSessionSleepState` for one analysis pass: every
+    /// motion UPDATE (in `motion` order), then every sleep-state UPDATE (in `sleepStates` order) — the very
+    /// statements the single-row calls run, in the order the pass issued them — inside ONE write
+    /// transaction instead of one per row. Each statement keeps its own failure isolation: an error on one
+    /// row is swallowed and the rest still land, as the per-row `try?` calls behaved. Returns rows changed.
+    @discardableResult
+    public func persistSessionAux(deviceId: String,
+                                  motion: [(sessionStart: Int, motionEpochs: [Double])],
+                                  sleepStates: [(sessionStart: Int, states: [Int])]) async throws -> Int {
+        guard !motion.isEmpty || !sleepStates.isEmpty else { return 0 }
+        // Encoded exactly as the single-row calls encode (empty series → NULL).
+        let motionRows: [(start: Int, json: String?)] = motion.map {
+            (start: $0.sessionStart, json: $0.motionEpochs.isEmpty ? nil : Self.encodeDoubleArray($0.motionEpochs))
+        }
+        let stateRows: [(start: Int, json: String?)] = sleepStates.map {
+            (start: $0.sessionStart, json: $0.states.isEmpty ? nil : Self.encodeIntArray($0.states))
+        }
+        return try syncWrite { db in
+            var n = 0
+            for row in motionRows {
+                do {
+                    try db.execute(sql: """
+                        UPDATE sleepSession SET motionJSON = ?
+                        WHERE deviceId = ? AND startTs = ?
+                        """, arguments: [row.json, deviceId, row.start])
+                    n += db.changesCount
+                } catch {}
+            }
+            for row in stateRows {
+                do {
+                    try db.execute(sql: """
+                        UPDATE sleepSession SET sleepStateJSON = ?
+                        WHERE deviceId = ? AND startTs = ?
+                        """, arguments: [row.json, deviceId, row.start])
+                    n += db.changesCount
+                } catch {}
+            }
+            return n
+        }
+    }
+
+    /// Batched twin of `deleteSleepSession`: the same single-row DELETE for each of `startTs`, in order,
+    /// inside ONE write transaction. Per-row failures are swallowed as the per-row `try?` calls were.
+    /// Returns rows deleted.
+    @discardableResult
+    public func deleteSleepSessions(deviceId: String, startTs: [Int]) async throws -> Int {
+        guard !startTs.isEmpty else { return 0 }
+        return try syncWrite { db in
+            var n = 0
+            for ts in startTs {
+                do {
+                    try db.execute(sql: "DELETE FROM sleepSession WHERE deviceId = ? AND startTs = ?",
+                                   arguments: [deviceId, ts])
+                    n += db.changesCount
+                } catch {}
+            }
+            return n
+        }
+    }
+
     /// The persisted per-epoch motion magnitudes for one session, or nil when the column is NULL / the
     /// session doesn't exist / the JSON is unparseable (absent stays absent). Keyed by detected startTs.
     public func sessionMotion(deviceId: String, sessionStart: Int) async throws -> [Double]? {
@@ -619,14 +679,21 @@ extension WhoopStore {
     // MARK: - Reads
 
     /// Cached sleep sessions overlapping [from, to] (by startTs), oldest first.
+    ///
+    /// THE NEWEST `limit` SESSIONS, not the oldest. The read used to be `ORDER BY startTs ASC LIMIT`, so a
+    /// history longer than the limit (the dashboard reads 4000 over ~11 years) silently dropped its most
+    /// RECENT nights — the only ones most screens are about. It now takes the newest `limit` rows and hands
+    /// them back ascending. `(deviceId, startTs)` is the primary key, so startTs is unique per device and a
+    /// window holding fewer than `limit` rows reads back exactly as before, row for row, in the same order.
     public func sleepSessions(deviceId: String, from: Int, to: Int, limit: Int) async throws -> [CachedSleepSession] {
         try syncRead { db in
             try Row.fetchAll(db, sql: """
                 SELECT startTs, endTs, efficiency, restingHr, avgHrv, stagesJSON, userEdited,
                        startTsAdjusted, stagingSparse FROM sleepSession
                 WHERE deviceId = ? AND startTs >= ? AND startTs <= ?
-                ORDER BY startTs ASC LIMIT ?
+                ORDER BY startTs DESC LIMIT ?
                 """, arguments: [deviceId, from, to, limit])
+                .reversed()
                 .map {
                     CachedSleepSession(startTs: $0["startTs"], endTs: $0["endTs"],
                                        efficiency: $0["efficiency"], restingHr: $0["restingHr"],
@@ -635,6 +702,34 @@ extension WhoopStore {
                                        stagingSparse: $0["stagingSparse"],
                                        // The read knows the device it queried, so every block it hands
                                        // back carries it and no caller has to ask the store again.
+                                       deviceId: deviceId)
+                }
+        }
+    }
+
+    /// The SAME rows as `sleepSessions(deviceId:from:to:limit:)` — same WHERE, same ORDER, same LIMIT, same
+    /// order handed back — carrying only the TIMING columns: `startTs`, `endTs`, `startTsAdjusted`,
+    /// `userEdited`, `efficiency`, `restingHr`. `stagesJSON`, `avgHrv` and `stagingSparse` are NOT read and
+    /// come back nil.
+    ///
+    /// For callers that only place nights in time — onset/wake, the overlap dedup (`SleepSessionDedup`
+    /// reads nothing else), in-bed spans, the stored resting HR / efficiency — and would otherwise haul
+    /// every night's staging blob across a multi-year window to read a few integers from it. NEVER hand
+    /// these rows to anything that reads stages, HRV or the sparse flag, and never write them back.
+    public func sleepSessionTimings(deviceId: String, from: Int, to: Int, limit: Int) async throws -> [CachedSleepSession] {
+        try syncRead { db in
+            try Row.fetchAll(db, sql: """
+                SELECT startTs, endTs, efficiency, restingHr, userEdited, startTsAdjusted FROM sleepSession
+                WHERE deviceId = ? AND startTs >= ? AND startTs <= ?
+                ORDER BY startTs DESC LIMIT ?
+                """, arguments: [deviceId, from, to, limit])
+                .reversed()
+                .map {
+                    CachedSleepSession(startTs: $0["startTs"], endTs: $0["endTs"],
+                                       efficiency: $0["efficiency"], restingHr: $0["restingHr"],
+                                       avgHrv: nil, stagesJSON: nil,
+                                       userEdited: $0["userEdited"], startTsAdjusted: $0["startTsAdjusted"],
+                                       stagingSparse: nil,
                                        deviceId: deviceId)
                 }
         }

@@ -148,6 +148,11 @@ final class LevelLedger: @unchecked Sendable {
     private var storedEpoch = 0
     private var settledFrom: String?
     private var settledThrough: String?
+    /// Days committed to `levels` whose entry has not yet been proven to encode. The proof is the save:
+    /// see `persistLocked`.
+    private var unencodedCheck: Set<String> = []
+    /// A commit landed in memory without being saved (`commit(_:persist: false)`); `flush()` saves it.
+    private var unsaved = false
 
     /// `fileURL` nil keeps the ledger in memory only (tests). `legacy` is where the old single frozen day
     /// is carried over from, the first time the ledger file does not exist yet.
@@ -298,8 +303,14 @@ final class LevelLedger: @unchecked Sendable {
     }
 
     /// Write every settlement whose day is not already settled, and save once. Returns how many were new.
+    ///
+    /// `persist: false` (PERF) keeps the commit in memory only — every read below sees it at once — and
+    /// leaves the save to the next one that happens (any saving call writes the whole ledger) or to
+    /// `flush()`. A long backfill commits every forty days so the screen can draw; it used to rewrite the
+    /// whole file each time, and now writes it once when the walk ends. The file that lands is the same:
+    /// a save always encodes the complete in-memory ledger.
     @discardableResult
-    func commit(_ settlements: [LevelSettlement]) -> Int {
+    func commit(_ settlements: [LevelSettlement], persist: Bool = true) -> Int {
         guard !settlements.isEmpty else { return 0 }
         lock.lock(); defer { lock.unlock() }
         guard state == .loaded else { return 0 }
@@ -311,12 +322,11 @@ final class LevelLedger: @unchecked Sendable {
             guard levels[day] == nil, memoryOnly[day] == nil, !empty.contains(day) else { continue }
             switch s {
             case .level(let l):
-                if (try? JSONEncoder().encode(l)) != nil {
-                    levels[day] = l
-                } else {
-                    NSLog("LevelLedger: the level for %@ does not encode; kept in memory only", day)
-                    memoryOnly[day] = l
-                }
+                // Whether it encodes is settled at the save (`persistLocked`), which moves an entry that
+                // does not to `memoryOnly` — the same outcome the per-entry trial encode here used to
+                // reach, without encoding every entry twice.
+                levels[day] = l
+                unencodedCheck.insert(day)
             case .empty(let d):
                 empty.insert(d)
             }
@@ -324,9 +334,20 @@ final class LevelLedger: @unchecked Sendable {
         }
         if added > 0 {
             pruneLocked()
-            persistLocked()
+            if persist {
+                persistLocked()
+            } else {
+                unsaved = true
+            }
         }
         return added
+    }
+
+    /// Save a commit made with `persist: false`, if one is still unsaved. Cheap when there is none.
+    func flush() {
+        lock.lock(); defer { lock.unlock() }
+        guard unsaved, state == .loaded else { return }
+        persistLocked()
     }
 
     func markBackfilled() {
@@ -356,6 +377,7 @@ final class LevelLedger: @unchecked Sendable {
         levels = [:]
         memoryOnly = [:]
         empty = []
+        unencodedCheck = []
         backfilled = false
         settledFrom = nil
         settledThrough = nil
@@ -387,18 +409,49 @@ final class LevelLedger: @unchecked Sendable {
     /// Save to disk. True when there is nowhere to save to, or the save succeeded.
     @discardableResult
     private func persistLocked() -> Bool {
-        guard let url else { return true }
+        guard let url else {
+            // Nothing to save to (tests): still settle which entries encode, as a save would.
+            quarantineUnencodableLocked()
+            unsaved = false
+            return true
+        }
         guard state == .loaded else { return false }
-        let stored = Stored(entries: levels, empty: empty.sorted(), backfilled: backfilled, epoch: storedEpoch,
-                            settledFrom: settledFrom, settledThrough: settledThrough)
         do {
-            let data = try JSONEncoder().encode(stored)
+            let data: Data
+            do {
+                data = try JSONEncoder().encode(storedLocked())
+            } catch {
+                // An entry committed since the last save does not encode (a non-finite figure, say). Those
+                // are the only candidates — every other entry was read from or written to this file — so
+                // try each on its own, keep the ones that fail in memory only, exactly as `commit` used to
+                // decide per entry, and encode again. Anything else still failing is a real save failure.
+                quarantineUnencodableLocked()
+                data = try JSONEncoder().encode(storedLocked())
+            }
+            unencodedCheck = []
             try data.write(to: url, options: .atomic)
+            unsaved = false
             return true
         } catch {
             NSLog("LevelLedger: could not save the ledger: %@", String(describing: error))
             return false
         }
+    }
+
+    /// Move every entry committed since the last save that does not encode on its own to `memoryOnly`.
+    private func quarantineUnencodableLocked() {
+        for day in unencodedCheck.sorted() {
+            guard let l = levels[day], (try? JSONEncoder().encode(l)) == nil else { continue }
+            NSLog("LevelLedger: the level for %@ does not encode; kept in memory only", day)
+            levels[day] = nil
+            memoryOnly[day] = l
+        }
+        unencodedCheck = []
+    }
+
+    private func storedLocked() -> Stored {
+        Stored(entries: levels, empty: empty.sorted(), backfilled: backfilled, epoch: storedEpoch,
+               settledFrom: settledFrom, settledThrough: settledThrough)
     }
 
     // MARK: - When a day may be written
