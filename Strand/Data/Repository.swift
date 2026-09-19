@@ -1044,6 +1044,47 @@ final class Repository: ObservableObject {
         // and an appended line after the bump is how that invariant quietly stops being true.
         self.exploreAllCache = nil
         self.refreshSeq += 1
+        // NOT a cache (so after the bump is fine): re-derive the HR-ZONE inputs from what just landed and
+        // hand them to ProfileStore. Its own Task so the zone read never delays this publish.
+        Task { [weak self] in await self?.publishHRZoneInputs() }
+    }
+
+    /// WHOOP-style dynamic HR zones: derive the evidence the display zones are built from and post it as
+    /// `noopHRZoneInputsDidUpdate` for `ProfileStore.applyZoneInputs` (which owns the age floor, override
+    /// and slow decay). Evidence:
+    ///   - OBSERVED HRmax: the runner-up plausible workout peak over the last 180 days, ≥ 3 workouts
+    ///     (`HRZones.observedZoneHRmax`).
+    ///   - RESTING HR: median of the last 7 nights' SLEEP resting HR (`DailyMetric.restingHr`), else of the
+    ///     stored WAKING resting HR series (`WakingRestingHR.metricKey`), else 60 (`HRZones.zoneRestingHR`).
+    /// Display / training zones only: Effort keeps its own HRmax. Called at the end of every real `refresh()`.
+    func publishHRZoneInputs() async {
+        let now = Int(Date().timeIntervalSince1970)
+        let workouts = await workoutRows(days: HRZones.zoneHRmaxWindowDays)
+        let peaks: [(ts: Int, bpm: Double)] = workouts.compactMap { w in
+            w.maxHr.map { (ts: w.startTs, bpm: Double($0)) }
+        }
+        let observed = HRZones.observedZoneHRmax(workoutPeaks: peaks, now: now)
+        // `days` is oldest → newest; two weeks gives `zoneRestingHR` room to find 7 nights with a value.
+        let recent = Array(days.suffix(2 * HRZones.zoneRestingHRNights))
+        let sleepRHRs: [Double] = recent.compactMap { d in d.restingHr.map { Double($0) } }
+        var wakingRHRs: [Double] = []
+        // The waking series is only a FALLBACK, so it is only read when no night has a resting HR.
+        if sleepRHRs.isEmpty, let store = await ensureStore(),
+           let from = recent.first?.day, let to = recent.last?.day {
+            var byDay: [String: Double] = [:]
+            for id in computedReadIds {
+                for p in (try? await store.metricSeries(deviceId: id, key: WakingRestingHR.metricKey,
+                                                        from: from, to: to)) ?? [] where byDay[p.day] == nil {
+                    byDay[p.day] = p.value
+                }
+            }
+            wakingRHRs = byDay.keys.sorted().compactMap { byDay[$0] }
+        }
+        let rhr = HRZones.zoneRestingHR(sleepRestingHRs: sleepRHRs, wakingRestingHRs: wakingRHRs)
+        var info: [String: Any] = [HRZoneInputsKey.restingHR: rhr.bpm,
+                                   HRZoneInputsKey.restingHRSource: rhr.source.rawValue]
+        if let observed { info[HRZoneInputsKey.observedHRmax] = observed }
+        NotificationCenter.default.post(name: .noopHRZoneInputsDidUpdate, object: nil, userInfo: info)
     }
 
     /// Per-source coverage counts for the Freshness Pipeline card. Pure over the rows already read.

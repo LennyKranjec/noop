@@ -3,6 +3,22 @@ import Combine
 import SwiftUI
 import StrandAnalytics
 
+extension Notification.Name {
+    /// Posted by `Repository` (main thread) with fresh HR-zone evidence after a refresh; `ProfileStore`
+    /// observes it and re-learns its zone HRmax / resting HR. userInfo keys: `HRZoneInputsKey`.
+    static let noopHRZoneInputsDidUpdate = Notification.Name("noop.hrZoneInputsDidUpdate")
+}
+
+/// userInfo keys of `noopHRZoneInputsDidUpdate`. Values: Double bpm (absent = none) / String raw source.
+enum HRZoneInputsKey {
+    /// `HRZones.observedZoneHRmax(...)`, absent when too few workouts.
+    static let observedHRmax = "observedHRmax"
+    /// `HRZones.zoneRestingHR(...).bpm`.
+    static let restingHR = "restingHR"
+    /// `HRZones.RestingHRSource.rawValue`.
+    static let restingHRSource = "restingHRSource"
+}
+
 /// User profile (age/sex/body metrics/HR-max) persisted in UserDefaults.
 /// Powers HR zones, calories and recovery baselines.
 @MainActor
@@ -27,7 +43,8 @@ final class ProfileStore: ObservableObject {
     @Published var waistCm: Double { didSet { d.set(waistCm, forKey: K.waist) } }
     /// 0 = auto-estimate from age.
     @Published var hrMaxOverride: Int { didSet { d.set(hrMaxOverride, forKey: K.hrMax) } }
-    /// Five personalized inclusive zone starts in BPM; empty = conventional %HRmax zones.
+    /// Five personalized inclusive zone starts in BPM; empty = the conventional heart-rate-RESERVE
+    /// (Karvonen) zones built from `zoneHRmax` / `zoneRestingHR`.
     @Published var hrZoneThresholds: [Int] {
         didSet {
             if hrZoneThresholds.isEmpty { d.removeObject(forKey: K.hrZoneThresholds) }
@@ -67,6 +84,42 @@ final class ProfileStore: ObservableObject {
     /// `ProfileStore.stepsHasBankedMotion`.
     @Published var stepsHasBankedMotion: Bool { didSet { d.set(stepsHasBankedMotion, forKey: K.stepsHasMotion) } }
 
+    // ── Dynamic HR-zone inputs (WHOOP-style Karvonen zones) ──────────────────────────────────────
+    // LEARNED, never user-set: written by `applyZoneInputs` whenever `Repository.refresh()` publishes new
+    // evidence (`Notification.Name.noopHRZoneInputsDidUpdate`), persisted so the zones are right on the
+    // next launch before any refresh has run. DISPLAY / TRAINING ZONES ONLY: Effort keeps `hrMax`.
+    /// The learned zone HRmax (bpm) as last resolved by `HRZones.learnedZoneHRmax`, incl. its slow decay;
+    /// nil until the first refresh. Read through `zoneHRmaxResolved`, which re-floors it at the CURRENT
+    /// age formula (so a birthday or DOB edit applies at once).
+    @Published private(set) var learnedZoneHRmax: Double? {
+        didSet {
+            if let learnedZoneHRmax { d.set(learnedZoneHRmax, forKey: K.zoneHRmaxLearned) }
+            else { d.removeObject(forKey: K.zoneHRmaxLearned) }
+        }
+    }
+    /// Unix seconds `learnedZoneHRmax` was last evaluated at: the decay clock. Not published.
+    private var learnedZoneHRmaxAt: Int? {
+        didSet {
+            if let learnedZoneHRmaxAt { d.set(learnedZoneHRmaxAt, forKey: K.zoneHRmaxLearnedAt) }
+            else { d.removeObject(forKey: K.zoneHRmaxLearnedAt) }
+        }
+    }
+    /// The zones' resting HR (7-night sleep median, else waking RHR); nil until the first refresh, when
+    /// `zoneRestingHR` reports the documented 60 bpm fallback.
+    @Published private(set) var zoneRestingHRInput: HRZones.ZoneRestingHR? {
+        didSet {
+            if let r = zoneRestingHRInput {
+                d.set(r.bpm, forKey: K.zoneRestingHR)
+                d.set(r.source.rawValue, forKey: K.zoneRestingHRSource)
+            } else {
+                d.removeObject(forKey: K.zoneRestingHR)
+                d.removeObject(forKey: K.zoneRestingHRSource)
+            }
+        }
+    }
+    /// Token for the `noopHRZoneInputsDidUpdate` observer (app-lifetime; never removed).
+    private var zoneInputsObserver: NSObjectProtocol?
+
     // ── Profile picture (optional, on-device only) ──────────────────────────────────────────────
     /// The user's chosen profile photo as JPEG bytes, or nil for the default SF-Symbol fallback.
     /// LOCAL-ONLY — like every other field here it lives in UserDefaults on this device; NOOP is
@@ -97,6 +150,11 @@ final class ProfileStore: ObservableObject {
         static let stepsManualCoeff = "profile.stepsManualCoefficient"
         static let stepsHasMotion = "profile.stepsHasBankedMotion"
         static let avatar = "profile.avatarImageData"
+        // Learned zone inputs. Deliberately NOT in the `.noopbak` whitelist: they re-learn from the data.
+        static let zoneHRmaxLearned = "profile.zoneHRmaxLearned"
+        static let zoneHRmaxLearnedAt = "profile.zoneHRmaxLearnedAt"
+        static let zoneRestingHR = "profile.zoneRestingHR"
+        static let zoneRestingHRSource = "profile.zoneRestingHRSource"
     }
 
     init() {
@@ -137,6 +195,27 @@ final class ProfileStore: ObservableObject {
         stepsManualCoefficient = max(0, d.object(forKey: K.stepsManualCoeff) as? Double ?? 0)
         stepsHasBankedMotion = d.object(forKey: K.stepsHasMotion) as? Bool ?? false
         avatarImageData = d.data(forKey: K.avatar)
+        learnedZoneHRmax = d.object(forKey: K.zoneHRmaxLearned) as? Double
+        learnedZoneHRmaxAt = d.object(forKey: K.zoneHRmaxLearnedAt) as? Int
+        if let bpm = d.object(forKey: K.zoneRestingHR) as? Double,
+           let src = d.string(forKey: K.zoneRestingHRSource).flatMap(HRZones.RestingHRSource.init(rawValue:)) {
+            zoneRestingHRInput = HRZones.ZoneRestingHR(bpm: bpm, source: src)
+        } else {
+            zoneRestingHRInput = nil
+        }
+        // LAST, once every stored property is initialized (the closure captures `self`). queue: .main so the
+        // payload is unpacked on the main thread; the hop into the actor is the BLEManager pattern.
+        zoneInputsObserver = NotificationCenter.default.addObserver(
+            forName: .noopHRZoneInputsDidUpdate, object: nil, queue: .main
+        ) { [weak self] note in
+            let observed = note.userInfo?[HRZoneInputsKey.observedHRmax] as? Double
+            let rhr = note.userInfo?[HRZoneInputsKey.restingHR] as? Double
+            let src = (note.userInfo?[HRZoneInputsKey.restingHRSource] as? String)
+                .flatMap(HRZones.RestingHRSource.init(rawValue:)) ?? .fallback
+            let resting = HRZones.ZoneRestingHR(bpm: rhr ?? HRZones.defaultZoneRestingHR,
+                                                source: rhr == nil ? .fallback : src)
+            Task { @MainActor in self?.applyZoneInputs(observedHRmax: observed, restingHR: resting) }
+        }
     }
 
     // MARK: - Profile picture
@@ -201,17 +280,70 @@ final class ProfileStore: ObservableObject {
         return hrZoneThresholds.map(Double.init)
     }
 
-    /// The single display-zone model used by live HR, workout splits, and haptic coaching.
+    // MARK: - HR zones (display / training; WHOOP-style heart-rate reserve)
+
+    /// The HRmax the ZONES use: the Settings override when set, else the learned value floored at the
+    /// CURRENT age formula (Tanaka). NOT the Effort HRmax: `hrMax` above stays override-else-Tanaka so
+    /// Effort scoring (Edwards %HRmax) is untouched by what the zones learn.
+    var zoneHRmaxResolved: HRZones.ZoneHRmax {
+        let formula = HRZones.tanakaMaxHR(age: Double(age))
+        let learned: HRZones.ZoneHRmax
+        if let l = learnedZoneHRmax, l.isFinite, l > formula {
+            learned = HRZones.ZoneHRmax(bpm: l, source: .learned)
+        } else {
+            learned = HRZones.ZoneHRmax(bpm: formula, source: .ageFormula)
+        }
+        return HRZones.resolveZoneHRmax(overrideBpm: hrMaxOverride > 0 ? Double(hrMaxOverride) : nil,
+                                        learned: learned)
+    }
+
+    /// Zone HRmax in whole bpm (what the Settings screen shows and the zones are built from).
+    var zoneHRmax: Int { Int(zoneHRmaxResolved.bpm.rounded()) }
+
+    /// The resting HR the zones use (whole bpm is taken in `hrZoneSet`); the 60 bpm fallback until the
+    /// first refresh has measured one.
+    var zoneRestingHR: HRZones.ZoneRestingHR {
+        zoneRestingHRInput ?? HRZones.ZoneRestingHR(bpm: HRZones.defaultZoneRestingHR, source: .fallback)
+    }
+
+    /// The single display-zone model used by live HR, workout splits, and haptic coaching: KARVONEN
+    /// (%HRR) edges from `zoneHRmax` and `zoneRestingHR`, unless the user set custom boundaries.
     var hrZoneSet: HRZoneSet {
-        HRZones.zones(maxHR: Double(hrMax), customLowerBounds: customHRZoneLowerBounds)
+        let source: String
+        switch zoneHRmaxResolved.source {
+        case .manual: source = "manual"
+        case .learned: source = "learned"
+        case .ageFormula: source = "tanaka"
+        }
+        return HRZones.zones(maxHR: Double(zoneHRmax),
+                             restingHR: zoneRestingHR.bpm.rounded(),
+                             source: source,
+                             customLowerBounds: customHRZoneLowerBounds)
     }
 
     var hasCustomHRZones: Bool { customHRZoneLowerBounds != nil }
 
-    /// Enable by seeding the editor with boundaries that classify integer BPM exactly like today's
-    /// conventional percentages; disabling removes the override and immediately restores defaults.
+    /// Enable by seeding the editor with boundaries that classify integer BPM exactly like the current
+    /// heart-rate-reserve zones; disabling removes the override and immediately restores defaults.
     func setCustomHRZonesEnabled(_ enabled: Bool) {
-        hrZoneThresholds = enabled ? HRZones.defaultLowerBounds(maxHR: Double(hrMax)) : []
+        hrZoneThresholds = enabled
+            ? HRZones.defaultLowerBounds(maxHR: Double(zoneHRmax), restingHR: zoneRestingHR.bpm.rounded())
+            : []
+    }
+
+    /// Feed fresh evidence into the learned zone inputs (called from the `noopHRZoneInputsDidUpdate`
+    /// observer; directly callable for tests). `observedHRmax` is `HRZones.observedZoneHRmax(...)` over the
+    /// last 180 days of workouts (nil = too few); the learned HRmax rises at once and decays slowly
+    /// (`HRZones.learnedZoneHRmax`). Learning runs even while a manual override is set, so clearing the
+    /// override lands on an up-to-date value. Only publishes on a real change.
+    func applyZoneInputs(observedHRmax: Double?, restingHR: HRZones.ZoneRestingHR, now: Date = Date()) {
+        let nowTs = Int(now.timeIntervalSince1970)
+        let learned = HRZones.learnedZoneHRmax(age: Double(age), observed: observedHRmax,
+                                               previous: learnedZoneHRmax, previousAt: learnedZoneHRmaxAt,
+                                               now: nowTs)
+        learnedZoneHRmaxAt = nowTs
+        if learnedZoneHRmax != learned.bpm { learnedZoneHRmax = learned.bpm }
+        if zoneRestingHRInput != restingHR { zoneRestingHRInput = restingHR }
     }
 
     /// Move one boundary while preserving strict ordering. Neighbour-aware clamps make it impossible

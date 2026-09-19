@@ -44,6 +44,9 @@ struct TodayStressTileView: View {
     /// The app's whole-day 0–3 score, for when no hour has been scored yet.
     let dailyFallback: Double?
     let onOpen: () -> Void
+    /// Handed each successful live ten-minute read and when it was taken — the host passes it on to the
+    /// lock-screen strip, so the widget shows the reading this dial does.
+    var onLive: ((Double, Date) -> Void)? = nil
 
     @State private var dayHours: [DaytimeStress.HourPoint] = []
     @State private var liveLevel: Double?
@@ -179,6 +182,7 @@ struct TodayStressTileView: View {
         }.value
         liveLevel = level
         liveAt = level == nil ? nil : Date()
+        if let level, let liveAt { onLive?(level, liveAt) }
     }
 
     private func stat(_ label: String, _ value: Double?) -> some View {

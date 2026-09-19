@@ -53,6 +53,16 @@ public struct WidgetSnapshot: Codable, Equatable {
     /// Stress over the last ten minutes (0–3) and when it was read.
     public var stressNow: Double?
     public var stressNowAt: Date?
+    /// The day (`yyyy-MM-dd`) `stepsToday` and the effort figures belong to. PER FIELD, because the
+    /// strip used to judge "is this today's" by `updated`, which the live and water paths advance (or
+    /// hold) without touching these figures — so a fresh stamp could vouch for a stale step count and a
+    /// stale one could blank a fresh count. Each figure now carries the day it was read for.
+    public var stepsDay: String?
+    public var effortDay: String?
+    /// When the Today screen last published the figures it was DISPLAYING (`publishTodayFigures`).
+    /// While recent, the background publisher's own read yields to them rather than overwrite what the
+    /// wearer just saw with a slightly different resolution of the same day.
+    public var stripTodayAt: Date?
 
     // THE WATER WIDGET.
     /// Whether hydration tracking is on in the app.
@@ -255,17 +265,96 @@ public struct WidgetSnapshot: Codable, Equatable {
             || previous.effortTodayDisplay != next.effortTodayDisplay
             || previous.effortTarget != next.effortTarget
             || previous.stressNow != next.stressNow
+            // A re-read that found the SAME stress still has to land, or the stored reading ages out of
+            // `stressForStrip`'s window while being confirmed every few minutes. Admitted once it has
+            // moved a quarter of an hour, not on every read.
+            || stampMoved(previous.stressNowAt, next.stressNowAt, by: 15 * 60)
+            || previous.stepsDay != next.stepsDay
+            || previous.effortDay != next.effortDay
             || previous.waterEnabled != next.waterEnabled
             || previous.waterDay != next.waterDay
             || previous.waterMl != next.waterMl
             || previous.waterGoalMl != next.waterGoalMl
     }
 
+    private static func stampMoved(_ a: Date?, _ b: Date?, by seconds: TimeInterval) -> Bool {
+        switch (a, b) {
+        case (nil, nil): return false
+        case let (a?, b?): return abs(b.timeIntervalSince(a)) >= seconds
+        default: return true
+        }
+    }
+
+    /// How long a live stress read stands for "now" on the strip.
+    public static let stressNowMaxAge: TimeInterval = 45 * 60
+
     /// The stress the strip shows: the live ten-minute read while it is recent, else the latest scored
     /// half-hour of today's curve, else nothing.
     public func stressForStrip(now: Date = Date(), calendar: Calendar = .current) -> Double? {
-        if let stressNow, let at = stressNowAt, now.timeIntervalSince(at) < 45 * 60 { return stressNow }
+        if let stressNow, let at = stressNowAt, now.timeIntervalSince(at) < Self.stressNowMaxAge { return stressNow }
         return stressCurve(now: now, calendar: calendar).last(where: { $0.level != nil })?.level
+    }
+
+    // MARK: - The lock-screen strip
+
+    /// The strip widget's kind, so the app can reload it alone.
+    public static let stripWidgetKind = "TelosStripWidget"
+    /// The step goal the strip's bar fills toward — the same 10 000 Today's steps tile measures against.
+    public static let stepsGoal = 10_000
+    /// The hour Today's LOGICAL day rolls (`Repository.logicalDayRolloverHour`, restated because the widget
+    /// extension cannot see the app module). Between midnight and this hour Today still shows the day
+    /// before, and so does the strip.
+    static let stripRolloverHour = 4
+    /// How long figures the Today screen published stay authoritative over the background publisher's.
+    static let todayFiguresAuthority: TimeInterval = 20 * 60
+
+    /// Is `day` the day the strip should be showing at `now`: the calendar day, or — before the 04:00
+    /// rollover — the logical day Today is still on.
+    public static func isStripDayCurrent(_ day: String?, now: Date = Date(),
+                                         calendar: Calendar = .current) -> Bool {
+        guard let day else { return false }
+        return day == dayKey(now, calendar: calendar)
+            || day == dayKey(now.addingTimeInterval(-Double(stripRolloverHour) * 3_600), calendar: calendar)
+    }
+
+    /// Today's steps for the strip, or nil when the stored count belongs to another day.
+    public func stripSteps(now: Date = Date(), calendar: Calendar = .current) -> Int? {
+        Self.isStripDayCurrent(stepsDay, now: now, calendar: calendar) ? stepsToday : nil
+    }
+
+    /// Whether the stored effort figures (value, display, target) belong to the day being shown.
+    public func stripEffortIsCurrent(now: Date = Date(), calendar: Calendar = .current) -> Bool {
+        Self.isStripDayCurrent(effortDay, now: now, calendar: calendar)
+    }
+
+    /// Fold the BACKGROUND publisher's strip figures over what is already stored.
+    ///
+    /// The Today screen publishes exactly what it displays; the full publish is the fallback for when it
+    /// is not running. So the stored figures win while Today published them recently (and they are still
+    /// for the current day), and a fallback that could not resolve a figure keeps the stored one for the
+    /// same day rather than blank it. The live stress read keeps whichever is newer, while it is fresh.
+    static func mergeStripFallback(stored: WidgetSnapshot?, into next: inout WidgetSnapshot,
+                                   now: Date, calendar: Calendar = .current) {
+        guard let stored else { return }
+        next.stripTodayAt = stored.stripTodayAt
+        let todayOwns = stored.stripTodayAt.map { now.timeIntervalSince($0) < todayFiguresAuthority } ?? false
+        if isStripDayCurrent(stored.stepsDay, now: now, calendar: calendar),
+           stored.stepsToday != nil, todayOwns || next.stepsToday == nil {
+            next.stepsToday = stored.stepsToday
+            next.stepsDay = stored.stepsDay
+        }
+        if isStripDayCurrent(stored.effortDay, now: now, calendar: calendar),
+           stored.effortToday != nil, todayOwns || next.effortToday == nil {
+            next.effortToday = stored.effortToday
+            next.effortTodayDisplay = stored.effortTodayDisplay
+            next.effortTarget = stored.effortTarget ?? next.effortTarget
+            next.effortDay = stored.effortDay
+        }
+        if let at = stored.stressNowAt, now.timeIntervalSince(at) < stressNowMaxAge,
+           at > (next.stressNowAt ?? .distantPast) {
+            next.stressNow = stored.stressNow
+            next.stressNowAt = at
+        }
     }
 
     /// Today's key, `yyyy-MM-dd`, built without a formatter so the widget can call it every render.

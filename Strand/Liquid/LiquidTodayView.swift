@@ -427,7 +427,13 @@ struct LiquidTodayView: View {
                             if selectedDayOffset == 0 {
                                 // Today's stress, live, directly above the energy bar — the Android
                                 // Stress & Energy block, both halves of it.
-                                TodayStressTileView(dailyFallback: stress, onOpen: { heroTap = .stress })
+                                TodayStressTileView(dailyFallback: stress, onOpen: { heroTap = .stress },
+                                                    onLive: { level, at in
+                                    #if os(iOS)
+                                    // The live read the dial shows, for the lock-screen strip too.
+                                    Task { await WidgetSnapshot.publishTodayStress(level, at: at) }
+                                    #endif
+                                })
                                 EnergyTileView(balance: energy, onOpen: { heroTap = .stress })
                             }
                         // The water tile and the macro tile — what the Nutrition TAB used to be on the
@@ -557,6 +563,22 @@ struct LiquidTodayView: View {
         .task(id: "\(Int(heroEffort ?? -1))-\(Int(optimalStrainCeiling ?? -1))-\(selectedDayOffset)") {
             checkOptimum()
         }
+        #if os(iOS)
+        // THE LOCK-SCREEN STRIP shows exactly what this screen shows: the step count, the hero's Effort
+        // (fill, text on the wearer's scale, target mark) — handed over whenever they change, debounced
+        // by the task restarting, rather than re-derived by the widget publisher on its own.
+        .task(id: stripFiguresKey) {
+            guard selectedDayOffset == 0 else { return }
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            guard !Task.isCancelled else { return }
+            await WidgetSnapshot.publishTodayFigures(
+                day: selectedDayKey,
+                steps: stepCount.map { Int($0.rounded()) },
+                effort: heroEffort.map { Int($0.rounded()) },
+                effortDisplay: heroEffortText,
+                target: optimalStrainCeiling.map { Int(StrainCalibration.effort100(strain21: $0).rounded()) })
+        }
+        #endif
         // THE THREE SLOTS. Registered once, then run on appearance for any slot whose time has passed
         // and which has not run today — see `DayRitualScheduler` on why the generation happens here
         // rather than in the notification body.
@@ -903,6 +925,11 @@ struct LiquidTodayView: View {
         return heroEffort.map { UnitFormatter.effortDisplay($0, scale: effortScale) } ?? "–"
     }
     private var heroRest: Double? { whoopRestToday ?? noopRest ?? restScore ?? cloudSleepScore }
+
+    /// Everything the lock-screen strip shows from this screen, as one key for the task that hands it over.
+    private var stripFiguresKey: String {
+        "\(selectedDayOffset)|\(selectedDayKey)|\(Int(stepCount ?? -1))|\(heroEffortText)|\(Int(heroEffort ?? -1))|\(Int(optimalStrainCeiling.map { $0 * 10 } ?? -1))"
+    }
 
     /// Whether the rings are showing the carried cloud row — i.e. the app has nothing of its own.
     private var heroIsCarried: Bool {

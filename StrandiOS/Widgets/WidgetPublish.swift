@@ -1,5 +1,6 @@
 #if os(iOS)
 import Foundation
+import UIKit
 import WidgetKit
 import StrandAnalytics
 import StrandImport
@@ -131,26 +132,48 @@ extension WidgetSnapshot {
                         dayHours: stress?.result.hours, now: now)
         fillWater(&full, model: model, now: now)
         full.waterMl = Int((await model.repo.hydrationTotal(day: Repository.localDayKey(now))).rounded())
-        saveAndReloadIfChanged(full, reload: reload)
+        // Read AFTER every await above, so figures the Today screen published meanwhile are not lost.
+        let stored = load()
+        mergeStripFallback(stored: stored, into: &full, now: now)
+        saveAndReloadIfChanged(full, previous: stored, reload: reload)
     }
 
     /// THE LOCK-SCREEN STRIP'S FIGURES: today's steps, today's effort and its target, stress now.
     ///
+    /// THE FALLBACK. The Today screen publishes exactly what it displays (`publishTodayFigures`), and
+    /// while it has done so recently those figures win (`mergeStripFallback`). This read is for when it
+    /// has not — the app in the background, Today never opened — and it resolves every figure from the
+    /// SAME sources, under the SAME day key, that Today does.
+    ///
     /// TODAY'S, not the anchor day's. The anchor carries yesterday's scored row over the rollover so the
     /// rings are never blank; a step count or an effort carried from yesterday would be a wrong number
-    /// under today's clock, so these read today's own row and are empty until it exists.
+    /// under today's clock, so these read today's own row and are stamped with the day they were read for.
     @MainActor
     private static func fillStrip(_ snap: inout WidgetSnapshot, model: AppModel, recovery: Double?,
                                   effortScale: EffortScale, dayHours: [DaytimeStress.HourPoint]?,
                                   now: Date) async {
-        let todayKey = Repository.localDayKey(now)
-        let row = model.repo.days.first { $0.day == todayKey }
+        // Today's key exactly as Today's `selectedDayKey` resolves it at offset 0: `repo.today`'s day
+        // (which carries the pre-04:00 logical-day rule), else the logical day. The calendar day this
+        // used before disagreed with Today — and with the live effort Today publishes under ITS key —
+        // for the four hours after every midnight.
+        let todayKey = model.repo.today?.day ?? Repository.logicalDayKey(now)
+        let row = model.repo.today ?? model.repo.days.last { $0.day == todayKey }
+        // STEPS, in Today's precedence: the strap's measured count, else Apple Health's imported count,
+        // else the on-device estimate. The estimate is written under the COMPUTED ("-noop") source,
+        // which only `exploreSeries` reads — the plain `series(key:source:"my-whoop")` this used before
+        // reads the imported ids alone, so on a strap-only install it returned nothing, every time, and
+        // the strip's step count stayed blank. Apple Health's count was not consulted at all.
         var steps = row?.steps
         if steps == nil {
-            steps = await model.repo.series(key: "steps_est", source: "my-whoop", from: todayKey, to: todayKey)
-                .last.map { Int($0.value.rounded()) }
+            steps = await model.repo.appleDailyRows(days: 2)
+                .filter { $0.day == todayKey }.compactMap { $0.steps }.max()
+        }
+        if steps == nil {
+            steps = await model.repo.exploreSeries(key: "steps_est", source: "my-whoop", days: 2)
+                .last { $0.day == todayKey }.map { Int($0.value.rounded()) }
         }
         snap.stepsToday = steps
+        snap.stepsDay = todayKey
         // E5 — MIRRORS TODAY'S `heroOwnEffort`. The app's OWN Effort (0–100) is the one number the O8
         // calibration may touch; WHOOP's cloud strain is already on WHOOP's axis, so on the 0–21 scale it is
         // shown exactly as WHOOP gave it (10.0 reads 10.0) instead of being round-tripped through ×100/21 and
@@ -160,9 +183,7 @@ extension WidgetSnapshot {
         // THE OWN EFFORT IS TODAY'S, resolved as Today resolves it: the computed lane first (`noopScores`,
         // the app's own row, as Today's `noopEffort`), the merged row only without one, and the live
         // in-progress value Today last scored (`TodayView.publishedLiveStrain`) through the same
-        // never-drop max (`StrainScorer.effectiveEffort`). Comparing the stored merged row alone left the
-        // strip behind the hero ring all day, and on a day with a cloud row it could show WHOOP's figure
-        // where Today showed the app's own.
+        // never-drop max (`StrainScorer.effectiveEffort`).
         let cloudToday = await model.repo.whoopCloudDay(todayKey)?.strain
         let computedEffort = await model.repo.noopScores(day: todayKey).effort
         var ownEffort = StrainScorer.effectiveEffort(live: TodayView.publishedLiveStrain(day: todayKey),
@@ -174,29 +195,71 @@ extension WidgetSnapshot {
         // mark below uses — so the ring and its mark share one axis, exactly as on Today's hero.
         let effort = ownEffort ?? cloudStrain21.map { StrainCalibration.effort100(strain21: $0) }
         snap.effortToday = effort.map { Int($0.rounded()) }
-        if effortScale == .whoop {
-            if let own = ownEffort {
-                snap.effortTodayDisplay = String(format: "%.1f", UnitFormatter.effortValue(own, scale: .whoop))
-            } else {
-                snap.effortTodayDisplay = cloudStrain21.map { String(format: "%.1f", $0) }
-            }
+        // The display string as Today's hero (`heroEffortText`) builds it, so the two read identically.
+        if ownEffort == nil, effortScale == .whoop, let cloud = cloudStrain21 {
+            snap.effortTodayDisplay = String(format: "%.1f", cloud)
         } else {
-            snap.effortTodayDisplay = effort.map { "\(Int($0.rounded()))" }
+            snap.effortTodayDisplay = effort.map { UnitFormatter.effortDisplay($0, scale: effortScale) }
         }
+        snap.effortDay = todayKey
         // The top of today's recommended band, the same ceiling Today's hero ring marks — placed on the
         // 0–100 axis through the INVERSE calibration, exactly as Today does, so the widget ring crosses the
         // mark at the same moment the hero ring does (linear ×100/21 without a calibration, as before).
         snap.effortTarget = CoupledView.optimalStrainRange(recovery: recovery)
             .map { Int(StrainCalibration.effort100(strain21: Double($0.upperBound)).rounded()) }
+        // A publish that cannot read the last ten minutes leaves these nil; `mergeStripFallback` then keeps
+        // the stored reading while it is recent rather than blanking a figure that was true a moment ago.
         if let dayHours, let level = await WindowStress.now(repo: model.repo, dayHours: dayHours) {
             snap.stressNow = level
             snap.stressNowAt = now
-        } else if let previous = load(), let at = previous.stressNowAt,
-                  now.timeIntervalSince(at) < 45 * 60 {
-            // A publish that could not read the last ten minutes keeps the last reading while it is
-            // recent, rather than blanking a figure that was true a moment ago.
-            snap.stressNow = previous.stressNow
+        }
+    }
+
+    /// THE TODAY SCREEN'S FIGURES, as displayed, for the lock-screen strip.
+    ///
+    /// Today resolves steps, effort and its target through a dozen sources and precedences; the strip
+    /// used to re-derive them on its own publish path and drifted from them (and, for steps, found
+    /// nothing at all). Now Today hands over the numbers it is SHOWING, debounced on its side, whenever
+    /// they change. Written straight into the stored snapshot — every other field untouched — and only
+    /// the strip is reloaded, and only while the app is in front (a background reload spends the day's
+    /// WidgetKit budget; the strip's own fifteen-minute timeline picks the figures up instead).
+    @MainActor
+    static func publishTodayFigures(day: String, steps: Int?, effort: Int?, effortDisplay: String?,
+                                    target: Int?) async {
+        writeStripFigures { snap in
+            snap.stepsToday = steps
+            snap.stepsDay = day
+            snap.effortToday = effort
+            snap.effortTodayDisplay = effort == nil ? nil : effortDisplay
+            snap.effortTarget = target
+            snap.effortDay = day
+            snap.stripTodayAt = Date()
+        }
+    }
+
+    /// The Today stress tile's live ten-minute read, as it shows it.
+    @MainActor
+    static func publishTodayStress(_ level: Double, at: Date) async {
+        writeStripFigures { snap in
+            snap.stressNow = level
             snap.stressNowAt = at
+        }
+    }
+
+    @MainActor
+    private static func writeStripFigures(_ edit: (inout WidgetSnapshot) -> Void) {
+        guard let defaults = UserDefaults(suiteName: suiteName) else { return }
+        let previous = load()
+        var snap = previous ?? .unavailable
+        edit(&snap)
+        guard snap != previous else { return }
+        // Encoded as-is rather than through `save()`: that folds the bpm into the trace at `updated`,
+        // and this write carries no new heart rate — the loaded trace goes back exactly as it came.
+        guard let data = try? JSONEncoder().encode(snap) else { return }
+        defaults.set(data, forKey: storageKey)
+        if renderedContentChanged(from: previous, to: snap),
+           UIApplication.shared.applicationState == .active {
+            WidgetCenter.shared.reloadTimelines(ofKind: stripWidgetKind)
         }
     }
 

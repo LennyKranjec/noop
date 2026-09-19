@@ -133,4 +133,18 @@ final class ActiveWorkoutPersistenceTests: XCTestCase {
             0
         )
     }
+
+    /// ZONE LOCK: the locked target zone round-trips, an old snapshot without the field reads unlocked,
+    /// and an out-of-range persisted zone is dropped rather than reviving a lock on a zone that isn't one.
+    func testLockedZoneRoundTripsAndValidates() {
+        XCTAssertNil(ActiveWorkoutPersistence.decode(ActiveWorkoutPersistence.encode(snapshot()))?.lockedZone)
+
+        var locked = snapshot()
+        locked.lockedZone = 3
+        XCTAssertEqual(ActiveWorkoutPersistence.decode(ActiveWorkoutPersistence.encode(locked))?.lockedZone, 3)
+
+        var bogus = snapshot()
+        bogus.lockedZone = 9
+        XCTAssertNil(ActiveWorkoutPersistence.decode(ActiveWorkoutPersistence.encode(bogus))?.lockedZone)
+    }
 }

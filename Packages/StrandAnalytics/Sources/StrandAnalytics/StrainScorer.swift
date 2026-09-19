@@ -191,9 +191,13 @@ public enum StrainScorer {
     /// back to Tanaka every time, so VO₂max never saw the wearer's own ceiling. A peak list is a different
     /// kind of evidence and needs a different robust statistic: the single highest peak is the one most
     /// likely to be an artefact, so it is discarded and the runner-up is taken. Pure.
-    public static func robustObservedHRmax(workoutPeaks: [Double]) -> Double? {
+    ///
+    /// `minWorkouts` defaults to `robustHRmaxMinWorkouts` (VO₂max's bar). The display HR zones pass a lower
+    /// bar (`HRZones.zoneHRmaxMinWorkouts`); it is floored at 2 because the runner-up needs two peaks.
+    public static func robustObservedHRmax(workoutPeaks: [Double],
+                                           minWorkouts: Int = robustHRmaxMinWorkouts) -> Double? {
         let peaks = workoutPeaks.filter { $0.isFinite && robustHRmaxPlausible.contains($0) }.sorted(by: >)
-        guard peaks.count >= robustHRmaxMinWorkouts else { return nil }
+        guard peaks.count >= max(2, minWorkouts) else { return nil }
         return peaks[1]
     }
 

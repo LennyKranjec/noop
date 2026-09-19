@@ -28,6 +28,9 @@ enum ActiveWorkoutPersistence {
         var liveStrain: Double
         var pausedAtSec: Int? = nil
         var pausedDurationSec: Int? = nil
+        /// The ZONE LOCK target (1...5) the wearer set for this session, nil when unlocked. Optional, so a
+        /// snapshot written before the lock existed decodes as "unlocked" rather than failing.
+        var lockedZone: Int? = nil
     }
 
     /// The single `UserDefaults` key (JSON-encoded `Snapshot`). Namespaced like `moments`/`sleepMarks`.
@@ -58,6 +61,7 @@ enum ActiveWorkoutPersistence {
             liveStrain: raw.liveStrain.isFinite ? max(0, raw.liveStrain) : 0,
             pausedAtSec: raw.pausedAtSec.flatMap { $0 > 0 ? $0 : nil },
             pausedDurationSec: raw.pausedDurationSec.map { max(0, $0) },
+            lockedZone: raw.lockedZone.flatMap { (1...5).contains($0) ? $0 : nil },
         )
     }
 

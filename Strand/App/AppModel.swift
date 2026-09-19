@@ -102,6 +102,19 @@ final class AppModel: ObservableObject {
     /// Android's `ActiveWorkout.gpsEnabled`.
     private var activeWorkoutIsGps = false
 
+    /// ZONE LOCK decision state for the active workout (see `ZoneGuidance`). Rebuilt whenever the locked
+    /// zone's bounds change, dropped (nil) whenever cueing must not run: no workout, no lock, paused.
+    /// Transient on purpose — only the LOCK itself is persisted; after a relaunch the settle window simply
+    /// starts over, which is the safe direction.
+    private var zoneGuidance: ZoneGuidance?
+    /// When the strap was last asked to buzz, from ANY path (`buzz` / `buzzStrapOnce`). The zone-lock cue
+    /// holds off within `zoneCueMinGap` of it, so a lock cue never lands on top of the start buzz, a coach
+    /// cue or a user buzz still playing on the motor — BLE writes are queued, but two patterns fired back
+    /// to back read as one long mush on the wrist.
+    private var lastStrapBuzzAt: Date = .distantPast
+    /// Minimum quiet gap (s) before a zone-lock cue may fire after any other strap buzz.
+    static let zoneCueMinGap: TimeInterval = 3
+
     /// A manual workout in progress. `samples` accumulate from the smoothed live `bpm`; `liveStrain`
     /// is recomputed as the window grows so the active card can show strain building in real time.
     struct ActiveWorkout: Equatable {
@@ -116,6 +129,10 @@ final class AppModel: ObservableObject {
         var peakHr: Int = 0
         var pausedAt: Date?
         var pausedDuration: TimeInterval = 0
+        /// ZONE LOCK: the target HR zone (1...5) the wearer locked for this session, nil when unlocked.
+        /// While set the strap cues below/above the zone (`AppModel.evaluateZoneGuidance`). Persisted with
+        /// the rest of the session so a relaunch keeps the lock.
+        var lockedZone: Int?
 
         var isPaused: Bool { pausedAt != nil }
 
@@ -771,6 +788,7 @@ final class AppModel: ObservableObject {
         let smoothed = vals.isEmpty ? nil : Int(vals[vals.count / 2].rounded())
         if bpm != smoothed { bpm = smoothed }
         captureWorkoutSample()
+        evaluateZoneGuidance()
         evaluateStress()
     }
 
@@ -856,7 +874,8 @@ final class AppModel: ObservableObject {
                 peakHr: w.peakHr,
                 liveStrain: w.liveStrain,
                 pausedAtSec: w.pausedAt.map { Int($0.timeIntervalSince1970) },
-                pausedDurationSec: Int(w.pausedDuration)))
+                pausedDurationSec: Int(w.pausedDuration),
+                lockedZone: w.lockedZone))
     }
 
     /// If a manual workout was in flight when iOS killed the app, rebuild `activeWorkout` from the durable
@@ -873,6 +892,7 @@ final class AppModel: ObservableObject {
         w.liveStrain = snap.liveStrain
         w.pausedAt = snap.pausedAtSec.map { Date(timeIntervalSince1970: TimeInterval($0)) }
         w.pausedDuration = TimeInterval(snap.pausedDurationSec ?? 0)
+        w.lockedZone = snap.lockedZone
         activeWorkout = w
 
         // Rebuild the transient GPS lifecycle flag as well as the durable workout value. Without this,
@@ -901,13 +921,48 @@ final class AppModel: ObservableObject {
             if activeWorkoutIsGps { gpsRecorder.pause() }
         }
         activeWorkout = w
+        // ZONE LOCK: a pause silences cueing at once, and a resume starts the settle window over rather
+        // than buzzing on a run that was building before the break.
+        zoneGuidance = nil
         persistActiveWorkout()
+    }
+
+    /// ZONE LOCK toggle: lock `zone` (1...5) as the session's target, or unlock when it is already the
+    /// locked one. Only one zone at a time — locking another replaces it. The guidance state starts
+    /// fresh either way, so a switch never inherits a half-built settle window from the old zone.
+    func toggleWorkoutZoneLock(_ zone: Int) {
+        guard var w = activeWorkout, (1...5).contains(zone) else { return }
+        w.lockedZone = w.lockedZone == zone ? nil : zone
+        activeWorkout = w
+        zoneGuidance = nil
+        persistActiveWorkout()
+    }
+
+    /// ZONE LOCK cueing, run on every live HR ingest. Feeds the smoothed `bpm` into `ZoneGuidance` and
+    /// turns its verdict into a STRAP buzz: two below the zone (speed up), one above (ease off), none
+    /// inside. Silent — with the guidance dropped — when there is no workout, no lock, or it is paused,
+    /// which also covers End / Discard (they clear `activeWorkout`). Gated by the workout haptics pref.
+    private func evaluateZoneGuidance(now: Date = Date()) {
+        guard let w = activeWorkout, let locked = w.lockedZone, !w.isPaused,
+              let band = profile.hrZoneSet.zones.first(where: { $0.number == locked }) else {
+            zoneGuidance = nil
+            return
+        }
+        // Rebuild when the bounds moved (HRmax / custom zones edited mid-session) or on first use.
+        if zoneGuidance?.lower != band.lower || zoneGuidance?.upper != band.upper {
+            zoneGuidance = ZoneGuidance(lower: band.lower, upper: band.upper)
+        }
+        guard let cue = zoneGuidance?.update(bpm: bpm.map { Double($0) }, now: now) else { return }
+        // Never stack on another buzz still playing; the guidance's own cadence brings the next one.
+        guard now.timeIntervalSince(lastStrapBuzzAt) >= Self.zoneCueMinGap else { return }
+        buzz(loops: UInt8(cue.buzzCount), gate: HapticPrefs.workout)
     }
 
     /// Abort the active session without saving a workout.
     func discardWorkout() {
         guard activeWorkout != nil else { return }
         activeWorkout = nil
+        zoneGuidance = nil
         if activeWorkoutIsGps { gpsRecorder.stop() }
         activeWorkoutIsGps = false
         ActiveWorkoutPersistence.clear()
@@ -920,6 +975,7 @@ final class AppModel: ObservableObject {
     func endWorkout() {
         guard let w = activeWorkout else { return }
         activeWorkout = nil
+        zoneGuidance = nil
         let wasGps = activeWorkoutIsGps
         activeWorkoutIsGps = false
         // Drop the durable snapshot the instant the session ends , whether it saves below or is discarded
@@ -1003,6 +1059,7 @@ final class AppModel: ObservableObject {
                 _ = try? await store.upsertWorkouts([row], deviceId: self.deviceId)
                 self.repo.noteWorkoutsChanged()
                 await self.repo.refresh()
+                await self.repo.publishHRZoneInputs()
             }
         }
     }
@@ -1338,6 +1395,7 @@ final class AppModel: ObservableObject {
     /// Requires a bonded connection , no-op otherwise (the command characteristic is gated on bond).
     /// For a user-facing "buzz the strap now" action use `buzzStrapOnce()` instead (#921).
     func buzz(loops: UInt8 = 2) {
+        lastStrapBuzzAt = Date()
         ble.send(.runHapticsPattern, payload: [2, loops, 0, 0, 0])
     }
 
@@ -1355,6 +1413,7 @@ final class AppModel: ObservableObject {
     /// (WHOOP 4.0 via the Siri shortcut) or dropped unacked on a busy link, so the Live "Buzz strap"
     /// button and the Buzz Strap App Intent both route through this single sequence.
     func buzzStrapOnce() {
+        lastStrapBuzzAt = Date()
         ble.buzzStrapOnce()
     }
 

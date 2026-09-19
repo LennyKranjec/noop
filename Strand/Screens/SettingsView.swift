@@ -512,17 +512,31 @@ struct SettingsView: View {
                 FormRow(label: "Max heart rate") {
                     VStack(alignment: .trailing, spacing: 6) {
                         hrMaxField
-                        Text(profile.hrMaxOverride > 0
-                             ? "Manual override"
-                             : "Auto · \(profile.hrMax) bpm (Tanaka)")
+                        Text(hrMaxCaption)
                             .font(StrandFont.footnote)
                             .foregroundStyle(profile.hrMaxOverride > 0
                                              ? StrandPalette.accent
                                              : StrandPalette.textTertiary)
+                            .multilineTextAlignment(.trailing)
                     }
                 }
                 rowDivider
-                // Custom HR zones (#531, @kavemang): replace the conventional %HRmax bands with five
+                // WHOOP-style zones: resting HR is LEARNED (7-night median), never typed in; shown so the
+                // zone maths below is legible.
+                FormRow(label: "Resting heart rate") {
+                    VStack(alignment: .trailing, spacing: 6) {
+                        Text("\(Int(profile.zoneRestingHR.bpm.rounded())) bpm")
+                            .font(StrandFont.bodyNumber)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                        Text(zoneRestingHRCaption)
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                    }
+                }
+                rowDivider
+                hrZoneRangesBlock
+                rowDivider
+                // Custom HR zones (#531, @kavemang): replace the heart-rate-reserve bands with five
                 // personalized inclusive BPM lower bounds. Off = the effective set stays conventional.
                 FormRow(label: "Custom HR zones") {
                     Toggle("Custom HR zones", isOn: Binding(
@@ -533,7 +547,7 @@ struct SettingsView: View {
                     .accessibilityLabel("Custom HR zones")
                 }
                 if profile.hasCustomHRZones {
-                    Text("Set the BPM where each zone begins. Turn off to restore the default percentage-of-max zones.")
+                    Text("Set the BPM where each zone begins. Turn off to restore the automatic heart-rate-reserve zones.")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -961,6 +975,58 @@ struct SettingsView: View {
                 .accessibilityLabel("Max heart rate override, \(profile.hrMaxOverride == 0 ? "automatic" : "\(profile.hrMaxOverride) bpm")")
         }
         .fixedSize()
+    }
+
+    /// Caption under the HR-max stepper. The ZONES follow the learned HRmax; Effort keeps the age formula
+    /// unless overridden, so when the two differ both are named rather than implying one number drives both.
+    private var hrMaxCaption: String {
+        if profile.hrMaxOverride > 0 { return String(localized: "Manual override") }
+        let zone = profile.zoneHRmaxResolved
+        switch zone.source {
+        case .learned:
+            return String(localized: "Auto · \(profile.zoneHRmax) bpm (learned from workouts)")
+                + "\n" + String(localized: "Effort uses \(profile.hrMax) bpm (age formula)")
+        case .ageFormula, .manual:
+            return String(localized: "Auto · \(profile.zoneHRmax) bpm (age formula)")
+        }
+    }
+
+    /// Where the zones' resting HR came from.
+    private var zoneRestingHRCaption: String {
+        switch profile.zoneRestingHR.source {
+        case .sleepMedian: return String(localized: "7-night median")
+        case .waking: return String(localized: "Waking resting HR")
+        case .fallback: return String(localized: "Default until nights are recorded")
+        }
+    }
+
+    /// The five effective zones as whole-bpm ranges (`HRZoneSet.bpmRanges`, which classify exactly like
+    /// the live screen), so the wearer sees what the learned HRmax / resting HR actually produce.
+    private var hrZoneRangesBlock: some View {
+        let set = profile.hrZoneSet
+        return VStack(alignment: .leading, spacing: 6) {
+            Text("Heart-rate zones")
+                .font(StrandFont.body)
+                .foregroundStyle(StrandPalette.textPrimary)
+            ForEach(set.bpmRanges) { r in
+                HStack {
+                    Text("Zone \(r.zone)")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                    Spacer()
+                    Text("\(r.lower)–\(r.upper) bpm")
+                        .font(StrandFont.footnote.monospacedDigit())
+                        .foregroundStyle(StrandPalette.textPrimary)
+                }
+                .accessibilityElement(children: .combine)
+            }
+            Text(profile.hasCustomHRZones
+                 ? "Custom boundaries."
+                 : "Based on heart-rate reserve: each zone starts at resting HR + 50, 60, 70, 80 or 90% of (max HR − resting HR), like WHOOP. They update as your max HR and resting HR change.")
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     /// One personalized zone lower bound (bpm), stepped neighbour-aware (see `Profile.stepHRZoneThreshold`)

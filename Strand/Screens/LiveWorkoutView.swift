@@ -11,6 +11,11 @@ import WhoopStore
 /// Live HR is the smoothed `AppModel.bpm`; the zone is derived from the user's HR-max via the shared
 /// `HRZones` model; elapsed time ticks from the workout's start (a TimelineView, no manual Timer);
 /// effort is the running `ActiveWorkout.liveStrain` (StrainScorer over the captured window).
+///
+/// ZONE LOCK: the HR ZONE card carries a zone slider (the whole zone 1 … HRmax range as one bar with a
+/// live marker) and five lock toggles. A locked zone is stored on `ActiveWorkout.lockedZone`; the strap
+/// cueing itself lives in `AppModel.evaluateZoneGuidance`, so it keeps running with this screen closed.
+/// The TODAY'S EFFORT card sets the session against the day's Effort and its recommended ceiling.
 struct LiveWorkoutView: View {
     @EnvironmentObject private var model: AppModel
     // PERF (scroll/recompose): this screen deliberately does NOT observe `LiveState` directly. A connected
@@ -50,6 +55,10 @@ struct LiveWorkoutView: View {
                     AnyView(timeBlock),
                     AnyView(heartRateBlock),
                     AnyView(effortGauge),
+                    // Today's Effort so far (live) against the day's recommended ceiling — the same
+                    // target Today's hero ring marks — so a session can be paced against the whole day.
+                    AnyView(DayEffortTargetCard(sessionEffort: model.activeWorkout?.liveStrain ?? 0,
+                                                effortScale: effortScale)),
                     AnyView(zoneSection),
                     AnyView(statsGrid),
                     // Live GPS distance + pace (#1195) — a self-gating leaf owning its own recorder
@@ -235,11 +244,13 @@ struct LiveWorkoutView: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// Zone status capsule + rail + caption — same zone derivation and copy; capsule sits on the
-    /// HR ZONE header row instead of beside the heart-rate value.
+    /// HR ZONE — the header capsule, the ZONE SLIDER (one continuous bar from zone 1's floor to HRmax with
+    /// a live marker), where-in-the-zone caption, and the ZONE LOCK row. Same zone derivation as before
+    /// (`HRZoneSet.zoneNumber(forBPM:)` on the smoothed bpm); the slider replaces the five-chip rail.
     private var zoneSection: some View {
         let tint = zone >= 1 ? StrandPalette.hrZoneColor(zone) : StrandPalette.effortColor
-        return VStack(alignment: .leading, spacing: 8) {
+        let locked = model.activeWorkout?.lockedZone
+        return VStack(alignment: .leading, spacing: NoopMetrics.space2) {
             HStack {
                 Text("HR ZONE")
                     .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
@@ -253,32 +264,76 @@ struct LiveWorkoutView: View {
                     .padding(.vertical, NoopMetrics.space1)
                     .background(tint.opacity(0.12), in: Capsule())
             }
-            HStack(spacing: 6) {
-                ForEach(1...5, id: \.self) { z in
-                    let active = z == zone
-                    let color = StrandPalette.hrZoneColor(z)
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
-                        .fill(active ? color : color.opacity(0.18))
-                        .frame(height: active ? 44 : 34)
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .strokeBorder(active ? color : StrandPalette.hairline, lineWidth: 1)
-                        )
-                        .overlay(
-                            Text("Z\(z)")
-                                .font(StrandFont.captionNumber)
-                                .foregroundStyle(active ? StrandPalette.surfaceBase : StrandPalette.textTertiary)
-                        )
+            ZoneSlider(zoneSet: zoneSet, bpm: model.bpm, lockedZone: locked)
+            Text(zonePlacementCaption)
+                .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+            zoneLockRow(locked: locked)
+            Text(zoneLockCaption(locked: locked))
+                .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    /// "Z3 · 142 bpm · high end" — the zone, the bpm and WHERE in the zone the marker sits, so the
+    /// slider reads in words too (and for VoiceOver). Warming-up copy below zone 1, as before.
+    private var zonePlacementCaption: String {
+        guard let bpm = model.bpm else { return String(localized: "Waiting for heart rate.") }
+        guard zone >= 1, let within = ZoneSliderGeometry.withinZone(bpm: Double(bpm), set: zoneSet) else {
+            return String(localized: "Warming up. Keep moving to climb into Zone 1.")
+        }
+        let place: String
+        switch within {
+        case ..<(1.0 / 3.0): place = String(localized: "low end")
+        case ..<(2.0 / 3.0): place = String(localized: "middle")
+        default:             place = String(localized: "high end")
+        }
+        return "Z\(zone) · \(bpm) bpm · \(place)"
+    }
+
+    /// ZONE LOCK row: five toggles, at most one on. Tapping the locked zone unlocks it; tapping another
+    /// moves the lock. The phone gives a light tap on every toggle; the STRAP carries the in-session cues
+    /// (`AppModel.evaluateZoneGuidance`), so the wearer never has to look.
+    private func zoneLockRow(locked: Int?) -> some View {
+        HStack(spacing: 6) {
+            ForEach(1...5, id: \.self) { z in
+                let isLocked = locked == z
+                let color = StrandPalette.hrZoneColor(z)
+                Button {
+                    StrandHaptic.light.play()
+                    model.toggleWorkoutZoneLock(z)
+                } label: {
+                    HStack(spacing: 3) {
+                        if isLocked {
+                            Image(systemName: "lock.fill").font(.system(size: 10, weight: .bold))
+                        }
+                        Text("Z\(z)")
+                    }
+                    .font(StrandFont.captionNumber)
+                    .foregroundStyle(isLocked ? StrandPalette.surfaceBase : color)
+                    .frame(maxWidth: .infinity, minHeight: 38)
+                    .background(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .fill(isLocked ? color : color.opacity(0.14))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(isLocked ? color : StrandPalette.hairline, lineWidth: 1)
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
-            }
-            if let band = zoneSet.zones.first(where: { $0.number == zone }) {
-                Text("Zone \(zone): \(Int(band.lower))-\(Int(band.upper)) bpm (\(Int(band.lowerPct * 100))-\(Int(band.upperPct * 100))% max HR)")
-                    .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-            } else {
-                Text("Warming up. Keep moving to climb into Zone 1.")
-                    .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                .buttonStyle(.plain)
+                .accessibilityLabel(Text(isLocked ? String(localized: "Unlock Zone \(z)")
+                                                    : String(localized: "Lock Zone \(z)")))
+                .accessibilityAddTraits(isLocked ? .isSelected : [])
             }
         }
+    }
+
+    private func zoneLockCaption(locked: Int?) -> String {
+        guard let locked, let band = zoneSet.zones.first(where: { $0.number == locked }) else {
+            return String(localized: "Tap a zone to lock it as your target. The strap buzzes twice when you're below it and once when you're above it.")
+        }
+        return String(localized: "Zone \(locked) locked · \(Int(band.lower))-\(Int(band.upper)) bpm. Two buzzes: speed up. One buzz: ease off.")
     }
 
     private var statsGrid: some View {
@@ -506,8 +561,9 @@ private extension View {
 /// no longer observes `LiveState`), so an incoming sensor / R-R packet re-renders only this row, not the
 /// HR hero / effort gauge / zone rail above. The gate, layout and `staggeredAppear(index: 5)` are
 /// preserved verbatim (index bumped to 7 — 6 after the glanceable layout split TIME / HR / Effort / zone
-/// into separate stagger slots, then 7 after the live distance/pace card #1195 took the slot before it),
-/// so the rendered output matches the previous inline code.
+/// into separate stagger slots, then 7 after the live distance/pace card #1195 took the slot before it,
+/// then 8 after the day-Effort/target card took a slot above), so the rendered output matches the
+/// previous inline code.
 private struct SensorRowIfPresent: View {
     @EnvironmentObject private var live: LiveState
     @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
@@ -536,7 +592,7 @@ private struct SensorRowIfPresent: View {
                     }
                 }
             }
-            .staggeredAppear(index: 7)
+            .staggeredAppear(index: 8)
         }
     }
 
@@ -611,5 +667,214 @@ private struct DistancePaceRowIfPresent: View {
 
     private var statDivider: some View {
         Rectangle().fill(StrandPalette.hairline).frame(width: 1, height: 48)
+    }
+}
+
+// MARK: - Zone slider
+
+/// One continuous horizontal bar from zone 1's lower bound to HRmax, divided into the five zone segments
+/// in their zone colours (each segment's width is its real bpm span, so personalised zones of unequal
+/// width draw true to scale). A marker rides the bar at the current smoothed bpm, showing WHERE in the
+/// zone the wearer is, not just which one. A locked zone's segment is raised and outlined; the rest dim.
+///
+/// The marker glides between readings; under Reduce Motion / quiet motion / Low Power (`NoopMotionState`)
+/// it jumps instead. The animation always settles, so it costs nothing between HR updates.
+private struct ZoneSlider: View {
+    let zoneSet: HRZoneSet
+    let bpm: Int?
+    let lockedZone: Int?
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var motion = NoopMotionState.shared
+
+    private static let barHeight: CGFloat = 16
+    private static let lockedHeight: CGFloat = 24
+    private static let segmentGap: CGFloat = 2
+
+    var body: some View {
+        if let span = ZoneSliderGeometry.span(zoneSet) {
+            let width = span.upperBound - span.lowerBound
+            let current = bpm.map { zoneSet.zoneNumber(forBPM: Double($0)) } ?? 0
+            let fraction = bpm.map { ZoneSliderGeometry.fraction(bpm: Double($0), in: span) }
+            GeometryReader { geo in
+                let w = geo.size.width
+                ZStack(alignment: .leading) {
+                    ForEach(zoneSet.zones, id: \.number) { z in
+                        segment(z, span: span, width: width, barWidth: w, current: current)
+                    }
+                    if let fraction {
+                        marker
+                            .offset(x: CGFloat(fraction) * w - 3)
+                            .animation(motion.poseStill(reduceMotion) ? nil
+                                       : .spring(response: 0.55, dampingFraction: 0.85),
+                                       value: fraction)
+                    }
+                }
+                .frame(width: w, height: geo.size.height, alignment: .leading)
+            }
+            .frame(height: 36)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text("Heart rate zone slider"))
+            .accessibilityValue(Text(accessibilityValue(current: current)))
+        }
+    }
+
+    /// One zone's segment, placed at its true bpm offset along the bar. With a lock the locked segment is
+    /// the focus; without one, the zone the wearer is in.
+    private func segment(_ z: HRZone, span: ClosedRange<Double>, width: Double, barWidth w: CGFloat,
+                         current: Int) -> some View {
+        let x = CGFloat((z.lower - span.lowerBound) / width) * w
+        let segW = max(0, CGFloat((z.upper - z.lower) / width) * w - Self.segmentGap)
+        let isLocked = lockedZone == z.number
+        let emphasised = lockedZone.map { $0 == z.number } ?? (z.number == current)
+        let color = StrandPalette.hrZoneColor(z.number)
+        return RoundedRectangle(cornerRadius: 5, style: .continuous)
+            .fill(color.opacity(emphasised ? 1 : 0.35))
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .strokeBorder(isLocked ? StrandPalette.textPrimary : Color.clear, lineWidth: 1.5)
+            )
+            .frame(width: segW, height: isLocked ? Self.lockedHeight : Self.barHeight)
+            .offset(x: x)
+    }
+
+    private func accessibilityValue(current: Int) -> String {
+        guard let bpm else { return String(localized: "No heart rate") }
+        return current >= 1 ? String(localized: "Zone \(current), \(bpm) bpm")
+                            : String(localized: "Below Zone 1, \(bpm) bpm")
+    }
+
+    /// The live-bpm marker: a slim pill that stands clear of the tallest (locked) segment.
+    private var marker: some View {
+        Capsule()
+            .fill(StrandPalette.textPrimary)
+            .frame(width: 6, height: 34)
+            .overlay(Capsule().strokeBorder(StrandPalette.surfaceBase, lineWidth: 1.5))
+            .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
+    }
+}
+
+// MARK: - Today's Effort vs target
+
+/// Today's Effort so far — live — against the day's recommended ceiling, on the wearer's Effort scale:
+/// "Day 9.8 / target 14". A bar shows the day before this session (dim), what this session has added
+/// (bright), and a notch at the target.
+///
+/// THE SAME NUMBERS AS TODAY, resolved as Today resolves them (and as the widget publisher mirrors it):
+///   - DAY BEFORE THE SESSION: the app's own Effort (computed lane, else the merged row, through the
+///     never-drop max with the live value Today last published), yielding to WHOOP's own strain when the
+///     app's own is a zero the strap did not earn — read ONCE when the screen opens.
+///   - TARGET: the top of `CoupledView.optimalStrainRange(recovery:)`, recovery being WHOOP's own for
+///     today when it has one, else the app's own Charge; placed on the 0–100 axis through the INVERSE
+///     `StrainCalibration`, exactly like the hero ring's mark.
+///
+/// CHEAP ON PURPOSE. Nothing here rescans the day's heart rate: the day figure is loaded once, and the
+/// session's running `liveStrain` (already recomputed per sample by `AppModel`) is folded in on the log
+/// axis via `StrainScorer.combinedStrain` — Effort is not additive, TRIMP is.
+///
+/// KNOWN LIMIT: if Today (or the daily pass) had already scored part of THIS session's heart rate before
+/// the screen opened — e.g. reopened after a relaunch mid-workout — that part is counted twice. It is a
+/// live pacing read-out, not a stored score; the day's number of record is still the daily pass.
+private struct DayEffortTargetCard: View {
+    @EnvironmentObject private var model: AppModel
+    let sessionEffort: Double
+    let effortScale: EffortScale
+
+    @State private var loaded = false
+    @State private var baseline: Double = 0
+    @State private var target100: Double?
+    @State private var targetUpper21: Int?
+
+    var body: some View {
+        // A zero-height stand-in until the one-off load lands, NOT an empty Group: `.task` on a view
+        // that renders nothing is not guaranteed to run, and then the card would never appear.
+        Group {
+            if loaded { card } else { Color.clear.frame(height: 1) }
+        }
+        .task { await load() }
+    }
+
+    private var dayEffort: Double {
+        let denominator = StrainScorer.logMapDenominator(method: PuffinExperiment.effortMethod,
+                                                         sex: model.profile.sex)
+        return StrainScorer.combinedStrain(baseline, sessionEffort, denominator: denominator)
+    }
+
+    private var targetText: String {
+        guard let target100 else { return "–" }
+        // On the WHOOP scale the band top is a whole WHOOP strain (14), shown as WHOOP states it.
+        if effortScale == .whoop, let targetUpper21 { return "\(targetUpper21)" }
+        return "\(Int(target100.rounded()))"
+    }
+
+    private var card: some View {
+        let day = dayEffort
+        let domain = min(StrainScorer.maxStrain, max((target100 ?? 0) * 1.2, day * 1.1, 10))
+        let beforeFrac = min(max(baseline / domain, 0), 1)
+        let dayFrac = min(max(day / domain, 0), 1)
+        let targetFrac = target100.map { min(max($0 / domain, 0), 1) }
+        let dayText = UnitFormatter.effortDisplay(day, scale: effortScale)
+        let past = target100.map { day >= $0 } ?? false
+        let sessionText = UnitFormatter.effortDeltaDisplay(max(0, day - baseline), scale: effortScale)
+        return NoopCard(padding: NoopMetrics.cardInnerPadding, tint: StrandPalette.effortColor) {
+            VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("TODAY'S EFFORT")
+                        .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                    Spacer()
+                    Text("Day \(dayText) / target \(targetText)")
+                        .font(StrandFont.captionNumber).monospacedDigit()
+                        .foregroundStyle(past ? StrandPalette.metricRose : StrandPalette.textPrimary)
+                }
+                GeometryReader { geo in
+                    let w = geo.size.width
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(StrandPalette.hairline)
+                        // The whole day so far in full colour, then the day-before span dimmed over its
+                        // start, so the bright remainder is exactly what this session added.
+                        Capsule().fill(StrandPalette.effortColor)
+                            .frame(width: max(0, CGFloat(dayFrac) * w))
+                        Capsule().fill(StrandPalette.effortColor.opacity(0.4))
+                            .frame(width: max(0, CGFloat(beforeFrac) * w))
+                        if let targetFrac {
+                            Rectangle()
+                                .fill(StrandPalette.textPrimary)
+                                .frame(width: 2, height: 20)
+                                .offset(x: CGFloat(targetFrac) * w - 1)
+                        }
+                    }
+                    .frame(width: w, height: 10, alignment: .leading)
+                    .frame(height: geo.size.height)
+                }
+                .frame(height: 20)
+                Text(past ? String(localized: "Past today's recommended ceiling.")
+                          : String(localized: "This workout +\(sessionText)"))
+                    .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    /// Read the day-before-session Effort and today's target once. Mirrors `LiquidTodayView.heroOwnEffort`
+    /// / `optimalStrainCeiling` and `WidgetPublish.fillStrip`.
+    private func load() async {
+        guard !loaded else { return }
+        let repo = model.repo
+        let todayKey = Repository.localDayKey(Date())
+        let cloud = await repo.whoopCloudDay(todayKey)
+        let computed = await repo.noopScores(day: todayKey)
+        let row = repo.days.first { $0.day == todayKey }
+        var own = StrainScorer.effectiveEffort(live: TodayView.publishedLiveStrain(day: todayKey),
+                                               stored: computed.effort ?? row?.strain)
+        // A ZERO THE STRAP DID NOT EARN yields to WHOOP's own strain for the day, as on Today.
+        if let o = own, o < 0.5, let c = cloud?.strain, c > 0 { own = nil }
+        baseline = own ?? cloud?.strain.map { StrainCalibration.effort100(strain21: $0) } ?? 0
+        let recovery = cloud?.recovery ?? computed.charge ?? row?.recovery
+        if let band = CoupledView.optimalStrainRange(recovery: recovery) {
+            targetUpper21 = band.upperBound
+            target100 = StrainCalibration.effort100(strain21: Double(band.upperBound))
+        }
+        loaded = true
     }
 }
