@@ -1954,7 +1954,9 @@ struct LiquidTodayView: View {
                                    journalDays: await repo.journalDays(),
                                    sleepTimesByDay: await repo.sleepTimingsByDay(),
                                    sleepDebtMinByDay: await repo.sleepDebtMinByDay())
+        CoachDaySnapshot.streaks = streaks
         await loadStateAndEnergy(stressByDay: stressByDay)
+        CoachDaySnapshot.energy = energy
         dailyMission = await coach.ensureDailyMission()?.text
         // Whatever today has earned, at most one at a time. Safe on every appearance: it returns
         // immediately when something is already waiting to be answered or today's list is full.
@@ -2042,7 +2044,6 @@ struct LiquidTodayView: View {
             strain: heroStrain21,
             energy: energy,
             deficits: deficits,
-            weather: weather,
             streaks: streaks)
         for due in DayRitualScheduler.dueRituals() where due != .morning {
             if let result = await DayRitualScheduler.runIfDue(

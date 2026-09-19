@@ -83,7 +83,11 @@ final class LevelBarModel: ObservableObject {
     /// The best each part reached over the span the timeline last loaded. Empty until it has.
     @Published private(set) var partBests: [LevelPart: Double] = [:]
     /// The inputs the shown day's level was computed without.
-    @Published private(set) var missing: [LevelMissingInput] = []
+    @Published private(set) var missing: [LevelMissingInput] = [] {
+        didSet { Self.lastMissing = missing }
+    }
+    /// The latest `missing` from any instance, for the coach's context.
+    static var lastMissing: [LevelMissingInput] = []
 
     private var lastLoadedTick: Int = -1
 

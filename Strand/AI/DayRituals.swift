@@ -163,7 +163,8 @@ struct RitualGrounding {
     var strain: Double?
     var energy: EnergyBalance?
     var deficits: [DayDeficit] = []
-    var weather: WeatherNow?
+    // NO WEATHER FIELD: the sky, the forecast and the clock ride the system prompt of every coach
+    // request (`AICoachEngine.requestSystemPrompt`), so a line here would reach the model twice.
     var streaks: [Streak] = []
     /// Further lines, already written — the level, the night's figures against yesterday, the morning's
     /// answers about the night. Handed over as they are.
@@ -184,7 +185,6 @@ struct RitualGrounding {
                 Int(energy.strainSpend.rounded()), Int(energy.stressSpend.rounded())))
         }
         if let line = DayDeficits.promptLine(deficits) { lines.append("- " + line) }
-        if let weather { lines.append("- " + weather.promptLine) }
         if !streaks.isEmpty {
             let running = streaks.filter { $0.days > 0 }
                 .map { "\(streakName($0.kind)) \($0.days)d" }

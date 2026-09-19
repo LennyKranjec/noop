@@ -316,6 +316,39 @@ final class AICoachEngine: ObservableObject {
         return Self.defaultSystemPrompt
     }
 
+    /// The system prompt a request actually goes out with: the framing (the wearer's, or a one-shot
+    /// caller's), then the moment it is asked in — weekday, local date and time, the sky now and
+    /// today's forecast (`CoachClock.situationBlock`).
+    ///
+    /// THE SYSTEM PROMPT, NOT THE DATA CONTEXT. The context rides only the FIRST user turn of a chat
+    /// (see `wireMessages`), so a time stamped there is hours stale by the afternoon's follow-up; the
+    /// system prompt is rebuilt on every request. And it is ONE seam — `callProvider`, `streamProvider`
+    /// and `generateOneShot` all pass through it — so the chat, the brief, the rituals, the mission and
+    /// the quest names each carry the block exactly once, consent or not (none of it is biometric).
+    ///
+    /// NEVER WAITS ON THE NETWORK. The weather is read from the cache; a stale cache only kicks a
+    /// background refresh, which the next request picks up.
+    func requestSystemPrompt(_ base: String, now: Date = Date()) -> String {
+        Self.refreshWeatherIfStale()
+        return base + "\n\n" + CoachClock.situationBlock(
+            now: now, weather: WeatherService.lastKnown, forecast: WeatherService.lastKnownForecast)
+    }
+
+    /// True while a background weather refresh is in flight, so a burst of requests (a ritual and its
+    /// quest, back to back) asks the sky once.
+    private static var weatherRefreshInFlight = false
+
+    /// Kick a weather refresh when the cached reading is past `WeatherService.staleAfter`. Fire and
+    /// forget: the request that noticed goes out with what the cache holds.
+    private static func refreshWeatherIfStale() {
+        guard WeatherService.cached == nil, !weatherRefreshInFlight else { return }
+        weatherRefreshInFlight = true
+        Task {
+            await WeatherService.refresh()
+            weatherRefreshInFlight = false
+        }
+    }
+
     /// The user's stored prompt override, or the default when nothing custom is set. The UI binds its
     /// editor to this: writing persists the override; writing a blank string clears it (back to default).
     var customSystemPrompt: String {
@@ -994,7 +1027,7 @@ final class AICoachEngine: ObservableObject {
         let reply = try? await provider.client.send(
             key: key,
             model: model,
-            systemPrompt: systemPrompt,
+            systemPrompt: requestSystemPrompt(systemPrompt),
             messages: [(role: ChatMessage.Role.user, content: question)],
             session: session
         )
@@ -1080,11 +1113,14 @@ final class AICoachEngine: ObservableObject {
         if let line = await stressIndexLine() { ctx += "\n\n" + line }
         // THE QUEST ON SCREEN, when the coach was opened from one. First after the metrics, because
         // everything below is background and this is the subject.
+        // EVERYTHING ELSE THE APP HOLDS about the day and the week — dreams, journal, water, energy,
+        // streaks, stress now and by the hour, quests, meditation, the level's gaps, VO₂max, strength,
+        // the bedroom and the lights. See `CoachExtraContext`.
+        let extra = await CoachExtraContext.block(repo: repo)
+        if !extra.isEmpty { ctx += "\n\n" + extra }
         if let activeQuest { ctx += "\n\n" + activeQuest.promptBlock }
-        // THE SKY, so a suggestion cannot contradict the tile the wearer is looking at. "Go for a walk"
-        // under a thunderstorm is the fastest way to make the coach read as something that has not
-        // looked outside. Read from the cache, so this costs nothing per turn.
-        if let weather = WeatherService.lastKnown { ctx += "\n\n" + weather.promptLine }
+        // THE SKY RIDES THE SYSTEM PROMPT, not this block: the weather now and today's forecast go out
+        // with every request (`requestSystemPrompt`), consent or not, so adding them here sends them twice.
         if includeOnDeviceSignals {
             let block = await onDeviceSignalsBlock()
             if !block.isEmpty { ctx += "\n\n" + block }
@@ -1172,7 +1208,7 @@ final class AICoachEngine: ObservableObject {
         try await provider.client.send(
             key: key,
             model: model,
-            systemPrompt: systemPrompt,
+            systemPrompt: requestSystemPrompt(systemPrompt),
             messages: messages,
             session: session
         )
@@ -1189,7 +1225,7 @@ final class AICoachEngine: ObservableObject {
         try await provider.client.streamWithImage(
             key: key,
             model: model,
-            systemPrompt: systemPrompt,
+            systemPrompt: requestSystemPrompt(systemPrompt),
             messages: messages,
             inlineImage: inlineImage,
             session: session,
