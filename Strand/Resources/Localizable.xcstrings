@@ -1,6 +1,30 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "My energy budget today": { "localizations": {
+      "de": { "stringUnit": { "state": "translated", "value": "Mein Energiebudget heute" } }, "en": { "stringUnit": { "state": "translated", "value": "My energy budget today" } }
+    } },
+    "Why is my charge like this?": { "localizations": {
+      "de": { "stringUnit": { "state": "translated", "value": "Warum ist mein Charge so?" } }, "en": { "stringUnit": { "state": "translated", "value": "Why is my charge like this?" } }
+    } },
+    "Check my training load": { "localizations": {
+      "de": { "stringUnit": { "state": "translated", "value": "Prüfe meine Trainingslast" } }, "en": { "stringUnit": { "state": "translated", "value": "Check my training load" } }
+    } },
+    "Analyse my stress": { "localizations": {
+      "de": { "stringUnit": { "state": "translated", "value": "Analysiere meinen Stress" } }, "en": { "stringUnit": { "state": "translated", "value": "Analyse my stress" } }
+    } },
+    "Review my week": { "localizations": {
+      "de": { "stringUnit": { "state": "translated", "value": "Wochenrückblick" } }, "en": { "stringUnit": { "state": "translated", "value": "Review my week" } }
+    } },
+    "Plan my evening": { "localizations": {
+      "de": { "stringUnit": { "state": "translated", "value": "Plane meinen Abend" } }, "en": { "stringUnit": { "state": "translated", "value": "Plan my evening" } }
+    } },
+    "Track my fitness progress": { "localizations": {
+      "de": { "stringUnit": { "state": "translated", "value": "Mein Fitnessfortschritt" } }, "en": { "stringUnit": { "state": "translated", "value": "Track my fitness progress" } }
+    } },
+    "Analysis: %@": { "localizations": {
+      "de": { "stringUnit": { "state": "translated", "value": "Analyse: %@" } }, "en": { "stringUnit": { "state": "translated", "value": "Analysis: %@" } }
+    } },
     "Deep Sleep Share": { "localizations": {
       "de": { "stringUnit": { "state": "translated", "value": "Tiefschlafanteil" } }, "en": { "stringUnit": { "state": "translated", "value": "Deep Sleep Share" } }, "es": { "stringUnit": { "state": "translated", "value": "Proporción de sueño profundo" } }, "fr": { "stringUnit": { "state": "translated", "value": "Part de sommeil profond" } }, "it": { "stringUnit": { "state": "translated", "value": "Quota di sonno profondo" } }, "pl": { "stringUnit": { "state": "translated", "value": "Udział snu głębokiego" } }, "pt-PT": { "stringUnit": { "state": "translated", "value": "Proporção de sono profundo" } }, "ru": { "stringUnit": { "state": "translated", "value": "Доля глубокого сна" } }, "zh-Hans": { "stringUnit": { "state": "translated", "value": "深睡占比" } }, "zh-Hant": { "stringUnit": { "state": "translated", "value": "深睡佔比" } }
     } },

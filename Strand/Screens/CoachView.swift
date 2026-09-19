@@ -990,6 +990,7 @@ struct CoachView: View {
             }
             // K7: follow-ups after a reply, the opening chips before one.
             if showFollowUpChips { followUpChips } else { suggestionChips }
+            analysisChips
             modelChip
             composer
             if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -1276,6 +1277,41 @@ struct CoachView: View {
             }
             .padding(.vertical, 1)
         }
+    }
+
+    /// Named deep analyses: the chip shows only the name, the model gets the full brief.
+    private var analysisChips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(CoachAnalysisPreset.all) { preset in
+                    Button {
+                        sendAnalysis(preset)
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: preset.symbol)
+                                .font(.system(size: 11, weight: .semibold))
+                            Text(preset.title)
+                                .font(StrandFont.captionNumber)
+                        }
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(StrandPalette.surfaceInset, in: Capsule(style: .continuous))
+                        .overlay(Capsule(style: .continuous).strokeBorder(StrandPalette.accent.opacity(0.45), lineWidth: 1))
+                    }
+                    .buttonStyle(LiquidPressStyle())
+                    .disabled(coach.sending)
+                    .accessibilityLabel(Text("Analysis: \(preset.title)"))
+                }
+            }
+            .padding(.vertical, 1)
+        }
+    }
+
+    private func sendAnalysis(_ preset: CoachAnalysisPreset) {
+        guard !coach.sending else { return }
+        composerFocused = false
+        Task { await coach.send(preset.title, wireText: preset.instruction) }
     }
 
     /// K7: True when follow-up chips should show instead of the initial contextual chips —

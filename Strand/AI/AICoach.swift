@@ -710,6 +710,7 @@ final class AICoachEngine: ObservableObject {
         // one, and carrying it would have the coach answering about a directive the wearer has left.
         activeQuest = nil
         activeWorkoutDossier = nil
+        wireOverrides = [:]
         droppedSummary = nil      // K13: reset the summary cache on clear
         droppedSummaryKey = []
         Task { try? await repo.storeHandle()?.clearCoachMessages() }
@@ -795,7 +796,7 @@ final class AICoachEngine: ObservableObject {
     /// Send a question: append it, build the metrics context, call the chosen provider with the
     /// system prompt + context + running history, parse the reply, append it. Never throws/crashes;
     /// failures land in `errorText`.
-    func send(_ userText: String) async {
+    func send(_ userText: String, wireText: String? = nil) async {
         let trimmed = userText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { errorText = AICoachError.emptyQuestion.errorDescription; return }
         guard let key = resolvedKey else { errorText = AICoachError.noKey.errorDescription; return }
@@ -816,7 +817,10 @@ final class AICoachEngine: ObservableObject {
         conversationDay = today
 
         errorText = nil
-        appendMessage(ChatMessage(role: .user, text: trimmed))
+        let userMessage = ChatMessage(role: .user, text: trimmed)
+        // A named analysis shows its short name in the thread and sends its full brief on the wire.
+        if let wireText, !wireText.isEmpty { wireOverrides[userMessage.id] = wireText }
+        appendMessage(userMessage)
         sending = true
         // K2: persist once the turn is fully settled (success, mid-stream error, or empty-stream
         // removal) — not per streamed chunk, so a long reply doesn't hammer the store.
@@ -1365,15 +1369,21 @@ final class AICoachEngine: ObservableObject {
         var out: [(role: ChatMessage.Role, content: String)] = []
         var contextInjected = false
         for m in windowedMessages() {
+            let text = wireOverrides[m.id] ?? m.text
             if m.role == .user && !contextInjected {
                 contextInjected = true
-                out.append((.user, context + "\n\n---\n\nQuestion: " + m.text))
+                out.append((.user, context + "\n\n---\n\nQuestion: " + text))
             } else {
-                out.append((m.role, m.text))
+                out.append((m.role, text))
             }
         }
         return out
     }
+
+    /// The full brief sent in place of a user turn's visible text, by message id (`CoachAnalysisPreset`).
+    /// In memory only: after a relaunch an old analysis turn goes out as its name, which still reads as
+    /// the question it was.
+    private var wireOverrides: [UUID: String] = [:]
 
     // MARK: - Context builder
 
