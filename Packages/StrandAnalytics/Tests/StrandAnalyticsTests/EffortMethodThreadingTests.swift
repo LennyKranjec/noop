@@ -20,9 +20,10 @@ final class EffortMethodThreadingTests: XCTestCase {
 
     private let day = "2026-08-23"
 
-    /// A flat hour just UNDER Edwards' 50% HRR floor: it earns nothing there, real credit under Banister.
+    /// A flat hour just UNDER Edwards' 50% HRmax floor (O6): it earns nothing there, real credit under
+    /// Banister. 93 bpm = 49% of 190 — and 25% HRR against resting 60.
     private func subThresholdHour() -> [HRSample] {
-        let bpm = Int((60.0 + (190.0 - 60.0) * 0.45).rounded())
+        let bpm = Int((190.0 * 0.49).rounded())
         return (0 ..< 3600).map { HRSample(ts: $0, bpm: bpm) }
     }
 
@@ -50,7 +51,8 @@ final class EffortMethodThreadingTests: XCTestCase {
     func testBanisterReachesTheDayScore() {
         let banister = score(.banister)
         XCTAssertNotNil(banister)
-        XCTAssertGreaterThan(banister!, 40.0, "an hour at 45% HRR should score under Banister")
+        // ≈ 28.7 on the shipped constants: 60 min of (0.25·0.64·e^(1.92·0.25) − sedentary floor).
+        XCTAssertGreaterThan(banister!, 20.0, "an hour at 25% HRR should score under Banister")
     }
 
     /// And it reaches the BOUTS inside the day by the same route. A day scored on Banister whose detected

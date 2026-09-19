@@ -867,9 +867,29 @@ struct LiquidTodayView: View {
     private var whoopRestToday: Double? { cloudIsCarried ? nil : cloudSleepScore }
     private var heroCharge: Double? { whoopChargeToday ?? noopCharge ?? displayDay?.recovery ?? cloudDay?.recovery }
     private var heroEffort: Double? {
-        let own = StrainScorer.effectiveEffort(live: selectedDayOffset == 0 ? liveTodayStrain : nil,
-                                               stored: noopEffort ?? displayDay?.strain)
-        return own ?? cloudDay?.strain.map { $0 * WhoopExportImporter.dayStrainToEffortScale }
+        heroOwnEffort ?? cloudDay?.strain.map { $0 * WhoopExportImporter.dayStrainToEffortScale }
+    }
+    /// The app's OWN Effort for the hero (0–100), nil when the ring is falling back to WHOOP's figure.
+    /// Kept apart so the O8 calibration is applied only to a number the app measured — WHOOP's strain is
+    /// already on WHOOP's axis and must not be put through a curve fitted to map ours onto it.
+    private var heroOwnEffort: Double? {
+        StrainScorer.effectiveEffort(live: selectedDayOffset == 0 ? liveTodayStrain : nil,
+                                     stored: noopEffort ?? displayDay?.strain)
+    }
+    /// Today's Effort on WHOOP's 0–21 axis, for comparing with WHOOP's optimal-strain band: the app's own
+    /// Effort through the calibration (linear ×21/100 without one), or WHOOP's own strain when the ring is
+    /// showing that.
+    private var heroEffortStrain21: Double? {
+        if let own = heroOwnEffort { return StrainCalibration.strain21(effort100: own) }
+        return cloudDay?.strain
+    }
+    /// The Effort ring's number. On the WHOOP scale a ring that is showing WHOOP's own strain shows it as
+    /// WHOOP gave it, rather than round-tripping it through ×100/21 and the calibration curve.
+    private var heroEffortText: String {
+        if heroOwnEffort == nil, effortScale == .whoop, let cloud = cloudDay?.strain {
+            return String(format: "%.1f", cloud)
+        }
+        return heroEffort.map { UnitFormatter.effortDisplay($0, scale: effortScale) } ?? "–"
     }
     private var heroRest: Double? { whoopRestToday ?? noopRest ?? restScore ?? cloudSleepScore }
 
@@ -890,12 +910,14 @@ struct LiquidTodayView: View {
             // EFFORT ON THE APP'S 0–100, through the same formatter every Effort read-out uses, so the
             // wearer's scale setting reaches it like everything else.
             HeroScore(id: 2, label: "Effort",
-                      text: heroEffort.map { UnitFormatter.effortDisplay($0, scale: effortScale) } ?? "–",
+                      text: heroEffortText,
                       fraction: heroFraction(heroEffort),
                       tint: StrandPalette.effortColor,
                       // The day's optimal effort ceiling, on the same 0–100, so the arc still reads
-                      // against a target rather than against nothing.
-                      mark: heroFraction(optimalStrainCeiling.map { $0 * WhoopExportImporter.dayStrainToEffortScale })),
+                      // against a target rather than against nothing. Placed through the INVERSE of the
+                      // O8 calibration, so the arc crosses the mark exactly when calibrated strain reaches
+                      // WHOOP's band top (linear ×100/21 without a calibration, as before).
+                      mark: heroFraction(optimalStrainCeiling.map { StrainCalibration.effort100(strain21: $0) })),
         ]
     }
 
@@ -913,11 +935,13 @@ struct LiquidTodayView: View {
         }
     }
 
-    /// Strain on WHOOP's scale. The cloud row already is; a local Effort is 0–100 and is compressed.
+    /// Strain on WHOOP's scale. The cloud row already is; a local Effort is 0–100 and is mapped through the
+    /// wearer's O8 calibration (`StrainCalibration`), which is the old `/ 100 × 21` until ≥ 10 paired days
+    /// exist.
     private var heroStrain21: Double? {
         if let cloud = cloudDay?.strain { return cloud }
         guard let local = effortStrain(displayDay) else { return nil }
-        return local / 100 * whoopStrainMax
+        return min(StrainCalibration.strain21(effort100: local), whoopStrainMax)
     }
 
     /// The top of the day's recommended strain band, on WHOOP's scale.
@@ -1347,7 +1371,8 @@ struct LiquidTodayView: View {
     /// String Catalog entry verbatim — one key serves both Today screens.
     private var effortZeroNote: String? {
         guard EffortDisplay.showsZeroNote(strain: effortStrain(displayDay), isToday: selectedDayOffset == 0) else { return nil }
-        return String(localized: "No cardio load yet. Effort builds once your heart rate climbs into your effort zone (around 50% of your heart-rate reserve). A calm day honestly reads near zero.")
+        // O6: Edwards' zone 1 starts at 50% of max heart rate (it was 50% of the reserve before the fix).
+        return String(localized: "No cardio load yet. Effort builds once your heart rate climbs into your effort zone (around 50% of your max heart rate). A calm day honestly reads near zero.")
     }
 
     private var synthesisSection: some View {
@@ -1832,13 +1857,18 @@ struct LiquidTodayView: View {
     }
 
     /// Raise the day's optimum notice once effort reaches the top of today's recommended band.
+    ///
+    /// O8: compared on WHOOP's OWN axis — the calibrated strain21 against the band's upper bound — because
+    /// the band is WHOOP's and the old ×100/21 of it assumed the two curves share a shape. The texts are
+    /// then put on the wearer's display scale: the target through the inverse calibration, so on the
+    /// 0–21 scale it reads back as exactly the band top.
     private func checkOptimum() {
-        guard selectedDayOffset == 0, let effort = heroEffort,
-              let ceiling = optimalStrainCeiling.map({ $0 * WhoopExportImporter.dayStrainToEffortScale }),
-              ceiling > 0, effort >= ceiling else { return }
+        guard selectedDayOffset == 0, let strain21 = heroEffortStrain21,
+              let ceiling21 = optimalStrainCeiling, ceiling21 > 0, strain21 >= ceiling21 else { return }
+        let ceiling100 = StrainCalibration.effort100(strain21: ceiling21)
         DayAlerts.shared.reachOptimum(
-            effort: UnitFormatter.effortDisplay(effort, scale: effortScale),
-            target: UnitFormatter.effortDisplay(ceiling, scale: effortScale))
+            effort: heroEffortText,
+            target: UnitFormatter.effortDisplay(ceiling100, scale: effortScale))
     }
 
     /// Reads the before/after stress of every recovery session in the list, off the load path.
@@ -1907,6 +1937,9 @@ struct LiquidTodayView: View {
         // A sync only if the last one has gone stale — opening Today is meant to be enough to see a
         // freshly connected account, without a round trip on every appearance.
         await WhoopCloudSync.syncIfStale(repo: repo)
+        // O8: refit the Effort → WHOOP-strain calibration (at most once a day) right after a possible sync,
+        // and before the @State writes below re-render the rings with it.
+        await StrainCalibration.refreshIfDue(repo: repo)
 
         let key = selectedDayKey
         // NOOP's own VO₂max from training, once a day, before anything reads the level.

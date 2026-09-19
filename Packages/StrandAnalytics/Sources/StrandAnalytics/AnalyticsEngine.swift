@@ -418,6 +418,12 @@ public enum AnalyticsEngine {
                                   // `PuffinExperiment.experimentalSleepV2Enabled`, which is default ON
                                   // (#277/#351), so the shipped app stages with V2. (7.0.0)
                                   useSleepStagerV2: Bool = false,
+                                  // The wearer's PERSONAL overnight HR level (nightly-metrics rework), threaded
+                                  // to `SleepStager.detectSleep(sleepHRBaseline:)`: IntelligenceEngine derives
+                                  // it from the trailing banked nights (`SleepStager.trailingSleepHRBaseline`).
+                                  // It can only rescue a night the day-median HR gate would drop. nil (the
+                                  // default, and cold start) keeps the day-median gate alone.
+                                  sleepHRBaseline: Double? = nil,
                                   // Opt-in motion-aware wake refinement (#364 "Proposal 2" follow-up; density
                                   // gate precedent #345). When true, `WakeMotionRefinement` re-derives each
                                   // detected session's stages, reclassifying a hot-but-still WAKE segment to
@@ -493,6 +499,7 @@ public enum AnalyticsEngine {
                                                   tzOffsetSeconds: tzOffsetSeconds, wristOff: wristOff,
                                                   bandSleepState: bandSleepState,
                                                   useSleepStagerV2: useSleepStagerV2,
+                                                  sleepHRBaseline: sleepHRBaseline,
                                                   traceSink: traceSink)
         // Motion-aware wake refinement (#364 follow-up) runs AFTER V1/V2 staging, over every detected
         // session (naps included — the same eligibility gates apply). `steps` is the SAME calendar-day/
@@ -519,8 +526,12 @@ public enum AnalyticsEngine {
                 // that measured a resting HR but no HRV (no R-R banked) would take the short-circuit and
                 // skip the fill every other session gets. The rule is uniform: fill what is missing.
                 guard s.restingHR == nil || s.avgHRV == nil else { return s }
-                let rhr = s.restingHR ?? SleepStager.sessionRestingHR(start: s.start, end: s.end, hr: hr)
-                let hrv = s.avgHRV ?? SleepStager.sessionAvgHRV(start: s.start, end: s.end, rr: rrSorted)
+                // Same stage-aware physiology a detected night gets (nightly-metrics rework): the provided
+                // hypnogram's own deep runs pick the windows.
+                let rhr = s.restingHR ?? SleepStager.sessionSleepRestingHR(start: s.start, end: s.end, hr: hr,
+                                                                           stages: s.stages)
+                let hrv = s.avgHRV ?? SleepStager.sessionAvgHRV(start: s.start, end: s.end, rr: rrSorted,
+                                                                stages: s.stages)
                 // `hrOnly` carried explicitly: unlike Kotlin's `copy`, this rebuilds the struct field by
                 // field, so a new flag is dropped by DEFAULT unless named here. #1884 removed the guard
                 // that used to keep HR-only nights away from this line, so this is now the only thing
@@ -680,7 +691,9 @@ public enum AnalyticsEngine {
         // widen the change's blast radius into the recovery score right at a release boundary for a
         // negligible shift. The Rest/sleep-quality term is main-night; the recovery physiology is
         // day-best-resting, night-dominated. Keep these two definitions distinct on purpose.
-        // Daily resting HR = lowest per-session resting HR across matched sessions.
+        // SUPERSEDED by the nightly-metrics rework (see `mainNightPhysiology` below): resting HR, HRV and
+        // respiration are now main-night too, to match how WHOOP scores them. The history is kept here
+        // because the trade-off it describes (recovery re-baselining) is exactly what that change accepts.
         // #1801/#1884: the sessions whose PHYSIOLOGY is folded into the day's aggregates. Motion-backed
         // sessions are PREFERRED; an HR-only night is used only when the day has no other kind.
         //
@@ -699,23 +712,42 @@ public enum AnalyticsEngine {
         // call site" a scattered filter invites.
         let physiologyOnly = matched.filter { !$0.hrOnly }
         let physiologySessions = physiologyOnly.isEmpty ? matched : physiologyOnly
-        let restingHRDaily = physiologySessions.compactMap { $0.restingHR }.min()
-        // Daily avg HRV = in-bed-weighted mean of per-session avg HRV.
+        // ── MAIN NIGHT ONLY for the nightly physiology (nightly-metrics rework) ──
+        // The #525 NOTE above kept resting HR / HRV / respiration over ALL matched sessions ("day-best
+        // resting"). That is what WHOOP does NOT do, and it cost accuracy: the daily resting HR was the
+        // `.min()` across sessions, so a short low-HR nap replaced the night (#1169), and a nap's windows
+        // diluted the night's HRV and respiration. WHOOP scores these off the main sleep. So they now read
+        // the SAME main-night group the sleep-duration figures use, intersected with the #1801/#1884
+        // physiology preference; a day whose main group holds no physiology-eligible session (a mixed day
+        // whose main block is HR-only) falls back to the longest eligible session, so the day still scores.
+        let mainNightPhysiology: [SleepSession] = {
+            let inGroup = mainGroup.filter { g in physiologySessions.contains(g) }
+            if !inGroup.isEmpty { return inGroup }
+            return physiologySessions.max(by: { ($0.end - $0.start) < ($1.end - $1.start) }).map { [$0] } ?? []
+        }()
+        // Daily resting HR = the PRIMARY (longest) main-night fragment's resting HR — each session's value is
+        // already WHOOP-shaped (last-deep-run mean, `SleepStager.sessionSleepRestingHR`). Longest-wins is the
+        // #1169 `PrimarySessionRestingHR` selection rule; a biphasic night's shorter fragment never replaces
+        // the main one. Falls through to the next-longest fragment only when the longest carries none.
+        let restingHRDaily = mainNightPhysiology.filter { $0.restingHR != nil }
+            .max(by: { ($0.end - $0.start) < ($1.end - $1.start) })?.restingHR
+        // Daily avg HRV = in-bed-weighted mean of the main night's per-session HRV (each already the
+        // last-deep-run value, `SleepStager.sessionAvgHRV(…, stages:)`); a single-block night is its own value.
         let avgHRVDaily: Double? = {
             if deepHrvWindow {
                 // #141: WHOOP-style HRV — pool RMSSD over DEEP-stage 5-min windows only (slow-wave sleep),
                 // instead of the whole-night mean. Reuses the SAME sessionHrvWindows the HRV trace is built
                 // from, so the displayed value equals the `deepOnly` figure the trace logs. rr sorted (RMSSD
                 // = successive diffs). nil when no deep sleep is detected (WHOOP-4.0 staging can be sparse) —
-                // the caller shows calibrating, never a fabricated number.
+                // the caller shows calibrating, never a fabricated number. Main night only, like the default.
                 let rrSorted = rr.sortedByTsStable()
-                let deep = physiologySessions.flatMap { s in
+                let deep = mainNightPhysiology.flatMap { s in
                     SleepStager.sessionHrvWindows(start: s.start, end: s.end, rr: rrSorted, stages: s.stages)
                         .filter { $0.stage == "deep" }.compactMap { $0.rmssd }
                 }
                 return deep.isEmpty ? nil : deep.reduce(0, +) / Double(deep.count)
             }
-            let pairs = physiologySessions.compactMap { s -> (Double, Double)? in
+            let pairs = mainNightPhysiology.compactMap { s -> (Double, Double)? in
                 s.avgHRV.map { ($0, Double(s.end - s.start)) }
             }
             guard !pairs.isEmpty else { return nil }
@@ -765,7 +797,8 @@ public enum AnalyticsEngine {
             let withR = allWin.filter { $0.rmssd != nil }
             let deepW = withR.filter { $0.stage == "deep" }
             let lastSws = SleepStager.lastDeepRun(allWin).filter { $0.rmssd != nil }
-            // `reported` is the value NOOP actually displays (duration-weighted session-mean-of-means);
+            // `reported` is the value NOOP actually displays (main night, each session's last-deep-run
+            // value, duration-weighted across a bridged night's fragments — so it tracks `lastSWS`);
             // `wholeNight` is the pooled-window mean it equals on single-session nights and the apples-to-
             // apples baseline for the deepOnly/lastSWS comparison (all three are pooled window means).
             let reported = avgHRVDaily.map { "\(r2($0))ms" } ?? "nil"
@@ -790,7 +823,7 @@ public enum AnalyticsEngine {
             // `s.avgHRV`, so the gate plays no part in its nil and naming it would be a diagnostic
             // asserting a cause it did not verify. `nDeep` on this same line already explains that case.
             let refused = !deepHrvWindow && avgHRVDaily == nil && !withR.isEmpty
-                && physiologySessions.contains { s in
+                && mainNightPhysiology.contains { s in
                     SleepStager.sessionHrvWindows(start: s.start, end: s.end, rr: rrSorted, stages: [])
                         .contains { $0.rmssd != nil }
                         && SleepStager.sessionAvgHRV(start: s.start, end: s.end, rr: rrSorted) == nil
@@ -800,9 +833,13 @@ public enum AnalyticsEngine {
 
         // Nightly APPROXIMATE respiratory rate (breaths/min) from the R-R stream via
         // RSA. WHOOP5 v18 carries no raw resp ADC, so this is an on-device estimate,
-        // NOT a cloud/clinical respiration value. Per matched in-bed session, estimate
-        // over [start, end]; the night's value = median of finite per-session
-        // estimates; nil only when no session yields a finite estimate.
+        // NOT a cloud/clinical respiration value. MAIN NIGHT ONLY (nightly-metrics rework): the
+        // spectral per-window rates of the main night's sessions (`SleepStager.respRateWindows`, sleep
+        // windows only, tagged by each session's own hypnogram) are POOLED across a bridged night's
+        // fragments, and the night's value is their median — over deep windows when there are enough,
+        // else over every non-wake window (`RespWindowRates.rate`). nil when nothing is measurable. It
+        // used to be the median of per-session whole-window estimates across ALL matched sessions, naps
+        // included, with wake and REM in every window.
         //
         // A DEVICE-MEASURED rate wins over that estimate when the night has one. `vendorResp` carries a
         // strap's own respiratory-rate rows — today the Oura ring's 0x6A `breath`, one value per sleep
@@ -810,15 +847,22 @@ public enum AnalyticsEngine {
         // Preferring it is not a close call: on a ring night the RSA estimate is built from BANKED R-R,
         // where shuffling or reversing the night returns the same 13.3333 bpm — it carries no breathing
         // information at all. A WHOOP night passes no `vendorResp`, so it keeps the RSA path verbatim.
+        // The vendor rows are read over the main night too (the whole main group — a ring night is not
+        // HR-only, so the physiology preference has nothing to choose between).
         let respRateDaily: Double? = {
+            let vendorNight = mainGroup.isEmpty ? matched : mainGroup
             if let vendor = Self.vendorRespRateBpm(vendorResp,
-                                                   sessions: matched.map { (start: $0.start, end: $0.end) }) {
+                                                   sessions: vendorNight.map { (start: $0.start, end: $0.end) }) {
                 return vendor
             }
-            let perSession = matched
-                .map { SleepStager.respRateFromRR(rr, start: $0.start, end: $0.end) }
-                .filter { $0.isFinite }
-            return perSession.isEmpty ? nil : HRVAnalyzer.median(perSession)
+            var pooled = SleepStager.RespWindowRates()
+            for s in mainNightPhysiology {
+                if let w = SleepStager.respRateWindows(rr, start: s.start, end: s.end, stages: s.stages) {
+                    pooled.append(w)
+                }
+            }
+            let rate = pooled.rate
+            return rate.isFinite ? rate : nil
         }()
 
         let sleepStart = matched.map { $0.start }.min()

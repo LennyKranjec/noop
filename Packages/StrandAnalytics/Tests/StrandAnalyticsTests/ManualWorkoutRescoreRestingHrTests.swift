@@ -16,19 +16,26 @@ final class ManualWorkoutRescoreRestingHrTests: XCTestCase {
     private let profile = UserProfile(weightKg: 70, heightCm: 175, age: 35, sex: "male")
     private let hrMax = 190.0
 
-    /// An hour at 148 bpm, 30 s cadence — chosen because the Edwards zone FLIPS with the reserve:
+    /// An hour at 148 bpm, 30 s cadence.
     private func window() -> [HRSample] {
         (0..<120).map { HRSample(ts: $0 * 30, bpm: 148) }
     }
 
-    /// A measured resting of 45 must score the same window strictly higher than the default 60:
-    /// 148 bpm is 71.0% of a 45-resting reserve (zone 3) but 67.7% of a 60-resting one (zone 2).
+    /// The measured resting must still REACH the scorer. Since O6 Edwards is on %HRmax and does not read
+    /// resting HR (148/190 = 77.9% → zone 3 either way), so the threading is proven through Banister,
+    /// which is defined on ΔHRR: 148 bpm is 71.0% of a 45-resting reserve but 67.7% of a 60-resting one.
     func testMeasuredRestingScoresHigherThanTheDefaultForAFitWearer() {
-        let def = ManualWorkoutRescore.scored(windowSamples: window(), profile: profile, hrMax: hrMax)
+        let def = ManualWorkoutRescore.scored(windowSamples: window(), profile: profile, hrMax: hrMax,
+                                              effortMethod: .banister)
         let measured = ManualWorkoutRescore.scored(windowSamples: window(), profile: profile,
-                                                   hrMax: hrMax, restingHR: 45)
+                                                   hrMax: hrMax, restingHR: 45, effortMethod: .banister)
         XCTAssertNotNil(def?.strain); XCTAssertNotNil(measured?.strain)
         XCTAssertGreaterThan(measured!.strain!, def!.strain!)
+        // Edwards: same zone, same score — the resting HR no longer moves it (O6).
+        let edDef = ManualWorkoutRescore.scored(windowSamples: window(), profile: profile, hrMax: hrMax)
+        let edMeasured = ManualWorkoutRescore.scored(windowSamples: window(), profile: profile,
+                                                     hrMax: hrMax, restingHR: 45)
+        XCTAssertEqual(edDef?.strain ?? -1, edMeasured?.strain ?? -2, accuracy: 1e-9)
     }
 
     /// nil keeps the old behaviour byte-for-byte — the cold-start path with no measured resting yet.

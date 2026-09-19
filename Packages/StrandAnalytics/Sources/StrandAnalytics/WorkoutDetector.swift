@@ -313,24 +313,34 @@ public enum WorkoutDetector {
         return out
     }
 
-    /// Per-bout Edwards zone breakdown (%) + mean %HRR. APPROXIMATE.
+    /// Per-bout Edwards zone breakdown (%) + mean %HRR, plus the fraction of samples in Karvonen band 2+
+    /// that the qualification gate reads. APPROXIMATE.
+    ///
+    /// O6: the breakdown is on Edwards' %HRmax zones — the SAME zones the bout's Effort is weighted by, so
+    /// the stored zone chart and the score agree. The gate fraction stays on the pre-O6 %HRR bands
+    /// (`StrainScorer.karvonenBand`) so the Effort fix does not also move which bouts are detected.
     static func boutIntensity(_ hrSeries: [(ts: Int, bpm: Double)],
-                              restingHR: Double, maxHR: Double) -> ([Int: Double], Double?) {
-        if hrSeries.isEmpty || maxHR <= restingHR { return ([:], nil) }
+                              restingHR: Double, maxHR: Double) -> ([Int: Double], Double?, Double) {
+        if hrSeries.isEmpty || maxHR <= restingHR { return ([:], nil, 0) }
         let hrReserve = maxHR - restingHR
         var zoneCounts = [Int: Int]()
         for z in 0...5 { zoneCounts[z] = 0 }
         var hrrVals: [Double] = []
+        var gateCount = 0
         for r in hrSeries {
             let z = StrainScorer.zoneWeight(r.bpm, restingHR: restingHR, hrReserve: hrReserve)
             zoneCounts[z, default: 0] += 1
+            if StrainScorer.karvonenBand(r.bpm, restingHR: restingHR, hrReserve: hrReserve) >= 2 { gateCount += 1 }
             hrrVals.append(StrainScorer.pctHRR(r.bpm, restingHR: restingHR, hrReserve: hrReserve))
         }
         let n = Double(hrSeries.count)
         var zonePct = [Int: Double]()
         for (z, c) in zoneCounts { zonePct[z] = ((Double(c) / n * 100.0) * 10).rounded() / 10 }
         let avgHRR = ((hrrVals.reduce(0, +) / n) * 10).rounded() / 10
-        return (zonePct, avgHRR)
+        // Rounded to 0.1 %, like the per-zone percentages the old gate summed. (It summed four rounded
+        // values; this rounds once — the two can differ by < 0.2 % only for a bout sitting on the line.)
+        let gatePct = ((Double(gateCount) / n * 100.0) * 10).rounded() / 10
+        return (zonePct, avgHRR, gatePct / 100.0)
     }
 
     /// Second-pass merge over raw active runs (#303).
@@ -509,13 +519,14 @@ public enum WorkoutDetector {
 
             var zonePct: [Int: Double] = [:]
             var avgHRR: Double? = nil
+            var z2plus = 0.0
             if let m = effMaxHR, m > restHR {
-                (zonePct, avgHRR) = boutIntensity(core, restingHR: restHR, maxHR: m)
+                (zonePct, avgHRR, z2plus) = boutIntensity(core, restingHR: restHR, maxHR: m)
             }
 
-            // Intensity qualification: require ≥ MIN_INTENSITY_Z2PLUS in zone 2+.
+            // Intensity qualification: require ≥ MIN_INTENSITY_Z2PLUS in (Karvonen) band 2+ — see
+            // `boutIntensity` on why the gate is not on the Edwards %HRmax zones stored below (O6).
             if !zonePct.isEmpty {
-                let z2plus = (2...5).reduce(0.0) { $0 + (zonePct[$1] ?? 0.0) } / 100.0
                 if z2plus < minIntensityZ2Plus { f.droppedLowIntensity += 1; continue }
             }
 

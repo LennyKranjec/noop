@@ -3589,20 +3589,22 @@ struct TodayView: View {
     }
 
     /// When TODAY's Effort scores a genuine near-zero, there's enough HR to score, but it never
-    /// crossed the cardiovascular "effort zone" (~50% of heart-rate reserve), explain the 0 instead
+    /// crossed the cardiovascular "effort zone" (~50% of max heart rate, O6), explain the 0 instead
     /// of leaving a bare number that reads as a fault (#482/#480). A low-HR day honestly earns ~0, the
     /// same as a WHOOP low-strain day; the 5/MG just hits it more often (sparser HR, lower daytime
     /// peaks). Only for today, only when the score is ~0 and a score exists (a no-data ring shows its
     /// own overlay, a past day isn't annotated).
     private var effortZeroNote: String? {
         guard selectedDayOffset == 0, let s = effortStrain(displayDay), s < 1.0 else { return nil }
-        return String(localized: "No cardio load yet. Effort builds once your heart rate climbs into your effort zone (around 50% of your heart-rate reserve). A calm day honestly reads near zero.")
+        // O6: Edwards' zone 1 starts at 50% of max heart rate (it was 50% of the reserve before the fix).
+        return String(localized: "No cardio load yet. Effort builds once your heart rate climbs into your effort zone (around 50% of your max heart rate). A calm day honestly reads near zero.")
     }
 
     /// Strain value to feed the Effort gauge, on the SELECTED display scale (#313). The effective
     /// `strain` is on NOOP's 0–100 Effort axis; `UnitFormatter.effortValue` converts it to the
-    /// user's chosen scale (0–100 native, or ×21/100 down to WHOOP's 0–21) so the arc + number
-    /// match the rest of the app's Effort read-outs. Pairs with `effortGaugeMax` for the "of N".
+    /// user's chosen scale (0–100 native, or WHOOP's 0–21 — through the wearer's O8 calibration when one
+    /// exists, ×21/100 otherwise) so the arc + number match the rest of the app's Effort read-outs. Pairs
+    /// with `effortGaugeMax` for the "of N".
     private func effortGaugeValue(_ d: DailyMetric?) -> Double? {
         effortStrain(d).map { UnitFormatter.effortValue($0, scale: effortScale) }
     }
@@ -4611,6 +4613,9 @@ struct TodayView: View {
     /// `refreshSeq`, which re-fires this task with `live.backfilling` false, and the deferred set runs then.
     /// Values + provenance are byte-identical to the old single-pass `loadAll` whenever each part runs.
     private func loadAll() async {
+        // O8: refit the Effort → WHOOP-strain calibration at most once a day (a defaults read otherwise),
+        // before the day-scoped read repaints the Effort gauge with it.
+        await StrainCalibration.refreshIfDue(repo: repo)
         // Always refresh the selected day (cheap, and it's what a day-switch / return-to-tab needs). Since
         // #860 retired the launch auto-land, this pass no longer changes `selectedDayOffset`, so there's no
         // re-fire to bail for: the history-wide set + the new-day announce run straight through below.

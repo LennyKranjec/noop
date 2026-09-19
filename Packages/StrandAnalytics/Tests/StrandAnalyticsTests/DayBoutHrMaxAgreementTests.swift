@@ -10,10 +10,11 @@ import WhoopProtocol
 /// back to `StrainScorer.estimateHRmax`, which returns `max(observed p99.5, Tanaka)`. So every bout was
 /// measured against a HRmax at least as high as its own day's, and usually higher.
 ///
-/// A higher HRmax is a bigger reserve and therefore a SMALLER %HRR, so bouts were held to a STRICTER
-/// standard than the day they sit inside. At age 30 / RHR 60 with an observed 195 bpm, a 125 bpm minute is
-/// zone 1 for the day and zone 0 for the bout — it counts toward the day total and scores nothing in the
-/// workout. That lands hardest at the 50% floor, which is the whole subject of #1545.
+/// A higher HRmax is a SMALLER %HRmax (and a smaller %HRR), so bouts were held to a STRICTER standard than
+/// the day they sit inside. At age 30 with an observed 195 bpm, a 115 bpm minute is Edwards zone 2 for the
+/// day (61.5% of 187) and zone 1 for the bout (59.0% of 195). Since O6 the Edwards zones are %HRmax; the
+/// detector's qualification gate still uses the Karvonen %HRR bands, which is what the end-to-end case
+/// below exercises.
 ///
 /// Byte-parity twin of Kotlin `DayBoutHrMaxAgreementTest`.
 final class DayBoutHrMaxAgreementTests: XCTestCase {
@@ -22,9 +23,9 @@ final class DayBoutHrMaxAgreementTests: XCTestCase {
     private let rhr = 60.0
     private var tanaka: Double { StrainScorer.tanakaHRmax(age: age) }   // 187 for age 30
 
-    /// The arithmetic the fix is about, stated independently of the engine.
+    /// The arithmetic the fix is about, stated independently of the engine (Edwards on %HRmax, O6).
     private func zoneWeight(_ bpm: Double, _ hrmax: Double) -> Int {
-        let pct = (bpm - rhr) / (hrmax - rhr) * 100.0
+        let pct = bpm / hrmax * 100.0
         if pct >= 90 { return 5 }; if pct >= 80 { return 4 }; if pct >= 70 { return 3 }
         if pct >= 60 { return 2 }; if pct >= 50 { return 1 }
         return 0
@@ -45,14 +46,18 @@ final class DayBoutHrMaxAgreementTests: XCTestCase {
     func testTheSameMinuteSplitsAcrossTheZoneFloor() {
         let boutMax = StrainScorer.estimateHRmax(Array(repeating: 195.0, count: 700), age: age).0
         XCTAssertEqual(boutMax, 195.0, accuracy: 1e-9, "fixture assumes the observed value wins")
-        XCTAssertEqual(zoneWeight(125, tanaka), 1, "day scores it zone 1")
-        XCTAssertEqual(zoneWeight(125, boutMax), 0, "bout scored it zone 0 — the bug")
+        XCTAssertEqual(zoneWeight(115, tanaka), 2, "day scores it zone 2")
+        XCTAssertEqual(zoneWeight(115, boutMax), 1, "bout scored it zone 1 — the bug")
+        // ...and the engine's own table agrees with the statement above.
+        XCTAssertEqual(StrainScorer.zoneWeight(115, restingHR: rhr, hrReserve: tanaka - rhr), 2)
+        XCTAssertEqual(StrainScorer.zoneWeight(115, restingHR: rhr, hrReserve: boutMax - rhr), 1)
     }
 
     /// The fix, end to end — and it is a DETECTION change, not only a scoring one.
     ///
-    /// A 138 bpm bout is 61.4% HRR against the day's Tanaka 187 (zone 2) but 57.8% against an observed
-    /// 195 (zone 1). The detector's z2+ qualification gate needs half the bout in zone 2 or above, so
+    /// A 138 bpm bout is 61.4% HRR against the day's Tanaka 187 (band 2) but 57.8% against an observed
+    /// 195 (band 1). The detector's z2+ qualification gate (still on the Karvonen bands after O6 — see
+    /// `StrainScorer.karvonenBand`) needs half the bout in band 2 or above, so
     /// before the fix this workout was DROPPED — by a standard its own day never applied.
     func testTheDaysHrMaxReachesDetectionAndScoring() {
         let res = AnalyticsEngine.analyzeDay(

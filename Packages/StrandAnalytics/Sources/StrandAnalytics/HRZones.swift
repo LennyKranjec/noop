@@ -13,11 +13,11 @@ import WhoopProtocol
 //   Zone 4 (80–90% HRmax) — hard / threshold
 //   Zone 5 (90–100% HRmax) — maximum
 //
-// NOTE: the Python source (strain.py) uses Karvonen %HRR zones (Edwards 5-zone,
-// 50/60/70/80/90 %HRR) for TRIMP/strain. Those are reproduced faithfully in
-// StrainScorer.swift. This file provides the simpler, age-only %HRmax zone model
-// the task asks for (zones from age, time-in-zone from [HRSample]); it is the
-// "display" zone model and is independent of the HRR-based strain math.
+// NOTE: the Python source (strain.py) applied Edwards' 50/60/70/80/90 cut-offs to Karvonen %HRR.
+// Since O6 StrainScorer applies them to %HRmax, as Edwards published them — the SAME percentages as
+// the display zones here. The two still differ in which HRmax they are handed (StrainScorer gets the
+// resolved Effort HRmax; this file its own age/override/custom boundaries), so they agree only when
+// both see the same HRmax and no custom boundaries are set.
 
 /// A single heart-rate zone defined as a bpm interval [lower, upper).
 public struct HRZone: Equatable, Sendable {

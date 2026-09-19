@@ -109,7 +109,8 @@ final class StrainBanisterDenominatorTests: XCTestCase {
 
     /// The claim under the request: an intermittent session — hard sets with recovery between — is
     /// scored relatively higher by Banister than by Edwards, because Edwards pays **nothing** below 50%
-    /// HRR while Banister's exponential still credits it and weights the peaks far more heavily.
+    /// HRmax (and only zone 1 for the recoveries here) while Banister's exponential weights the peaks far
+    /// more heavily.
     ///
     /// Compared as a RATIO against a steady moderate session of the same length, because the two methods
     /// have different natural magnitudes and comparing raw scores across them would prove nothing.
@@ -137,16 +138,15 @@ final class StrainBanisterDenominatorTests: XCTestCase {
 
     /// The mechanism that actually explains #1545, and it is NOT the exponential weighting of peaks.
     ///
-    /// Edwards pays **zero** below 50% HRR. A session that sits just under that floor — which is what an
-    /// hour of lifting looks like for plenty of people once the sets are averaged against the rests —
-    /// scores literally nothing, no matter how long it lasts. Banister has no floor, so the same hour
-    /// scores in the same range as a moderate walk.
+    /// Edwards pays **zero** below 50% HRmax (O6 — it was 50% HRR before, a far higher line). A session
+    /// that sits just under that floor scores literally nothing, no matter how long it lasts. Banister has
+    /// no floor, so the same hour still scores.
     ///
     /// This is the difference between "the metric under-rates lifting" and "the metric cannot see it at
     /// all", and it is the one worth showing.
     func testASessionBelowTheFiftyPercentFloorScoresNothingUnderEdwards() {
         let rest = 60.0, max = 190.0
-        let bpm = Int((rest + (max - rest) * 0.45).rounded())   // a flat 45% HRR — just under the floor
+        let bpm = Int((max * 0.49).rounded())   // a flat 49% HRmax (93 bpm, 25% HRR) — just under the floor
         let hour = (0 ..< 3600).map { HRSample(ts: $0, bpm: bpm) }
 
         let edwards = StrainScorer.strain(hour, maxHR: max, restingHR: rest, method: .edwards)
@@ -154,6 +154,6 @@ final class StrainBanisterDenominatorTests: XCTestCase {
 
         XCTAssertEqual(edwards, 0.0, "an hour below the floor earns nothing under Edwards, by design")
         XCTAssertNotNil(banister)
-        XCTAssertGreaterThan(banister!, 40.0, "Banister credits the same hour on the 0–100 axis")
+        XCTAssertGreaterThan(banister!, 20.0, "Banister credits the same hour on the 0–100 axis")
     }
 }

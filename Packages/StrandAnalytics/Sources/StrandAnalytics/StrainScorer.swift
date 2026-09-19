@@ -15,18 +15,39 @@ import WhoopProtocol
 //
 // Pipeline:
 //   1. Heart-Rate Reserve (Karvonen): HRR = HRmax − RHR.
-//   2. Per-sample intensity as %HRR = (HR − RHR) / HRR × 100, clamped 0..100.
+//   2. Per-sample intensity: %HRmax = HR / HRmax × 100 (Edwards) and
+//      %HRR = (HR − RHR) / HRR × 100, clamped 0..100 (Banister).
 //   3. TRIMP accumulated over the window:
 //        a. Edwards 5-zone summation (default): sample contributes its zone weight
-//           (1..5 at 50/60/70/80/90 %HRR cut-offs) × duration.
-//        b. Banister exponential: sample contributes duration × x × 0.64 × e^(b·x).
+//           (1..5 at 50/60/70/80/90 %HRmax cut-offs, AS PUBLISHED) × duration.
+//        b. Banister exponential: sample contributes duration × x × 0.64 × e^(b·x), x = ΔHRR.
+//
+//   O6 — EDWARDS ZONES ARE %HRmax, NOT %HRR. The port used to apply Edwards' 50/60/70/80/90 cut-offs
+//   to the heart-rate RESERVE. Edwards (1993) defines them on %HRmax, and the reserve version sits far
+//   higher: age 30 (Tanaka 187) / RHR 50 put zone 1 at 118.5 bpm instead of 93.5, so brisk walking and
+//   most lifting scored ≈0 Effort. The weights now follow the published table. Banister is untouched
+//   (it is DEFINED on ΔHRR). The one consequence worth knowing: under Edwards the resting HR no longer
+//   moves a sample's zone — it only gates validity (HRmax must exceed it). WorkoutDetector's z2+
+//   qualification gate keeps its tuned Karvonen bands (`karvonenBand`), so which bouts are DETECTED
+//   does not move with this fix; only how they are WEIGHTED does.
 //   4. Logarithmic compression onto [0, 100]:
 //        strain = 100 × ln(TRIMP + 1) / ln(D)
 //      D belongs to the METHOD, not to the scorer: Edwards uses `strainDenominator` (7201, from its
 //      sex-independent 7200 ceiling), Banister its own sex-dependent ceiling + 1. See
 //      `logMapDenominator(method:sex:)` — reusing one for the other silently rescales the axis (#1545).
 //
-// References: Karvonen 1957 (%HRR); Edwards 1993 (5-zone TRIMP); Banister 1991
+// Log-map calibration after O6 (age 30, HRmax 187, TRIMP = zone-weighted minutes, D = 7201 unchanged):
+//   easy walk day      (~60 min ≈ 53 %HRmax, w1)            TRIMP ≈  60 → Effort ≈ 46
+//   60-min moderate    (65 %HRmax, w2, + ~30 w1 of the day)  TRIMP ≈ 150 → Effort ≈ 56
+//   hard 90-min        (zones 3–4, + ~30 w1 of the day)      TRIMP ≈ 345 → Effort ≈ 66
+//   The hard day sits in its 60–80 target band; the walk and moderate days sit ABOVE their 5–15 / 25–40
+//   targets. That is a property of ln(TRIMP+1) itself, not of D: the walk:moderate:hard TRIMP ratio is
+//   ~1:2.5:5.8 while those bands want ~1:3:7 on the OUTPUT, which a pure log curve cannot produce (any D
+//   that puts the moderate day at 35 puts the hard day at ~41). D is therefore LEFT at 7201 — moving it
+//   would trade the one band that fits for none — and the 0–21 display is matched to WHOOP per wearer by
+//   the app-side StrainCalibration (`EffortStrainCalibration`) instead of by re-tuning this curve.
+//
+// References: Karvonen 1957 (%HRR); Edwards 1993 (5-zone TRIMP, %HRmax); Banister 1991
 // (exponential TRIMP, b = 1.92 men / 1.67 women); Tanaka 2001 (HRmax = 208 − 0.7×age).
 
 public enum StrainScorer {
@@ -125,7 +146,7 @@ public enum StrainScorer {
     public static let banisterBMen: Double = 1.92
     public static let banisterBWomen: Double = 1.67
 
-    /// Edwards zone cut-offs as (%HRR threshold, weight), highest-first.
+    /// Edwards zone cut-offs as (%HRmax threshold, weight), highest-first (O6 — as published).
     static let edwardsZones: [(threshold: Double, weight: Int)] = [
         (90.0, 5), (80.0, 4), (70.0, 3), (60.0, 2), (50.0, 1),
     ]
@@ -201,7 +222,7 @@ public enum StrainScorer {
         return (0.0, "unknown")
     }
 
-    // MARK: - Karvonen %HRR and Edwards zone weight
+    // MARK: - Karvonen %HRR (Banister) and Edwards %HRmax zone weight
 
     /// Karvonen %HRR, clamped [0, 100].
     static func pctHRR(_ bpm: Double, restingHR: Double, hrReserve: Double) -> Double {
@@ -211,9 +232,27 @@ public enum StrainScorer {
         return pct
     }
 
-    /// Edwards 5-zone weight (0–5) from %HRR (unclamped; extremes agree with
-    /// the clamped path at both ends).
+    /// Edwards 5-zone weight (0–5) from %HRmax (O6).
+    ///
+    /// THE SIGNATURE IS KEPT (restingHR, hrReserve) so every caller — TRIMP, the per-bout zone breakdown,
+    /// the tests — compiles unchanged; HRmax is recovered as restingHR + hrReserve. The resting HR therefore
+    /// cancels out: under Edwards it no longer moves a sample's zone. A non-positive HRmax scores 0.
     static func zoneWeight(_ bpm: Double, restingHR: Double, hrReserve: Double) -> Int {
+        let hrMax = restingHR + hrReserve
+        guard hrMax > 0 else { return 0 }
+        let pct = bpm / hrMax * 100.0
+        for (threshold, weight) in edwardsZones where pct >= threshold { return weight }
+        return 0
+    }
+
+    /// The PRE-O6 band table: the same 50/60/70/80/90 cut-offs applied to Karvonen %HRR (unclamped).
+    ///
+    /// NOT a TRIMP weight any more. Kept ONLY for WorkoutDetector's z2+ qualification gate, whose
+    /// `minIntensityZ2Plus` threshold was tuned against these bands (#148) — moving the gate to %HRmax
+    /// would lower "zone 2" from ~132 to ~112 bpm and start detecting every brisk walk as a workout,
+    /// which is a detection change the Effort-weighting fix was never meant to make.
+    static func karvonenBand(_ bpm: Double, restingHR: Double, hrReserve: Double) -> Int {
+        guard hrReserve > 0 else { return 0 }
         let pct = (bpm - restingHR) / hrReserve * 100.0
         for (threshold, weight) in edwardsZones where pct >= threshold { return weight }
         return 0

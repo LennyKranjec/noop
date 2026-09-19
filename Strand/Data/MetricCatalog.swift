@@ -87,8 +87,9 @@ struct MetricDescriptor: Identifiable, Hashable {
         case "°C":  return UnitFormatter.temperatureDeltaFromCelsius(v, unit: temperature, decimals: decimals)
         default:
             guard isEffort else { return format(v) }
-            // A delta on the 0–100 axis rescales by the same ×21/100 factor (the offset-free `effortValue`).
-            let n = UnitFormatter.effortDisplay(v, scale: effortScale)
+            // A delta on the 0–100 axis rescales by the linear ×21/100 factor — never through the O8
+            // calibration, which is a curve and would bend a magnitude by where it happens to start.
+            let n = UnitFormatter.effortDeltaDisplay(v, scale: effortScale)
             return "\(n) \(displayUnit(effortScale: effortScale))"
         }
     }

@@ -328,8 +328,26 @@ enum UnitFormatter {
     static let effortScaleFactor = 21.0 / 100.0
 
     /// The stored 0–100 Effort value mapped onto the selected display scale (the raw number, no unit).
+    ///
+    /// O8: on the WHOOP scale this goes through the wearer's `StrainCalibration` — a power-law fit of the
+    /// app's own Effort against WHOOP's own day strain over the paired days — so "12.4 of 21" means what
+    /// WHOOP would have said. With no calibration (under 10 paired days, or no WHOOP cloud) it is the old
+    /// linear ×21/100, byte-identical. A calibrated value is clamped to 0…21.
+    ///
+    /// NOT FOR DIFFERENCES: a calibrated map is not linear, so a delta must use `effortDeltaValue`.
     static func effortValue(_ value: Double, scale: EffortScale) -> Double {
+        scale == .whoop ? StrainCalibration.strain21(effort100: value) : value
+    }
+
+    /// A DIFFERENCE between two stored Effort values, on the selected scale. Always the linear ×21/100 on
+    /// the WHOOP scale: a magnitude has no position on the curve for a calibration to act on (O8).
+    static func effortDeltaValue(_ value: Double, scale: EffortScale) -> Double {
         scale == .whoop ? value * effortScaleFactor : value
+    }
+
+    /// `effortDeltaValue`, formatted to one decimal like `effortDisplay`.
+    static func effortDeltaDisplay(_ value: Double, scale: EffortScale) -> String {
+        oneDecimal(effortDeltaValue(value, scale: scale))
     }
 
     /// Format a stored 0–100 Effort value for display on the selected scale, to one decimal — the single
