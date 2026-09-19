@@ -219,7 +219,9 @@ final class RawPhysiologyUnionTests: XCTestCase {
         try registry.add(PairedDevice(id: "whoop-new", brand: "WHOOP", model: "5.0",
             sourceKind: .liveBLE, capabilities: [.hrv], status: .active, addedAt: 2, lastSeenAt: 2))
         let base = Int(Calendar.current.startOfDay(for: Date()).timeIntervalSince1970) + 60
-        let beats = (0..<24).map { RRInterval(ts: base + $0, rrMs: 780 + ($0 % 5) * 10) }
+        // Five minutes of beats: the coach's index is now the median of 5-minute windows, each needing
+        // at least `StressIndex.minBeatsPerWindow` beats, so two dozen beats no longer make a window.
+        let beats = (0..<300).map { RRInterval(ts: base + $0, rrMs: 780 + ($0 % 5) * 10) }
         _ = try await store.insert(Streams(rr: beats), deviceId: "whoop-old")
         let repo = Repository(deviceId: "whoop-new")
         repo.setStoreForTesting(store)
