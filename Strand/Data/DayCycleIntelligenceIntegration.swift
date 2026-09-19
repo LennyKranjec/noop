@@ -7,7 +7,12 @@ import WhoopStore
     static let onsetKey = "day_cycle_onset_ts"
     static let pageSize = 10_000
 
-    struct Night { let daily: DailyMetric; let sleeps: [CachedSleepSession]; let workouts: [ExerciseSession]; let owner: String }
+    struct Night {
+        let daily: DailyMetric; let sleeps: [CachedSleepSession]; let workouts: [ExerciseSession]; let owner: String
+        /// O7: the WAKING resting HR the day's own pass used for energy + Effort (measured daytime floor,
+        /// else sleep RHR + offset). nil → derived here from the sleep RHR the same way.
+        var wakingRestingHr: Double? = nil
+    }
     struct SourcedMarker: Sendable { let deviceId: String; let point: MetricPoint }
     struct BoundaryRecoveryReader {
         let sleepSessions: (String, Int, Int) async throws -> [CachedSleepSession]
@@ -201,15 +206,21 @@ import WhoopStore
                 }
             }
             let cycleHR = hrByTimestamp.values.sorted { $0.ts < $1.ts }
-            let restingHR = nights.first(where: { $0.daily.day == day })?.daily.restingHr.map(Double.init)
-                ?? StrainScorer.defaultRestingHR
+            // O7: the WAKING resting HR (the day pass's own value, else sleep + offset) — the cycle's
+            // Banister Effort and energy must read the same rest the calendar-day pass did.
+            let night = nights.first(where: { $0.daily.day == day })
+            let wakingRHR = night?.wakingRestingHr
+                ?? WakingRestingHR.fromSleep(night?.daily.restingHr.map(Double.init))
+            let restingHR = wakingRHR ?? StrainScorer.defaultRestingHR
             let effectiveMaxHR = StrainScorer.effortHRmax(overrideBpm: maxHROverride, age: profile.age)
             if let strain = StrainScorer.strain(cycleHR, maxHR: effectiveMaxHR,
                                                 restingHR: restingHR, method: effortMethod,
                                                 sex: profile.sex) { strains[day] = strain }
             if !cycleHR.isEmpty {
+                // NEAT only on a KNOWN resting HR (never the 60 default), exactly as the day pass does.
                 calories[day] = Calories.estimateDayCalories(
-                    cycleHR, profile: profile, hrmax: effectiveMaxHR, restingHR: restingHR)
+                    cycleHR, profile: profile, hrmax: effectiveMaxHR, restingHR: restingHR,
+                    includeNEAT: wakingRHR != nil)
             }
             let persistedWorkoutKeys = workouts
                 .filter { $0.startTs >= window.onset && $0.startTs < window.endExclusive }

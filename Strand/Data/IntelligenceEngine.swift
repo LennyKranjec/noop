@@ -510,8 +510,20 @@ final class IntelligenceEngine: ObservableObject {
     static func fitnessAgeRows(
         gateDays: [DailyMetric], age: Int, sex: String, waistCm: Double, heightCm: Double, weightKg: Double,
         computedId: String, satKey: String,
+        // O7: each gate day's MEASURED waking resting HR (`WakingRestingHR.metricKey`), by day. A day
+        // without one falls back to its sleep RHR + the documented offset (`WakingRestingHR.resolve`).
+        wakingRhrByDay: [String: Double] = [:],
     ) -> [MetricPoint] {
+        // The readiness gate still counts SLEEP-RHR nights (what the Health card counts), but the value fed
+        // to Nes / Uth is the WAKING resting HR those formulas were fitted on (O7): the sleep figure runs
+        // ~5–10 bpm lower, which read Fitness Age ~4 years young and VO₂max ~15% high.
         let rhrs = gateDays.compactMap { $0.restingHr }.map(Double.init)
+        let rhrDays = gateDays.filter { $0.restingHr != nil }
+        let wakingDays: [(daytime: Double?, sleep: Double?)] = rhrDays.map { (d: DailyMetric) in
+            let sleep: Double? = d.restingHr.map { Double($0) }
+            return (daytime: wakingRhrByDay[d.day], sleep: sleep)
+        }
+        let wakingRHR: Double? = WakingRestingHR.typical(wakingDays)
         let strains = gateDays.compactMap { $0.strain }.filter { $0 >= 30 }
         let meanStrain = strains.isEmpty ? 0 : strains.reduce(0, +) / Double(strains.count)
         let waist: Double? = waistCm > 0 ? waistCm : nil
@@ -519,10 +531,10 @@ final class IntelligenceEngine: ObservableObject {
             hasAge: age > 0, hasSex: !sex.isEmpty,
             rhrDays: rhrs.count, activityDays: gateDays.compactMap { $0.strain }.count,
             hasHeightWeight: heightCm > 0 && weightKg > 0, hasWaist: waist != nil)
-        guard ready.canCompute,
+        guard ready.canCompute, let wakingRHR,
               let res = FitnessAgeEngine.compute(
                 age: Double(age), sex: sex,
-                restingHR: medianOf(rhrs),
+                restingHR: wakingRHR,
                 paIndex: FitnessAgeEngine.physicalActivityIndexFromStrain(
                     activeDaysPerWeek: strains.count, meanActiveStrain: meanStrain),
                 waistCm: waist) else { return [] }
@@ -531,10 +543,10 @@ final class IntelligenceEngine: ObservableObject {
         // when no waist is set). Fall back to the Uth 2004 HR-ratio estimate (15.3·HRmax/RHR — waist-free,
         // the SAME formula the calorie path already uses), so any user past the age+RHR fitness-age gate gets
         // a (rougher) VO₂max instead of a blank. HRmax via the shared Tanaka estimator (no HR history here →
-        // age-predicted); RHR = the same median the Nes value used. Both persist under "vo2max_est"; the card
-        // labels it "Estimated". Mirrors the Android twin.
+        // age-predicted); RHR = the same WAKING median the Nes value used (O7). Both persist under
+        // "vo2max_est"; the card labels it "Estimated". Mirrors the Android twin.
         let vo2 = res.vo2max
-            ?? Calories.vo2maxFor(hrmax: StrainScorer.estimateHRmax([], age: Double(age)).0, restingHR: medianOf(rhrs))
+            ?? Calories.vo2maxFor(hrmax: StrainScorer.estimateHRmax([], age: Double(age)).0, restingHR: wakingRHR)
         if let v = vo2 { rows.append(MetricPoint(day: satKey, key: "vo2max_est", value: v)) }
         return rows
     }
@@ -571,10 +583,16 @@ final class IntelligenceEngine: ObservableObject {
         let oldestDay = scanKeys.last ?? newestDay
         let gate7 = Array((await repo.dailyMetrics(fromDay: oldestDay, toDay: newestDay))
             .sorted { $0.day < $1.day }.suffix(7))
+        // O7: the stored per-day waking resting HR for the gate days (absent days fall back per day).
+        var wakingByDay: [String: Double] = [:]
+        for p in (try? await store.metricSeries(deviceId: computedId, key: WakingRestingHR.metricKey,
+                                                from: oldestDay, to: newestDay)) ?? [] {
+            wakingByDay[p.day] = p.value
+        }
         let rows = Self.fitnessAgeRows(
             gateDays: gate7, age: profile.age, sex: profile.sex, waistCm: profile.waistCm,
             heightCm: profile.heightCm, weightKg: profile.weightKg, computedId: computedId,
-            satKey: Self.saturdayKey(onOrBefore: newestDay))
+            satKey: Self.saturdayKey(onOrBefore: newestDay), wakingRhrByDay: wakingByDay)
         if !rows.isEmpty {
             try? await store.persistMetricSeriesWithProvenance(
                 points: rows,
@@ -1007,25 +1025,45 @@ final class IntelligenceEngine: ObservableObject {
         // the construction stays a plain value list. Add or reorder here and add or reorder there:
         // `changedConfigField` refuses to name anything when the counts disagree, but it cannot see a
         // REORDER, which would quietly label the wrong field.
-        let dayCacheConfigSig = [
-            String(describing: baselines1.hrv),
-            String(describing: baselines1.restingHR),
-            String(up.age.bitPattern), up.sex, String(up.stepTicksPerStep.bitPattern),
-            maxHR.map { String($0.bitPattern) } ?? "nil",
-            "\(tzOffset)",
-            String(sleepNeedHours.bitPattern),
-            sleepConsistency.map { String($0.bitPattern) } ?? "nil",
-            habitualMidsleepSec.map { "\($0)" } ?? "nil",
-            "\(useSleepStagerV2Global)", "\(useMotionAwareWakeGlobal)", "\(deepHrvWindow)",
-            "\(spo2CandidateDisplayOn)",
+        // Type-checker relief (CI: "unable to type-check this expression in reasonable time"): every
+        // optional-with-fallback and closure-based element is resolved into an explicitly typed `String`
+        // first, so the literal below is a plain `[String]` of names. Same values, same order.
+        let sigHrv: String = String(describing: baselines1.hrv)
+        let sigRhr: String = String(describing: baselines1.restingHR)
+        let sigAge: String = String(up.age.bitPattern)
+        let sigTicks: String = String(up.stepTicksPerStep.bitPattern)
+        let sigMaxHR: String = maxHR.map { (v: Double) -> String in String(v.bitPattern) } ?? "nil"
+        let sigTz: String = "\(tzOffset)"
+        let sigNeed: String = String(sleepNeedHours.bitPattern)
+        let sigConsistency: String = sleepConsistency.map { (v: Double) -> String in String(v.bitPattern) } ?? "nil"
+        let sigMidsleep: String = habitualMidsleepSec.map { (v: Int) -> String in String(v) } ?? "nil"
+        let sigV2: String = "\(useSleepStagerV2Global)"
+        let sigMotionWake: String = "\(useMotionAwareWakeGlobal)"
+        let sigDeep: String = "\(deepHrvWindow)"
+        let sigSpo2: String = "\(spo2CandidateDisplayOn)"
+        let sigEffort: String = "\(effortMethodGlobal)"
+        let sigCycle: String = dayCycleMode.rawValue
+        let sigSleepHR: String = sleepHRBaseline.map { (v: Double) -> String in String(v.bitPattern) } ?? "nil"
+        let dayCacheConfigFieldsList: [String] = [
+            sigHrv,
+            sigRhr,
+            sigAge, up.sex, sigTicks,
+            sigMaxHR,
+            sigTz,
+            sigNeed,
+            sigConsistency,
+            sigMidsleep,
+            sigV2, sigMotionWake, sigDeep,
+            sigSpo2,
             // #1545: MUST be here. The Effort recipe changes every day's strain, so a cached scan
             // produced under one method is stale the moment the user switches — serving it would show a
             // window of days scored by a recipe the user just turned off, with nothing to explain it.
-            "\(effortMethodGlobal)",
-            dayCycleMode.rawValue,
+            sigEffort,
+            sigCycle,
             // Nightly-metrics rework (O1): feeds every day's sleep-detection HR gate.
-            sleepHRBaseline.map { String($0.bitPattern) } ?? "nil",
-        ].joined(separator: "|")
+            sigSleepHR,
+        ]
+        let dayCacheConfigSig: String = dayCacheConfigFieldsList.joined(separator: "|")
         // Drop the whole cache on a config change, then snapshot it into a Sendable `let` for the detached
         // loop (the engine is @MainActor; the loop can't touch `self`). The loop returns the updated cache
         // and we write it back after `.value`.
@@ -1824,6 +1862,12 @@ final class IntelligenceEngine: ObservableObject {
         var primarySessionRHRByDay: [String: Double] = [:]
         // #1169: its coverage inputs (valid-sample count + primary-session duration), same lifetime as the mean.
         var primarySessionRHRCoverageByDay: [String: PrimarySessionRestingHR.Coverage] = [:]
+        // O7: the day's MEASURED waking resting HR (persisted as `WakingRestingHR.metricKey`) and the value
+        // the day's energy/Effort actually used (measured, else sleep + offset — handed to the day-cycle pass).
+        var wakingRhrByDay: [String: Double] = [:]
+        var wakingRhrUsedByDay: [String: Double] = [:]
+        // O10b: the day's active energy proper (NEAT + exercise), persisted beside the TOTAL activeKcalEst.
+        var activeEnergyByDay: [String: Double] = [:]
 
         // Back on the main actor: fold the off-actor results into the pass-2 state in the SAME order the
         // loop produced them. Pure assignment / appends , no further store reads , so this is cheap and the
@@ -1852,6 +1896,9 @@ final class IntelligenceEngine: ObservableObject {
             if let cov = scan.primarySessionRHRCoverage {
                 primarySessionRHRCoverageByDay[res.daily.day] = cov
             }
+            if let v = res.wakingRestingHR { wakingRhrByDay[res.daily.day] = v }
+            if let v = res.wakingRestingHRUsed { wakingRhrUsedByDay[res.daily.day] = v }
+            if let v = res.activeEnergyKcal { activeEnergyByDay[res.daily.day] = v }
             if let line = scan.rhrLine { diagnosticSink?(line, nil) }
             if let line = scan.rhrBinLine { diagnosticSink?(line, nil) }
             if let line = scan.respLine { diagnosticSink?(line, nil) }
@@ -2066,7 +2113,8 @@ final class IntelligenceEngine: ObservableObject {
                     daily: night.daily,
                     sleeps: night.cachedSleep,
                     workouts: night.workouts,
-                    owner: resolvedScoreOwnerByDay[night.daily.day] ?? regActiveId)
+                    owner: resolvedScoreOwnerByDay[night.daily.day] ?? regActiveId,
+                    wakingRestingHr: wakingRhrUsedByDay[night.daily.day])
             },
             editedRows: editedRows,
             store: store,
@@ -2279,6 +2327,15 @@ final class IntelligenceEngine: ObservableObject {
             if let cov = primarySessionRHRCoverageByDay[daily.day] {
                 restPoints.append(MetricPoint(day: daily.day, key: "rhr_primary_session_valid_samples", value: Double(cov.validSamples)))
                 restPoints.append(MetricPoint(day: daily.day, key: "rhr_primary_session_duration_s", value: cov.durationSec))
+            }
+            // O7: the MEASURED waking resting HR (daytime floor), for VO₂max / Fitness Age / energy. Only a
+            // measured value is stored; readers resolve the sleep + offset fallback per day themselves.
+            if let v = wakingRhrByDay[daily.day] {
+                restPoints.append(MetricPoint(day: daily.day, key: WakingRestingHR.metricKey, value: v))
+            }
+            // O10b: active energy proper (NEAT + exercise above BMR). `activeKcalEst` stays the TOTAL.
+            if let v = activeEnergyByDay[daily.day] {
+                restPoints.append(MetricPoint(day: daily.day, key: "active_energy_kcal_est", value: v))
             }
             cachedSleep.append(contentsOf: night.cachedSleep)
             // Persist the detected workouts the pipeline already computes (previously discarded).
@@ -2551,7 +2608,8 @@ final class IntelligenceEngine: ObservableObject {
         let faPts = Self.fitnessAgeRows(
             gateDays: faGate7, age: profile.age, sex: profile.sex, waistCm: profile.waistCm,
             heightCm: profile.heightCm, weightKg: profile.weightKg, computedId: computedId,
-            satKey: IntelligenceEngine.saturdayKey(onOrBefore: newestDay))
+            satKey: IntelligenceEngine.saturdayKey(onOrBefore: newestDay),
+            wakingRhrByDay: wakingRhrByDay)
         if !faPts.isEmpty {
             try? await store.persistMetricSeriesWithProvenance(
                 points: faPts,
@@ -2624,6 +2682,10 @@ final class IntelligenceEngine: ObservableObject {
         // `deviceId` (a MainActor instance `let`) to a local Sendable `String` so the @Sendable detached
         // closure captures the VALUE, never `self`, exactly as FIX 1's `ownerFallbackId`.
         let stepsFallbackId = deviceId
+        // O10a: NOOP's own detected sleep over the scan, so each day's motion volume can MASK it (turning
+        // over in bed is not steps). The computed "-noop" id is where the scoring pass banks its sessions.
+        let stepsSleepId = computedId
+        let stepsScanFrom = (stepsScan.last.map { Int($0.start.timeIntervalSince1970) } ?? now) - 86_400
         // Seed the fold cache from storage on the first pass of the process. Without this the sixty-day
         // fold is re-paid in full after every relaunch — the cache's whole win is a repeat, and a relaunch
         // is a repeat the process boundary hid. Nothing pass-global feeds the fold, so a payload written by
@@ -2650,6 +2712,10 @@ final class IntelligenceEngine: ObservableObject {
                                                          from: calOldest, to: newestDay)) ?? []
             var refSteps: [String: Double] = [:]
             for r in appleRows { if let s = r.steps, s > 0 { refSteps[r.day] = Double(s) } }
+            let sleepSpans: [(start: Int, end: Int)] =
+                ((try? await store.sleepSessions(deviceId: stepsSleepId, from: stepsScanFrom, to: now,
+                                                 limit: 4_000)) ?? [])
+                .map { (start: $0.effectiveStartTs, end: $0.endTs) }
             // Per-day motion volume over the calibration window, read from the owner-resolved strap streams.
             // (Owner resolution mirrors the scoring loop; one device installs resolve to `deviceId`.)
             //
@@ -2675,8 +2741,12 @@ final class IntelligenceEngine: ObservableObject {
                 // has since gained gravity. On a nil fingerprint the cache is bypassed in both directions:
                 // fold fresh, and store nothing under a key that does not describe anything.
                 let fp = try? await store.gravityFingerprint(deviceId: owner, from: dayMid, to: dayEnd)
+                // O10a: the sleep windows touching this day are part of the fold's input, so of its key.
+                let daySleep = sleepSpans.filter { $0.end > dayMid && $0.start <= dayEnd }
+                    .sorted { $0.start < $1.start }
+                let sleepKey = daySleep.map { "\($0.start)-\($0.end)" }.joined(separator: ",")
                 let key = fp.map { StepsMotionCache.cacheKey(owner: owner, gravityCount: $0.count,
-                                                             gravityMaxTs: $0.maxTs) }
+                                                             gravityMaxTs: $0.maxTs, sleepKey: sleepKey) }
                 let m: Double
                 if let key, let cached = motionCacheLocal[dayKey], cached.key == key {
                     m = cached.motion
@@ -2688,7 +2758,7 @@ final class IntelligenceEngine: ObservableObject {
                     // stale zero feeding the step estimate for the life of the process.
                     let gravRead = try? await store.gravitySamples(deviceId: owner, from: dayMid, to: dayEnd,
                                                                    limit: 200_000)
-                    m = StepsEstimateEngine.dayMotionIntensity(gravRead ?? [])
+                    m = StepsEstimateEngine.dayMotionIntensity(gravRead ?? [], excluding: daySleep)
                     motionFolded += 1
                     // A ZERO fold from a read that SUCCEEDED is cached. Storing only the days that moved
                     // would leave every unworn gap re-reading its whole stream on every pass to rediscover
@@ -2731,8 +2801,14 @@ final class IntelligenceEngine: ObservableObject {
         // reporter to enter Apple Health steps by hand expecting calibration to start, which it cannot.
         profile.stepsHasBankedMotion = !motionByDay.isEmpty
         // Build calibration points only for days with BOTH a motion volume and a real phone step count.
+        // O10a: NEVER today. Its motion is a partial day read NOW, its phone total whatever the phone had
+        // synced at some OTHER moment — the two describe different spans of the day, so the pair's ratio is
+        // noise. Today still gets an estimate below; it just never teaches `k`.
+        let stepsTodayKey = stepsScan.first.map {
+            AnalyticsEngine.dayString(Int($0.start.timeIntervalSince1970), offsetSec: $0.utcOffsetSeconds)
+        } ?? AnalyticsEngine.dayString(nowLocalMidnight, offsetSec: tzOffset)
         let calPoints = motionByDay.compactMap { (day, motion) -> StepsEstimateEngine.CalibrationPoint? in
-            guard let s = refStepsByDay[day] else { return nil }
+            guard day != stepsTodayKey, let s = refStepsByDay[day] else { return nil }
             return StepsEstimateEngine.CalibrationPoint(motion: motion, steps: s)
         }
         if let cal = StepsEstimateEngine.calibrate(calPoints, manualOverride: profile.stepsManualOverride) {
@@ -2933,7 +3009,8 @@ final class IntelligenceEngine: ObservableObject {
         // (`for dayWindow in scanDays`, newest first; see `localDayScan`), so out[0] is
         // today and the tail is the oldest day in the window. Taking the last match would have scored
         // today's workout against a resting HR up to `maxDays` old.
-        let measuredResting = out.first(where: { $0.rhr != nil })?.rhr.map(Double.init)
+        // O7: the WAKING resting HR (sleep + the documented offset), the same the manual save uses.
+        let measuredResting = WakingRestingHR.fromSleep(out.first(where: { $0.rhr != nil })?.rhr.map(Double.init))
         await rescoreManualWorkouts(store: store, profile: up, restingHR: measuredResting,
                                     effortMethod: effortMethodGlobal)
 

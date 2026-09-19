@@ -32,8 +32,25 @@ final class Vo2maxFallbackTests: XCTestCase {
     func testNoWaistFallsBackToUthHrRatioEstimate() {
         let vo2 = vo2maxEst(waistCm: 0)   // no waist → Nes value is nil
         XCTAssertNotNil(vo2, "without a waist, VO₂max must still be offered via the Uth fallback")
-        // Uth: 15.3 × Tanaka(40)=180 / RHR 60 = 45.9
-        XCTAssertEqual(vo2!, 15.3 * StrainScorer.tanakaHRmax(age: 40) / 60.0, accuracy: 1e-6)
+        // Uth: 15.3 × Tanaka(40)=180 / the WAKING rest (O7): sleep RHR 60 + the 6 bpm offset = 66.
+        XCTAssertEqual(vo2!, 15.3 * StrainScorer.tanakaHRmax(age: 40) / 66.0, accuracy: 1e-6)
+    }
+
+    /// O7: a MEASURED daytime waking rest wins over the sleep + offset fallback, day by day, and the
+    /// value fed to Uth / Nes is the median of the resolved days.
+    func testMeasuredWakingRestFeedsTheEstimate() {
+        let days = gate(60)
+        var waking: [String: Double] = [:]
+        for d in days.prefix(4) { waking[d.day] = 70 }   // 4 measured @70, 3 fallback @66 → median 70
+        let rows = IntelligenceEngine.fitnessAgeRows(
+            gateDays: days, age: 40, sex: "male", waistCm: 0, heightCm: 175, weightKg: 80,
+            computedId: "my-whoop-noop", satKey: "2026-08-15", wakingRhrByDay: waking)
+        let vo2 = rows.first { $0.key == "vo2max_est" }?.value
+        XCTAssertEqual(vo2 ?? 0, 15.3 * StrainScorer.tanakaHRmax(age: 40) / 70.0, accuracy: 1e-6)
+        let fa = rows.first { $0.key == "fitness_age" }?.value
+        let paIndex = FitnessAgeEngine.physicalActivityIndexFromStrain(activeDaysPerWeek: 7, meanActiveStrain: 50)
+        XCTAssertEqual(fa ?? 0, FitnessAgeEngine.fitnessAge(age: 40, sex: "male", restingHR: 70, paIndex: paIndex),
+                       accuracy: 1e-6)
     }
 
     func testWaistSetUsesTheNesWaistBasedEstimate() {
@@ -42,7 +59,7 @@ final class Vo2maxFallbackTests: XCTestCase {
         let paIndex = FitnessAgeEngine.physicalActivityIndexFromStrain(activeDaysPerWeek: 7, meanActiveStrain: 50)
         // With a waist the persisted value is the Nes waist-based estimate…
         XCTAssertEqual(nes, FitnessAgeEngine.estimateVO2max(age: 40, sex: "male", waistCm: 90,
-                                                            restingHR: 60, paIndex: paIndex), accuracy: 1e-6)
+                                                            restingHR: 66, paIndex: paIndex), accuracy: 1e-6)
         // …and it differs from the Uth HR-ratio fallback.
         XCTAssertGreaterThan(abs(nes - uth), 0.01)
     }

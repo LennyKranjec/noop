@@ -936,7 +936,10 @@ final class AppModel: ObservableObject {
         // Effort and the manual rescore (#972) already thread this, so the stored number used to
         // disagree with its own re-score. Read once here, at save time; the live readout during the
         // session is a transient running estimate and deliberately left alone.
-        let restingHR = repo.today?.restingHr.map(Double.init) ?? StrainScorer.defaultRestingHR
+        // O7: the WAKING resting HR (sleep RHR + the documented offset here, synchronously) — Karvonen
+        // %HRR and the Keytel gate were fitted on a waking rest, and the manual rescore reads the same.
+        let restingHR = WakingRestingHR.fromSleep(repo.today?.restingHr.map(Double.init))
+            ?? StrainScorer.defaultRestingHR
         let strain = samples.count >= 2
             ? StrainScorer.strain(samples, maxHR: Double(profile.hrMax),
                                   restingHR: restingHR,

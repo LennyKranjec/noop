@@ -16,6 +16,40 @@ final class StepsEstimateEngineTests: XCTestCase {
         XCTAssertEqual(StepsEstimateEngine.dayMotionIntensity(grav), 0.7, accuracy: 1e-9)
     }
 
+    // MARK: motion intensity: cadence normalisation + sleep mask (O10a)
+
+    /// The same oscillating 10 minutes read at 1 Hz and at one sample per 30 s must give comparable
+    /// volumes (1 Hz-equivalent units) — not a 30x smaller one for the sparse stream.
+    func testMotionIntensityIsCadenceInvariant() {
+        let dense = (0..<600).map { GravitySample(ts: $0, x: Double($0 % 2) * 0.5, y: 0, z: 1) }
+        let sparse = stride(from: 0, to: 600, by: 30).enumerated().map {
+            GravitySample(ts: $0.element, x: Double($0.offset % 2) * 0.5, y: 0, z: 1)
+        }
+        let d = StepsEstimateEngine.dayMotionIntensity(dense)
+        let s = StepsEstimateEngine.dayMotionIntensity(sparse)
+        XCTAssertEqual(d, 599 * 0.5, accuracy: 1e-9, "a 1 Hz stream is the plain sum, as before")
+        XCTAssertEqual(s, 19 * 0.5 * 30, accuracy: 1e-9, "each sparse delta spans 30 one-second steps")
+        XCTAssertEqual(s, d, accuracy: d * 0.06)
+    }
+
+    /// A wear gap is credited at most one cadence step, never its whole length.
+    func testMotionIntensityGapIsCappedAtTheCadence() {
+        var grav = (0..<300).map { GravitySample(ts: $0, x: 0, y: 0, z: 1) }
+        grav.append(GravitySample(ts: 10_000, x: 0.3, y: 0, z: 1))   // 2.7 h later, one 0.3 g jump
+        XCTAssertEqual(StepsEstimateEngine.dayMotionIntensity(grav), 0.3, accuracy: 1e-9)
+    }
+
+    /// Deltas touching a detected sleep window are dropped: tossing in bed is not steps.
+    func testMotionIntensityMasksSleep() {
+        let grav = (0..<600).map { GravitySample(ts: $0, x: Double($0 % 2) * 0.5, y: 0, z: 1) }
+        let all = StepsEstimateEngine.dayMotionIntensity(grav)
+        let masked = StepsEstimateEngine.dayMotionIntensity(grav, excluding: [(start: 0, end: 300)])
+        // Deltas (i-1, i) survive only when both samples are awake: i-1 ≥ 300, i.e. 299 deltas.
+        XCTAssertEqual(masked, 299 * 0.5, accuracy: 1e-9)
+        XCTAssertLessThan(masked, all)
+        XCTAssertEqual(StepsEstimateEngine.dayMotionIntensity(grav, excluding: []), all, accuracy: 1e-12)
+    }
+
     func testMotionIntensityEmptyAndSingle() {
         XCTAssertEqual(StepsEstimateEngine.dayMotionIntensity([]), 0)
         XCTAssertEqual(StepsEstimateEngine.dayMotionIntensity([GravitySample(ts: 0, x: 0, y: 0, z: 1)]), 0)

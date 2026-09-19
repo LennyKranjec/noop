@@ -420,9 +420,14 @@ public enum WorkoutDetector {
     ///   - maxHR: HRmax (bpm). nil → estimated via StrainScorer.estimateHRmax.
     ///   - age: used only for the Tanaka fallback when maxHR is nil.
     ///   - profile: when provided, per-bout calories are estimated.
+    ///   - wakingRestingHR: the WAKING resting HR (O7, `WakingRestingHR`) for each bout's Keytel
+    ///     calories and its Effort (the Banister %HRR). nil → `restingHR`'s resolved value, i.e. the
+    ///     pre-O7 behaviour. DETECTION itself (the HR floor and the Karvonen z2+ gate, both tuned on the
+    ///     sleep figure, #148) keeps `restingHR`.
     public static func detect(hr: [HRSample],
                               gravity: [GravitySample],
                               restingHR: Double? = nil,
+                              wakingRestingHR: Double? = nil,
                               maxHR: Double? = nil,
                               age: Double? = nil,
                               profile: UserProfile? = nil,
@@ -448,6 +453,8 @@ public enum WorkoutDetector {
         if hrSeg.isEmpty || motion.isEmpty { return [] }
 
         let restHR = restingHR ?? deriveRestingHR(hrSeg)
+        // O7: energy + Effort read the WAKING rest; detection gates stay on `restHR`.
+        let energyRestHR = wakingRestingHR ?? restHR
         let hrFloor = restHR + hrMarginBPM
         f.restingHR = restHR
         f.hrFloor = hrFloor
@@ -544,14 +551,14 @@ public enum WorkoutDetector {
             var kj: Double? = nil
             if let profile = profile {
                 let (k, j) = Calories.estimateBoutCalories(hrSamples, profile: profile,
-                                                           hrmax: effMaxHR, restingHR: restHR)
+                                                           hrmax: effMaxHR, restingHR: energyRestHR)
                 kcal = k; kj = j
             }
 
             guard !bpms.isEmpty else { f.droppedNoHR += 1; continue }   // degenerate bout, no HR samples
             let avg = bpms.reduce(0, +) / Double(bpms.count)
             let peak = Int(bpms.max()!.rounded())
-            let strain = StrainScorer.strain(hrSamples, maxHR: effMaxHR, restingHR: restHR,
+            let strain = StrainScorer.strain(hrSamples, maxHR: effMaxHR, restingHR: energyRestHR,
                                              method: effortMethod, sex: profile?.sex ?? "male")
 
             sessions.append(ExerciseSession(
@@ -590,14 +597,20 @@ public enum WorkoutDetector {
 public enum Calories {
 
     /// Whole-day energy split. `restingKcal` is the BMR contribution over supported sample intervals;
-    /// `activeKcal` is energy above that resting floor during supported high-HR intervals.
-    /// `totalKcal` is the backward-compatible value persisted in `DailyMetric.activeKcalEst`.
+    /// `activeKcal` is the EXERCISE energy above that resting floor during supported intervals at or above
+    /// the 50% HRR gate; `neatKcal` is the NON-EXERCISE activity energy above the resting floor between
+    /// the waking resting HR and that gate (0 unless NEAT was requested, see `estimateDayEnergy`).
+    /// `totalKcal` is the TOTAL daily energy (resting + NEAT + exercise), the backward-compatible value
+    /// persisted in `DailyMetric.activeKcalEst` — despite that field's name it has always been the total,
+    /// not "active" energy. `aboveRestingKcal` is the active-energy figure proper (NEAT + exercise).
     public struct DayEnergyEstimate: Equatable, Sendable {
         public let restingKcal: Double
         public let activeKcal: Double
         public let observedSeconds: Double
+        public var neatKcal: Double = 0
 
-        public var totalKcal: Double { restingKcal + activeKcal }
+        public var totalKcal: Double { restingKcal + neatKcal + activeKcal }
+        public var aboveRestingKcal: Double { neatKcal + activeKcal }
     }
 
     struct Coeffs {
@@ -647,6 +660,15 @@ public enum Calories {
     /// Keytel is appropriate for a real detected/manual workout — but the day path raises
     /// the gate to 50% HRR so the gross rate only applies at genuine exercise-level HR.
     static let dayActiveHRRFraction = 0.50
+    /// NEAT ceiling (O10b), as a multiple of the resting (BMR) rate ADDED at the 50% HRR gate. Below the
+    /// gate the day path used to credit nothing but BMR, so every walk, errand and hour on your feet was
+    /// zero — a sedentary-looking day read as ≈ BMR, well under a real total. NEAT now ramps LINEARLY
+    /// from 0 at the waking resting HR to `neatMaxBMRMultiple` × BMR at the gate: a seated minute a few
+    /// bpm above rest earns ~0.1–0.3 × BMR extra (≈ the 1.3–1.5 MET of sitting), and light activity just
+    /// under the gate ~2× BMR extra (≈ 3 MET, the light/moderate boundary). Deliberately CONSERVATIVE —
+    /// it sits under the Keytel rate at the gate, so crossing the gate is still the bigger step, and a
+    /// typical desk day gains a few hundred kcal rather than the ~1000 the old 30% gate over-counted.
+    public static let neatMaxBMRMultiple = 2.0
     /// Longest gap over which one daily HR reading may carry RESTING energy.
     ///
     /// Resting metabolism continues across a dropout, so a reading may carry the BMR rate into the gap
@@ -773,12 +795,18 @@ public enum Calories {
     /// flat 1 s for a reading on a gappy day, but never a whole disconnect. Thus a 30 s sparse stream
     /// and a 1 Hz stream covering the same activity produce comparable energy.
     ///
+    /// `restingHR` is the WAKING resting HR (`WakingRestingHR`): it sets the 50% HRR gate, the Uth VO₂max
+    /// the fitness-adjusted Keytel reads, and the bottom of the NEAT ramp. With `includeNEAT` (and a known
+    /// `restingHR`) the sub-gate intervals also earn NEAT — see `neatMaxBMRMultiple`. Off by default so
+    /// every existing caller and the Android parity vectors stay byte-identical.
+    ///
     /// This is an on-device estimate from heart rate alone — NOT laboratory calorimetry, NOT
     /// Apple/WHOOP cloud parity, NOT medical advice.
     public static func estimateDayEnergy(_ hrSamples: [HRSample],
                                          profile: UserProfile,
                                          hrmax: Double?,
-                                         restingHR: Double?) -> DayEnergyEstimate {
+                                         restingHR: Double?,
+                                         includeNEAT: Bool = false) -> DayEnergyEstimate {
         if hrSamples.isEmpty {
             return DayEnergyEstimate(restingKcal: 0, activeKcal: 0, observedSeconds: 0)
         }
@@ -824,6 +852,11 @@ public enum Calories {
         let restingKcal = restingRate * observedSeconds
 
         var activeKcal = 0.0
+        var neatKcal = 0.0
+        // NEAT only with a KNOWN resting HR: the 60 bpm default is no one's floor, and a ramp anchored on
+        // it would credit or withhold light activity arbitrarily.
+        let neatFloor: Double? = (includeNEAT && restingHR != nil && activeThreshold > effResting)
+            ? effResting : nil
         for i in ordered.indices {
             let durationS: Double
             // Active carry is capped at the INFERRED CADENCE, not at the wider resting cap. A 30 s
@@ -839,21 +872,31 @@ public enum Calories {
                 durationS = nominalSampleS
             }
             let bpm = Double(ordered[i].bpm)
-            guard bpm >= activeThreshold else { continue }
+            guard bpm >= activeThreshold else {
+                // NEAT ramp: 0 at the waking resting HR → neatMaxBMRMultiple × BMR at the gate. Same
+                // cadence-capped duration as the exercise carry, so a gap is never credited as activity.
+                if let neatLo = neatFloor, bpm > neatLo {
+                    let frac = (bpm - neatLo) / (activeThreshold - neatLo)
+                    neatKcal += restingRate * neatMaxBMRMultiple * frac * durationS
+                }
+                continue
+            }
             let grossRate = activeKcalPerS(coeffs, hr: bpm, hrmax: effHRmax,
                                            weightKg: weightKg, age: age, vo2max: vo2max)
             activeKcal += max(0.0, grossRate - restingRate) * durationS
         }
         return DayEnergyEstimate(restingKcal: restingKcal, activeKcal: activeKcal,
-                                 observedSeconds: observedSeconds)
+                                 observedSeconds: observedSeconds, neatKcal: neatKcal)
     }
 
-    /// Backward-compatible total-kcal facade for the stored daily metric.
+    /// Backward-compatible TOTAL-kcal facade (resting + NEAT + exercise) for the stored daily metric
+    /// (`DailyMetric.activeKcalEst`, which despite its name holds the total).
     public static func estimateDayCalories(_ hrSamples: [HRSample],
                                            profile: UserProfile,
                                            hrmax: Double?,
-                                           restingHR: Double?) -> Double {
+                                           restingHR: Double?,
+                                           includeNEAT: Bool = false) -> Double {
         estimateDayEnergy(hrSamples, profile: profile, hrmax: hrmax,
-                          restingHR: restingHR).totalKcal
+                          restingHR: restingHR, includeNEAT: includeNEAT).totalKcal
     }
 }

@@ -58,7 +58,7 @@ final class StepsMotionCacheTests: XCTestCase {
     /// the header, the separators or the number rendering is caught here rather than by a user whose folds
     /// silently stopped being reused after an update.
     static let vector = """
-    stepsMotion v1
+    stepsMotion v2
     2026-09-01\tmy-whoop|8640|1757000000\t4659742922898407424
     2026-09-02\tmy-whoop|0|0\t0
     """
@@ -103,7 +103,7 @@ final class StepsMotionCacheTests: XCTestCase {
     /// whose gravity has not moved keys identically across an app update — without the header check the
     /// pre-update volume would be served until that day's stream happened to change.
     func testOlderFoldVersionIsDiscarded() {
-        let stale = Self.vector.replacingOccurrences(of: "stepsMotion v1", with: "stepsMotion v0")
+        let stale = Self.vector.replacingOccurrences(of: "stepsMotion v2", with: "stepsMotion v1")
         XCTAssertTrue(StepsMotionCache.deserialize(stale).isEmpty)
     }
 
@@ -119,7 +119,7 @@ final class StepsMotionCacheTests: XCTestCase {
     /// truncated, not the whole window.
     func testMalformedLinesAreSkippedIndividually() {
         let raw = """
-        stepsMotion v1
+        stepsMotion v2
         2026-09-01\tmy-whoop|8640|1757000000\t4659742922898407424
         2026-09-02\tmissing-a-field
         2026-09-03\tmy-whoop|1|2\tnot-a-number
@@ -135,7 +135,7 @@ final class StepsMotionCacheTests: XCTestCase {
     /// The writer prunes to the calibration window every pass, so a payload far above it did not come from
     /// this cache. Rejecting it whole keeps a hand-edited or corrupt store from being parsed at length.
     func testImplausiblyLargePayloadIsRejected() {
-        var raw = "stepsMotion v1"
+        var raw = "stepsMotion v2"
         for i in 0...513 { raw += "\nday-\(i)\tmy-whoop|1|2\t0" }
         XCTAssertTrue(StepsMotionCache.deserialize(raw).isEmpty)
     }

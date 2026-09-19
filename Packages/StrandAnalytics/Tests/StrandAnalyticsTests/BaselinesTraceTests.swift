@@ -29,8 +29,8 @@ final class BaselinesTraceTests: XCTestCase {
     func testSeedNamesThatOneNightFixesTheCentre() {
         XCTAssertEqual(
             Baselines.updateTrace(nil, value: 60.0, cfg: hrv, metric: "hrv").lines[0],
-            "baseline hrv night=seed value=60.0 spread starts at floor=5.0 "
-            + "(this ONE night fixes the centre) -> mean=60.0 spread=5.0 nValid=1 status=calibrating")
+            "baseline hrv night=seed value=60.0 spread starts at prior=5.75 (floor=5.0) "
+            + "(this ONE night fixes the centre) -> mean=60.0 spread=5.75 nValid=1 status=calibrating")
     }
 
     /// A first night with no usable value seeds the MIDPOINT and leaves nValid at 0 — not a skip.
@@ -46,7 +46,7 @@ final class BaselinesTraceTests: XCTestCase {
         XCTAssertEqual(
             Baselines.updateTrace(s, value: nil, cfg: hrv, metric: "hrv").lines[0],
             "baseline hrv night=missing skip-and-hold nightsSinceUpdate=1 "
-            + "-> mean=60.0 spread=5.0 nValid=1 status=calibrating")
+            + "-> mean=60.0 spread=5.75 nValid=1 status=calibrating")
     }
 
     func testImplausibleNightNamesTheBounds() {
@@ -54,7 +54,7 @@ final class BaselinesTraceTests: XCTestCase {
         XCTAssertEqual(
             Baselines.updateTrace(s, value: 999.0, cfg: hrv, metric: "hrv").lines[0],
             "baseline hrv night=implausible value=999.0 bounds=5.0..250.0 skip-and-hold "
-            + "nightsSinceUpdate=1 -> mean=60.0 spread=5.0 nValid=1 status=calibrating")
+            + "nightsSinceUpdate=1 -> mean=60.0 spread=5.75 nValid=1 status=calibrating")
     }
 
     /// While young the fold uses the fast half-life and the inflated Winsor band; the line says so.
@@ -62,9 +62,9 @@ final class BaselinesTraceTests: XCTestCase {
         let s = Baselines.updateTrace(nil, value: 60.0, cfg: hrv, metric: "hrv").state
         XCTAssertEqual(
             Baselines.updateTrace(s, value: 70.0, cfg: hrv, metric: "hrv").lines[0],
-            "baseline hrv night=folded value=70.0 young=yes effSpread=12.5 halfLifeB=3.0 "
-            + "winsor=22.5..97.5 clamped=no spread 5.0->5.1 atFloor=no "
-            + "-> mean=62.06 spread=5.1 nValid=2 status=calibrating")
+            "baseline hrv night=folded value=70.0 young=yes effSpread=14.37 halfLifeB=3.0 "
+            + "winsor=16.9..103.1 clamped=no spread 5.75->6.44 from=sample(n=2) atFloor=no "
+            + "-> mean=62.06 spread=6.44 nValid=2 status=calibrating")
     }
 
     /// A hard outlier is "seen, NOT folded" — the case that otherwise leaves no trace at all.
@@ -81,8 +81,20 @@ final class BaselinesTraceTests: XCTestCase {
         XCTAssertEqual(
             Baselines.updateTrace(settled, value: 66.0, cfg: hrv, metric: "hrv").lines[0],
             "baseline hrv night=folded value=66.0 young=no effSpread=5.0 halfLifeB=14.0 "
-            + "winsor=45.0..75.0 clamped=no spread 5.0->5.02 atFloor=no "
-            + "-> mean=60.29 spread=5.02 nValid=11 status=provisional")
+            + "winsor=45.0..75.0 clamped=no spread 5.0->5.0 from=sample(n=11) atFloor=yes "
+            + "-> mean=60.29 spread=5.0 nValid=11 status=provisional")
+    }
+
+    /// Past the cold start (nValid >= coldStartNights) the EWMA owns the spread, and the night's
+    /// deviation is measured against the OLD centre: |66 − 60| = 6, not |66 − 60.29|.
+    func testFoldedPastColdStartUsesTheEwmaAgainstTheOldCentre() {
+        let settled = Baselines.foldHistoryTrace(Array(repeating: 60.0, count: 14), cfg: hrv, metric: "hrv").state
+        XCTAssertTrue(settled.coldStartSample.isEmpty, "the sample is dropped at the hand-over")
+        XCTAssertEqual(
+            Baselines.updateTrace(settled, value: 66.0, cfg: hrv, metric: "hrv").lines[0],
+            "baseline hrv night=folded value=66.0 young=no effSpread=5.0 halfLifeB=14.0 "
+            + "winsor=45.0..75.0 clamped=no spread 5.0->5.03 atFloor=no "
+            + "-> mean=60.29 spread=5.03 nValid=15 status=trusted")
     }
 
     /// The reason this file exists: a flat history leaves the spread ON its floor for as long as you

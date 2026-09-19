@@ -56,8 +56,12 @@ extension Baselines {
                                + "(bounds=\(r2(cfg.minVal))..\(r2(cfg.maxVal))) "
                                + "seeded at midpoint, nValid stays 0 \(stateSuffix)"])
             }
+            // A cfg with a cold-start prior starts the spread at max(floor, prior), not on the floor.
+            let spreadStart = cfg.coldStartPriorCV == nil
+                ? "floor=\(r2(cfg.floorSpread))"
+                : "prior=\(r2(next.spread)) (floor=\(r2(cfg.floorSpread)))"
             return (next, ["\(head) night=seed value=\(r2(v)) "
-                           + "spread starts at floor=\(r2(cfg.floorSpread)) "
+                           + "spread starts at \(spreadStart) "
                            + "(this ONE night fixes the centre) \(stateSuffix)"])
         }
 
@@ -93,12 +97,16 @@ extension Baselines {
         // `update` floors the spread with max(cfg.floorSpread, ...); report when that floor is what won,
         // since a spread sitting on its floor is indistinguishable from a settled one in every other log.
         let atFloor = next.spread <= cfg.floorSpread
+        // Same predicate `update` uses to pick the sample-spread cold start over the EWMA (O9).
+        let fromSample = cfg.coldStartPriorCV != nil && usesColdStartSpread(state)
 
         return (next, ["\(head) night=folded value=\(r2(value)) young=\(yn(isYoung)) "
                        + "effSpread=\(r2(effSpread)) halfLifeB=\(r2(effHalfLifeB)) "
                        + "winsor=\(r2(lo))..\(r2(hi)) clamped=\(yn(wasClamped))"
                        + (wasClamped ? " to=\(r2(clamped))" : "")
-                       + " spread \(r2(state.spread))->\(r2(next.spread)) atFloor=\(yn(atFloor)) \(stateSuffix)"])
+                       + " spread \(r2(state.spread))->\(r2(next.spread))"
+                       + (fromSample ? " from=sample(n=\(state.nValid + 1))" : "")
+                       + " atFloor=\(yn(atFloor)) \(stateSuffix)"])
     }
 
     /// Replay an ordered history (oldest first) through `updateTrace`, returning the final state and one

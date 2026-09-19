@@ -40,8 +40,13 @@ public enum StepsMotionCache {
     ///   moves one of the two. Deliberately NOT the wider `dayStreamFingerprint`: that also counts HR, R-R,
     ///   respiration, SpO2, steps, skin temp and sleep state, so an ordinary HR offload would invalidate a
     ///   motion volume that cannot have changed by it.
-    public static func cacheKey(owner: String, gravityCount: Int, gravityMaxTs: Int) -> String {
-        "\(owner)|\(gravityCount)|\(gravityMaxTs)"
+    ///
+    /// `sleepKey` (O10a) witnesses the day's detected sleep windows, since the fold masks them: a night
+    /// re-detected with different bounds must re-fold even though the gravity did not move. Empty (the
+    /// default) leaves the key byte-identical to the pre-mask format.
+    public static func cacheKey(owner: String, gravityCount: Int, gravityMaxTs: Int,
+                                sleepKey: String = "") -> String {
+        "\(owner)|\(gravityCount)|\(gravityMaxTs)" + (sleepKey.isEmpty ? "" : "|\(sleepKey)")
     }
 
     /// The pass's one-line reuse readout, beside the phase cost line.
@@ -61,7 +66,9 @@ public enum StepsMotionCache {
     /// build, and `cacheKey` witnesses the INPUTS only — a day whose gravity has not moved keys identically
     /// across an app update, so without this the old volume would be served until that day's stream happened
     /// to change. A bump discards every entry and costs one full re-fold, once, which is the cheap side.
-    public static let foldVersion = 1
+    ///
+    /// v2 (O10a): the fold became cadence-normalised and sleep-masked.
+    public static let foldVersion = 2
 
     /// Render the cache for storage. Days are emitted in sorted order so an unchanged cache renders to an
     /// identical payload and the write is a no-op rather than churn.

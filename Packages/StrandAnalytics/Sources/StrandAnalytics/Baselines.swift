@@ -21,14 +21,21 @@ public struct MetricCfg: Equatable, Sendable {
     public let floorSpread: Double  // σ_floor: minimum dispersion
     public let halfLifeB: Double    // baseline-center half-life (nights)
     public let halfLifeS: Double    // spread half-life (nights, slower than center)
+    /// COLD-START SPREAD PRIOR, as a coefficient of variation (Gaussian σ / centre), or nil to keep the
+    /// plain EWMA spread from the first night. When set, a young baseline (fewer than
+    /// `Baselines.coldStartNights` valid nights) takes its spread from the SAMPLE of the nights seen so
+    /// far, shrunk toward `coldStartPriorCV × centre`, and only then hands over to the EWMA. See
+    /// `Baselines.coldStartSpread`.
+    public let coldStartPriorCV: Double?
 
     public init(minVal: Double, maxVal: Double, floorSpread: Double,
-                halfLifeB: Double, halfLifeS: Double) {
+                halfLifeB: Double, halfLifeS: Double, coldStartPriorCV: Double? = nil) {
         self.minVal = minVal
         self.maxVal = maxVal
         self.floorSpread = floorSpread
         self.halfLifeB = halfLifeB
         self.halfLifeS = halfLifeS
+        self.coldStartPriorCV = coldStartPriorCV
     }
 }
 
@@ -44,8 +51,9 @@ public enum BaselineStatus: String, Equatable, Sendable {
 public struct BaselineState: Equatable, Sendable {
     /// Robust EWMA center (the personal "mean").
     public let baseline: Double
-    /// EWMA of absolute deviations, floored at cfg.floorSpread. Multiply by 1.253
-    /// to approximate Gaussian σ.
+    /// EWMA of absolute deviations, floored at cfg.floorSpread (during a cfg's cold start: the
+    /// prior-shrunk SAMPLE abs-dev, see `Baselines.coldStartSpread`). Multiply by 1.253 to approximate
+    /// Gaussian σ.
     public let spread: Double
     /// Count of valid nights contributing to the state.
     public let nValid: Int
@@ -53,14 +61,21 @@ public struct BaselineState: Equatable, Sendable {
     public let nightsSinceUpdate: Int
     /// Cold-start / staleness status.
     public let status: BaselineStatus
+    /// The raw valid nights folded so far WHILE the baseline is in its sample-spread cold start (only
+    /// for a cfg with `coldStartPriorCV`; empty otherwise, and emptied at the hand-over to the EWMA).
+    /// At most `Baselines.coldStartNights` values, so the state stays small. A state rebuilt without it
+    /// (count != nValid) simply continues on the EWMA spread.
+    public let coldStartSample: [Double]
 
     public init(baseline: Double, spread: Double, nValid: Int,
-                nightsSinceUpdate: Int, status: BaselineStatus) {
+                nightsSinceUpdate: Int, status: BaselineStatus,
+                coldStartSample: [Double] = []) {
         self.baseline = baseline
         self.spread = spread
         self.nValid = nValid
         self.nightsSinceUpdate = nightsSinceUpdate
         self.status = status
+        self.coldStartSample = coldStartSample
     }
 
     /// True iff fully trusted (not calibrating or stale).
@@ -180,6 +195,64 @@ public enum Baselines {
     /// flat against a floor-tight band before the spread has had a chance to widen.
     public static let earlySpreadInflate: Double = 2.5
 
+    // MARK: - Sample-spread cold start (O9)
+    //
+    // THE PROBLEM: the EWMA spread starts ON the floor and converges with a 21-night half-life, while
+    // Charge becomes usable after `minNightsSeed` (4) nights. For HRV that is an abs-dev of 5 ms (σ≈6.3)
+    // for weeks, so a wearer whose true night-to-night σ is 12 ms reads roughly 2x z-scores (Charge
+    // swinging to the extremes) until the spread catches up.
+    //
+    // THE FIX: while the baseline is young (nValid < coldStartNights) the spread is the SAMPLE mean
+    // absolute deviation of the nights seen so far (bias-corrected by sqrt(n/(n-1)); the same abs-dev
+    // units the EWMA keeps), shrunk toward a PRIOR of `cfg.coldStartPriorCV × centre` worth
+    // `coldStartPriorNights` pseudo-nights, and floored at `cfg.floorSpread`. The first night is the pure
+    // prior; by night 14 the sample carries ~80% of the weight. At the hand-over the EWMA simply
+    // continues from that estimate. Only cfgs that set `coldStartPriorCV` (HRV / resting HR /
+    // respiration) take this path; every other cfg keeps the plain EWMA spread.
+
+    /// Valid-night count below which a cfg with a `coldStartPriorCV` uses the sample spread. Equal to
+    /// `minNightsTrust`, so the EWMA owns the spread exactly when the baseline becomes "trusted".
+    public static let coldStartNights: Int = minNightsTrust
+    /// Weight of the cold-start prior, in pseudo-nights, against the sample's n−1 degrees of freedom.
+    public static let coldStartPriorNights: Double = 3.0
+
+    /// The cold-start spread (internal abs-dev units, floored) for the nights seen so far. Pure.
+    ///
+    /// spread = max(floor, (k·prior + (n−1)·sampleAbsDev) / (k + n−1)), where
+    /// prior = priorCV·|mean| / 1.253 and sampleAbsDev = mean|x−x̄| · sqrt(n/(n−1)).
+    public static func coldStartSpread(_ sample: [Double], cfg: MetricCfg, priorCV: Double) -> Double {
+        let n = sample.count
+        guard n > 0 else { return cfg.floorSpread }
+        let mean = sample.reduce(0, +) / Double(n)
+        let prior = priorCV * abs(mean) / 1.253
+        guard n >= 2 else { return max(cfg.floorSpread, prior) }
+        let meanAbsDev = sample.reduce(0.0) { $0 + abs($1 - mean) } / Double(n)
+        let sampleAbsDev = meanAbsDev * (Double(n) / Double(n - 1)).squareRoot()
+        let k = coldStartPriorNights
+        let dof = Double(n - 1)
+        return max(cfg.floorSpread, (k * prior + dof * sampleAbsDev) / (k + dof))
+    }
+
+    /// The state for the very first valid night: centre on the value, spread at the floor (or at the
+    /// cold-start prior when the cfg has one), and the one-value cold-start sample.
+    static func seedState(_ value: Double, cfg: MetricCfg) -> BaselineState {
+        guard let priorCV = cfg.coldStartPriorCV else {
+            return BaselineState(baseline: value, spread: cfg.floorSpread, nValid: 1,
+                                 nightsSinceUpdate: 0, status: .calibrating)
+        }
+        return BaselineState(baseline: value,
+                             spread: coldStartSpread([value], cfg: cfg, priorCV: priorCV),
+                             nValid: 1, nightsSinceUpdate: 0, status: .calibrating,
+                             coldStartSample: [value])
+    }
+
+    /// True when the NEXT folded night takes the sample-spread cold-start path (the caller checks the
+    /// cfg has a prior): the baseline is still young, and the state carries its full sample. A state
+    /// rebuilt without the sample falls back to the EWMA rather than estimating from a partial one.
+    static func usesColdStartSpread(_ state: BaselineState) -> Bool {
+        state.nValid < coldStartNights && state.coldStartSample.count == state.nValid
+    }
+
     /// UserDefaults key for the manual HRV-baseline recalibration epoch (epoch SECONDS).
     /// 0 / absent = no recalibration. Written by the Settings "Recalibrate HRV baseline" button.
     public static let hrvBaselineEpochKey: String = "noop.hrvBaselineEpoch"
@@ -203,12 +276,18 @@ public enum Baselines {
     /// floor would make the z-score hypersensitive to routine training variation. Same
     /// half-lives as the other metrics for consistency.
     public static let metricCfg: [String: MetricCfg] = [
+        //
+        // COLD-START PRIORS (coldStartPriorCV): the typical night-to-night σ as a fraction of the centre,
+        // used to shrink a young baseline's sample spread (see `coldStartSpread`). HRV 12% (nightly
+        // RMSSD CV is commonly ~10-15%); resting HR 5% (~2.5-3 bpm at 55 bpm); respiration 4% (~0.6
+        // br/min at 15). For resting HR and respiration the floor usually still wins; HRV is where the
+        // old floor-pinned spread (σ≈6.3 ms) roughly doubled the z of a wearer whose true σ is ~12 ms.
         "hrv": MetricCfg(minVal: 5.0, maxVal: 250.0, floorSpread: 5.0,
-                         halfLifeB: 14.0, halfLifeS: 21.0),
+                         halfLifeB: 14.0, halfLifeS: 21.0, coldStartPriorCV: 0.12),
         "resting_hr": MetricCfg(minVal: 30.0, maxVal: 120.0, floorSpread: 2.0,
-                                halfLifeB: 14.0, halfLifeS: 21.0),
+                                halfLifeB: 14.0, halfLifeS: 21.0, coldStartPriorCV: 0.05),
         "resp": MetricCfg(minVal: 4.0, maxVal: 40.0, floorSpread: 0.5,
-                          halfLifeB: 14.0, halfLifeS: 21.0),
+                          halfLifeB: 14.0, halfLifeS: 21.0, coldStartPriorCV: 0.04),
         "skin_temp": MetricCfg(minVal: 20.0, maxVal: 42.0, floorSpread: 0.3,
                                halfLifeB: 14.0, halfLifeS: 21.0),
         "strain": MetricCfg(minVal: 0.0, maxVal: 100.0, floorSpread: 5.0,
@@ -333,7 +412,8 @@ public enum Baselines {
     /// - `state == nil`: seed the first night.
     /// - `value == nil` or out-of-range: skip-and-hold (carry forward).
     /// - hard outlier (> HARD_OUTLIER_K × spread): seen but not folded.
-    /// - otherwise: Winsorized EWMA center + EWMA-abs-dev spread update.
+    /// - otherwise: Winsorized EWMA center + spread update (the cold-start sample spread while young
+    ///   for a cfg with a `coldStartPriorCV`, else EWMA of |value − previous centre|).
     public static func update(_ state: BaselineState?, value: Double?, cfg: MetricCfg,
                               rejectHardOutliers: Bool = true) -> BaselineState {
         let lb = lambda(halfLife: cfg.halfLifeB)
@@ -342,8 +422,7 @@ public enum Baselines {
         // First night ever.
         guard let state = state else {
             if let v = value, cfg.minVal <= v && v <= cfg.maxVal {
-                return BaselineState(baseline: v, spread: cfg.floorSpread, nValid: 1,
-                                     nightsSinceUpdate: 0, status: .calibrating)
+                return seedState(v, cfg: cfg)
             }
             let seed = (cfg.minVal + cfg.maxVal) / 2.0
             return BaselineState(baseline: seed, spread: cfg.floorSpread, nValid: 0,
@@ -355,7 +434,8 @@ public enum Baselines {
             let m = state.nightsSinceUpdate + 1
             return BaselineState(baseline: state.baseline, spread: state.spread,
                                  nValid: state.nValid, nightsSinceUpdate: m,
-                                 status: computeStatus(nValid: state.nValid, nightsSinceUpdate: m))
+                                 status: computeStatus(nValid: state.nValid, nightsSinceUpdate: m),
+                                 coldStartSample: state.coldStartSample)
         }
 
         // Step 0: sanity gate — physiologically implausible → skip-and-hold.
@@ -363,7 +443,8 @@ public enum Baselines {
             let m = state.nightsSinceUpdate + 1
             return BaselineState(baseline: state.baseline, spread: state.spread,
                                  nValid: state.nValid, nightsSinceUpdate: m,
-                                 status: computeStatus(nValid: state.nValid, nightsSinceUpdate: m))
+                                 status: computeStatus(nValid: state.nValid, nightsSinceUpdate: m),
+                                 coldStartSample: state.coldStartSample)
         }
 
         // Is the baseline still "young"? While young we adapt faster and suspend the hard-outlier
@@ -391,14 +472,14 @@ public enum Baselines {
             if dev > hardOutlierK * state.spread {
                 return BaselineState(baseline: state.baseline, spread: state.spread,
                                      nValid: state.nValid, nightsSinceUpdate: 0,
-                                     status: computeStatus(nValid: state.nValid, nightsSinceUpdate: 0))
+                                     status: computeStatus(nValid: state.nValid, nightsSinceUpdate: 0),
+                                     coldStartSample: state.coldStartSample)
             }
         }
 
         // First real value after a None-placeholder seed: treat as clean first night.
         if state.nValid == 0 {
-            return BaselineState(baseline: value, spread: cfg.floorSpread, nValid: 1,
-                                 nightsSinceUpdate: 0, status: .calibrating)
+            return seedState(value, cfg: cfg)
         }
 
         // Step 1: Winsorized EWMA update.
@@ -412,14 +493,28 @@ public enum Baselines {
         let clamped = max(lo, min(hi, value))
         let newBaseline = effLb * clamped + (1.0 - effLb) * state.baseline
 
-        // Spread uses the UNCLAMPED value so true deviations are tracked.
-        let absDev = abs(value - newBaseline)
-        let newSpread = max(cfg.floorSpread, ls * absDev + (1.0 - ls) * state.spread)
         let newN = state.nValid + 1
+        let newSpread: Double
+        var newSample: [Double] = []
+        if let priorCV = cfg.coldStartPriorCV, usesColdStartSpread(state) {
+            // COLD START: spread from the sample of nights so far, prior-shrunk (`coldStartSpread`). The
+            // sample is dropped at the hand-over and the EWMA below continues from this estimate.
+            let sample = state.coldStartSample + [value]
+            newSpread = coldStartSpread(sample, cfg: cfg, priorCV: priorCV)
+            if newN < coldStartNights { newSample = sample }
+        } else {
+            // Spread uses the UNCLAMPED value so true deviations are tracked, measured against the OLD
+            // centre: the deviation this night actually showed against the baseline it was judged by.
+            // Measuring it after the centre had already moved toward the value shrank every deviation
+            // by (1−λ), biasing the spread low (~5% settled, ~21% on the fast early half-life).
+            let absDev = abs(value - state.baseline)
+            newSpread = max(cfg.floorSpread, ls * absDev + (1.0 - ls) * state.spread)
+        }
 
         return BaselineState(baseline: newBaseline, spread: newSpread, nValid: newN,
                              nightsSinceUpdate: 0,
-                             status: computeStatus(nValid: newN, nightsSinceUpdate: 0))
+                             status: computeStatus(nValid: newN, nightsSinceUpdate: 0),
+                             coldStartSample: newSample)
     }
 
     /// Replay an ordered sequence of nightly values (oldest first) to build state.

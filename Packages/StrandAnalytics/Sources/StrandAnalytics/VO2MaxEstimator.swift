@@ -31,6 +31,10 @@ import Foundation
 //
 // WITH NO USABLE SESSION it uses the zone-based model alone, and with neither (no waist measurement,
 // no runs) it falls back to Uth et al. 2004 — 15.3 × HRmax / resting HR — the roughest of the three.
+//
+// RESTING HR MEANS THE WAKING ONE (O7). All three models were fitted on a resting HR measured awake,
+// sitting or lying quietly. The nightly sleep figure runs ~5–10 bpm lower and inflates every estimate
+// (~15% through Uth), so callers pass `WakingRestingHR` (the daytime floor, else sleep RHR + offset).
 
 public enum VO2MaxEstimator {
 

@@ -121,6 +121,8 @@ enum V2Recipe {
 
     /// Farthest seconds, relative to an epoch, that `features` reads any input. Same values the shipped
     /// stager clips with; they are a property of the feature windows, not a tunable.
+    /// `SleepStagerV2.preSleepUnclampMinutes`: the motionless awake-clamp stands down this long after onset.
+    static let preSleepUnclampMinutes = 60.0
     static let padLo = 330
     static let padHi = 390
 
@@ -445,7 +447,10 @@ enum V2Recipe {
             let gate = cfg.deepGateSlope * max(0.0, fpct(f.hrFlat11) - cfg.deepGateThresh)
             let awakeCardiac0 = cfg.awakeZhv * dz(zhvv, cfg.awakeDeadzone)
                 + cfg.awakeZhr * dz(zhrv, cfg.awakeDeadzone)
-            let awakeCardiac = motionQuiescent(f, cfg) ? min(0.0, awakeCardiac0) : awakeCardiac0
+            // Mirrors the shipped stager: the motionless clamp is NOT applied in the window's first
+            // `preSleepUnclampMinutes` (60), so still-but-awake time before sleep can stage awake.
+            let clampCardiac = motionQuiescent(f, cfg) && f.minutesSinceOnset >= Self.preSleepUnclampMinutes
+            let awakeCardiac = clampCardiac ? min(0.0, awakeCardiac0) : awakeCardiac0
             var em: [String: Double] = [
                 "deep": cfg.deepZhv * zhvv + cfg.deepZhr * zhrv + cfg.deepZmv * zmvv - gate + prior["deep"]!,
                 "rem": cfg.remZhv * zhvv + cfg.remZmv * zmvv + cfg.remZhr * zhrv + prior["rem"]!,

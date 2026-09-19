@@ -280,4 +280,59 @@ final class DayCaloriesTests: XCTestCase {
         XCTAssertEqual(forward.activeKcal, 0.0, accuracy: 1e-12,
                        "the tie resolves to the lower reading, so no active energy is credited")
     }
+
+    // MARK: - NEAT (O10b)
+
+    /// BMR for the standard male subject (80 kg / 180 cm / 35 y), kcal/day — pinned above as ≈ 1825.25.
+    private let bmrMale = 1825.247
+
+    /// An hour at 94 bpm (resting 55, gate 55 + 0.5·(185 − 55) = 120) sits 60% of the way up the NEAT ramp:
+    /// NEAT = BMR rate × 2 × 0.6 × 3600 s. Resting and exercise energy are untouched.
+    func testNeatRampsLinearlyBetweenRestAndTheGate() {
+        let profile = UserProfile(weightKg: 80, heightCm: 180, age: 35, sex: "male")
+        let hour = hrDay(bpm: 94, n: 3600)
+        let legacy = Calories.estimateDayEnergy(hour, profile: profile, hrmax: 185, restingHR: 55)
+        let neat = Calories.estimateDayEnergy(hour, profile: profile, hrmax: 185, restingHR: 55, includeNEAT: true)
+        XCTAssertEqual(legacy.neatKcal, 0, accuracy: 1e-12, "NEAT is opt-in: the legacy call is byte-identical")
+        XCTAssertEqual(neat.neatKcal, bmrMale / 86_400 * Calories.neatMaxBMRMultiple * 0.6 * 3600, accuracy: 1e-6)
+        XCTAssertEqual(neat.restingKcal, legacy.restingKcal, accuracy: 1e-12)
+        XCTAssertEqual(neat.activeKcal, 0, accuracy: 1e-12)
+        XCTAssertEqual(neat.totalKcal, neat.restingKcal + neat.neatKcal, accuracy: 1e-9)
+        XCTAssertEqual(neat.aboveRestingKcal, neat.neatKcal, accuracy: 1e-12)
+        XCTAssertEqual(Calories.estimateDayCalories(hour, profile: profile, hrmax: 185, restingHR: 55,
+                                                    includeNEAT: true), neat.totalKcal, accuracy: 1e-9)
+    }
+
+    /// At or below the resting HR there is nothing to credit; above the gate Keytel takes over (NEAT stops).
+    func testNeatIsZeroAtRestAndAboveTheGate() {
+        let profile = UserProfile(weightKg: 80, heightCm: 180, age: 35, sex: "male")
+        for bpm in [50, 55, 130] {
+            let e = Calories.estimateDayEnergy(hrDay(bpm: bpm, n: 600), profile: profile, hrmax: 185,
+                                               restingHR: 55, includeNEAT: true)
+            XCTAssertEqual(e.neatKcal, 0, accuracy: 1e-12, "no NEAT at \(bpm) bpm")
+        }
+    }
+
+    /// No known resting HR → no NEAT: the ramp is never anchored on the 60 bpm default.
+    func testNeatNeedsAKnownRestingHR() {
+        let e = Calories.estimateDayEnergy(hrDay(bpm: 90, n: 600), profile: UserProfile(), hrmax: 185,
+                                           restingHR: nil, includeNEAT: true)
+        XCTAssertEqual(e.neatKcal, 0, accuracy: 1e-12)
+    }
+
+    /// The light-activity day that used to collapse to BMR (8 h @55, 8 h @70, 8 h @100) now earns a
+    /// conservative NEAT on top: above BMR, yet nowhere near the old 30%-gate runaway (~4768 kcal).
+    func testLightActivityDayEarnsConservativeNeat() {
+        let profile = UserProfile(weightKg: 80, heightCm: 180, age: 35, sex: "male")
+        let block = 8 * 3_600
+        let lightDay = hrDay(bpm: 55, n: block)
+            + hrDay(bpm: 70, n: block, start: block)
+            + hrDay(bpm: 100, n: block, start: 2 * block)
+        let total = Calories.estimateDayCalories(lightDay, profile: profile, hrmax: 185, restingHR: 55,
+                                                 includeNEAT: true)
+        // 8 h @70 → frac 15/65, 8 h @100 → frac 45/65; NEAT = BMR/3 × 2 × (15 + 45)/65 ≈ 1123 kcal.
+        let expectedNeat = bmrMale / 3 * Calories.neatMaxBMRMultiple * (15.0 + 45.0) / 65.0
+        XCTAssertEqual(total, bmrMale + expectedNeat, accuracy: 1.0)
+        XCTAssertLessThan(total, 4768.0 - 1500.0)
+    }
 }

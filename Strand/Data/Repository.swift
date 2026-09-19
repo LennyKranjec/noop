@@ -1409,9 +1409,24 @@ final class Repository: ObservableObject {
     private static let noopVo2TriedKey = "vo2max.noop.triedAt"
     private static let noopVo2RetrySeconds: TimeInterval = 3 * 3600
 
+    /// O7: the WAKING resting HR for `day`, resolved exactly as that day's scoring pass resolved it: the
+    /// day's stored measured daytime floor (`WakingRestingHR.metricKey`), else `sleepRestingHR` + the
+    /// documented offset. For the live Effort (Banister %HRR) so it reads the same rest the stored row did.
+    func wakingRestingHR(day: String, sleepRestingHR: Double?) async -> Double? {
+        if let store = await ensureStore() {
+            for id in computedReadIds {
+                if let v = (try? await store.metricSeries(deviceId: id, key: WakingRestingHR.metricKey,
+                                                          from: day, to: day))?.last?.value {
+                    return WakingRestingHR.resolve(daytime: v, sleepRestingHR: sleepRestingHR)
+                }
+            }
+        }
+        return WakingRestingHR.fromSleep(sleepRestingHR)
+    }
+
     /// Estimate today's VO₂max from the wearer's runs and walks and bank it — once a day.
     ///
-    /// Resting HR is the 7-day median; HRmax is observed from the wearer's own workout peaks (the runner-up
+    /// Resting HR is the 7-day median WAKING resting HR (O7, `WakingRestingHR`); HRmax is observed from the wearer's own workout peaks (the runner-up
     /// peak, floored at the age formula; the age formula without enough workouts). See `VO2MaxEstimator`.
     func bankNoopVo2Max(age: Int, sex: String = "", waistCm: Double = 0) async {
         let today = Self.localDayKey(Date())
@@ -1420,9 +1435,25 @@ final class Repository: ObservableObject {
               Date().timeIntervalSince1970 - tried >= Self.noopVo2RetrySeconds,
               let store = await ensureStore() else { return }
         UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: Self.noopVo2TriedKey)
-        let rhrs = days.suffix(7).compactMap { $0.restingHr.map(Double.init) }.sorted()
-        guard !rhrs.isEmpty else { return }
-        let rhr = rhrs[rhrs.count / 2]
+        // O7: the WAKING resting HR, not the sleep one. Uth (15.3·HRmax/RHR), the heart-rate reserve in the
+        // run-based estimate and the HUNT model were all fitted on a waking seated/supine rest; the nightly
+        // `restingHr` runs ~5–10 bpm below it and read VO₂max ~15% high. Per day: the stored measured
+        // daytime floor, else sleep RHR + the documented offset; then the 7-day median.
+        let last7 = Array(days.suffix(7))
+        var wakingByDay: [String: Double] = [:]
+        if let from = last7.first?.day, let to = last7.last?.day {
+            for id in computedReadIds {
+                for p in (try? await store.metricSeries(deviceId: id, key: WakingRestingHR.metricKey,
+                                                        from: from, to: to)) ?? [] where wakingByDay[p.day] == nil {
+                    wakingByDay[p.day] = p.value
+                }
+            }
+        }
+        let wakingDays: [(daytime: Double?, sleep: Double?)] = last7.map { (d: DailyMetric) in
+            let sleep: Double? = d.restingHr.map { Double($0) }
+            return (daytime: wakingByDay[d.day], sleep: sleep)
+        }
+        guard let rhr = WakingRestingHR.typical(wakingDays) else { return }
         let workouts = await workoutRows(days: 365)
         // F7: HRmax from the wearer's own per-workout PEAKS. `estimateHRmax` needs a dense HR history
         // (≥ 600 readings) and was handed one peak per workout, so it fell back to Tanaka every time. The

@@ -192,15 +192,47 @@ public enum StepsEstimateEngine {
     /// Total daily MOTION INTENSITY = the sum of per-record gravity-vector deltas (L2 magnitude of the change
     /// between consecutive samples). This is movement VOLUME over the day, the same proxy the sleep stager
     /// uses for stillness, integrated. Sparse-but-monotone-with-activity, so it calibrates cleanly to steps.
-    public static func dayMotionIntensity(_ grav: [GravitySample]) -> Double {
+    ///
+    /// CADENCE-NORMALISED (O10a). A raw sum of deltas scales with the SAMPLE RATE: step motion oscillates far
+    /// faster than any cadence we see, so each delta is roughly the same size whatever the spacing, and a
+    /// day streamed live at 1 Hz summed ~60× the deltas of the same day banked a minute apart — pairing one
+    /// with a phone total calibrated `k` against a volume the next day would not reproduce. Each delta is now
+    /// weighted by the seconds it spans, capped at the day's NOMINAL cadence (median positive gap, ≥ 1 s),
+    /// i.e. the volume is expressed in 1 Hz-equivalent units: a steady 1 Hz day is byte-identical to the old
+    /// sum (weight 1 everywhere, gaps included), and a sparse day is scaled up to match it. A wear gap is
+    /// never credited more than one cadence step.
+    ///
+    /// SLEEP-MASKED (O10a). `sleepWindows` (`[start, end)` wall-clock spans of detected sleep) drop every
+    /// delta touching a sleeping sample: turning over in bed is motion volume, not steps, and it inflated
+    /// the volume of a restless night's day relative to the phone (which is on the nightstand). Empty (the
+    /// default) keeps the unmasked sum.
+    public static func dayMotionIntensity(_ grav: [GravitySample],
+                                          excluding sleepWindows: [(start: Int, end: Int)] = []) -> Double {
         guard grav.count > 1 else { return 0 }
+        var gaps: [Int] = []
+        gaps.reserveCapacity(grav.count - 1)
+        for i in 1..<grav.count {
+            let g = grav[i].ts - grav[i - 1].ts
+            if g > 0 { gaps.append(g) }
+        }
+        gaps.sort()
+        let nominalS: Double = {
+            guard !gaps.isEmpty else { return 1.0 }
+            let mid = gaps.count / 2
+            let median = gaps.count % 2 == 1 ? Double(gaps[mid]) : Double(gaps[mid - 1] + gaps[mid]) / 2.0
+            return max(1.0, median)
+        }()
+        func asleep(_ ts: Int) -> Bool { sleepWindows.contains { ts >= $0.start && ts < $0.end } }
         var total = 0.0
         var prev = grav[0]
         for i in 1..<grav.count {
             let r = grav[i]
+            defer { prev = r }
+            if !sleepWindows.isEmpty && (asleep(prev.ts) || asleep(r.ts)) { continue }
             let dx = prev.x - r.x, dy = prev.y - r.y, dz = prev.z - r.z
-            total += (dx * dx + dy * dy + dz * dz).squareRoot()
-            prev = r
+            let dt = Double(r.ts - prev.ts)
+            let weight = dt > 0 ? min(dt, nominalS) : 1.0
+            total += (dx * dx + dy * dy + dz * dz).squareRoot() * weight
         }
         return total
     }

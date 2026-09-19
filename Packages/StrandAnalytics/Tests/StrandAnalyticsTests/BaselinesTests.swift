@@ -158,6 +158,87 @@ final class BaselinesTests: XCTestCase {
         XCTAssertEqual(s.spread, Baselines.hrvCfg.floorSpread, accuracy: 1e-9)
     }
 
+    // MARK: - Sample-spread cold start (O9)
+
+    /// The first night's spread is the PRIOR (12% of the centre as σ, in abs-dev units), not the floor,
+    /// once that prior clears the floor.
+    func testColdStartSeedUsesThePrior() {
+        let s = Baselines.update(nil, value: 80, cfg: Baselines.hrvCfg)
+        XCTAssertEqual(s.spread, 0.12 * 80 / 1.253, accuracy: 1e-9)
+        XCTAssertEqual(s.coldStartSample, [80])
+        // At 50 ms the prior (σ 6 → abs-dev 4.79) is under the 5 ms floor, so the floor still wins.
+        XCTAssertEqual(Baselines.update(nil, value: 50, cfg: Baselines.hrvCfg).spread,
+                       Baselines.hrvCfg.floorSpread, accuracy: 1e-9)
+    }
+
+    /// The pinned formula: k=3 pseudo-nights of prior against n−1 of bias-corrected sample abs-dev.
+    func testColdStartSpreadFormula() {
+        // mean 60; |dev| 12,12,0,6,6 → 7.2 × sqrt(5/4) = 8.050; prior 7.2/1.253 = 5.746.
+        let v: [Double] = [48, 72, 60, 54, 66]
+        let expected = (3 * (0.12 * 60 / 1.253) + 4 * (7.2 * (5.0 / 4.0).squareRoot())) / 7
+        XCTAssertEqual(Baselines.coldStartSpread(v, cfg: Baselines.hrvCfg, priorCV: 0.12), expected, accuracy: 1e-9)
+        XCTAssertEqual(expected, 7.0626, accuracy: 1e-3)
+    }
+
+    /// A wearer with a genuinely wide night-to-night spread gets a spread that reflects it within days,
+    /// not the floor-pinned EWMA (which read 5.42 for these five nights, ~2x too tight in σ).
+    func testColdStartSpreadTracksTheSampleNotTheFloor() {
+        let v: [Double?] = [48, 72, 60, 54, 66]
+        let s = Baselines.foldHistory(v, cfg: Baselines.hrvCfg)
+        XCTAssertEqual(s.nValid, 5)
+        XCTAssertTrue(s.usable)
+        XCTAssertEqual(s.spread, 7.0626, accuracy: 1e-3)
+        XCTAssertEqual(s.coldStartSample, [48, 72, 60, 54, 66])
+    }
+
+    /// Missing / implausible nights neither enter the sample nor lose it.
+    func testColdStartSampleSurvivesSkipAndHold() {
+        let s = Baselines.foldHistory([60, nil, 999, 64], cfg: Baselines.hrvCfg)
+        XCTAssertEqual(s.nValid, 2)
+        XCTAssertEqual(s.coldStartSample, [60, 64])
+    }
+
+    /// At `coldStartNights` the sample is dropped and the EWMA takes over from the cold estimate.
+    func testColdStartHandsOverToTheEwma() {
+        var v: [Double?] = []
+        for i in 0..<Baselines.coldStartNights { v.append(i % 2 == 0 ? 50 : 66) }
+        let atHandOver = Baselines.foldHistory(v, cfg: Baselines.hrvCfg)
+        XCTAssertEqual(atHandOver.nValid, Baselines.coldStartNights)
+        XCTAssertTrue(atHandOver.coldStartSample.isEmpty)
+        XCTAssertGreaterThan(atHandOver.spread, Baselines.hrvCfg.floorSpread)
+        // The next night is a plain EWMA step from that spread, deviation against the OLD centre.
+        let next = Baselines.update(atHandOver, value: 58, cfg: Baselines.hrvCfg)
+        let ls = Baselines.lambda(halfLife: Baselines.hrvCfg.halfLifeS)
+        XCTAssertEqual(next.spread, ls * abs(58 - atHandOver.baseline) + (1 - ls) * atHandOver.spread,
+                       accuracy: 1e-9)
+    }
+
+    /// A young state rebuilt WITHOUT its sample (e.g. constructed from stored numbers) continues on the
+    /// EWMA spread instead of estimating from a partial sample.
+    func testColdStartWithoutSampleFallsBackToEwma() {
+        let rebuilt = BaselineState(baseline: 60, spread: 6, nValid: 5, nightsSinceUpdate: 0, status: .provisional)
+        let next = Baselines.update(rebuilt, value: 70, cfg: Baselines.hrvCfg)
+        let ls = Baselines.lambda(halfLife: Baselines.hrvCfg.halfLifeS)
+        XCTAssertEqual(next.spread, ls * 10 + (1 - ls) * 6, accuracy: 1e-9)
+        XCTAssertTrue(next.coldStartSample.isEmpty)
+    }
+
+    /// A cfg with no prior (strain) keeps the plain EWMA spread and never carries a sample.
+    func testNoPriorCfgKeepsThePlainEwma() {
+        let s = Baselines.foldHistory([38, 42, 40], cfg: Baselines.strainCfg)
+        XCTAssertTrue(s.coldStartSample.isEmpty)
+        XCTAssertNil(Baselines.strainCfg.coldStartPriorCV)
+    }
+
+    /// The as-of fold (Charge scores day D on the nights before D) carries the cold start unchanged.
+    func testColdStartThroughFoldHistoryAsOf() {
+        let keys = (1...6).map { String(format: "2026-03-%02d", $0) }
+        let vals: [Double?] = [48, 72, 60, 54, 66, 61]
+        let asOf = Baselines.foldHistoryAsOf(vals, dayKeys: keys, cfg: Baselines.hrvCfg,
+                                             baselineEpoch: 0, asOf: ["2026-03-06"])
+        XCTAssertEqual(asOf["2026-03-06"]?.spread ?? 0, 7.0626, accuracy: 1e-3)
+    }
+
     // MARK: - Manual recalibration epoch (noop.hrvBaselineEpoch)
 
     /// Day-keyed fold with a recalibration epoch must DROP every night before the epoch and re-seed

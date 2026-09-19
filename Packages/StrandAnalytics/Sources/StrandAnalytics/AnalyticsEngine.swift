@@ -110,6 +110,18 @@ public enum AnalyticsEngine {
         /// so the caller persists NULL there rather than a fabricated array. Feeds the H7 re-onset CONFIRM
         /// guard on the NEXT pass; never overrides the derived hypnogram. Empty on a WHOOP 4.0. (#175)
         public let sessionSleepStateByStart: [Int: [Int]]
+        /// O7: the day's MEASURED waking resting HR (`WakingRestingHR.daytimeEstimate`), or nil when the
+        /// day had too little waking wear. The caller persists it under `WakingRestingHR.metricKey`. The
+        /// day's energy / Banister Effort / bout scoring used this, else sleep RHR + the documented offset
+        /// (`wakingRestingHRUsed`). Charge keeps the SLEEP resting HR.
+        public let wakingRestingHR: Double?
+        /// O7: the waking resting HR actually used for this day's energy + Effort (measured, else the
+        /// sleep fallback), or nil when neither exists.
+        public let wakingRestingHRUsed: Double?
+        /// O10b: the day's ACTIVE energy proper — NEAT + exercise, the energy ABOVE the resting (BMR)
+        /// floor — beside `daily.activeKcalEst`, which is the TOTAL (resting + active) despite its name.
+        /// nil when there is no HR.
+        public let activeEnergyKcal: Double?
 
         public init(daily: DailyMetric, sleepSessions: [SleepSession],
                     cachedSleep: [CachedSleepSession], workouts: [ExerciseSession],
@@ -122,8 +134,14 @@ public enum AnalyticsEngine {
                     sessionSleepStateByStart: [Int: [Int]] = [:],
                     chargeDrivers: [ChargeDriver] = [],
                     skinTempRelative: SkinTempRelative? = nil,
-                    detectionFunnel: WorkoutDetector.DetectionFunnel? = nil) {
+                    detectionFunnel: WorkoutDetector.DetectionFunnel? = nil,
+                    wakingRestingHR: Double? = nil,
+                    wakingRestingHRUsed: Double? = nil,
+                    activeEnergyKcal: Double? = nil) {
             self.daily = daily; self.sleepSessions = sleepSessions
+            self.wakingRestingHR = wakingRestingHR
+            self.wakingRestingHRUsed = wakingRestingHRUsed
+            self.activeEnergyKcal = activeEnergyKcal
             self.cachedSleep = cachedSleep; self.workouts = workouts
             self.detectionFunnel = detectionFunnel
             self.recovery = recovery; self.strain = strain
@@ -928,11 +946,31 @@ public enum AnalyticsEngine {
         // night `hr` for pure-function callers/tests.
         // F5: the SAME resolution the live Today recompute uses (override, else Tanaka, else nil).
         let effMaxHR: Double? = StrainScorer.effortHRmax(overrideBpm: maxHROverride, age: profile.age)
-        let restForStrain = restingHRDaily.map(Double.init) ?? StrainScorer.defaultRestingHR
+
+        // ── Waking resting HR (O7) ────────────────────────────────────────────
+        // The Karvonen reserve (Banister Effort, the Keytel gate) and the Uth VO₂max inside the
+        // fitness-adjusted Keytel were all fitted on a WAKING resting HR; `restingHRDaily` is the SLEEP
+        // figure (~5–10 bpm lower). Measure the day's own waking floor (P10 of waking minutes outside every
+        // detected sleep session), else sleep RHR + the documented offset. Charge above stays on the
+        // SLEEP resting HR. The same LOCAL-day filter the additive totals below use (#277).
+        let dayHrFiltered = (dayHr ?? hr).filter { tsInDay($0.ts) }
+        let wakingRestingHRDaily = WakingRestingHR.daytimeEstimate(
+            hr: dayHrFiltered,
+            sleepWindows: allSessions.map { (start: $0.start, end: $0.end) },
+            tzOffsetSeconds: tzOffsetSeconds,
+            sleepRestingHR: restingHRDaily.map(Double.init))
+        let restingHRForEnergy = WakingRestingHR.resolve(daytime: wakingRestingHRDaily,
+                                                         sleepRestingHR: restingHRDaily.map(Double.init))
+        // Under Edwards (%HRmax) the resting HR cancels out of the zones; it moves Banister's %HRR only.
+        let restForStrain = restingHRForEnergy ?? StrainScorer.defaultRestingHR
         // The Effort ring's own funnel. A nil sink builds nothing at all, so a caller that does not want
         // diagnostics pays nothing; IntelligenceEngine passes its per-day recorder, the same one the
         // `workout detect` and `sleep-detect` lines beside it already use.
-        let strain = StrainScorer.strain(dayHr ?? hr, maxHR: effMaxHR, restingHR: restForStrain,
+        // THE DAY'S OWN SAMPLES ONLY: a caller may hand over a stream that spills past either midnight,
+        // and Effort must be byte-identical whether it did or not (#277, `AnalyticsEngineDayBoundsTests`).
+        // The night-window fallback (`hr`, pure-function callers) is passed through as before.
+        let strainHr: [HRSample] = dayHr.map { stream in stream.filter { tsInDay($0.ts) } } ?? hr
+        let strain = StrainScorer.strain(strainHr, maxHR: effMaxHR, restingHR: restForStrain,
                                          method: effortMethod, sex: profile.sex,
                                          diag: strainDiag, day: day)
 
@@ -946,6 +984,8 @@ public enum AnalyticsEngine {
         let workouts = WorkoutDetector.detect(
             hr: dayHr ?? hr, gravity: dayGravity ?? gravity,
             restingHR: restingHRDaily.map(Double.init),
+            // O7: bout calories + bout Effort on the WAKING rest, detection gates still on the sleep one.
+            wakingRestingHR: restingHRForEnergy,
             // #1545: the DAY's effective HRmax, not just the override. Passing `maxHROverride` meant an
             // install with no override left the detector to fall back to `StrainScorer.estimateHRmax`,
             // which returns max(observed p99.5, Tanaka) -- so every bout was measured against a HRmax at
@@ -995,10 +1035,12 @@ public enum AnalyticsEngine {
         }()
 
         // ── Daily calories (APPROXIMATE, HR-only whole-day estimate) ──────────
-        // Whole-day active+resting energy from the full HR window, using the same resting/active
-        // per-second model the per-workout estimate uses (resting BMR below activeThreshold, Keytel
-        // active above). effMaxHR + restingHRDaily are the same effective HRmax / resting baseline
-        // strain uses. Nil when there is no HR. A heart-rate ESTIMATE — not cloud/clinical parity.
+        // Whole-day TOTAL energy (resting BMR + NEAT + exercise) from the full HR window: BMR throughout,
+        // a conservative NEAT ramp between the waking resting HR and the 50% HRR gate (O10b), Keytel
+        // exercise energy above the gate. effMaxHR + restingHRForEnergy (the WAKING rest, O7) are the same
+        // effective HRmax / resting baseline Effort uses. Nil when there is no HR. A heart-rate ESTIMATE —
+        // not cloud/clinical parity. Stored as `activeKcalEst` (a TOTAL, despite the name); the active part
+        // alone rides `DayResult.activeEnergyKcal`.
         // Whole-day additive totals (steps above, calories here) are summed over the full LOCAL
         // calendar day supplied by the caller (dayHr / daySteps), NOT the ~42h sleep-detection
         // window — which, anchored to the current time-of-day, would drop a past day's late hours
@@ -1006,10 +1048,10 @@ public enum AnalyticsEngine {
         // (dayString(ts, tzOffset)) so it agrees with the bucket (#277). Fall back to the
         // night-window hr for pure-function callers that don't supply dayHr. Strain keeps the full
         // window (bounded log).
-        let dayHrFiltered = (dayHr ?? hr).filter { tsInDay($0.ts) }
-        let activeKcalEst: Double? = dayHrFiltered.isEmpty ? nil : Calories.estimateDayCalories(
+        let dayEnergy: Calories.DayEnergyEstimate? = dayHrFiltered.isEmpty ? nil : Calories.estimateDayEnergy(
             dayHrFiltered, profile: profile, hrmax: effMaxHR,
-            restingHR: restingHRDaily.map(Double.init))
+            restingHR: restingHRForEnergy, includeNEAT: true)
+        let activeKcalEst: Double? = dayEnergy?.totalKcal
 
         // ── Assemble DailyMetric ──────────────────────────────────────────────
         let daily = DailyMetric(
@@ -1114,7 +1156,10 @@ public enum AnalyticsEngine {
                          sessionSleepStateByStart: sessionSleepStateByStart,
                          chargeDrivers: chargeDrivers,
                          skinTempRelative: skinTempRelative,
-                         detectionFunnel: detectionFunnel)
+                         detectionFunnel: detectionFunnel,
+                         wakingRestingHR: wakingRestingHRDaily,
+                         wakingRestingHRUsed: restingHRForEnergy,
+                         activeEnergyKcal: dayEnergy?.aboveRestingKcal)
     }
 
     // MARK: - Rest composite (Charge/Effort/Rest)

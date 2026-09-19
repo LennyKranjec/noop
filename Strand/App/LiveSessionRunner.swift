@@ -100,11 +100,13 @@ final class LiveSessionRunner: ObservableObject {
         // Resting HR: today's own, else the most recent banked night's. The engine needs *a* baseline
         // to place the band, so a never-slept-yet install gets a deliberately ordinary 60 — the band it
         // yields is conservative, and the first banked night replaces it for every later session.
-        let resting = repo.today?.restingHr
+        let bankedSleepResting = repo.today?.restingHr
             ?? repo.days.last(where: { $0.restingHr != nil })?.restingHr
-            ?? 60
         chargeAtStart = repo.today?.recovery
-        let config = LiveSessionEngine.Config(restingHR: Double(resting),
+        // O7: the band is placed on the Karvonen reserve, which is defined on a WAKING rest — the banked
+        // (sleep) figure + the documented offset. The never-slept 60 default is already a waking figure.
+        let wakingResting = WakingRestingHR.fromSleep(bankedSleepResting.map(Double.init)) ?? 60
+        let config = LiveSessionEngine.Config(restingHR: wakingResting,
                                               hrMax: Double(profile.hrMax),
                                               charge: chargeAtStart)
         let band = LiveSessionEngine.band(config: config)

@@ -30,7 +30,9 @@ public enum FitnessAgeEngine {
 
     // MARK: - Normative reference point (the "average peer" the Fitness Age compares against)
     /// Population-reference resting HR (bpm): an average healthy adult. At this RHR + paiReference a
-    /// person's Fitness Age equals their chronological age by construction.
+    /// person's Fitness Age equals their chronological age by construction. It is a SEATED, WAKING resting
+    /// HR (HUNT measured it that way), so callers must pass a waking resting HR (`WakingRestingHR`, O7),
+    /// never the nightly sleep figure — that runs ~5–10 bpm lower and read Fitness Age ~4 years young.
     public static let restingHRReference = 65.0
     /// Population-reference PA-index (0–15): ≈ "moderately active, a few sessions a week".
     public static let paiReference = 5.0

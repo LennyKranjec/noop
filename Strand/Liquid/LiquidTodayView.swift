@@ -2180,7 +2180,10 @@ struct LiquidTodayView: View {
             // scores the stored row with, so `effectiveEffort`'s max can't pick whichever HRmax is kinder.
             let maxHR = StrainScorer.effortHRmax(overrideBpm: Double(profile.hrMaxOverride),
                                                  age: Double(profile.age))
-            let restHR = day?.restingHr.map(Double.init) ?? StrainScorer.defaultRestingHR
+            // O7: the WAKING rest the stored row was scored with (only Banister's %HRR reads it).
+            let restHR = await repo.wakingRestingHR(day: selectedDayKey,
+                                                    sleepRestingHR: day?.restingHr.map(Double.init))
+                ?? StrainScorer.defaultRestingHR
             liveStrainLocal = StrainScorer.strain(todayHr, maxHR: maxHR, restingHR: restHR,
                                                   method: PuffinExperiment.effortMethod, sex: profile.sex)
         } else {
