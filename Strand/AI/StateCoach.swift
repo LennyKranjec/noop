@@ -126,16 +126,163 @@ struct WorkoutSuggestion: Codable, Equatable, Identifiable {
     var window: String?
     /// One short sentence of why.
     var why: String
+    /// A recovery variant the catalogue has no sport for ("NSDR", "Restorative yoga", "Breathwork" — a
+    /// `StateWorkoutChoices.variants` key). `sport` then holds the activity it is RECORDED as (Meditation /
+    /// Yoga), so a tap starts that activity. nil for a plain sport. Optional so stored lists still decode.
+    var label: String? = nil
 
-    var id: String { "\(sport)|\(minutes)|\(zone)|\(window ?? "")" }
+    var id: String { "\(sport)|\(minutes)|\(zone)|\(window ?? "")|\(label ?? "")" }
 
     /// The zone the live workout should LOCK, or nil. Zone 1 is never locked: an easy walk or mobility
     /// block routinely sits under it, and the lock would buzz "speed up" through the whole session.
     var lockZone: Int? { (2...5).contains(zone) ? zone : nil }
 
+    /// The key this suggestion is allowed / excluded under in the wearer's workout selection.
+    var choiceKey: String { StateWorkoutChoices.key(for: self) }
+
+    /// A down-regulation session (meditation, breathwork, NSDR, restorative yoga, stretching …) rather
+    /// than training load.
+    var isRecovery: Bool { label != nil || WorkoutCatalog.isRecovery(sport) }
+
     var askCoachPrompt: String {
         let win = window.map { " (\($0))" } ?? ""
-        return String(localized: "You suggested this workout for today: \(sport), \(minutes) min in zone \(zone)\(win). Why this one, and how should I pace it given my data today?")
+        let name = label ?? sport
+        return String(localized: "You suggested this workout for today: \(name), \(minutes) min in zone \(zone)\(win). Why this one, and how should I pace it given my data today?")
+    }
+}
+
+// MARK: - The wearer's workout selection
+
+/// Which workouts the STATE tile may suggest. Stored as the set the wearer UNTICKED, so the default is
+/// "everything" and a sport added to the catalogue later starts out allowed.
+///
+/// Keys are `WorkoutCatalog` names, plus three recovery VARIANTS the catalogue has no sport for. Each
+/// variant is recorded as an existing activity — NSDR / yoga nidra and breathwork as a Meditation session
+/// (a guided lie-down or a breathing practice is exactly what that activity measures: heart rate settling
+/// at rest), restorative yoga as Yoga — so starting one is the same recording as the meditation card's
+/// play button, and nothing new is written into the cross-platform sport column.
+struct StateWorkoutChoices: Equatable {
+
+    struct Option: Identifiable, Hashable {
+        /// The selection / prompt key.
+        let key: String
+        /// The catalogue sport a session of it is recorded as.
+        let sport: String
+        var id: String { key }
+        var isVariant: Bool { key != sport }
+    }
+
+    /// Keys the wearer unticked.
+    var excluded: Set<String>
+
+    init(excluded: Set<String> = []) { self.excluded = excluded }
+
+    static let all = StateWorkoutChoices()
+
+    static let breathworkKey = "Breathwork"
+    static let nsdrKey = "NSDR"
+    static let restorativeYogaKey = "Restorative yoga"
+
+    static let variants: [Option] = [
+        Option(key: breathworkKey, sport: "Meditation"),
+        Option(key: nsdrKey, sport: "Meditation"),
+        Option(key: restorativeYogaKey, sport: "Yoga"),
+    ]
+
+    /// The recovery & calm group, shown first in the settings list.
+    static let recoveryKeys = ["Meditation", StateWorkoutChoices.breathworkKey, StateWorkoutChoices.nsdrKey, "Yoga",
+                               StateWorkoutChoices.restorativeYogaKey, "Stretching", "Walking"]
+
+    /// Catalogue entries that are not a suggestion (the generic bucket).
+    private static let hiddenSports: Set<String> = ["Other"]
+
+    static let recoveryOptions: [Option] = StateWorkoutChoices.recoveryKeys.map { key in
+        StateWorkoutChoices.variants.first { $0.key == key } ?? Option(key: key, sport: key)
+    }
+
+    static let sportOptions: [Option] = WorkoutCatalog.all.map(\.name)
+        .filter { !StateWorkoutChoices.recoveryKeys.contains($0) && !StateWorkoutChoices.hiddenSports.contains($0) }
+        .map { Option(key: $0, sport: $0) }
+
+    /// Every selectable key, recovery group first, then the catalogue in its own order.
+    static let options: [Option] = recoveryOptions + sportOptions
+
+    static func option(forKey key: String) -> Option? {
+        let q = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        return options.first { $0.key.caseInsensitiveCompare(q) == .orderedSame }
+    }
+
+    /// The activity a key is recorded as.
+    static func sport(forKey key: String) -> String { option(forKey: key)?.sport ?? key }
+
+    /// The variant a free-text label names ("yoga nidra" → NSDR), or nil for anything else.
+    static func variant(matching raw: String) -> Option? {
+        let s = raw.lowercased()
+        if s.contains("nsdr") || s.contains("nidra") || s.contains("non-sleep deep rest")
+            || s.contains("non sleep deep rest") {
+            return variants.first { $0.key == nsdrKey }
+        }
+        if s.contains("restorative") || s.contains("yin yoga") {
+            return variants.first { $0.key == restorativeYogaKey }
+        }
+        if s.contains("breath") && !s.contains("meditat") {
+            return variants.first { $0.key == breathworkKey }
+        }
+        return nil
+    }
+
+    /// The selection key of a suggestion: its variant when it has one, else the catalogue spelling of its
+    /// sport, else the sport as given.
+    static func key(for s: WorkoutSuggestion) -> String {
+        if let l = s.label, let o = option(forKey: l) { return o.key }
+        return WorkoutCatalog.sport(named: s.sport)?.name ?? s.sport
+    }
+
+    /// True when nothing is unticked.
+    var isUnrestricted: Bool { !Self.options.contains { excluded.contains($0.key) } }
+
+    /// Whether `key` may be suggested. A label outside the list (free text from the model, "Other") can
+    /// not be ticked, so it passes only while nothing at all is restricted.
+    func allows(key: String) -> Bool {
+        guard let o = Self.option(forKey: key) else { return isUnrestricted }
+        return !excluded.contains(o.key)
+    }
+
+    func allows(_ s: WorkoutSuggestion) -> Bool { allows(key: Self.key(for: s)) }
+
+    func filter(_ items: [WorkoutSuggestion]) -> [WorkoutSuggestion] { items.filter { allows($0) } }
+
+    /// The first allowed key of `candidates`, in order.
+    func first(of candidates: [String]) -> String? {
+        candidates.first { Self.option(forKey: $0) != nil && allows(key: $0) }
+    }
+
+    /// The allowed keys, in list order.
+    var allowedKeys: [String] { Self.options.map(\.key).filter { !excluded.contains($0) } }
+
+    /// A stable short tag of the selection, for cache keys ("all" when unrestricted). FNV-1a rather than
+    /// `hashValue`, which is seeded per launch and would miss the cache on every start.
+    var signature: String {
+        let keys = excluded.filter { Self.option(forKey: $0) != nil }.sorted()
+        guard !keys.isEmpty else { return "all" }
+        var h: UInt64 = 0xcbf2_9ce4_8422_2325
+        for b in keys.joined(separator: "\n").utf8 {
+            h ^= UInt64(b)
+            h = h &* 0x0000_0100_0000_01b3
+        }
+        return String(h, radix: 16)
+    }
+}
+
+enum StateWorkoutChoicesStore {
+    static let key = "state.workoutChoices.excluded"
+
+    static func read(_ d: UserDefaults = .standard) -> StateWorkoutChoices {
+        StateWorkoutChoices(excluded: Set(d.stringArray(forKey: key) ?? []))
+    }
+
+    static func write(_ c: StateWorkoutChoices, _ d: UserDefaults = .standard) {
+        d.set(c.excluded.sorted(), forKey: key)
     }
 }
 
@@ -176,8 +323,9 @@ enum WorkoutSuggestionParser {
         var out: [WorkoutSuggestion] = []
         for case let d as [String: Any] in items {
             guard let s = suggestion(from: d) else { continue }
-            // The same sport at the same zone twice is one suggestion, not two.
-            if out.contains(where: { $0.sport.caseInsensitiveCompare(s.sport) == .orderedSame && $0.zone == s.zone }) {
+            // The same sport at the same zone twice is one suggestion, not two. Compared by selection key,
+            // so NSDR and a plain meditation (both recorded as Meditation) stay two.
+            if out.contains(where: { $0.choiceKey.caseInsensitiveCompare(s.choiceKey) == .orderedSame && $0.zone == s.zone }) {
                 continue
             }
             out.append(s)
@@ -220,7 +368,10 @@ enum WorkoutSuggestionParser {
 
     static func suggestion(from d: [String: Any]) -> WorkoutSuggestion? {
         guard let rawSport = string(d["sport"] ?? d["activity"] ?? d["type"]) else { return nil }
-        let sport = canonicalSport(rawSport)
+        // A recovery variant (NSDR, restorative yoga, breathwork) is recorded as its activity and keeps
+        // its own name as the label.
+        let variant = StateWorkoutChoices.variant(matching: rawSport)
+        let sport = variant?.sport ?? canonicalSport(rawSport)
         guard !sport.isEmpty else { return nil }
         // Clamped BEFORE the Int conversion: Int(_:) traps on a huge or non-finite Double.
         let minutes = number(d["minutes"] ?? d["duration_min"] ?? d["duration"])
@@ -235,7 +386,8 @@ enum WorkoutSuggestionParser {
             zone: Swift.min(Swift.max(zone, 1), 5),
             effort: effort.map { Swift.min(Swift.max($0, 0), 100) },
             window: window.map { String($0.prefix(32)) },
-            why: String(why.prefix(220)))
+            why: String(why.prefix(220)),
+            label: variant?.key)
     }
 
     /// The catalogue's own spelling when the label matches one (case-insensitively, or through a short
@@ -352,6 +504,12 @@ struct StateWorkoutFact: Equatable {
 /// Deliberately plain rules on the figures the tile already holds, so the section is never empty and
 /// never guesses: low charge or a strained body → Zone 1–2 recovery; plenty of charge and a lot of target
 /// left → Zone 2 endurance plus intervals; target reached → only an easy walk / mobility.
+///
+/// STRESS IS THE SECOND OBJECTIVE, as in the coach's prompt: before 11:00 a short meditation comes first;
+/// a hard session (done today, or the intervals suggested here) earns a down-regulation block after it
+/// (NSDR, restorative yoga, meditation — whichever is allowed); high stress without either gets a quick
+/// breathing / meditation block. Every pick goes through the wearer's selection (`StateWorkoutChoices`)
+/// with substitutes in order; when nothing allowed fits, the list is empty and the tile says so.
 enum WorkoutSuggestionFallback {
 
     /// Rough Effort points per minute in each zone (0–100 axis). An ESTIMATE for sizing a session and for
@@ -383,101 +541,278 @@ enum WorkoutSuggestionFallback {
 
     /// The wearer's own most frequent endurance sport over `recent`, else Running.
     static func preferredEnduranceSport(recent: [StateWorkoutFact]) -> String {
+        enduranceSport(recent: recent, choices: .all) ?? "Running"
+    }
+
+    /// Endurance sports to fall back on, in order, when the wearer's own is not allowed (or they have none).
+    static let enduranceDefaults = [
+        "Running", "Cycling", "Indoor cycle", "Rowing", "Row machine", "Elliptical", "Treadmill run",
+        "Pool swim", "Open-water swim", "Hiking", "Spinning", "Stair climber", "Mountain biking",
+        "Inline skating", "Jump rope", "Rucking",
+    ]
+    static let walkKeys = ["Walking", "Treadmill walk", "Hiking"]
+    static let mobilityKeys = ["Stretching", "Yoga", StateWorkoutChoices.restorativeYogaKey, "Pilates"]
+    static let calmMovementKeys = [StateWorkoutChoices.restorativeYogaKey, "Yoga", "Stretching"]
+    static let strengthKeys = ["Strength", "Weightlifting", "Bodybuilding", "Calisthenics", "Powerlifting",
+                               "CrossFit", "Boot camp", "Pilates"]
+    /// After a hard session: the deepest down-regulation first.
+    static let postHardKeys = [StateWorkoutChoices.nsdrKey, StateWorkoutChoices.restorativeYogaKey, "Meditation",
+                               StateWorkoutChoices.breathworkKey, "Stretching"]
+    /// The start of the day: a short sit.
+    static let morningKeys = ["Meditation", StateWorkoutChoices.breathworkKey]
+    /// High stress without hard training: the quickest downshift first.
+    static let calmKeys = [StateWorkoutChoices.breathworkKey, "Meditation", StateWorkoutChoices.nsdrKey,
+                           StateWorkoutChoices.restorativeYogaKey]
+    /// Late evening: nothing that keeps you up.
+    static let windDownKeys = ["Stretching", StateWorkoutChoices.restorativeYogaKey, StateWorkoutChoices.nsdrKey,
+                               StateWorkoutChoices.breathworkKey, "Meditation", "Yoga"]
+
+    /// The wearer's most frequent ALLOWED endurance sport over `recent`, else the first allowed default,
+    /// else nil (nothing endurance-like is ticked).
+    static func enduranceSport(recent: [StateWorkoutFact], choices: StateWorkoutChoices) -> String? {
         var counts: [String: Int] = [:]
         var order: [String] = []
         for w in recent {
             guard let hit = WorkoutCatalog.sport(named: w.sport),
                   !notEndurance.contains(hit.name.lowercased()),
-                  !WorkoutCatalog.isRecovery(hit.name) else { continue }
+                  !WorkoutCatalog.isRecovery(hit.name),
+                  choices.allows(key: hit.name) else { continue }
             if counts[hit.name] == nil { order.append(hit.name) }
             counts[hit.name, default: 0] += 1
         }
         // Ties go to the most recent (recent is newest first, so `order` is too).
-        guard let best = counts.values.max() else { return "Running" }
-        return order.first { counts[$0] == best } ?? "Running"
+        if let best = counts.values.max(), let name = order.first(where: { counts[$0] == best }) { return name }
+        return choices.first(of: enduranceDefaults)
+    }
+
+    /// A suggestion for a selection key: a variant is recorded as its activity and keeps its name as label.
+    static func make(_ key: String, minutes: Int, zone: Int, effort: Double?, window: String?,
+                     why: String) -> WorkoutSuggestion {
+        let option = StateWorkoutChoices.option(forKey: key)
+        let label: String? = (option?.isVariant ?? false) ? option?.key : nil
+        return WorkoutSuggestion(sport: option?.sport ?? key, minutes: minutes, zone: zone, effort: effort,
+                                 window: window, why: why, label: label)
+    }
+
+    /// Minutes for a recovery session of `key`.
+    static func recoveryMinutes(_ key: String) -> Int {
+        switch key {
+        case StateWorkoutChoices.nsdrKey, StateWorkoutChoices.restorativeYogaKey, "Yoga": return 20
+        case "Stretching": return 15
+        default: return 10
+        }
+    }
+
+    /// "HH:MM–HH:MM" from `startMinute` (rounded UP to 5), `length` minutes long. nil when it would start
+    /// after 21:30 — too close to the night to be worth a line.
+    static func clockWindow(startMinute: Int, length: Int) -> String? {
+        let start = ((startMinute + 4) / 5) * 5
+        guard start <= 21 * 60 + 30 else { return nil }
+        let end = Swift.min(start + length, 22 * 60)
+        return String(format: "%02d:%02d–%02d:%02d", start / 60, start % 60, end / 60, end % 60)
+    }
+
+    /// The start of a window string as minutes past midnight ("17:10–17:40" → 1030, "18:00" → 1080,
+    /// "18–19" → 1080). nil when it does not start with a clock time.
+    static func startMinute(of window: String?) -> Int? {
+        guard let w = window else { return nil }
+        let chars = Array(w)
+        var i = 0
+        while i < chars.count, !(chars[i].isASCII && chars[i].isNumber) { i += 1 }
+        var h = ""
+        while i < chars.count, h.count < 2, chars[i].isASCII, chars[i].isNumber {
+            h.append(chars[i])
+            i += 1
+        }
+        guard let hour = Int(h), (0...23).contains(hour) else { return nil }
+        var minute = 0
+        if i + 2 < chars.count, chars[i] == ":" || chars[i] == "." {
+            if let v = Int(String(chars[(i + 1)...(i + 2)])), (0...59).contains(v) { minute = v }
+        }
+        return hour * 60 + minute
     }
 
     static func suggest(figures: StateTrainingFigures,
                         hour: Int,
                         today: [StateWorkoutFact],
                         recent: [StateWorkoutFact],
-                        now: Date = Date()) -> [WorkoutSuggestion] {
+                        now: Date = Date(),
+                        choices: StateWorkoutChoices = .all) -> [WorkoutSuggestion] {
         // LATE: only something that does not keep you up.
         if hour >= 21 {
-            return [WorkoutSuggestion(
-                sport: "Stretching", minutes: 10, zone: 1, effort: 1, window: nil,
-                why: String(localized: "It's late: gentle mobility helps you wind down without adding load before sleep."))]
+            guard let key = choices.first(of: windDownKeys) else { return [] }
+            return [make(key, minutes: key == "Stretching" ? 10 : recoveryMinutes(key), zone: 1, effort: 1,
+                         window: nil,
+                         why: String(localized: "It's late: a calm wind-down lowers stress before sleep without adding load."))]
         }
 
         let remaining = figures.remainingEffort
         let charge = figures.charge
         let walkWindow = window(hour: hour, preferredStart: hour + 1)
+        let walkKey = choices.first(of: walkKeys)
 
-        // TARGET REACHED: nothing that adds meaningful load.
-        if let remaining, remaining <= 3 {
-            return [
-                WorkoutSuggestion(sport: "Walking", minutes: 20, zone: 1, effort: 3, window: walkWindow,
-                                  why: String(localized: "Today's Effort target is reached. An easy walk aids recovery without adding real load.")),
-                WorkoutSuggestion(sport: "Stretching", minutes: 15, zone: 1, effort: 2,
-                                  window: window(hour: hour, preferredStart: 19),
-                                  why: String(localized: "Mobility work loosens you up after today's load.")),
-            ]
+        // Today's hard work, and whether a recovery session already followed it.
+        let lastHard = today.filter { $0.isHard }.max { $0.end < $1.end }
+        var recoveredSince = false
+        if let h = lastHard {
+            recoveredSince = today.contains { WorkoutCatalog.isRecovery($0.sport) && $0.start >= h.end }
         }
+        let meditatedToday = today.contains { w in
+            let name = w.sport.lowercased()
+            return ["meditat", "mindful", "breath", "nidra", "nsdr"].contains { name.contains($0) }
+        }
+        let highStress = (figures.stress ?? 0) >= 2 || (figures.hrvDeltaPct ?? 0) <= -10
 
-        // LOW CHARGE OR A STRAINED BODY: recovery only.
+        // THE BRANCH'S OWN SESSIONS, most important first.
+        var core: [WorkoutSuggestion] = []
+        // A hard session this branch suggests (start minute, length), which earns a recovery block after it.
+        var suggestedHardStart: Int?
+        var suggestedHardMinutes = 0
+
         let lowCharge = (charge ?? 50) < 34
         let strained = (figures.sleepDebtMin ?? 0) >= 120
             || (figures.hrvDeltaPct ?? 0) <= -15
             || (figures.rhrDeltaBpm ?? 0) >= 5
             || (figures.stress ?? 0) >= 2.5
-        if lowCharge || strained {
+
+        if let remaining, remaining <= 3 {
+            // TARGET REACHED: nothing that adds meaningful load.
+            if let walkKey {
+                core.append(make(walkKey, minutes: 20, zone: 1, effort: 3, window: walkWindow,
+                                 why: String(localized: "Today's Effort target is reached. An easy walk aids recovery without adding real load.")))
+            }
+            if let mob = choices.first(of: mobilityKeys) {
+                core.append(make(mob, minutes: 15, zone: 1, effort: 2, window: window(hour: hour, preferredStart: 19),
+                                 why: String(localized: "Mobility work loosens you up after today's load.")))
+            }
+        } else if lowCharge || strained {
+            // LOW CHARGE OR A STRAINED BODY: recovery only.
             let why = lowCharge
                 ? String(localized: "Charge is low today: keep it in Zone 1 so recovery keeps going.")
                 : String(localized: "Your body shows strain (sleep debt, HRV, resting HR or stress): easy movement only.")
-            return [
-                WorkoutSuggestion(sport: "Walking", minutes: 30, zone: 1, effort: 5, window: walkWindow, why: why),
-                WorkoutSuggestion(sport: "Yoga", minutes: 20, zone: 1, effort: 3,
-                                  window: window(hour: hour, preferredStart: 18),
-                                  why: String(localized: "Calm mobility supports recovery and lowers stress.")),
-            ]
-        }
-
-        let endurance = preferredEnduranceSport(recent: recent)
-        let rem = remaining ?? 25
-        let hardToday = today.contains { $0.isHard }
-        // Yesterday's (or earlier today's) intensity counts: two interval days in a row is the classic mistake.
-        let hardRecently = hardToday || recent.prefix(3).contains { w in
-            w.isHard && now.timeIntervalSince(w.start) < 36 * 3600
-        }
-        var out: [WorkoutSuggestion] = []
-
-        if (charge ?? 0) >= 67 && !hardRecently && rem >= 20 {
-            let intervalMin = minutes(for: rem * 0.6, zone: 4, range: 20...45)
-            out.append(WorkoutSuggestion(
-                sport: endurance, minutes: intervalMin, zone: 4,
-                effort: Swift.min(rem, Double(intervalMin) * effortPerMinute(zone: 4)).rounded(),
-                window: window(hour: hour, preferredStart: 16),
-                why: String(localized: "High charge and plenty of target left: intervals, e.g. 5 × 3 min in Zone 4 with easy recoveries.")))
-            let z2 = minutes(for: rem, zone: 2, range: 30...75)
-            out.append(WorkoutSuggestion(
-                sport: endurance, minutes: z2, zone: 2,
-                effort: Swift.min(rem, Double(z2) * effortPerMinute(zone: 2)).rounded(),
-                window: window(hour: hour, preferredStart: 11),
-                why: String(localized: "Or steady Zone 2 endurance: builds base with little recovery cost.")))
+            if let walkKey {
+                core.append(make(walkKey, minutes: 30, zone: 1, effort: 5, window: walkWindow, why: why))
+            }
+            if let calmMove = choices.first(of: calmMovementKeys) {
+                core.append(make(calmMove, minutes: 20, zone: 1, effort: 3,
+                                 window: window(hour: hour, preferredStart: 18),
+                                 why: String(localized: "Calm mobility supports recovery and lowers stress.")))
+            }
         } else {
-            let z2 = minutes(for: rem, zone: 2, range: 20...60)
-            out.append(WorkoutSuggestion(
-                sport: endurance, minutes: z2, zone: 2,
-                effort: Swift.min(rem, Double(z2) * effortPerMinute(zone: 2)).rounded(),
-                window: window(hour: hour, preferredStart: 11),
-                why: hardRecently
-                    ? String(localized: "You already went hard recently: keep today aerobic in Zone 2.")
-                    : String(localized: "Zone 2 endurance closes the gap to today's target at a sustainable cost.")))
+            let rem = remaining ?? 25
+            let hardToday = lastHard != nil
+            // Yesterday's (or earlier today's) intensity counts: two interval days in a row is the classic mistake.
+            let hardRecently = hardToday || recent.prefix(3).contains { w in
+                w.isHard && now.timeIntervalSince(w.start) < 36 * 3600
+            }
+            // After a hard session today, the next load waits until the recovery block has had its turn.
+            let z2Start = hardToday ? hour + 3 : 11
+            if let endurance = enduranceSport(recent: recent, choices: choices) {
+                if (charge ?? 0) >= 67 && !hardRecently && rem >= 20 {
+                    let intervalMin = minutes(for: rem * 0.6, zone: 4, range: 20...45)
+                    let intervalWindow = window(hour: hour, preferredStart: 16)
+                    core.append(WorkoutSuggestion(
+                        sport: endurance, minutes: intervalMin, zone: 4,
+                        effort: Swift.min(rem, Double(intervalMin) * effortPerMinute(zone: 4)).rounded(),
+                        window: intervalWindow,
+                        why: String(localized: "High charge and plenty of target left: intervals, e.g. 5 × 3 min in Zone 4 with easy recoveries.")))
+                    suggestedHardStart = startMinute(of: intervalWindow)
+                    suggestedHardMinutes = intervalMin
+                    let z2 = minutes(for: rem, zone: 2, range: 30...75)
+                    core.append(WorkoutSuggestion(
+                        sport: endurance, minutes: z2, zone: 2,
+                        effort: Swift.min(rem, Double(z2) * effortPerMinute(zone: 2)).rounded(),
+                        window: window(hour: hour, preferredStart: 11),
+                        why: String(localized: "Or steady Zone 2 endurance: builds base with little recovery cost.")))
+                } else {
+                    let z2 = minutes(for: rem, zone: 2, range: 20...60)
+                    core.append(WorkoutSuggestion(
+                        sport: endurance, minutes: z2, zone: 2,
+                        effort: Swift.min(rem, Double(z2) * effortPerMinute(zone: 2)).rounded(),
+                        window: window(hour: hour, preferredStart: z2Start),
+                        why: hardRecently
+                            ? String(localized: "You already went hard recently: keep today aerobic in Zone 2.")
+                            : String(localized: "Zone 2 endurance closes the gap to today's target at a sustainable cost.")))
+                }
+            } else if let strength = choices.first(of: strengthKeys) {
+                // No endurance sport ticked: the wearer's gym work, kept moderate.
+                core.append(make(strength, minutes: 45, zone: 2,
+                                 effort: Swift.min(rem, 45 * effortPerMinute(zone: 2)).rounded(),
+                                 window: window(hour: hour, preferredStart: z2Start),
+                                 why: String(localized: "A controlled strength session moves you toward today's target without a hard cardio hit.")))
+            } else if let other = choices.allowedKeys.first(where: { key in
+                !StateWorkoutChoices.recoveryKeys.contains(key) && !walkKeys.contains(key)
+            }) {
+                // Only other sports ticked: one of them, at a moderate intensity.
+                core.append(make(other, minutes: 45, zone: 2,
+                                 effort: Swift.min(rem, 45 * effortPerMinute(zone: 2)).rounded(),
+                                 window: window(hour: hour, preferredStart: z2Start),
+                                 why: String(localized: "One of your selected sports, kept at a moderate intensity.")))
+            }
+            if let walkKey {
+                core.append(make(walkKey, minutes: 25, zone: 1, effort: 4, window: walkWindow,
+                                 why: String(localized: "An easy walk adds steps and aids recovery between sessions.")))
+            }
         }
-        out.append(WorkoutSuggestion(
-            sport: "Walking", minutes: 25, zone: 1, effort: 4, window: walkWindow,
-            why: String(localized: "An easy walk adds steps and aids recovery between sessions.")))
-        return Array(out.prefix(WorkoutSuggestionParser.maxCount))
+
+        // DOWN-REGULATION, the stress half of the plan.
+        // 1. The start of the day: a short sit before anything else, unless one is already logged.
+        var morning: WorkoutSuggestion?
+        if hour < 11, !meditatedToday, let key = choices.first(of: morningKeys) {
+            morning = make(key, minutes: 10, zone: 1, effort: 1,
+                           window: window(hour: hour, preferredStart: hour + 1, length: 1),
+                           why: String(localized: "Start the day calm: a short sit early on lowers the stress baseline for everything after it."))
+        }
+        // 2. After hard work, done today or suggested above: a recovery block 30–90 minutes after it.
+        var recovery: WorkoutSuggestion?
+        if let key = choices.first(of: postHardKeys) {
+            if let h = lastHard, !recoveredSince {
+                let minutesSince = now.timeIntervalSince(h.end) / 60
+                let win = minutesSince <= 240
+                    ? window(hour: hour, preferredStart: hour + 1, length: 1)
+                    : window(hour: hour, preferredStart: Swift.max(hour + 1, 19), length: 1)
+                recovery = make(key, minutes: recoveryMinutes(key), zone: 1, effort: 1, window: win,
+                                why: String(localized: "After today's hard session: a down-regulation block brings heart rate and stress back down and speeds recovery."))
+            } else if let start = suggestedHardStart,
+                      let win = clockWindow(startMinute: start + suggestedHardMinutes + 30, length: 30) {
+                recovery = make(key, minutes: recoveryMinutes(key), zone: 1, effort: 1, window: win,
+                                why: String(localized: "About 30 minutes after the intervals: a down-regulation block to bring stress back down."))
+            }
+        }
+        // 3. High stress without either of the above: a quick downshift.
+        var calm: WorkoutSuggestion?
+        if highStress, morning == nil, recovery == nil, let key = choices.first(of: calmKeys) {
+            calm = make(key, minutes: recoveryMinutes(key), zone: 1, effort: 1,
+                        window: window(hour: hour, preferredStart: hour + 1, length: 1),
+                        why: String(localized: "Stress is high today: a few minutes of slow breathing or a guided rest lowers it before anything else."))
+        }
+
+        // PRIORITY for the three places: the morning sit, the stress downshift (high stress puts
+        // down-regulation ahead of any training), the main session, its recovery, then the alternatives.
+        // Shown in clock order.
+        var ranked: [WorkoutSuggestion] = []
+        if let morning { ranked.append(morning) }
+        if let calm { ranked.append(calm) }
+        if let first = core.first { ranked.append(first) }
+        if let recovery { ranked.append(recovery) }
+        ranked.append(contentsOf: core.dropFirst())
+        var picked: [WorkoutSuggestion] = []
+        for s in ranked where !picked.contains(where: { $0.id == s.id }) {
+            picked.append(s)
+            if picked.count == WorkoutSuggestionParser.maxCount { break }
+        }
+        return inClockOrder(picked)
+    }
+
+    /// Sorted by window start; items without a readable window keep their order at the end.
+    static func inClockOrder(_ items: [WorkoutSuggestion]) -> [WorkoutSuggestion] {
+        items.enumerated()
+            .sorted { a, b in
+                let sa = startMinute(of: a.element.window) ?? Int.max
+                let sb = startMinute(of: b.element.window) ?? Int.max
+                return sa != sb ? sa < sb : a.offset < b.offset
+            }
+            .map { $0.element }
     }
 }
 
@@ -569,26 +904,130 @@ enum StateTrainingContext {
 /// The framing the workout suggestions are asked under.
 enum WorkoutSuggestionWriter {
 
-    static func systemPrompt(grounding: String) -> String {
-        var s = "You are the user's training coach. Suggest 1 to 3 FURTHER workouts for the REST OF TODAY, "
+    static func systemPrompt(grounding: String, choices: StateWorkoutChoices = .all) -> String {
+        var s = "You are the user's training coach. Suggest 1 to 3 FURTHER sessions for the REST OF TODAY, "
         s += "chosen from their data: what they already did today, the last two weeks of training and its "
         s += "effort, today's Effort against the recommended target, charge, sleep debt, HRV and resting HR "
         s += "against baseline, stress, the time of day and the weather. Rules: never prescribe hard work on "
         s += "low charge or a strained body; if the target is already reached suggest only easy Zone 1 "
-        s += "movement or mobility; do not repeat a hard session the day after one; time windows must lie "
-        s += "later today than now. Prefer sports the user actually does.\n\n"
+        s += "movement, mobility or recovery; do not repeat a hard session the day after one. Prefer sports "
+        s += "the user actually does.\n\n"
+        s += StateDayPlanContext.stressObjective + "\n\n"
+        s += allowedSection(choices) + "\n\n"
         s += "Answer with JSON ONLY, no prose and no code fence, exactly in this shape:\n"
-        s += #"{"workouts":[{"sport":"Running","minutes":40,"zone":2,"effort":12,"window":"17:00-18:00","why":"one short sentence"}]}"#
+        s += #"{"workouts":[{"sport":"Running","minutes":40,"zone":2,"effort":12,"window":"17:00-18:00","why":"one short sentence"},{"sport":"NSDR","minutes":20,"zone":1,"effort":1,"window":"18:30-19:00","why":"one short sentence"}]}"#
         s += "\n"
-        s += "sport: a plain sport name (Running, Walking, Cycling, Strength, Yoga, HIIT, Rowing, Stretching, ...). "
-        s += "zone: the target heart-rate zone 1-5 on the user's zones listed below. "
+        s += "sport: exactly one name from the allowed list above. "
+        s += "zone: the target heart-rate zone 1-5 on the user's zones listed below (recovery sessions: 1). "
         s += "effort: estimated Effort points (0-100 scale) the session adds today. "
+        s += "window: a clock-time window HH:MM-HH:MM that starts LATER than the time now (never in the past) "
+        s += "and fits the day's schedule below. "
         s += "why: one short sentence in the user's language.\n\n"
         s += grounding
         return s
     }
 
+    /// The names the model may use. Always the full list, so "only from these" is a closed set the parser
+    /// can hold the answer to.
+    static func allowedSection(_ choices: StateWorkoutChoices) -> String {
+        let keys = choices.allowedKeys
+        guard !keys.isEmpty else {
+            return "ALLOWED SESSIONS: the user has deselected every workout. Answer {\"workouts\":[]}."
+        }
+        var s = "ALLOWED SESSIONS — the user chose which workouts may be suggested. Only suggest from this "
+        s += "list and use the names exactly as written; never suggest anything else: "
+        s += keys.joined(separator: ", ") + "."
+        let variants = StateWorkoutChoices.variants.filter { keys.contains($0.key) }
+        if !variants.isEmpty {
+            s += " (" + variants.map { v -> String in
+                switch v.key {
+                case StateWorkoutChoices.nsdrKey: return "NSDR = non-sleep deep rest / yoga nidra, a guided lying-down relaxation"
+                case StateWorkoutChoices.restorativeYogaKey: return "Restorative yoga = slow, supported, floor-based yoga"
+                default: return "Breathwork = slow-breathing practice, e.g. extended exhale or box breathing"
+                }
+            }.joined(separator: "; ") + ".)"
+        }
+        return s
+    }
+
     static let question = "Suggest today's further workouts as JSON."
+}
+
+// MARK: - Stress objective and the day's schedule
+
+/// The STATE tile's second objective beside training — keep stress low — and the day's clock the coach
+/// plans it on: wake, focus window, wind-down, bedtime. Shared by the workout suggestions and the mission
+/// the State refresh writes.
+enum StateDayPlanContext {
+
+    /// The rules the coach is asked to plan stress by. Stated once here so both prompts say the same thing.
+    static let stressObjective: String = {
+        var s = "SECOND OBJECTIVE — KEEP THE USER'S STRESS LOW. Read stress now, the stress-by-hour curve "
+        s += "today, the stress score and HRV against baseline, and plan the day to bring stress down:\n"
+        s += "- After any hard session (one done today, or one you suggest), schedule a down-regulation block "
+        s += "— NSDR / yoga nidra, restorative yoga, meditation or breathwork, 10-20 min, Zone 1 — starting "
+        s += "30-90 minutes after that session ends.\n"
+        s += "- When stress is elevated (stress score 2 or more of 3, a rising curve, or HRV 10% or more below "
+        s += "baseline), include a down-regulation block even without hard training and keep any training easy.\n"
+        s += "- Follow the day's structure: a short meditation or breathwork early in the day, soon after "
+        s += "waking, while it is still morning; training and movement breaks inside the focus window; only "
+        s += "calm, low-arousal sessions in the wind-down before bedtime, never training.\n"
+        s += "- Respect the user's routines (work hours, fixed appointments) when they are given.\n"
+        s += "- Every time you give is a clock time later than the time now, never in the past."
+        return s
+    }()
+
+    /// The mission's version: the same objective, pointed at ONE thing to do today.
+    static func missionObjective(choices: StateWorkoutChoices) -> String {
+        var s = stressObjective + "\n"
+        s += "For TODAY'S MISSION this means: when stress is elevated, HRV is below baseline or a hard session "
+        s += "is done or planned today, a down-regulation mission (meditation, breathwork, NSDR / yoga nidra "
+        s += "or restorative yoga — GOAL: MEDITATION_MIN) or an earlier bedtime is often the right one thing. "
+        s += "Name a clock time for it that fits the schedule below."
+        if !choices.isUnrestricted {
+            let keys = choices.allowedKeys
+            s += keys.isEmpty
+                ? " The user has deselected every workout: do not make the mission a workout."
+                : " If the mission is a workout, pick it only from: " + keys.joined(separator: ", ") + "."
+        }
+        return s
+    }
+
+    private static func clock(_ minute: Int) -> String {
+        let m = RoomClimateSchedule.wrap(minute)
+        return String(format: "%02d:%02d", m / 60, m % 60)
+    }
+
+    /// The day's clock for the coach: now, wake, the morning start-up, the focus window, the wind-down and
+    /// bedtime, from the same schedule the bedroom-climate tile uses (the wearer's plan, else their
+    /// typical nights, else 22:30–07:00).
+    static func block(now: Date, schedule: RoomClimateSchedule, calendar: Calendar = .current) -> String {
+        let source: String
+        switch schedule.source {
+        case .plan: source = "from the user's sleep plan"
+        case .history: source = "typical of the last two weeks"
+        case .fallback: source = "default estimate, no plan or sleep history"
+        }
+        let nowMinute = RoomClimateSchedule.minuteOfDay(now, calendar)
+        let phase: String
+        switch schedule.mode(atMinute: nowMinute) {
+        case .morning: phase = "morning start-up"
+        case .focus: phase = "focus / active day"
+        case .sleep:
+            phase = RoomClimateSchedule.within(nowMinute, from: schedule.sleepStartMinute, to: schedule.bedtimeMinute)
+                ? "wind-down" : "night"
+        }
+        var s: [String] = ["TODAY'S SCHEDULE (local clock; place every session inside it and later than now):"]
+        s.append("Time now: \(clock(nowMinute)) (\(phase)).")
+        s.append("Wake: \(clock(schedule.wakeMinute)). Bedtime: \(clock(schedule.bedtimeMinute)) (\(source)).")
+        s.append("Morning start-up (best for a short meditation or breathwork): "
+                 + "\(clock(schedule.wakeMinute))–\(clock(schedule.focusStartMinute)).")
+        s.append("Focus / active window (training, focus blocks, movement breaks): "
+                 + "\(clock(schedule.focusStartMinute))–\(clock(schedule.sleepStartMinute)).")
+        s.append("Wind-down (calm only — breathwork, NSDR, restorative yoga, stretching; no training): "
+                 + "\(clock(schedule.sleepStartMinute))–\(clock(schedule.bedtimeMinute)).")
+        return s.joined(separator: "\n")
+    }
 }
 
 // MARK: - Cache
@@ -621,10 +1060,11 @@ enum WorkoutSuggestionStore {
         return s
     }
 
-    /// The fingerprint of today's workouts: how many, and when the latest started.
-    static func fingerprint(today: [StateWorkoutFact]) -> String {
+    /// The fingerprint of today's workouts (how many, and when the latest started) and of the wearer's
+    /// workout selection, so changing the selection asks for fresh suggestions once.
+    static func fingerprint(today: [StateWorkoutFact], choices: StateWorkoutChoices = .all) -> String {
         let latest = today.map { Int($0.start.timeIntervalSince1970) }.max() ?? 0
-        return "\(today.count)|\(latest)"
+        return "\(today.count)|\(latest)|\(choices.signature)"
     }
 }
 

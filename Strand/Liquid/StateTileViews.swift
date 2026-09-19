@@ -218,6 +218,7 @@ struct StateWorkoutsSection: View {
     private var loadKey: String {
         "\(Int(figures.charge ?? -1))|\(Int(figures.effortTarget ?? -1))|\(Int((figures.effortNow ?? -5) / 5))"
             + "|\(Int(figures.sleepDebtMin ?? -1))|\(repo.workoutsSeq)|\(repo.refreshSeq)"
+            + "|\(controller.choices.signature)"
     }
 
     var body: some View {
@@ -239,9 +240,12 @@ struct StateWorkoutsSection: View {
                 }
             }
             if controller.suggestions.isEmpty {
-                Text("Nothing more to suggest for today.")
+                Text(controller.choices.isUnrestricted
+                     ? String(localized: "Nothing more to suggest for today.")
+                     : String(localized: "None of your selected workouts fits the rest of today. Adjust the selection below."))
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 ForEach(controller.suggestions) { s in row(s) }
             }
@@ -251,9 +255,34 @@ struct StateWorkoutsSection: View {
                     .foregroundStyle(StrandPalette.statusWarning)
                     .fixedSize(horizontal: false, vertical: true)
             }
+            choicesButton
         }
         .task(id: loadKey) {
             await controller.load(figures: figures, repo: repo, profile: profile, coach: coach)
+        }
+    }
+
+    /// Bottom of the section: which workouts may be suggested.
+    private var choicesButton: some View {
+        HStack {
+            Spacer(minLength: 0)
+            Button {
+                controller.presented = .workoutChoices
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 12, weight: .semibold))
+                    Text(controller.choices.isUnrestricted
+                         ? String(localized: "Workouts to suggest")
+                         : String(localized: "Workouts to suggest · \(controller.choices.allowedKeys.count)"))
+                        .font(StrandFont.caption)
+                }
+                .foregroundStyle(StrandPalette.textTertiary)
+                .padding(.vertical, 4)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text("Choose which workouts may be suggested"))
         }
     }
 
@@ -279,13 +308,19 @@ struct StateWorkoutsSection: View {
                 HStack(alignment: .center, spacing: 10) {
                     ZStack {
                         Circle().fill(StrandPalette.effortColor.opacity(0.16))
-                        Text("Z\(s.zone)")
-                            .font(StrandFont.caption.weight(.bold))
-                            .foregroundStyle(StrandPalette.effortColor)
+                        if s.isRecovery {
+                            Image(systemName: "leaf.fill")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(StrandPalette.effortColor)
+                        } else {
+                            Text("Z\(s.zone)")
+                                .font(StrandFont.caption.weight(.bold))
+                                .foregroundStyle(StrandPalette.effortColor)
+                        }
                     }
                     .frame(width: 34, height: 34)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("\(WorkoutSource.displaySport(s.sport)) · \(s.minutes) min")
+                        Text("\(StateWorkoutChoiceTitle.title(for: s)) · \(s.minutes) min")
                             .font(StrandFont.subhead.weight(.semibold))
                             .foregroundStyle(StrandPalette.textPrimary)
                         let detail = detailLine(s)
@@ -308,7 +343,7 @@ struct StateWorkoutsSection: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(Text("Start \(s.sport), \(s.minutes) minutes, zone \(s.zone)"))
+            .accessibilityLabel(Text("Start \(StateWorkoutChoiceTitle.title(for: s)), \(s.minutes) minutes, zone \(s.zone)"))
 
             Button {
                 controller.presented = .workoutDetail(s)
@@ -395,7 +430,7 @@ struct StateTilePresentationHost: ViewModifier {
                 })
         case .workoutDetail(let s):
             StateRecommendationSheet(
-                title: WorkoutSource.displaySport(s.sport),
+                title: StateWorkoutChoiceTitle.title(for: s),
                 message: s.why.isEmpty ? String(localized: "Suggested for the rest of today.") : s.why,
                 facts: workoutFacts(s),
                 primaryTitle: s.lockZone.map { String(localized: "Start with Zone \($0) locked") }
@@ -419,6 +454,8 @@ struct StateTilePresentationHost: ViewModifier {
                         }
                     }
             }
+        case .workoutChoices:
+            StateWorkoutChoicesSheet()
         }
     }
 
@@ -509,5 +546,112 @@ struct StateRecommendationSheet: View {
         .padding(.vertical, 12)
         .background(Capsule().fill(filled ? StrandPalette.accent : StrandPalette.accent.opacity(0.12)))
         .contentShape(Capsule())
+    }
+}
+
+// MARK: - Workout selection
+
+/// Display names for the selection keys. The catalogue sports show as the app shows them everywhere; the
+/// three recovery variants have their own names and say what they are recorded as.
+enum StateWorkoutChoiceTitle {
+
+    static func title(forKey key: String) -> String {
+        switch key {
+        case StateWorkoutChoices.nsdrKey: return String(localized: "NSDR (yoga nidra)")
+        case StateWorkoutChoices.restorativeYogaKey: return String(localized: "Restorative yoga")
+        case StateWorkoutChoices.breathworkKey: return String(localized: "Breathwork")
+        default: return WorkoutSource.displaySport(key)
+        }
+    }
+
+    static func title(for s: WorkoutSuggestion) -> String {
+        s.label.map { title(forKey: $0) } ?? WorkoutSource.displaySport(s.sport)
+    }
+}
+
+/// The "which workouts may be suggested" checklist: a ticked box per sport, recovery & calm first.
+/// Edits a local draft and commits ONCE when the sheet goes away (Done or swipe), so ticking through the
+/// list does not regenerate the suggestions on every box.
+struct StateWorkoutChoicesSheet: View {
+    @State private var excluded: Set<String> = StateCoachController.shared.choices.excluded
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack(spacing: 16) {
+                        Button {
+                            excluded.removeAll()
+                        } label: {
+                            Label("Select all", systemImage: "checkmark.square")
+                        }
+                        .buttonStyle(.borderless)
+                        Spacer(minLength: 0)
+                        Button {
+                            excluded = Set(StateWorkoutChoices.options.map(\.key))
+                        } label: {
+                            Label("Select none", systemImage: "square")
+                        }
+                        .buttonStyle(.borderless)
+                    }
+                    .font(StrandFont.subhead.weight(.semibold))
+                    .foregroundStyle(StrandPalette.accent)
+                } footer: {
+                    Text("Only ticked workouts are suggested under WORKOUTS TODAY, by the coach and by the built-in rules.")
+                }
+                Section {
+                    ForEach(StateWorkoutChoices.recoveryOptions) { row($0) }
+                } header: {
+                    Text("Recovery & calm")
+                } footer: {
+                    Text("NSDR and breathwork are recorded as a Meditation session, restorative yoga as Yoga.")
+                }
+                Section {
+                    ForEach(StateWorkoutChoices.sportOptions) { row($0) }
+                } header: {
+                    Text("Sports")
+                }
+            }
+            .navigationTitle(String(localized: "Workouts to suggest"))
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .onDisappear {
+            StateCoachController.shared.updateChoices(StateWorkoutChoices(excluded: excluded))
+        }
+    }
+
+    private func row(_ option: StateWorkoutChoices.Option) -> some View {
+        let on = !excluded.contains(option.key)
+        return Button {
+            if on { excluded.insert(option.key) } else { excluded.remove(option.key) }
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: on ? "checkmark.square.fill" : "square")
+                    .font(.system(size: 20))
+                    .foregroundStyle(on ? StrandPalette.accent : StrandPalette.textTertiary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(StateWorkoutChoiceTitle.title(forKey: option.key))
+                        .font(StrandFont.body)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    if option.isVariant {
+                        Text("Recorded as \(WorkoutSource.displaySport(option.sport))")
+                            .font(StrandFont.caption)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(on ? AccessibilityTraits.isSelected : AccessibilityTraits())
     }
 }

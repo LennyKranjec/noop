@@ -28,12 +28,15 @@ final class StateCoachController: ObservableObject {
         case detail(StateRecommendation)
         case workoutDetail(WorkoutSuggestion)
         case breathe
+        /// The "which workouts may be suggested" checklist.
+        case workoutChoices
 
         var id: String {
             switch self {
             case .detail(let r): return "detail-" + r.id
             case .workoutDetail(let w): return "workout-" + w.id
             case .breathe: return "breathe"
+            case .workoutChoices: return "workout-choices"
             }
         }
     }
@@ -49,11 +52,16 @@ final class StateCoachController: ObservableObject {
     @Published var presented: Presentation?
     /// The start-workout picker (a separate cover, it is its own full-screen browser on iPhone).
     @Published var pickingWorkout = false
+    /// Which workouts may be suggested (persisted; default everything).
+    @Published private(set) var choices: StateWorkoutChoices = StateWorkoutChoicesStore.read()
 
     private var throttle = RefreshThrottle(minInterval: StateCoachController.minRefreshInterval)
     /// The automatic generation, held here rather than in the view's task so a re-render that restarts
     /// the task does not cancel a request half-way and throw its answer away.
     private var generation: Task<Void, Never>?
+    /// Bumped whenever an in-flight generation is superseded (the selection changed, a manual refresh
+    /// started), so its late answer is dropped instead of overwriting the newer list.
+    private var generationToken = 0
 
     private init() {}
 
@@ -108,7 +116,44 @@ final class StateCoachController: ObservableObject {
 
     private func fallback(_ f: StateTrainingFigures, _ snap: TrainingSnapshot, now: Date = Date()) -> [WorkoutSuggestion] {
         WorkoutSuggestionFallback.suggest(figures: f, hour: Calendar.current.component(.hour, from: now),
-                                          today: snap.today, recent: snap.recent, now: now)
+                                          today: snap.today, recent: snap.recent, now: now, choices: choices)
+    }
+
+    /// The coach's grounding for the State tile: the full context, today's training state and the day's
+    /// schedule (wake, focus, wind-down, bedtime) the stress objective is planned on.
+    private func stateGrounding(coach: AICoachEngine, figures f: StateTrainingFigures,
+                                snap: TrainingSnapshot) async -> String {
+        let now = Date()
+        let full = await coach.buildFullContext()
+        return full + "\n\n"
+            + StateTrainingContext.block(figures: f, zones: snap.zones, today: snap.today, recent: snap.recent)
+            + "\n\n" + StateDayPlanContext.block(now: now, schedule: RoomClimatePlan.schedule(now: now))
+    }
+
+    /// The coach's list held to the selection: disallowed sessions dropped, nil when nothing is left.
+    private func allowed(_ items: [WorkoutSuggestion]?) -> [WorkoutSuggestion]? {
+        guard let items else { return nil }
+        let kept = choices.filter(items)
+        return kept.isEmpty ? nil : kept
+    }
+
+    // MARK: Selection
+
+    /// Save a new selection. What is on screen is held to it at once (disallowed rows vanish) and a coach
+    /// generation still out for the OLD selection is superseded. The fresh list comes from the next
+    /// `load`: the selection is part of the cache fingerprint and of the section's load key, so a change
+    /// misses the cache and generates once — outside the manual refresh's 20 s throttle, which guards the
+    /// refresh button, not this. The sheet commits once, on close, so ticking boxes costs nothing.
+    func updateChoices(_ new: StateWorkoutChoices) {
+        guard new != choices else { return }
+        StateWorkoutChoicesStore.write(new)
+        choices = new
+        generationToken += 1
+        generation?.cancel()
+        generation = nil
+        isGenerating = false
+        notice = nil
+        suggestions = new.filter(suggestions)
     }
 
     // MARK: Automatic
@@ -121,9 +166,11 @@ final class StateCoachController: ObservableObject {
         // of the per-workout heart-rate reads the snapshot makes.
         let dayStart = Int(Calendar.current.startOfDay(for: Date()).timeIntervalSince1970)
         let todayRows = await repo.workoutRows(days: 15).filter { $0.startTs >= dayStart }.prefix(6)
-        let fp = WorkoutSuggestionStore.fingerprint(today: todayRows.map { fact($0, zoneMinutes: nil) })
-        if let cached = WorkoutSuggestionStore.current(dayKey: day, fingerprint: fp) {
-            suggestions = cached.items
+        let fp = WorkoutSuggestionStore.fingerprint(today: todayRows.map { fact($0, zoneMinutes: nil) },
+                                                    choices: choices)
+        if let cached = WorkoutSuggestionStore.current(dayKey: day, fingerprint: fp),
+           let items = allowed(cached.items) {
+            suggestions = items
             source = .coach
             return
         }
@@ -135,17 +182,29 @@ final class StateCoachController: ObservableObject {
         source = .fallback
         // Only ask the coach once the day's figures are in: a generation from a half-loaded screen would
         // be cached for the whole day.
-        guard coach.isConfigured, coach.dataConsent, f.charge != nil || f.effortNow != nil else { return }
+        guard coach.isConfigured, coach.dataConsent, f.charge != nil || f.effortNow != nil,
+              !choices.allowedKeys.isEmpty else { return }
         isGenerating = true
+        generationToken += 1
+        let token = generationToken
+        let choicesNow = choices
         generation = Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.isGenerating = false; self.generation = nil }
-            let grounding = await coach.buildFullContext() + "\n\n"
-                + StateTrainingContext.block(figures: f, zones: snap.zones, today: snap.today, recent: snap.recent)
-            guard let answer = await coach.generateOneShot(
-                    systemPrompt: WorkoutSuggestionWriter.systemPrompt(grounding: grounding),
-                    question: WorkoutSuggestionWriter.question),
-                  let items = WorkoutSuggestionParser.parse(answer) else { return }
+            defer {
+                // Only the generation still current clears the flags; a superseded one leaves them to
+                // whatever replaced it.
+                if self.generationToken == token {
+                    self.isGenerating = false
+                    self.generation = nil
+                }
+            }
+            let grounding = await self.stateGrounding(coach: coach, figures: f, snap: snap)
+            let answer = await coach.generateOneShot(
+                systemPrompt: WorkoutSuggestionWriter.systemPrompt(grounding: grounding, choices: choicesNow),
+                question: WorkoutSuggestionWriter.question)
+            guard self.generationToken == token,
+                  let answer,
+                  let items = self.allowed(WorkoutSuggestionParser.parse(answer)) else { return }
             WorkoutSuggestionStore.write(StoredWorkoutSuggestions(dayKey: day, fingerprint: fp,
                                                                   createdAt: Date(), items: items))
             // Only if nothing newer (a manual refresh) replaced the list meanwhile.
@@ -184,7 +243,8 @@ final class StateCoachController: ObservableObject {
         let snap = await snapshot(repo: repo, profile: profile)
         let f = completed(figures, snap)
         let day = DailyMissionStore.dayKey()
-        let fp = WorkoutSuggestionStore.fingerprint(today: snap.today)
+        let fp = WorkoutSuggestionStore.fingerprint(today: snap.today, choices: choices)
+        let choicesNow = choices
 
         guard coach.isConfigured, coach.dataConsent else {
             suggestions = fallback(f, snap)
@@ -195,14 +255,19 @@ final class StateCoachController: ObservableObject {
             return false
         }
 
-        let grounding = await coach.buildFullContext() + "\n\n"
-            + StateTrainingContext.block(figures: f, zones: snap.zones, today: snap.today, recent: snap.recent)
+        let grounding = await stateGrounding(coach: coach, figures: f, snap: snap)
+        let missionGrounding = grounding + "\n\n" + StateDayPlanContext.missionObjective(choices: choicesNow)
+        // A manual refresh supersedes an automatic generation still out.
+        generationToken += 1
+        generation?.cancel()
+        generation = nil
+        isGenerating = false
         // Both in parallel: they share the grounding and neither depends on the other.
         async let missionAnswer = coach.generateOneShot(
-            systemPrompt: DailyMissionWriter.systemPrompt(grounding: grounding),
+            systemPrompt: DailyMissionWriter.systemPrompt(grounding: missionGrounding),
             question: DailyMissionWriter.question)
         async let workoutAnswer = coach.generateOneShot(
-            systemPrompt: WorkoutSuggestionWriter.systemPrompt(grounding: grounding),
+            systemPrompt: WorkoutSuggestionWriter.systemPrompt(grounding: grounding, choices: choicesNow),
             question: WorkoutSuggestionWriter.question)
         let mAnswer = await missionAnswer
         let wAnswer = await workoutAnswer
@@ -213,7 +278,12 @@ final class StateCoachController: ObservableObject {
             missionUpdated = true
         }
         var workoutsUpdated = false
-        if let wAnswer, let items = WorkoutSuggestionParser.parse(wAnswer) {
+        if choicesNow.allowedKeys.isEmpty {
+            // Nothing may be suggested: an empty list, and the section says why.
+            suggestions = []
+            source = .fallback
+            workoutsUpdated = true
+        } else if let wAnswer, let items = allowed(WorkoutSuggestionParser.parse(wAnswer)) {
             WorkoutSuggestionStore.write(StoredWorkoutSuggestions(dayKey: day, fingerprint: fp,
                                                                   createdAt: Date(), items: items))
             suggestions = items

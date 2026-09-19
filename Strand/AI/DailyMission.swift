@@ -91,7 +91,10 @@ enum DailyMissionWriter {
         s += "at the person. You are writing TODAY'S MISSION — one single concrete thing to do "
         s += "today, chosen from their numbers and their goals. Not a list, not a plan for the "
         s += "week. It must be doable today and it must suit the state their data is in: do not "
-        s += "prescribe a hard session on a wrecked night.\n\n"
+        s += "prescribe a hard session on a wrecked night. Keep their stress in mind too: when stress is "
+        s += "high, HRV is below baseline or a hard session is already done today, a calming mission "
+        s += "(meditation, breathwork, NSDR / yoga nidra, restorative yoga, an earlier night) often beats "
+        s += "more training.\n\n"
         s += "Answer with the mission itself, two or three sentences, then ONE final line stating "
         s += "the goal the app will check automatically — no heading, no preamble, no score.\n\n"
         // THE GOAL LINE. The quest closes itself when the data meets it, so the mission has to be

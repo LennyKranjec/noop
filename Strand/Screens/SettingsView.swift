@@ -607,6 +607,8 @@ struct SettingsView: View {
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
                 rowDivider
+                StepCalibrationTileToggleRow()   // TEMPORARY: brings back the Today walk tile after its ×
+                rowDivider
                 // Tap-through to the WHOOP 4.0 steps-ESTIMATE calibration (a SEPARATE thing from the
                 // 5/MG @57 counter divisor above): a 4.0 sends no step count, so NOOP estimates steps
                 // from motion and calibrates that to the phone. The sheet explains it, shows the fit +

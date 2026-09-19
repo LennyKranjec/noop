@@ -1076,7 +1076,13 @@ final class AICoachEngine: ObservableObject {
     func ensureDailyMission() async -> DailyMission? {
         if let existing = DailyMissionStore.today() { return existing }
         guard isConfigured, dataConsent else { return nil }
+        // The same stress objective and day schedule the State tile's refresh plans by, so the automatic
+        // mission keeps stress low too (down-regulation after hard sessions, morning meditation, a calm
+        // wind-down) and respects the wearer's allowed workouts.
+        let now = Date()
         let grounding = await buildFullContext()
+            + "\n\n" + StateDayPlanContext.block(now: now, schedule: RoomClimatePlan.schedule(now: now))
+            + "\n\n" + StateDayPlanContext.missionObjective(choices: StateWorkoutChoicesStore.read())
         let answer = await generateOneShot(
             systemPrompt: DailyMissionWriter.systemPrompt(grounding: grounding),
             question: DailyMissionWriter.question)
