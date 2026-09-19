@@ -214,7 +214,7 @@ struct TestCentreView: View {
                 let modes = TestCentreLayout.visibleModes(is5MG: is5MG)
                 ForEach(Array(modes.enumerated()), id: \.element.id) { idx, mode in
                     if idx > 0 { Divider().overlay(StrandPalette.hairline) }
-                    TestModeRow(mode: mode, report: report)
+                    TestModeRow(mode: mode, report: report, logStore: live.logStore)
                 }
             }
         }
@@ -878,6 +878,9 @@ struct TestCentreView: View {
 private struct TestModeRow: View {
     let mode: TestMode
     @ObservedObject var report: TestCentreReport
+    /// The strap log, observed so `capturedUnits` and the log-driven readout panels still recompute on new
+    /// lines now that `LiveState` no longer publishes log changes (it is `live.logStore`).
+    @ObservedObject var logStore: LiveLog
     @EnvironmentObject var live: LiveState
     @EnvironmentObject var model: AppModel
     @State private var on: Bool = false
@@ -889,7 +892,7 @@ private struct TestModeRow: View {
     /// The HONEST per-mode captured-day count for a guided row (#965): distinct days THIS mode produced its
     /// own trace on, read from the same shareable log the report exports, so each active mode accumulates
     /// its OWN count instead of every guided row sharing one elapsed-clock number. nil for a toggle mode
-    /// (no "K of N") and when the mode is off. Recomputes with `live.log` (published) so the row updates as
+    /// (no "K of N") and when the mode is off. Recomputes with the log (`logStore`, observed) so the row updates as
     /// new capture days land.
     private var capturedUnits: Int? {
         guard on, case .guided = mode.capture else { return nil }
@@ -930,31 +933,31 @@ private struct TestModeRow: View {
             // Live readout (Group E/F): the per-mode panel binding the registry's liveReadout ids. Shown
             // only while the mode is on, so an inactive row stays compact.
             if on, mode.domain == .sleep {
-                SleepReadoutPanel(live: live)
+                SleepReadoutPanel(live: live, logStore: logStore)
             }
             if on, mode.domain == .battery {
                 BatteryReadoutPanel(live: live)
             }
             if on, mode.domain == .connection {
-                ConnectionReadoutPanel(live: live)
+                ConnectionReadoutPanel(live: live, logStore: logStore)
             }
             if on, mode.domain == .recovery {
-                RecoveryReadoutPanel(live: live)
+                RecoveryReadoutPanel(live: live, logStore: logStore)
             }
             if on, mode.domain == .hrv {
-                HrvReadoutPanel(live: live)
+                HrvReadoutPanel(live: live, logStore: logStore)
             }
             if on, mode.domain == .steps {
-                StepsReadoutPanel(live: live)
+                StepsReadoutPanel(live: live, logStore: logStore)
             }
             if on, mode.domain == .workouts {
-                WorkoutsReadoutPanel(live: live)
+                WorkoutsReadoutPanel(live: live, logStore: logStore)
             }
             if on, mode.domain == .dataImport {
-                ImportReadoutPanel(live: live)
+                ImportReadoutPanel(live: live, logStore: logStore)
             }
             if on, mode.domain == .display {
-                DisplayReadoutPanel(live: live)
+                DisplayReadoutPanel(live: live, logStore: logStore)
             }
             HStack {
                 Spacer()
@@ -1002,6 +1005,8 @@ private struct TestModeRow: View {
 /// tail. No hardcoded colours; uses the same tokens as the surrounding Test Centre rows.
 private struct SleepReadoutPanel: View {
     @ObservedObject var live: LiveState
+    /// Observed so the log-derived readout refreshes on new lines (`live.logStore`).
+    @ObservedObject var logStore: LiveLog
 
     var body: some View {
         let hrDensity = SleepReadout.hrDensityPerMinute(hr: live.recentHrSamples)
@@ -1043,6 +1048,8 @@ private struct BatteryReadoutPanel: View {
 /// same ReadoutRow tokens as the other panels. No em-dash in any string here.
 private struct ConnectionReadoutPanel: View {
     @ObservedObject var live: LiveState
+    /// Observed so the log-derived readout refreshes on new lines (`live.logStore`).
+    @ObservedObject var logStore: LiveLog
 
     var body: some View {
         let tail = live.taggedTail(domain: .connection)
@@ -1100,6 +1107,8 @@ private struct ConnectionReadoutPanel: View {
 /// uses the same ReadoutRow tokens as the Sleep / Battery panels. No em-dash in any string here.
 private struct RecoveryReadoutPanel: View {
     @ObservedObject var live: LiveState
+    /// Observed so the log-derived readout refreshes on new lines (`live.logStore`).
+    @ObservedObject var logStore: LiveLog
 
     var body: some View {
         let last = TestReadout.lastChargeBreakdown(taggedTail: live.taggedTail(domain: .recovery))
@@ -1116,6 +1125,8 @@ private struct RecoveryReadoutPanel: View {
 /// panel reads the same outcome the snapshot screen showed. No hardcoded colours. No em-dash here.
 private struct HrvReadoutPanel: View {
     @ObservedObject var live: LiveState
+    /// Observed so the log-derived readout refreshes on new lines (`live.logStore`).
+    @ObservedObject var logStore: LiveLog
 
     var body: some View {
         let last = TestReadout.lastHrvComputation(taggedTail: live.taggedTail(domain: .hrv))
@@ -1133,6 +1144,8 @@ private struct HrvReadoutPanel: View {
 /// tokens as the other panels. No em-dash in any string here.
 private struct StepsReadoutPanel: View {
     @ObservedObject var live: LiveState
+    /// Observed so the log-derived readout refreshes on new lines (`live.logStore`).
+    @ObservedObject var logStore: LiveLog
 
     var body: some View {
         let tail = live.taggedTail(domain: .steps)
@@ -1152,6 +1165,8 @@ private struct StepsReadoutPanel: View {
 /// properties. No hardcoded colours; uses the same ReadoutRow tokens as the other panels. No em-dash here.
 private struct WorkoutsReadoutPanel: View {
     @ObservedObject var live: LiveState
+    /// Observed so the log-derived readout refreshes on new lines (`live.logStore`).
+    @ObservedObject var logStore: LiveLog
 
     var body: some View {
         let summary = WorkoutsReadout.lastSessionSummary(taggedTail: live.taggedTail(domain: .workouts))
@@ -1169,6 +1184,8 @@ private struct WorkoutsReadoutPanel: View {
 /// ReadoutRow tokens as the other panels. No em-dash in any string here.
 private struct ImportReadoutPanel: View {
     @ObservedObject var live: LiveState
+    /// Observed so the log-derived readout refreshes on new lines (`live.logStore`).
+    @ObservedObject var logStore: LiveLog
 
     var body: some View {
         let summary = ImportReadout.lastImportSummary(taggedTail: live.taggedTail(domain: .dataImport))
@@ -1186,6 +1203,8 @@ private struct ImportReadoutPanel: View {
 /// hardcoded colours; uses the same ReadoutRow tokens as the other panels. No em-dash in any string here.
 private struct DisplayReadoutPanel: View {
     @ObservedObject var live: LiveState
+    /// Observed so the log-derived readout refreshes on new lines (`live.logStore`).
+    @ObservedObject var logStore: LiveLog
 
     var body: some View {
         let tail = live.taggedTail(domain: .display)

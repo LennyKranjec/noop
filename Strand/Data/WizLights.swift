@@ -187,15 +187,21 @@ private final class ResumeOnce: @unchecked Sendable {
 final class WizLightStore: ObservableObject {
     static let shared = WizLightStore()
 
-    @Published private(set) var bulbs: [WizBulb] = []
+    @Published private(set) var bulbs: [WizBulb] = [] {
+        // Only the empty/non-empty edge matters to the automation loop (it idles with no bulbs).
+        didSet { if bulbs.isEmpty != oldValue.isEmpty { rescheduleAutomation() } }
+    }
     @Published private(set) var pilots: [String: WizPilot] = [:]
     @Published private(set) var searching = false
 
     // The two automations: the morning's daylight and the evening's wind-down, each at its own time.
-    @Published var wakeLightOn: Bool { didSet { d.set(wakeLightOn, forKey: K.wakeOn) } }
-    @Published var wakeMinute: Int { didSet { d.set(wakeMinute, forKey: K.wakeMinute) } }
-    @Published var windDownOn: Bool { didSet { d.set(windDownOn, forKey: K.windOn) } }
-    @Published var windDownMinute: Int { didSet { d.set(windDownMinute, forKey: K.windMinute) } }
+    // Every change restarts the automation loop so its sleep is recomputed against the new settings.
+    @Published var wakeLightOn: Bool { didSet { d.set(wakeLightOn, forKey: K.wakeOn); rescheduleAutomation() } }
+    @Published var wakeMinute: Int { didSet { d.set(wakeMinute, forKey: K.wakeMinute); rescheduleAutomation() } }
+    @Published var windDownOn: Bool { didSet { d.set(windDownOn, forKey: K.windOn); rescheduleAutomation() } }
+    @Published var windDownMinute: Int {
+        didSet { d.set(windDownMinute, forKey: K.windMinute); rescheduleAutomation() }
+    }
 
     private let d = UserDefaults.standard
     private enum K {
@@ -204,7 +210,13 @@ final class WizLightStore: ObservableObject {
         static let windOn = "wiz.auto.wind.on", windMinute = "wiz.auto.wind.minute"
         static let wakeRan = "wiz.auto.wake.ran", windRan = "wiz.auto.wind.ran"
     }
+    /// `startAutomation()` has been called (the app wants automations for the rest of the process).
     private var automating = false
+    /// The running check loop, nil while there is nothing to automate.
+    private var automationTask: Task<Void, Never>?
+    /// Longest the loop sleeps between checks. Well inside the 15-minute firing window, so a sleep that
+    /// ran long (a suspended app, a clock or time-zone change) is re-evaluated while the window is open.
+    static let automationMaxSleep: TimeInterval = 5 * 60
 
     private init() {
         wakeLightOn = d.bool(forKey: K.wakeOn)
@@ -284,17 +296,68 @@ final class WizLightStore: ObservableObject {
 
     // MARK: Automations
 
-    /// Check the two automations once a minute for as long as the app runs — which, with the strap
-    /// connected, is in the background too. Each fires at most once a day.
+    /// Check the two automations for as long as the app runs — which, with the strap connected, is in the
+    /// background too. Each fires at most once a day.
+    ///
+    /// PERF: this used to wake every 60 s around the clock, even with no bulbs or both automations off.
+    /// Now the loop runs only while there is something to automate, and between checks it sleeps until the
+    /// next enabled automation's window OPENS (capped at `automationMaxSleep`), so it fires at the start of
+    /// the window instead of up to a minute into it. Firing rules (`runDueAutomations`) are unchanged.
     func startAutomation() {
         guard !automating else { return }
         automating = true
-        Task { [weak self] in
-            while let self, !Task.isCancelled {
+        rescheduleAutomation(checkNow: true)
+    }
+
+    /// Cadence of the old always-on loop. A settings change re-checks no later than this, which is when
+    /// that loop's next tick would have seen the change.
+    private static let settingsChangeRecheck: TimeInterval = 60
+
+    /// (Re)start the check loop to match the current bulbs + settings; stop it when nothing can fire.
+    ///
+    /// `checkNow` (the launch start) checks immediately, as the old loop's first pass did. A settings
+    /// change instead first waits `settingsChangeRecheck` (or less, if a window opens sooner): that is the
+    /// old loop's worst case for noticing the change, and it keeps a time being scrolled through in the
+    /// picker from firing on an intermediate value — each edit restarts the wait.
+    ///
+    /// Safe against double-firing: `runDueAutomations` records the day BEFORE it awaits the bulbs, so a
+    /// superseded loop still finishing its scene cannot make the new one fire the same automation again.
+    private func rescheduleAutomation(checkNow: Bool = false) {
+        automationTask?.cancel()
+        automationTask = nil
+        guard automating, !bulbs.isEmpty, wakeLightOn || windDownOn else { return }
+        automationTask = Task { [weak self] in
+            if !checkNow {
+                let first = min(Self.settingsChangeRecheck, self?.secondsUntilNextAutomationCheck() ?? 0)
+                try? await Task.sleep(nanoseconds: UInt64(first * 1_000_000_000))
+            }
+            while !Task.isCancelled {
+                guard let self else { return }
                 await self.runDueAutomations()
-                try? await Task.sleep(nanoseconds: 60 * 1_000_000_000)
+                if Task.isCancelled { return }
+                let delay = self.secondsUntilNextAutomationCheck()
+                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
             }
         }
+    }
+
+    /// Seconds from `now` to the next moment an enabled automation's window opens (the start of its set
+    /// minute), capped at `automationMaxSleep`, never under one second. Waking at a window start that has
+    /// already run today is harmless: `runDueAutomations` is idempotent within the day.
+    func secondsUntilNextAutomationCheck(now: Date = Date()) -> TimeInterval {
+        let calendar = Calendar.current
+        var next = now.addingTimeInterval(Self.automationMaxSleep)
+        for (on, at) in [(wakeLightOn, wakeMinute), (windDownOn, windDownMinute)] where on {
+            var start = DateComponents()
+            start.hour = at / 60
+            start.minute = at % 60
+            start.second = 0
+            if let opens = calendar.nextDate(after: now, matching: start, matchingPolicy: .nextTime),
+               opens < next {
+                next = opens
+            }
+        }
+        return max(1, next.timeIntervalSince(now))
     }
 
     private func runDueAutomations(now: Date = Date()) async {

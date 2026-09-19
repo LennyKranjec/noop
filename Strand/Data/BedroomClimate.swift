@@ -3,6 +3,11 @@ import Foundation
 import CoreBluetooth
 #endif
 import UserNotifications
+#if os(iOS)
+import UIKit
+#elseif os(macOS)
+import AppKit
+#endif
 
 // BedroomClimate.swift — the bedroom's temperature and humidity, from a Govee sensor.
 //
@@ -103,12 +108,27 @@ final class BedroomClimate: NSObject, ObservableObject {
     nonisolated static var scanOptions: [String: Any] { [CBCentralManagerScanOptionAllowDuplicatesKey: true] }
     #endif
     private var scanEndsAt: Date?
+    /// Bumped by every `scan`, so a scan's own end-of-window stop never touches a LATER scan (one started
+    /// after this one was ended early).
+    private var scanGeneration = 0
+    /// True while the sensor picker (More -> Bedroom) is on screen. A scan then runs its full window even
+    /// after the configured sensor answered, because the picker lists EVERY sensor heard. Set by the view.
+    var sensorPickerOpen = false
 
     override init() {
         super.init()
         if let data = UserDefaults.standard.data(forKey: Self.latestKey) {
             latest = try? JSONDecoder().decode(ClimateReading.self, from: data)
         }
+        // The history is written to defaults on a throttle (see `ClimateHistory`); write what is pending
+        // as the app leaves the foreground / quits, the last moment it is guaranteed to run.
+        #if os(iOS)
+        _ = NotificationCenter.default.addObserver(forName: UIApplication.didEnterBackgroundNotification,
+                                               object: nil, queue: nil) { _ in ClimateHistory.flush() }
+        #elseif os(macOS)
+        _ = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification,
+                                               object: nil, queue: nil) { _ in ClimateHistory.flush() }
+        #endif
     }
 
     // MARK: - Configuration
@@ -162,7 +182,20 @@ final class BedroomClimate: NSObject, ObservableObject {
                 return
             }
         }
-        if bleDeviceId != nil { await scan(seconds: 10) }
+        // Bluetooth fallback only while the app is in the foreground: iOS delivers nothing to a scan with
+        // no service filter (which a Govee sensor needs) from the background, so a background scan only
+        // cost radio time. `!= .background`, not `== .active`: a launch or a pulled-down Control Centre
+        // is `.inactive` yet still in the foreground, where the scan works as before.
+        if bleDeviceId != nil, appCanScan { await scan(seconds: 10) }
+    }
+
+    /// Whether a Bluetooth scan can hear anything right now (see `refresh`).
+    private var appCanScan: Bool {
+        #if os(iOS)
+        return UIApplication.shared.applicationState != .background
+        #else
+        return true
+        #endif
     }
 
     /// Listen for Govee advertisements for `seconds`. Fills `heard`; accepts the configured sensor's.
@@ -171,6 +204,8 @@ final class BedroomClimate: NSObject, ObservableObject {
         heard = []
         scanning = true
         scanEndsAt = Date().addingTimeInterval(seconds)
+        scanGeneration &+= 1
+        let generation = scanGeneration
         if central == nil {
             central = CBCentralManager(delegate: self, queue: bleQueue,
                                        options: [CBCentralManagerOptionShowPowerAlertKey: false])
@@ -178,6 +213,19 @@ final class BedroomClimate: NSObject, ObservableObject {
             central?.scanForPeripherals(withServices: nil, options: Self.scanOptions)
         }
         try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        // Ended early (`endScanEarly`) and a newer scan has started since: that one is not ours to stop.
+        guard generation == scanGeneration else { return }
+        central?.stopScan()
+        scanning = false
+        #endif
+    }
+
+    /// Stop listening as soon as the configured sensor has answered: the reading is taken, and the rest
+    /// of the ten-second window would only hear the same sensor again. Not while the picker is open,
+    /// which lists every sensor in range.
+    private func endScanEarly() {
+        #if canImport(CoreBluetooth)
+        guard scanning, !sensorPickerOpen else { return }
         central?.stopScan()
         scanning = false
         #endif
@@ -199,7 +247,10 @@ final class BedroomClimate: NSObject, ObservableObject {
         } else {
             heard.append(Heard(id: id, name: name, reading: reading))
         }
-        if id == bleDeviceId { accept(reading) }
+        if id == bleDeviceId {
+            accept(reading)
+            endScanEarly()
+        }
     }
 
     private func accept(_ r: ClimateReading) {
@@ -323,23 +374,106 @@ enum ClimateHistory {
     /// Readings closer together than this replace the previous point rather than adding one.
     static let minSpacing: TimeInterval = 5 * 60
 
+    // PERF: the standard-defaults history (the only one the app uses) is held IN MEMORY. Every accepted
+    // reading used to decode and re-encode the whole two-week list (a few thousand points), and a
+    // Bluetooth scan accepts one every two seconds. Now a reading updates the memory copy, and the list is
+    // written only when it CHANGED, at most once per `writeInterval` (a trailing write picks up the rest),
+    // plus on background / quit (`flush`, observed by BedroomClimate). Reads come from the same memory
+    // copy, so every reader sees exactly the points it did before. No other code writes `key`.
+    private static let lock = NSLock()
+    private static var cache: [Point]?
+    private static var dirty = false
+    private static var lastWriteUptime: TimeInterval?
+    private static var writeScheduled = false
+    static let writeInterval: TimeInterval = 60
+
     static func all(_ d: UserDefaults = .standard) -> [Point] {
+        guard d === UserDefaults.standard else { return decode(d) }
+        lock.lock(); defer { lock.unlock() }
+        return loadedLocked()
+    }
+
+    private static func decode(_ d: UserDefaults) -> [Point] {
         guard let data = d.data(forKey: key),
               let points = try? JSONDecoder().decode([Point].self, from: data) else { return [] }
         return points
     }
 
-    static func record(_ r: ClimateReading, _ d: UserDefaults = .standard) {
-        var points = all(d)
+    /// The memory copy, loaded from defaults on first use. Call with `lock` held.
+    private static func loadedLocked() -> [Point] {
+        if let cache { return cache }
+        let points = decode(.standard)
+        cache = points
+        return points
+    }
+
+    /// Add `r` under the spacing + retention rules (unchanged). Returns whether `points` changed.
+    private static func add(_ r: ClimateReading, to points: inout [Point]) -> Bool {
         let point = Point(at: r.at, temperatureC: r.temperatureC, humidityPct: r.humidityPct)
+        var changed = true
         if let last = points.last, point.at.timeIntervalSince(last.at) < minSpacing {
+            changed = last != point
             points[points.count - 1] = point
         } else {
             points.append(point)
         }
         let floor = Date().addingTimeInterval(-Double(keepDays) * 86_400)
+        let before = points.count
         points.removeAll { $0.at < floor }
-        if let data = try? JSONEncoder().encode(points) { d.set(data, forKey: key) }
+        return changed || points.count != before
+    }
+
+    static func record(_ r: ClimateReading, _ d: UserDefaults = .standard) {
+        guard d === UserDefaults.standard else {
+            var points = decode(d)
+            _ = add(r, to: &points)
+            if let data = try? JSONEncoder().encode(points) { d.set(data, forKey: key) }
+            return
+        }
+        lock.lock()
+        var points = loadedLocked()
+        guard add(r, to: &points) else { lock.unlock(); return }
+        cache = points
+        dirty = true
+        let now = ProcessInfo.processInfo.systemUptime
+        var writeNow = true
+        var trailingDelay: TimeInterval?
+        if let last = lastWriteUptime, now - last < writeInterval {
+            writeNow = false
+            if !writeScheduled {
+                writeScheduled = true
+                trailingDelay = writeInterval - (now - last)
+            }
+        }
+        lock.unlock()
+        if writeNow {
+            flush()
+        } else if let trailingDelay {
+            DispatchQueue.main.asyncAfter(deadline: .now() + trailingDelay) {
+                ClimateHistory.lock.lock()
+                ClimateHistory.writeScheduled = false
+                ClimateHistory.lock.unlock()
+                ClimateHistory.flush()
+            }
+        }
+    }
+
+    /// Write the memory copy to defaults now, if it changed since the last write.
+    static func flush() {
+        lock.lock(); defer { lock.unlock() }
+        guard dirty, let points = cache else { return }
+        dirty = false
+        lastWriteUptime = ProcessInfo.processInfo.systemUptime
+        if let data = try? JSONEncoder().encode(points) { UserDefaults.standard.set(data, forKey: key) }
+    }
+
+    /// Tests only: forget the memory copy and the write throttle, so the next read reloads from defaults.
+    static func resetCacheForTesting() {
+        lock.lock(); defer { lock.unlock() }
+        cache = nil
+        dirty = false
+        lastWriteUptime = nil
+        writeScheduled = false
     }
 
     /// The points since `since`, oldest first.

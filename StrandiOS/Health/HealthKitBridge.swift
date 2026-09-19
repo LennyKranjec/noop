@@ -203,6 +203,9 @@ final class HealthKitBridge: ObservableObject {
         do {
             try await store.requestAuthorization(toShare: writeTypes, read: readTypes)
             HealthKitBridge.persistReadTypeSignature()
+            // A (re-)grant: the next write-back rewrites every kind rather than trusting fingerprints of
+            // what was written under the previous grant.
+            HealthWriteFingerprintStore.clearAll()
         } catch {
             // Leave the signature unset so the next sync tries again. Not surfaced in `lastError`: the
             // user did not ask for this, and the rest of the sync is unaffected.
@@ -233,6 +236,9 @@ final class HealthKitBridge: ObservableObject {
             auth = .authorized
             // This grant covered the CURRENT read set, so record it — see `requestNewReadTypesIfNeeded`.
             HealthKitBridge.persistReadTypeSignature()
+            // Re-authorization: forget the write fingerprints so the next write-back rewrites every kind
+            // in full (the user may have removed NOOP's data in Health along with the old grant).
+            HealthWriteFingerprintStore.clearAll()
         } catch {
             // A thrown error here is on a build that carries the entitlement (guarded above), so it's a
             // genuine denial / request failure — keep the normal `.denied` "enable in Settings" path,
@@ -277,7 +283,11 @@ final class HealthKitBridge: ObservableObject {
             // presented. The status read above is unaffected, so a legacy grant still resumes.
             let newTypesPending = writeTypes.contains { store.authorizationStatus(for: $0) == .notDetermined }
             if newTypesPending, UIApplication.shared.applicationState == .active {
-                Task { try? await store.requestAuthorization(toShare: writeTypes, read: readTypes) }
+                Task {
+                    if (try? await store.requestAuthorization(toShare: writeTypes, read: readTypes)) != nil {
+                        HealthWriteFingerprintStore.clearAll()
+                    }
+                }
             }
         }
     }
@@ -758,6 +768,15 @@ final class HealthKitBridge: ObservableObject {
     /// (no metadata, no delete) flooded Health with duplicates on every `sync()`.
     ///
     /// Throws on save failure so the caller can decide whether to advance `lastSync`.
+    ///
+    /// PERF (no change to what ends up in Health): each kind first computes a content fingerprint of the
+    /// exact samples it would write (`HealthWriteFingerprint`) and skips its delete + save when that
+    /// matches the last SUCCESSFUL write, because Health then already holds exactly those samples. Heart
+    /// rate compares per minute and appends / rewrites only from the first changed minute. A kind's
+    /// fingerprint is cleared before it deletes or saves anything and stored only once it fully saved, so
+    /// any failure makes the next pass rewrite in full as before. Fingerprints are scoped to the device
+    /// ids (a device switch rewrites everything once) and dropped on re-authorization, when a kind is
+    /// found unauthorized, and after the #1503 sweep deletes anything.
     private func writeBack(whoopStore: WhoopStore, days: Int = 14) async throws {
         guard auth == .authorized else { return }
         let now = Date()
@@ -792,6 +811,13 @@ final class HealthKitBridge: ObservableObject {
         await attempt { try await writeHeartRate(whoopStore: whoopStore, fromTs: fromTs, nowTs: nowTs) }
         await attempt { try await writeWorkouts(whoopStore: whoopStore, fromTs: fromTs, toTs: nowTs) }
         if let firstError { throw firstError }
+    }
+
+    /// A fingerprint hasher for one write kind, primed with everything that scopes it: a format version,
+    /// NOOP's source id and the ACTIVE device id. A device switch therefore never matches a fingerprint
+    /// written for another device, so the first pass after one rewrites everything, as before.
+    private func writeFingerprint(_ kind: String) -> HealthWriteFingerprint {
+        HealthWriteFingerprint(seed: ["noop-hk-write", "v1", kind, noopDeviceId, repo.deviceId])
     }
 
     /// UserDefaults key for the #1503 stranded-records sweep completion set. Stores the set of
@@ -860,6 +886,9 @@ final class HealthKitBridge: ObservableObject {
         if !succeededThisRun.isEmpty {
             let updated = HealthWriteback.strandedSweepResult(swept: swept, succeededThisRun: succeededThisRun)
             defaults.set(Array(updated), forKey: Self.strandedRecordsSweptKey)
+            // The sweep just deleted our records in the window: nothing written before may be assumed
+            // present any more, so every kind rewrites in full on this very pass.
+            HealthWriteFingerprintStore.clearAll()
         }
     }
 
@@ -892,6 +921,9 @@ final class HealthKitBridge: ObservableObject {
 
         struct Candidate { let type: HKQuantityType; let key: String; let sample: HKQuantitySample }
         var candidates: [Candidate] = []
+        // Fingerprint of exactly what is written: per sample its type, unit, value, key and instant, in
+        // write order. The delete set (the keys, per type) is derived from the same values.
+        var fingerprint = writeFingerprint("vitals")
         func add(_ id: HKQuantityTypeIdentifier, _ unit: HKUnit, _ value: Double, _ day: String, _ at: Date) {
             guard let type = HKQuantityType.quantityType(forIdentifier: id),
                   store.authorizationStatus(for: type) == .sharingAuthorized else { return }
@@ -907,6 +939,11 @@ final class HealthKitBridge: ObservableObject {
                 metadata: [HKMetadataKeyExternalUUID: key]
             )
             candidates.append(Candidate(type: type, key: key, sample: sample))
+            fingerprint.add(id.rawValue)
+            fingerprint.add(unit.unitString)
+            fingerprint.add(value)
+            fingerprint.add(key)
+            fingerprint.add(at)
         }
 
         for row in rows {
@@ -934,7 +971,13 @@ final class HealthKitBridge: ObservableObject {
                 add(.respiratoryRate, HKUnit.count().unitDivided(by: .minute()), rr, row.day, at)
             }
         }
-        guard !candidates.isEmpty else { return }
+        guard !candidates.isEmpty else {
+            HealthWriteFingerprintStore.clear(.vitals)
+            return
+        }
+        // Unchanged since the last successful write: Health already holds exactly these samples.
+        if HealthWriteFingerprintStore.matches(.vitals, fingerprint) { return }
+        HealthWriteFingerprintStore.clear(.vitals)
 
         // Delete any of OUR prior samples that carry the same metadata keys, then write the fresh
         // batch. Scoped to HKSource.default() so we never touch a sample written by another app
@@ -950,6 +993,7 @@ final class HealthKitBridge: ObservableObject {
             _ = try? await self.store.deleteObjects(of: type, predicate: pred)
         }
         try await self.store.save(candidates.map { $0.sample })
+        HealthWriteFingerprintStore.store(.vitals, fingerprint)
     }
 
     /// Write each BRIDGED NIGHT (#364) as one `.inBed` sample plus one category sample per stage
@@ -970,7 +1014,11 @@ final class HealthKitBridge: ObservableObject {
     /// every prior record as unreachable duplicates after a re-pair.
     private func writeSleep(sessions: [CachedSleepSession]) async throws {
         guard let type = HKObjectType.categoryType(forIdentifier: .sleepAnalysis),
-              store.authorizationStatus(for: type) == .sharingAuthorized else { return }
+              store.authorizationStatus(for: type) == .sharingAuthorized else {
+            // Not written while unauthorized: after a re-grant, rewrite in full rather than trust this.
+            HealthWriteFingerprintStore.clear(.sleep)
+            return
+        }
         let blocks = sessions.map { SleepStageTotals.NightBlock(start: $0.effectiveStartTs, end: $0.endTs) }
         let groups = SleepStageTotals.bridgedNightGroups(blocks, offsetSec: TimeZone.current.secondsFromGMT())
             .map { g in
@@ -982,9 +1030,15 @@ final class HealthKitBridge: ObservableObject {
             }
         var samples: [HKCategorySample] = []
         var keys: [String] = []
+        // Fingerprint of exactly what is written (every sample's value, span and key) and deleted (keys).
+        var fingerprint = writeFingerprint("sleep")
         for entry in HealthWriteback.mergedSleepPlan(groups: groups) {
             let key = HealthWriteback.appleHealthSleepKey(startTs: entry.keyStartTs)
             let meta = [HKMetadataKeyExternalUUID: key]
+            fingerprint.add(key)
+            fingerprint.add(HKCategoryValueSleepAnalysis.inBed.rawValue)
+            fingerprint.add(entry.spanStart)
+            fingerprint.add(entry.spanEnd)
             keys.append(contentsOf: entry.allKeyStartTs.map { HealthWriteback.appleHealthSleepKey(startTs: $0) })
             samples.append(HKCategorySample(type: type, value: HKCategoryValueSleepAnalysis.inBed.rawValue,
                                             start: Date(timeIntervalSince1970: TimeInterval(entry.spanStart)),
@@ -1004,15 +1058,26 @@ final class HealthKitBridge: ObservableObject {
                     start: Date(timeIntervalSince1970: TimeInterval(seg.start)),
                     end: Date(timeIntervalSince1970: TimeInterval(seg.end)),
                     metadata: meta))
+                fingerprint.add(value.rawValue)
+                fingerprint.add(seg.start)
+                fingerprint.add(seg.end)
             }
         }
-        guard !samples.isEmpty else { return }
+        guard !samples.isEmpty else {
+            HealthWriteFingerprintStore.clear(.sleep)
+            return
+        }
+        for key in keys { fingerprint.add(key) }
+        // Unchanged since the last successful write: Health already holds exactly these samples.
+        if HealthWriteFingerprintStore.matches(.sleep, fingerprint) { return }
+        HealthWriteFingerprintStore.clear(.sleep)
         let pred = NSCompoundPredicate(andPredicateWithSubpredicates: [
             HKQuery.predicateForObjects(from: HKSource.default()),
             HKQuery.predicateForObjects(withMetadataKey: HKMetadataKeyExternalUUID, allowedValues: keys),
         ])
         _ = try? await store.deleteObjects(of: type, predicate: pred)
         try await store.save(samples)
+        HealthWriteFingerprintStore.store(.sleep, fingerprint)
     }
 
     /// UserDefaults key for the HR write cursor (the newest bucket ts we've written). Per-strap so a
@@ -1029,40 +1094,90 @@ final class HealthKitBridge: ObservableObject {
     /// sample external-UUID keys at this volume) and rewrites the window, so a strap offload that
     /// backfills a recent night reconciles. Offloads older than 48 h behind the cursor are missed
     /// until the cursor is cleared — accepted trade-off for not re-walking 14 days every sync.
+    ///
+    /// PERF: the window is no longer rewritten wholesale on every pass. `HealthHRWriteRecord` remembers a
+    /// digest per minute of what the last successful pass wrote; when nothing changed the pass writes
+    /// nothing, when only newer minutes arrived it just appends them, and otherwise it deletes and
+    /// rewrites from the first changed minute. Health ends up holding exactly the samples the full
+    /// rewrite would have written. With no usable record (first run, a device switch, re-authorization,
+    /// a failed pass) it falls back to the original full-window delete + rewrite below.
     private func writeHeartRate(whoopStore: WhoopStore, fromTs: Int, nowTs: Int) async throws {
         guard let type = HKQuantityType.quantityType(forIdentifier: .heartRate),
-              store.authorizationStatus(for: type) == .sharingAuthorized else { return }
+              store.authorizationStatus(for: type) == .sharingAuthorized else {
+            // Not written while unauthorized: after a re-grant, rewrite in full rather than trust this.
+            HealthHRWriteRecord.clear()
+            return
+        }
         let cursor = UserDefaults.standard.integer(forKey: hrWriteCursorKey)
         let windowStart = cursor > 0 ? max(fromTs, cursor - 48 * 3600) : fromTs
         let buckets = (try? await whoopStore.hrBuckets(deviceId: noopDeviceId, from: windowStart,
                                                        to: nowTs, bucketSeconds: 60)) ?? []
         guard !buckets.isEmpty else { return }
 
-        let pred = NSCompoundPredicate(andPredicateWithSubpredicates: [
-            HKQuery.predicateForObjects(from: HKSource.default()),
-            HKQuery.predicateForSamples(withStart: Date(timeIntervalSince1970: TimeInterval(windowStart)),
-                                        end: Date(timeIntervalSince1970: TimeInterval(nowTs) + 60),
-                                        options: []),
-        ])
-        _ = try? await store.deleteObjects(of: type, predicate: pred)
-
         let unit = HKUnit.count().unitDivided(by: .minute())
         var samples: [HKQuantitySample] = []
         samples.reserveCapacity(buckets.count)
+        var entries: [HealthHRWriteRecord.Entry] = []
+        entries.reserveCapacity(buckets.count)
         for b in buckets {
             let start = Date(timeIntervalSince1970: TimeInterval(b.ts))
             // Span the bucket, clamped so a bucket at the window edge can't end in the future
             // (HealthKit rejects future-dated samples).
             let end = Date(timeIntervalSince1970: TimeInterval(min(b.ts + 60, nowTs)))
+            let clampedEnd = max(start, end)
             samples.append(HKQuantitySample(type: type,
                                             quantity: .init(unit: unit, doubleValue: b.bpm),
-                                            start: start, end: max(start, end)))
+                                            start: start, end: clampedEnd))
+            entries.append(.init(ts: b.ts,
+                                 digest: HealthHRWriteRecord.digest(ts: b.ts,
+                                                                    endTs: Int(clampedEnd.timeIntervalSince1970),
+                                                                    bpm: b.bpm)))
         }
+
+        let seed = writeFingerprint("heartRate").value
+        let plan = HealthHRWriteRecord.plan(previous: HealthHRWriteRecord.load(), seed: seed,
+                                            windowStart: windowStart, entries: entries)
+        let firstToSave: Int
+        switch plan {
+        case .skip:
+            // Health already holds exactly this window. Advance the cursor exactly as the full rewrite's
+            // saves would have (normally a no-op: the pass that wrote this window already advanced it).
+            if let last = buckets.last?.ts, last > cursor {
+                UserDefaults.standard.set(last, forKey: hrWriteCursorKey)
+            }
+            return
+        case .append(let fromIndex):
+            HealthHRWriteRecord.clear()
+            firstToSave = fromIndex
+        case .rewrite(let deleteFromTs, let fromIndex):
+            HealthHRWriteRecord.clear()
+            // `.strictStartDate`: only samples STARTING at/after the first changed minute go; the
+            // unchanged minutes before it (proven equal by the record) stay as they are.
+            let pred = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                HKQuery.predicateForObjects(from: HKSource.default()),
+                HKQuery.predicateForSamples(withStart: Date(timeIntervalSince1970: TimeInterval(deleteFromTs)),
+                                            end: Date(timeIntervalSince1970: TimeInterval(nowTs) + 60),
+                                            options: [.strictStartDate]),
+            ])
+            _ = try? await store.deleteObjects(of: type, predicate: pred)
+            firstToSave = fromIndex
+        case .full:
+            HealthHRWriteRecord.clear()
+            let pred = NSCompoundPredicate(andPredicateWithSubpredicates: [
+                HKQuery.predicateForObjects(from: HKSource.default()),
+                HKQuery.predicateForSamples(withStart: Date(timeIntervalSince1970: TimeInterval(windowStart)),
+                                            end: Date(timeIntervalSince1970: TimeInterval(nowTs) + 60),
+                                            options: []),
+            ])
+            _ = try? await store.deleteObjects(of: type, predicate: pred)
+            firstToSave = 0
+        }
+
         // First run backfills ~20k samples (14 d × 1440/day); chunk the saves so no single HealthKit
         // transaction is oversized. Cursor only advances past what actually saved.
         var lastSaved = cursor
-        var pending = samples[...]
-        var pendingTs = buckets.map(\.ts)[...]
+        var pending = samples[firstToSave...]
+        var pendingTs = buckets.map(\.ts)[firstToSave...]
         while !pending.isEmpty {
             let chunk = Array(pending.prefix(5000))
             let chunkTs = Array(pendingTs.prefix(5000))
@@ -1072,6 +1187,12 @@ final class HealthKitBridge: ObservableObject {
             lastSaved = max(lastSaved, chunkTs.last ?? lastSaved)
             UserDefaults.standard.set(lastSaved, forKey: hrWriteCursorKey)
         }
+        // Everything saved: record what Health now holds for this window. Only the part a LATER window can
+        // reach is kept: the next window starts no earlier than the cursor now stored minus 48 h, so older
+        // minutes (the bulk of a 14-day first run) would never be compared again.
+        let recordFrom = max(windowStart, UserDefaults.standard.integer(forKey: hrWriteCursorKey) - 48 * 3600)
+        HealthHRWriteRecord(seed: seed, from: recordFrom,
+                            entries: entries.filter { $0.ts > recordFrom - 60 }).save()
     }
 
     /// Write strap-detected and manual workouts into Health via `HKWorkoutBuilder`, with an
@@ -1117,7 +1238,9 @@ final class HealthKitBridge: ObservableObject {
     /// does not let an app ask whether it may read. With write granted and read withheld the query
     /// returns nothing rather than failing, so reconciliation quietly does nothing and the duplicates
     /// stay. That fails safe, but it fails silent.
-    private func deleteOrphanedWorkouts(fromTs: Int, toTs: Int, keeping: Set<String>) async {
+    /// Returns false when the read-back failed or the delete threw, i.e. when orphans may remain.
+    @discardableResult
+    private func deleteOrphanedWorkouts(fromTs: Int, toTs: Int, keeping: Set<String>) async -> Bool {
         let pred = NSCompoundPredicate(andPredicateWithSubpredicates: [
             HKQuery.predicateForObjects(from: HKSource.default()),
             // `.strictStartDate`, and it is load-bearing. A workout is an INTERVAL, and the default
@@ -1134,9 +1257,12 @@ final class HealthKitBridge: ObservableObject {
                                         end: Date(timeIntervalSince1970: TimeInterval(toTs)),
                                         options: [.strictStartDate]),
         ])
-        let orphans: [HKWorkout] = await withCheckedContinuation { (cont: CheckedContinuation<[HKWorkout], Never>) in
+        let orphans: [HKWorkout]? = await withCheckedContinuation { (cont: CheckedContinuation<[HKWorkout]?, Never>) in
             let q = HKSampleQuery(sampleType: HKObjectType.workoutType(), predicate: pred,
-                                  limit: HKObjectQueryNoLimit, sortDescriptors: nil) { _, samples, _ in
+                                  limit: HKObjectQueryNoLimit, sortDescriptors: nil) { _, samples, error in
+                // A failed read is handled exactly as before (nothing deleted) but reported, so the
+                // write-back does not record the window as reconciled.
+                if error != nil, samples == nil { cont.resume(returning: nil); return }
                 var out: [HKWorkout] = []
                 for case let workout as HKWorkout in samples ?? [] {
                     guard let uuid = workout.metadata?[HKMetadataKeyExternalUUID] as? String,
@@ -1147,12 +1273,17 @@ final class HealthKitBridge: ObservableObject {
             }
             store.execute(q)
         }
-        guard !orphans.isEmpty else { return }
-        _ = try? await store.delete(orphans)
+        guard let orphans else { return false }
+        guard !orphans.isEmpty else { return true }
+        return (try? await store.delete(orphans)) != nil
     }
 
     private func writeWorkouts(whoopStore: WhoopStore, fromTs: Int, toTs: Int) async throws {
-        guard store.authorizationStatus(for: .workoutType()) == .sharingAuthorized else { return }
+        guard store.authorizationStatus(for: .workoutType()) == .sharingAuthorized else {
+            // Not written while unauthorized: after a re-grant, rewrite in full rather than trust this.
+            HealthWriteFingerprintStore.clear(.workouts)
+            return
+        }
         // Read result kept OPTIONAL rather than collapsed with `?? []`, because the reconciliation below
         // has to tell "the store holds no workouts here" apart from "the read failed". Collapsed, a
         // transient read error would look like an empty window and delete every workout we had written
@@ -1183,12 +1314,45 @@ final class HealthKitBridge: ObservableObject {
         //
         // Runs BEFORE the empty-rows return: a window whose last workout was deleted in the app is the
         // case where every Health copy is an orphan, and returning early would leave all of them.
-        if mineRead != nil, computedRead != nil,
-           mine.count < Self.workoutReadLimit, computed.count < Self.workoutReadLimit {
-            await deleteOrphanedWorkouts(fromTs: fromTs, toTs: toTs, keeping: Set(rows.map(key)))
+        let canReconcile = mineRead != nil && computedRead != nil
+            && mine.count < Self.workoutReadLimit && computed.count < Self.workoutReadLimit
+
+        // Fingerprint of exactly what this pass writes (per row: key, activity type, span, and the energy
+        // and distance samples it attaches, which depend on those types' share status) and deletes (every
+        // row's key). Only a pass that could also reconcile orphans may be skipped or recorded: then
+        // Health's copies in the window are exactly `rows`, and an unchanged `rows` means nothing to do.
+        var fingerprint = writeFingerprint("workouts")
+        for row in rows {
+            fingerprint.add(key(row))
+            fingerprint.add(row.startTs)
+            fingerprint.add(row.endTs)
+            fingerprint.add(UInt64(Self.activityType(forSport: row.sport).rawValue))
+            if let kcal = row.energyKcal, kcal > 0,
+               let t = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned),
+               store.authorizationStatus(for: t) == .sharingAuthorized {
+                fingerprint.add("kcal")
+                fingerprint.add(kcal)
+            }
+            if let meters = row.distanceM, meters > 0,
+               let id = Self.distanceTypeId(forSport: row.sport),
+               let t = HKQuantityType.quantityType(forIdentifier: id),
+               store.authorizationStatus(for: t) == .sharingAuthorized {
+                fingerprint.add(id.rawValue)
+                fingerprint.add(meters)
+            }
+        }
+        if canReconcile, HealthWriteFingerprintStore.matches(.workouts, fingerprint) { return }
+        HealthWriteFingerprintStore.clear(.workouts)
+
+        var reconciled = false
+        if canReconcile {
+            reconciled = await deleteOrphanedWorkouts(fromTs: fromTs, toTs: toTs, keeping: Set(rows.map(key)))
         }
 
-        guard !rows.isEmpty else { return }
+        guard !rows.isEmpty else {
+            if reconciled { HealthWriteFingerprintStore.store(.workouts, fingerprint) }
+            return
+        }
         let pred = NSCompoundPredicate(andPredicateWithSubpredicates: [
             HKQuery.predicateForObjects(from: HKSource.default()),
             HKQuery.predicateForObjects(withMetadataKey: HKMetadataKeyExternalUUID,
@@ -1228,6 +1392,7 @@ final class HealthKitBridge: ObservableObject {
                 throw error
             }
         }
+        if reconciled { HealthWriteFingerprintStore.store(.workouts, fingerprint) }
     }
 
     /// Reverse of `sportName`: NOOP's sport label → the `HKWorkoutActivityType` written to Health.

@@ -4,6 +4,9 @@ import StrandAnalytics
 import WhoopProtocol
 import WhoopStore
 import OuraProtocol
+#if os(iOS)
+import UIKit
+#endif
 
 /// Observable snapshot of the live connection + biometric state, driven by FrameRouter
 /// (from decoded frames) and BLEManager (from CoreBluetooth callbacks).
@@ -482,8 +485,16 @@ public final class LiveState: ObservableObject {
         guard let watts, watts >= 0 else { return nil }
         return String(watts)
     }
-    /// Rolling log of human-readable lines for the on-device verification checklist.
-    @Published public var log: [String] = []
+    /// The rolling strap-log buffer. PERF: it lives in its own small `ObservableObject` (`LiveLog`) instead
+    /// of a `@Published` field here, because every appended line used to fire THIS object's
+    /// `objectWillChange` — re-rendering every view that observes `LiveState` (dozens: Today, Live, the
+    /// menu bar, Devices, ...) several times a minute for a line only the log card shows. Views that render
+    /// the log (LiveView's log card, DevicesView's clock line, the Test Centre readouts) observe `logStore`
+    /// directly. Same object for the life of this `LiveState`.
+    public let logStore = LiveLog()
+    /// Rolling log of human-readable lines for the on-device verification checklist. Read-only view of
+    /// `logStore.lines`; NOT observable through `LiveState` — observe `logStore` to live-update on new lines.
+    public var log: [String] { logStore.lines }
 
     // MARK: - Connection status (single source of truth, #266)
 
@@ -601,7 +612,23 @@ public final class LiveState: ObservableObject {
     /// looped forever. Informational note for the Live screen; cleared on a clean reconnect or Live re-open.
     @Published public var standardHRMode: String? = nil
 
-    public init() {}
+    public init() {
+        #if os(iOS)
+        // Flush the durable log tail as the app backgrounds: the time-batched mirror may be holding up to
+        // `tailPersistInterval` of unwritten lines, and a backgrounded process can be suspended or killed
+        // without another chance. `queue: .main` delivers on the main thread, so the synchronous
+        // main-actor hop writes before the notification returns (no deferred Task that might not run).
+        backgroundObserver = NotificationCenter.default.addObserver(
+            forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.flushLogTail() }
+        }
+        #endif
+    }
+
+    deinit {
+        if let backgroundObserver { NotificationCenter.default.removeObserver(backgroundObserver) }
+    }
 
     /// Single funnel for battery readings — updates the published value AND notifies the hook,
     /// so both write sites (FrameRouter, BLEManager) drive the alert monitor identically.
@@ -693,8 +720,7 @@ public final class LiveState: ObservableObject {
         ouraBatteryPct = nil              // nor a stale ring charge (#2075)
         // Perf: flush the durable log tail on disconnect (mirroring is batched in `append`), so a completed
         // session's tail is always persisted for a later scheduled export despite the per-line throttle.
-        Self.persistTail(log)
-        logsSincePersist = 0
+        flushLogTail()
     }
 
     /// Cap on the in-app strap-log ring buffer. Raised from the old ~1h (200 lines) to retain a rolling
@@ -707,12 +733,22 @@ public final class LiveState: ObservableObject {
     /// Perf: the durable UserDefaults tail (`persistTail`) only feeds a scheduled export that fires hours
     /// later, so it needn't be current to the last line. Mirroring the whole tail on EVERY append was a
     /// hot-path cost that grew as more diagnostics (offload/backfill/#700/#714/#720) funnel through this one
-    /// sink. Persist in batches of `persistEveryNLines` instead, and always flush on disconnect
-    /// (`clearBiometrics`) so a finished session stays durable; a few unmirrored lines on an abrupt kill is
-    /// harmless for a debug tail. iOS-only — Android's `logBuffer` is an O(1) `ArrayDeque` with no per-line
-    /// persist, already correct.
-    private static let persistEveryNLines = 32
-    private var logsSincePersist = 0
+    /// sink. The mirror is TIME-batched: at most one write every `tailPersistInterval` seconds (a trailing
+    /// flush picks up the last lines of a burst, so nothing waits longer than that), plus an immediate flush
+    /// on disconnect (`clearBiometrics`) and when the app goes to the background — the last moment a
+    /// suspended/killed process is guaranteed to run. A line-count batch (the old every-32-lines rule) still
+    /// wrote a 2,000-line array several times a minute during a busy offload. iOS-only concern — Android's
+    /// `logBuffer` is an O(1) `ArrayDeque` with no per-line persist, already correct.
+    static let tailPersistInterval: TimeInterval = 30
+    /// `systemUptime` of the last durable-tail write (monotonic, immune to wall-clock changes). nil until
+    /// the first write of this process, so the first line is mirrored immediately.
+    private var lastTailPersistUptime: TimeInterval?
+    /// Lines appended since the last durable-tail write.
+    private var tailDirty = false
+    /// A trailing flush is already pending (at most one at a time).
+    private var tailFlushScheduled = false
+    /// The background-flush observer token (iOS), removed on deinit.
+    private var backgroundObserver: NSObjectProtocol?
     /// Amortize the ring trim: let the buffer overrun by this slack, then trim back to the cap in one batch
     /// — turning an O(n) `Array.removeFirst` on every line at steady state into one per `trimSlack` lines.
     /// Still hard-bounded (never exceeds `maxLogLines + trimSlack`).
@@ -727,16 +763,15 @@ public final class LiveState: ObservableObject {
         // parseable marker the export filters on. Redaction is STILL the only scrub point
         // (redactPii below); tagging happens BEFORE redaction so the scrub covers the whole line.
         let tagged = domain.map { "[\($0.id)] " + line } ?? line
-        log.append(Self.redactPii(tagged))
+        logStore.lines.append(Self.redactPii(tagged))
         // Batched trim: overrun by `trimSlack`, then trim back to the cap in one shot (amortized O(1)/line).
-        if log.count > Self.maxLogLines + Self.trimSlack { log.removeFirst(log.count - Self.maxLogLines) }
-        // Batched durable-tail mirror: persist every `persistEveryNLines` lines, not on every line;
-        // `clearBiometrics()` flushes on disconnect so a completed session is always fully mirrored.
-        logsSincePersist += 1
-        if logsSincePersist >= Self.persistEveryNLines {
-            logsSincePersist = 0
-            Self.persistTail(log)
+        if logStore.lines.count > Self.maxLogLines + Self.trimSlack {
+            logStore.lines.removeFirst(logStore.lines.count - Self.maxLogLines)
         }
+        // Time-batched durable-tail mirror (see `tailPersistInterval`); `clearBiometrics()` and the
+        // background observer flush immediately so a completed session is always fully mirrored.
+        tailDirty = true
+        persistTailIfDue()
         // #990: fold the Backfiller's per-session "session persisted N rows" summary into the persisted
         // ALL-TIME drained-rows tally, right here at the single log sink (no new BLE seam). The summary
         // is emitted unconditionally whenever rows landed (#150), so the cumulative counter accrues on
@@ -745,6 +780,34 @@ public final class LiveState: ObservableObject {
         if line.contains("session persisted"), let rows = ConnectionReadout.drainedRowsFromSummary(line) {
             TestCentre.noteDrainedRows(rows)
         }
+    }
+
+    /// Write the durable tail now if the last write is at least `tailPersistInterval` old; otherwise make
+    /// sure ONE trailing flush is pending for when it will be. No-op when nothing new was appended.
+    private func persistTailIfDue() {
+        guard tailDirty else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        guard let last = lastTailPersistUptime, now - last < Self.tailPersistInterval else {
+            flushLogTail()
+            return
+        }
+        guard !tailFlushScheduled else { return }
+        tailFlushScheduled = true
+        let delay = max(0, Self.tailPersistInterval - (now - last))
+        // Weak: a LiveState that goes away (tests) must not be kept alive, nor write, by a pending flush.
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard let self else { return }
+            self.tailFlushScheduled = false
+            self.persistTailIfDue()
+        }
+    }
+
+    /// Mirror the current log to the durable tail immediately (disconnect, app background, or when due).
+    func flushLogTail() {
+        tailDirty = false
+        lastTailPersistUptime = ProcessInfo.processInfo.systemUptime
+        Self.persistTail(log)
     }
 
     /// The in-app log lines tagged for one test domain (for the Test Centre live readout). Read-only,
@@ -839,7 +902,7 @@ public final class LiveState: ObservableObject {
         if gens.count > maxLogGenerations { gens.removeFirst(gens.count - maxLogGenerations) }
         UserDefaults.standard.set(gens, forKey: generationsKey)
         // Clear the live slot: this tail now belongs to a generation, and leaving it would duplicate it in
-        // every export until 32 fresh lines happen to overwrite it.
+        // every export until the next durable-tail write happens to overwrite it.
         UserDefaults.standard.set([String](), forKey: tailKey)
     }
 
@@ -1004,6 +1067,38 @@ public final class LiveState: ObservableObject {
     }
 
     private static let hexRunRegex = try? NSRegularExpression(pattern: "[0-9a-fA-F]{16,}")
+    // Perf: the text rules of `redactPii`, compiled ONCE. `redactPii` runs on every appended log line, and
+    // `String.replacingOccurrences(of:with:options: .regularExpression)` compiled a fresh
+    // NSRegularExpression for each of these eight patterns on every call. Patterns and options are
+    // byte-identical to the old inline ones (that API only honours `.caseInsensitive` from the string
+    // compare options, mapped to the same regex option here), and it applies the SAME `$n` template
+    // syntax `stringByReplacingMatches(in:options:range:withTemplate:)` does, so output is unchanged.
+    private static let macRegex = try? NSRegularExpression(
+        pattern: "([0-9A-Fa-f]{2}):[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:([0-9A-Fa-f]{2})")
+    private static let serialRegex = try? NSRegularExpression(
+        pattern: "WHOOP (?=[0-9A-Za-z]{6,})[0-9A-Za-z]*[0-9][0-9A-Za-z]*")
+    private static let peripheralUuidRegex = try? NSRegularExpression(
+        pattern: "(?![0-9A-Fa-f]{8}-(?:0000-1000-8000-00805f9b34fb|8d6d-82b8-614a-1c8cb0f8dcc6))[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}", options: .caseInsensitive)
+    private static let whoopIdNoopRegex = try? NSRegularExpression(
+        pattern: "whoop-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}(-noop)")
+    private static let whoopIdRegex = try? NSRegularExpression(
+        pattern: "whoop-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}")
+    private static let ouraIdNoopRegex = try? NSRegularExpression(
+        pattern: "oura-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}(-noop)")
+    private static let ouraIdRegex = try? NSRegularExpression(
+        pattern: "oura-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}")
+    private static let ownerNameRegex = try? NSRegularExpression(
+        pattern: "[\\p{L}\\p{N}_.\\-]+(['\u{2019}]s\\s+(?i:whoop))")
+
+    /// Replace every match of `regex` in `s` using template syntax, exactly as
+    /// `replacingOccurrences(of:with:options: .regularExpression)` does over the whole string.
+    nonisolated private static func replaceMatches(in s: String, of regex: NSRegularExpression?,
+                                                   withTemplate template: String) -> String {
+        guard let regex else { return s }
+        return regex.stringByReplacingMatches(in: s, options: [],
+                                              range: NSRange(location: 0, length: (s as NSString).length),
+                                              withTemplate: template)
+    }
 
     nonisolated static func redactPii(_ s: String) -> String {
         var out = s
@@ -1023,9 +1118,7 @@ public final class LiveState: ObservableObject {
                 out = rebuilt
             }
         }
-        out = out.replacingOccurrences(
-            of: "([0-9A-Fa-f]{2}):[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:[0-9A-Fa-f]{2}:([0-9A-Fa-f]{2})",
-            with: "$1:••:••:••:••:$2", options: .regularExpression)
+        out = Self.replaceMatches(in: out, of: Self.macRegex, withTemplate: "$1:••:••:••:••:$2")
         // #1193 field capture: the old rule required a DIGIT straight after "WHOOP ", but real serials
         // start with letters as often as digits - "WHOOP MGB0779473" sat unredacted in a log attached to
         // an issue while "WHOOP 4C1594026" beside it was masked. The rule now accepts any alnum run of 6+
@@ -1035,12 +1128,9 @@ public final class LiveState: ObservableObject {
         // service 1150" is a real diagnostic line, and PUFFIN is six alnum characters. A serial always
         // carries a digit; a word does not. "WHOOP 4.0" stays untouched for a different reason - the dot
         // stops the run at one character, short of the six the lookahead demands.
-        out = out.replacingOccurrences(
-            of: "WHOOP (?=[0-9A-Za-z]{6,})[0-9A-Za-z]*[0-9][0-9A-Za-z]*", with: "WHOOP <serial>", options: .regularExpression)
+        out = Self.replaceMatches(in: out, of: Self.serialRegex, withTemplate: "WHOOP <serial>")
         // Mask a CoreBluetooth peripheral UUID, but NOT a standard-BLE / WHOOP-vendor service UUID.
-        out = out.replacingOccurrences(
-            of: "(?![0-9A-Fa-f]{8}-(?:0000-1000-8000-00805f9b34fb|8d6d-82b8-614a-1c8cb0f8dcc6))[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}",
-            with: "<device>", options: [.regularExpression, .caseInsensitive])
+        out = Self.replaceMatches(in: out, of: Self.peripheralUuidRegex, withTemplate: "<device>")
         // #1303: an ADOPTED device id (`whoop-<SERIAL>`) is a device identifier in every line that prints
         // an id. Neither rule above catches it — the MAC rule wants MAC shape and the serial rule wants the
         // literal "WHOOP " then a DIGIT, while an adopted id is `whoop-` + a serial commonly starting with
@@ -1049,24 +1139,16 @@ public final class LiveState: ObservableObject {
         // what lets a reader tell derived rows from measured ones. Six-character minimum matches
         // `minSerialLength`, so `my-whoop` and `my-whoop-noop` are untouched. Kotlin twin in
         // `redactStrapLogPii`.
-        out = out.replacingOccurrences(
-            of: "whoop-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}(-noop)",
-            with: "whoop-$1…$2", options: .regularExpression)
-        out = out.replacingOccurrences(
-            of: "whoop-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}",
-            with: "whoop-$1…", options: .regularExpression)
+        out = Self.replaceMatches(in: out, of: Self.whoopIdNoopRegex, withTemplate: "whoop-$1…$2")
+        out = Self.replaceMatches(in: out, of: Self.whoopIdRegex, withTemplate: "whoop-$1…")
         // #2092: an Oura device id (`oura-<serial>`) is the same #1303 gap for the OTHER brand — neither
         // rule above catches it, since the prefix isn't "whoop-". Exact same shape (3-character prefix +
         // `…`, matching `OuraSerialIdentity.logSafe`) and the same `-noop`-suffix-preserving pair, since
         // `DeviceRegistryStore.computedSuffix` is brand-agnostic — an Oura device gets a `oura-<serial>
         // -noop` sibling the same way a WHOOP strap does. Applied AFTER the WHOOP rules but that ordering
         // is not load-bearing: the two prefixes never overlap. Kotlin twin in `redactStrapLogPii`.
-        out = out.replacingOccurrences(
-            of: "oura-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}(-noop)",
-            with: "oura-$1…$2", options: .regularExpression)
-        out = out.replacingOccurrences(
-            of: "oura-([A-Za-z0-9]{3})[A-Za-z0-9-]{3,}",
-            with: "oura-$1…", options: .regularExpression)
+        out = Self.replaceMatches(in: out, of: Self.ouraIdNoopRegex, withTemplate: "oura-$1…$2")
+        out = Self.replaceMatches(in: out, of: Self.ouraIdRegex, withTemplate: "oura-$1…")
         // The account holder's NAME, as WHOOP writes it into the advertised local name. WHOOP names a
         // strap "<FirstName>'s Whoop" by default and the scan path logs that name on every discovery, so
         // the shareable log (#445) we ask people to attach to public issues carried a real person's name.
@@ -1080,9 +1162,7 @@ public final class LiveState: ObservableObject {
         // "Ryan". A multi-token rule cannot tell a name from the surrounding log text and would swallow
         // "Discovered" with it. A fully custom name with no possessive stays a known gap. Kotlin twin in
         // `redactStrapLogPii` as `PII_DEVICE_NAME_RE`.
-        out = out.replacingOccurrences(
-            of: "[\\p{L}\\p{N}_.\\-]+(['\u{2019}]s\\s+(?i:whoop))",
-            with: "<name>$1", options: .regularExpression)
+        out = Self.replaceMatches(in: out, of: Self.ownerNameRegex, withTemplate: "<name>$1")
         return out
     }
 
@@ -1124,6 +1204,17 @@ public final class LiveState: ObservableObject {
         // it unchanged — they just get the night that a wake-time restart used to erase.
         return header + Self.previousSessionsText() + log.joined(separator: "\n")
     }
+}
+
+/// The strap-log ring buffer, owned by `LiveState` (`live.logStore`) and written ONLY by
+/// `LiveState.append(log:domain:)`. Split out so a new log line re-renders just the views that show the
+/// log, not every `LiveState` observer (see `LiveState.logStore`). Mutated only on the main actor (by
+/// `LiveState`, which is `@MainActor`); not itself actor-annotated, so it is a plain stored default there.
+public final class LiveLog: ObservableObject {
+    /// Redacted log lines, oldest first, capped by `LiveState.maxLogLines` (+ trim slack).
+    @Published public internal(set) var lines: [String] = []
+
+    public init() {}
 }
 
 /// What the Live Console should read out, given WHICH device is active.

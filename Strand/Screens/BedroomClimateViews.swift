@@ -244,6 +244,10 @@ struct BedroomClimateSettingsView: View {
                 }
             }
         }
+        // While this picker is up, a scan runs its full window: it lists every sensor heard, so it must
+        // not stop at the configured one (`BedroomClimate.endScanEarly`).
+        .onAppear { climate.sensorPickerOpen = true }
+        .onDisappear { climate.sensorPickerOpen = false }
     }
 
     private func header(_ text: String) -> some View {

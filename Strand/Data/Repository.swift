@@ -1062,7 +1062,10 @@ final class Repository: ObservableObject {
                 guard let self else { return }
                 // Promote: from here on this is the running reload, and a new caller queues behind it.
                 self.refreshQueued[nDays] = nil
-                let run = Task { @MainActor [weak self] in await self?.performRefresh(days: nDays) }
+                let run = Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    await self.performRefresh(days: nDays)
+                }
                 self.refreshRunning[nDays] = run
                 await run.value
                 if self.refreshRunning[nDays] == run { self.refreshRunning[nDays] = nil }
@@ -1071,7 +1074,10 @@ final class Repository: ObservableObject {
             await queued.value
             return
         }
-        let run = Task { @MainActor [weak self] in await self?.performRefresh(days: nDays) }
+        let run = Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.performRefresh(days: nDays)
+        }
         refreshRunning[nDays] = run
         await run.value
         if refreshRunning[nDays] == run { refreshRunning[nDays] = nil }

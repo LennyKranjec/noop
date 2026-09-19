@@ -1164,8 +1164,9 @@ private struct ActiveWorkoutLive: View {
     }
 }
 
-/// The strap log + export controls + Test Centre link. Owns LiveState so the streaming log lines
-/// re-render only this card. Wrapped in the liquid frosted card style.
+/// The strap log + export controls + Test Centre link. The streaming lines live in `LiveLogLines`, which
+/// observes only `live.logStore`, so a new log line re-renders just that list. Wrapped in the liquid
+/// frosted card style.
 private struct LiveLogCard: View {
     @EnvironmentObject private var live: LiveState
     @AppStorage(CardAppearancePrefs.opacityKey) private var cardOpacityPercent = CardAppearancePrefs.defaultPercent
@@ -1184,25 +1185,7 @@ private struct LiveLogCard: View {
                 Button("Save…") { saveStrapLog() }
                     .buttonStyle(.plain).font(StrandFont.mono).foregroundStyle(StrandPalette.accent)
             }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(Array(live.log.enumerated()), id: \.offset) { idx, line in
-                            Text(line).font(StrandFont.mono)
-                                .foregroundStyle(StrandPalette.textSecondary)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .id(idx)
-                        }
-                    }
-                }
-                #if os(iOS)
-                .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
-                #endif
-                .frame(height: 200)
-                .onChangeCompat(of: live.log.count) { _ in
-                    if let last = live.log.indices.last { proxy.scrollTo(last, anchor: .bottom) }
-                }
-            }
+            LiveLogLines(logStore: live.logStore)
 
             // Users look on Live first when something's wrong (#507/#509), so link straight into the
             // Test Centre diagnostic home, one tap from the log.
@@ -1236,6 +1219,38 @@ private struct LiveLogCard: View {
     private func saveStrapLog() {
         FileExport.exportText(live.exportableLogText(),
                               suggestedName: FileExport.timestampedName("noop-strap-log", ext: "txt"))
+    }
+}
+
+/// The scrolling strap-log lines. Its own view observing ONLY `LiveLog`, so a new line re-renders this
+/// list and nothing else (perf; `LiveState` no longer publishes log changes). LAZY: the buffer holds up to
+/// 5,000 lines and a plain VStack built a Text for every one of them on each new line, although the
+/// 200 pt window shows about a dozen. Row identity is still the line's index, as before, so the
+/// scroll-to-newest below targets the same id.
+private struct LiveLogLines: View {
+    @ObservedObject var logStore: LiveLog
+
+    var body: some View {
+        let lines = logStore.lines
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 2) {
+                    ForEach(lines.indices, id: \.self) { idx in
+                        Text(lines[idx]).font(StrandFont.mono)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .id(idx)
+                    }
+                }
+            }
+            #if os(iOS)
+            .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+            #endif
+            .frame(height: 200)
+            .onChangeCompat(of: lines.count) { _ in
+                if let last = logStore.lines.indices.last { proxy.scrollTo(last, anchor: .bottom) }
+            }
+        }
     }
 }
 

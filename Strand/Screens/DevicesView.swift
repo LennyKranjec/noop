@@ -27,7 +27,7 @@ struct DevicesView: View {
                        // full-bleed time-of-day sky behind the scroll content (it does not scroll).
                        topBackground: liquidScaffoldSky()) {
             if let registry = model.deviceRegistry {
-                DevicesContent(registry: registry)
+                DevicesContent(registry: registry, logStore: model.live.logStore)
             } else {
                 // The registry is built once the on-device store opens (a beat after launch). Show a
                 // calm pending note rather than an empty screen in that brief window.
@@ -47,6 +47,10 @@ struct DevicesView: View {
 /// becoming non-nil.
 private struct DevicesContent: View {
     @ObservedObject var registry: DeviceRegistry
+    /// The strap log, observed so the active card's clock line (`strapClockState`, parsed from the log)
+    /// still refreshes on new lines now that `LiveState` no longer publishes log changes. `model.live`'s
+    /// store: the same `LiveState` the environment carries.
+    @ObservedObject var logStore: LiveLog
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var live: LiveState
 
@@ -172,6 +176,9 @@ private struct DevicesContent: View {
                 // opt-in has been switched off mid-session. Turning a feature off must not remove the
                 // only control that turns the STRAP off; the MG gate still applies either way.
                 let ecgGate = probeGate && (ecgEnabled || model.ecgMayBeRunning) && model.isWhoop5MG
+                // #987 clock line + warning: ONE log scan per render for the active card (it was computed
+                // twice, once per field, each a reverse scan of up to 5,000 log lines), none for the rest.
+                let clockState: (line: String, warning: String?)? = device.status == .active ? strapClockState : nil
                 DeviceCard(
                     device: device,
                     isActive: device.status == .active,
@@ -224,8 +231,8 @@ private struct DevicesContent: View {
                     // backfill. Distinct from the strap firmware build shown as FW.
                     liveHistoryLayout: (device.status == .active && live.connected) ? live.strapRange?.firmwareLayout : nil,
                     // #987: clock latch + frame freshness + the 1970/71 RTC warning, active card only.
-                    liveClockLine: device.status == .active ? strapClockState?.line : nil,
-                    liveClockWarning: device.status == .active ? strapClockState?.warning : nil,
+                    liveClockLine: clockState?.line,
+                    liveClockWarning: clockState?.warning,
                     onMakeActive: { switchTarget = device },
                     onRename: { renameDraft = device.nickname ?? device.displayName; renameTarget = device },
                     onRemove: { removeTarget = device },
