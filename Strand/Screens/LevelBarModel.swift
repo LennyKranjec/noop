@@ -129,8 +129,15 @@ final class LevelBarModel: ObservableObject {
     /// strip on yesterday, unmarked. A load now runs to the end whoever was waiting for it.
     private var loadTask: Task<Void, Never>?
     private var loadTaskTick: Int?
-    /// A reload booked for when the store stops being written.
+    /// A reload booked for later: when the store stops being written, or when the level day next becomes
+    /// writable (see `bookSettleCheck`). Only one at a time; an earlier booking replaces a later one.
     private var retryTask: Task<Void, Never>?
+    /// When `retryTask` fires.
+    private var retryAt: Date?
+
+    /// When the level day's night counts as over (its wake + `LevelLedger.wakeSettle`), while that day is
+    /// still unwritten — so the morning brief can keep looking until then. Nil when unknown or written.
+    private(set) var levelDayWakeSettledAt: Date?
 
     /// The series behind the last load, what they were read at, and over how many days.
     ///
@@ -203,18 +210,43 @@ final class LevelBarModel: ObservableObject {
         }
         publish(calendar: calendar)
         if let span = historySpan { rebuildHistory(spanDays: span, calendar: calendar) }
+        if rescoreDone { bookSettleCheck(repo: repo, calendar: calendar) }
         return true
     }
 
-    /// Book one reload for a little later. Only one is ever booked at a time.
-    private func scheduleRetry(repo: Repository) {
-        guard retryTask == nil else { return }
+    /// Book one reload for `seconds` from now. Only one is ever booked at a time: a booking EARLIER than the
+    /// one standing replaces it; a later one is dropped (the earlier reload books again when it runs).
+    private func scheduleRetry(repo: Repository, after seconds: TimeInterval = TimeInterval(LevelBarModel.retrySeconds)) {
+        let at = Date().addingTimeInterval(seconds)
+        if retryTask != nil, let booked = retryAt, booked <= at { return }
+        retryTask?.cancel()
+        retryAt = at
         retryTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: LevelBarModel.retrySeconds * 1_000_000_000)
-            guard let self else { return }
+            try? await Task.sleep(nanoseconds: UInt64(Swift.max(seconds, 0) * 1_000_000_000))
+            guard !Task.isCancelled, let self else { return }
             self.retryTask = nil
+            self.retryAt = nil
             await self.reload(repo: repo)
         }
+    }
+
+    /// THE LEVEL DAY IS LOOKED AT AGAIN WHEN IT BECOMES WRITABLE. If it is still unwritten at the end of a
+    /// load, one reload is booked for the earlier of its wake + `wakeSettle` and its deadline (capped at
+    /// `LevelLedger.maxSettleCheckDelay`, re-booked by every load). Without it nothing reloaded at either
+    /// moment, and a night that had landed stayed pending until some other refresh came along.
+    private func bookSettleCheck(repo: Repository, calendar: Calendar) {
+        let now = Date()
+        let levelKey = LevelWiring.key(from: LevelDayFreeze.levelDay(now: now, calendar: calendar), calendar: calendar)
+        guard !ledger.isSettled(levelKey), let series = cachedSeries?.series else {
+            levelDayWakeSettledAt = nil
+            return
+        }
+        levelDayWakeSettledAt = LevelLedger.wakeTime(day: levelKey, series: series, calendar: calendar)?
+            .addingTimeInterval(LevelLedger.wakeSettle)
+        guard let at = LevelLedger.nextSettleCheck(day: levelKey, series: series,
+                                                   beganAt: LevelDayFreeze.beganAt(levelKey),
+                                                   calendar: calendar, now: now) else { return }
+        scheduleRetry(repo: repo, after: LevelLedger.settleCheckDelay(at: at, now: now))
     }
 
     /// Write every day that is due and not yet in the ledger, oldest first.

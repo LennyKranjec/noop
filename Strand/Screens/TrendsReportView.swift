@@ -343,8 +343,9 @@ struct TrendsReportPage: View {
                 ? (up == stat.metric.higherIsBetter ? StrandPalette.statusPositive : StrandPalette.metricRose)
                 : StrandPalette.textTertiary
             let sign = up ? "+" : "−"
-            // A DELTA: linear on every axis (E5), never through the Effort calibration curve.
-            let shown = abs(RangeReportEngine.displayDelta(d, metric: stat.metric, units: units))
+            // The difference of the two DISPLAYED half means (E5): on the calibrated Effort axis a linear
+            // delta beside calibrated levels would not add up to what the reader sees.
+            let shown = abs(RangeReportEngine.displayHalfDelta(stat, units: units))
             TrendChip(text: "\(sign)\(round1Text(shown))", color: color)
         }
     }

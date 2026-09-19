@@ -866,8 +866,13 @@ struct LiquidTodayView: View {
     private var whoopChargeToday: Double? { cloudIsCarried ? nil : cloudDay?.recovery }
     private var whoopRestToday: Double? { cloudIsCarried ? nil : cloudSleepScore }
     private var heroCharge: Double? { whoopChargeToday ?? noopCharge ?? displayDay?.recovery ?? cloudDay?.recovery }
+    /// ON ONE AXIS WITH THE TARGET MARK. When the ring shows WHOOP's own strain, the fill is placed through
+    /// the INVERSE calibration (`StrainCalibration.effort100(strain21:)`) — the same mapping the optimal-
+    /// strain ceiling's mark uses — so the arc crosses the mark exactly when WHOOP's strain reaches the
+    /// band top. The linear ×100/21 the fill used before put the two on different axes whenever a
+    /// calibration exists (both reduce to ×100/21 without one).
     private var heroEffort: Double? {
-        heroOwnEffort ?? cloudDay?.strain.map { $0 * WhoopExportImporter.dayStrainToEffortScale }
+        heroOwnEffort ?? cloudDay?.strain.map { StrainCalibration.effort100(strain21: $0) }
     }
     /// The app's OWN Effort for the hero (0–100), nil when the ring is falling back to WHOOP's figure.
     /// Kept apart so the O8 calibration is applied only to a number the app measured — WHOOP's strain is
@@ -2198,13 +2203,21 @@ struct LiquidTodayView: View {
             // gate the daily pass scores the stored row with, or `effectiveEffort`'s max would let the
             // ungated live number win and the desk-day inflation would stay on the ring.
             let todayGravity = await repo.gravitySamplesUnion(from: from, to: to, limit: 200_000)
-            liveStrainLocal = StrainScorer.strain(todayHr, maxHR: maxHR, restingHR: restHR,
-                                                  method: PuffinExperiment.effortMethod, sex: profile.sex,
-                                                  zone1Gate: .day(StrainScorer.movingMinutes(gravity: todayGravity)))
+            // The day's workouts (memoised; the same read `wkA` below awaits) mark their minutes moving, as
+            // the daily pass's bouts do. Scored OFF the main actor — see `TodayView.liveDayStrain`.
+            let dayWorkoutRows = await repo.workoutRows()
+            let bouts = TodayView.workoutWindows(dayWorkoutRows, from: from, to: to)
+            liveStrainLocal = await TodayView.liveDayStrain(hr: todayHr, gravity: todayGravity, bouts: bouts,
+                                                            maxHR: maxHR, restingHR: restHR,
+                                                            method: PuffinExperiment.effortMethod,
+                                                            sex: profile.sex)
         } else {
             liveStrainLocal = nil
         }
         liveTodayStrain = liveStrainLocal
+        if selectedDayOffset == 0, let liveStrainLocal {
+            TodayView.publishLiveStrain(liveStrainLocal, day: selectedDayKey)
+        }
 
         async let restA = repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
         async let stressA = repo.series(key: "stress", source: "my-whoop")

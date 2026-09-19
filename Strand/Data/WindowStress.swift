@@ -50,7 +50,7 @@ enum WindowStress {
                          calendar: Calendar = .current) async -> [DaytimeStress.HourPoint] {
         let key = Repository.localDayKey(date)
         if key == Repository.localDayKey(Date()) {
-            return await StressDayCurve.today(repo: repo)?.result.hours ?? []
+            return await StressDayCurve.cachedToday(repo: repo)?.result.hours ?? []
         }
         if let hit = hoursByDay[key] { return hit }
         let start = calendar.startOfDay(for: date)

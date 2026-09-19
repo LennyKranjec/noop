@@ -361,9 +361,22 @@ public enum RangeReportEngine {
         }
     }
 
-    /// A DIFFERENCE on the display axis: always the plain multiplication (×9/5 for a temperature delta,
-    /// the linear Effort factor), never the calibration curve — a magnitude has no position on the curve
-    /// for a calibration to act on (O8 / E5, matching `UnitFormatter.effortDeltaValue`).
+    /// The first→second half change AS IT READS beside the two half means: the difference of the two
+    /// DISPLAYED levels (`displayValue` of each), not a free-standing magnitude.
+    ///
+    /// WHY NOT `displayDelta`. On the calibrated 0–21 axis the two half means go through the curve, and a
+    /// linear ×21/100 of their stored difference is a different number from the difference of what is
+    /// printed next to it — "8.4 → 11.0, +3.4" — which reads as an arithmetic error. Where both
+    /// conversions are plain multiplications (°F deviations, the uncalibrated axis) the two agree exactly.
+    public static func displayHalfDelta(_ stat: MetricRangeStat, units: ReportDisplayUnits) -> Double {
+        displayValue(stat.secondHalfMean, metric: stat.metric, units: units)
+            - displayValue(stat.firstHalfMean, metric: stat.metric, units: units)
+    }
+
+    /// A DIFFERENCE on the display axis with no levels to anchor it: always the plain multiplication (×9/5
+    /// for a temperature delta, the linear Effort factor), never the calibration curve — a magnitude has
+    /// no position on the curve for a calibration to act on (O8 / E5, matching
+    /// `UnitFormatter.effortDeltaValue`). A change BETWEEN TWO SHOWN LEVELS uses `displayHalfDelta`.
     public static func displayDelta(_ d: Double, metric: ReportMetric,
                                     units: ReportDisplayUnits) -> Double {
         switch metric {

@@ -469,6 +469,14 @@ final class AppModel: ObservableObject {
                 await LevelBarModel.shared.reload(repo: self.repo)
             }
             while !Task.isCancelled {
+                // THE ONE-SHOT RESCORE IS RETRIED HERE until it has run. A launch attempt that found a pass it
+                // could not wait out, or was suspended part-way, used to wait for the next launch; the pass
+                // is resumable now (it keeps a per-chunk watermark), so each tick carries it on from where it
+                // stopped. A no-op once the flag is set; an attempt already running is not doubled.
+                if !UserDefaults.standard.bool(forKey: IntelligenceEngine.nightlyMetricsRescoreFlagKey),
+                   await self.intelligence.runNightlyMetricsRescoreIfNeeded() {
+                    await LevelBarModel.shared.reload(repo: self.repo)
+                }
                 // #547 RE-POLLUTION: a sync since the last tick may have armed a re-heal (its ingest gate
                 // dropped bad-clock records). `runTimestampHealIfNeeded` honours the pending flag even after
                 // the one-shot done flag is set, purges any pollution, and rescores the affected days , so a

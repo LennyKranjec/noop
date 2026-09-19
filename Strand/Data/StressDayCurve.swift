@@ -30,9 +30,43 @@ enum StressDayCurve {
         let maxTs: Int
         let day: Int
         let result: DaytimeStress.Result
+        /// When this curve was last scored OR confirmed unchanged by the fingerprint — what
+        /// `cachedToday`'s age is measured from.
+        let at: Date
     }
 
     @MainActor private static var memo: Memo?
+
+    /// A scoring already under way, so a second caller arriving mid-score waits for it instead of
+    /// reading the same three 200 000-row ranges a second time.
+    @MainActor private static var inFlight: Task<(result: DaytimeStress.Result, day: Int)?, Never>?
+
+    /// How stale the SHARED curve may be for the surfaces that poll it (the Today stress tile, the live
+    /// stress monitor): a quarter of an hour.
+    static let sharedMaxAge: TimeInterval = 15 * 60
+
+    /// Today's curve, reused without even the fingerprint query while it is younger than `maxAge`.
+    ///
+    /// WHY THIS EXISTS. With the strap streaming, today's heart rate changes every few seconds, so the
+    /// fingerprint gate in `today` never hits: every five-minute poll re-read three 200 000-row ranges
+    /// and re-scored the whole day — and the tile and the live monitor each did it on their own. The
+    /// curve is HOURLY grain; a quarter-hour-old one is as good as a fresh one for both of them (the
+    /// live ten-minute reading is taken separately and stays at five minutes). One cache, both readers.
+    @MainActor
+    static func cachedToday(repo: Repository, maxAge: TimeInterval = sharedMaxAge, now: Date = Date(),
+                            calendar: Calendar = .current) async -> (result: DaytimeStress.Result, day: Int)? {
+        let day = localDayNumber(now, calendar: calendar)
+        if let memo, isFresh(memoDay: memo.day, at: memo.at, day: day, now: now, maxAge: maxAge) {
+            return (memo.result, day)
+        }
+        return await today(repo: repo, now: now, calendar: calendar)
+    }
+
+    /// Whether a memo scored at `at` for `memoDay` may be served to a reader on `day` at `now` — the
+    /// `cachedToday` rule, pure for the tests.
+    static func isFresh(memoDay: Int, at: Date, day: Int, now: Date, maxAge: TimeInterval) -> Bool {
+        memoDay == day && now.timeIntervalSince(at) < maxAge
+    }
 
     /// Today's curve and the local day number it belongs to, or nil when it could not be scored.
     ///
@@ -47,6 +81,18 @@ enum StressDayCurve {
     @MainActor
     static func today(repo: Repository, now: Date = Date(),
                       calendar: Calendar = .current) async -> (result: DaytimeStress.Result, day: Int)? {
+        // ONE SCORING AT A TIME: a caller arriving while another is scoring shares its answer.
+        if let inFlight { return await inFlight.value }
+        let task = Task { @MainActor in await StressDayCurve.score(repo: repo, now: now, calendar: calendar) }
+        inFlight = task
+        let value = await task.value
+        inFlight = nil
+        return value
+    }
+
+    @MainActor
+    private static func score(repo: Repository, now: Date,
+                              calendar: Calendar) async -> (result: DaytimeStress.Result, day: Int)? {
         let startOfDay = calendar.startOfDay(for: now)
         let from = Int(startOfDay.timeIntervalSince1970)
         let to = Int(now.timeIntervalSince1970)
@@ -57,6 +103,8 @@ enum StressDayCurve {
         // part of the check because a fingerprint that happened to match across midnight would otherwise
         // serve yesterday's curve as today's.
         if let memo, memo.day == day, memo.count == fingerprint.count, memo.maxTs == fingerprint.maxTs {
+            // Confirmed unchanged NOW, so the shared cache's age restarts from here.
+            self.memo = Memo(count: memo.count, maxTs: memo.maxTs, day: memo.day, result: memo.result, at: now)
             return (memo.result, day)
         }
 
@@ -94,7 +142,7 @@ enum StressDayCurve {
         }
         // Too little signal leaves an EMPTY result, which is a real answer about today rather than a
         // refusal: a reader should drop yesterday's line rather than keep drawing it.
-        memo = Memo(count: fingerprint.count, maxTs: fingerprint.maxTs, day: day, result: scored)
+        memo = Memo(count: fingerprint.count, maxTs: fingerprint.maxTs, day: day, result: scored, at: now)
         // E10: BANK the day's high-stress minutes here, where today's curve is actually (re)scored. The
         // writer existed with no caller, so the energy bank's stress spend / calm return and the
         // DayDeficits stress input always read nothing. Once per real rescore (the memo hit above returns
@@ -128,5 +176,5 @@ enum StressDayCurve {
 
     /// Drops the memo so a test starts from a known state.
     @MainActor
-    static func resetForTest() { memo = nil }
+    static func resetForTest() { memo = nil; inFlight = nil }
 }

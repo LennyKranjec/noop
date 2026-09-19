@@ -447,6 +447,39 @@ final class LevelLedger: @unchecked Sendable {
         return out
     }
 
+    /// The longest a load books its next look ahead. A reload every three hours at most is cheap, and it
+    /// bounds the damage of a clock change or a wake time that moves under a late sync.
+    static let maxSettleCheckDelay: TimeInterval = 3 * 60 * 60
+
+    /// A few seconds past the boundary, so the reload's own `now` is on the far side of it.
+    static let settleCheckSlack: TimeInterval = 5
+
+    /// When an UNSETTLED `day` next becomes writable without anything else happening: the earlier of its
+    /// wake + `wakeSettle` (the night is over) and its deadline — whichever are still ahead of `now`. Nil
+    /// when neither is: then only new data (a sync, an analysis pass) can change the answer, and those
+    /// reload the level themselves.
+    ///
+    /// WHY THIS EXISTS. Nothing reloaded the level at those two moments. A night that had fully landed at
+    /// 07:10 with a 07:00 wake stayed "settling" until something else happened to reload — and the brief's
+    /// ten-minute poll could end first — so the day could sit pending until the afternoon.
+    static func nextSettleCheck(day: String, series: LevelSeries, beganAt: Date?,
+                                calendar: Calendar, now: Date) -> Date? {
+        var candidates: [Date] = []
+        if let wake = wakeTime(day: day, series: series, calendar: calendar) {
+            let settled = wake.addingTimeInterval(wakeSettle)
+            if settled > now { candidates.append(settled) }
+        }
+        if let due = deadline(day: day, beganAt: beganAt, calendar: calendar), due > now {
+            candidates.append(due)
+        }
+        return candidates.min()
+    }
+
+    /// How long to wait for a look booked at `at`: just past it, never more than `maxSettleCheckDelay`.
+    static func settleCheckDelay(at: Date, now: Date) -> TimeInterval {
+        Swift.min(Swift.max(at.timeIntervalSince(now), 0) + settleCheckSlack, maxSettleCheckDelay)
+    }
+
     static func isReady(day: String, byDay: [String: DailyMetric], series: LevelSeries,
                         calendar: Calendar, now: Date? = nil) -> Bool {
         nightMissing(day: day, byDay: byDay, series: series, calendar: calendar, now: now).isEmpty

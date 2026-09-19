@@ -1,4 +1,5 @@
 import XCTest
+import WhoopStore
 @testable import Strand
 
 /// #817 - the day-nav swipe / chevron clamp. The same pure bounds back the swipe gesture, the prev/next
@@ -92,5 +93,23 @@ final class TodayDayNavClampTests: XCTestCase {
         let logical = cal.date(from: DateComponents(year: 2026, month: 6, day: 28))!
         let picked = cal.date(from: DateComponents(year: 2026, month: 6, day: 24))!
         XCTAssertEqual(TodayView.pickedDayOffset(pickedDate: picked, anchorLogicalDay: logical), 4)
+    }
+}
+
+/// The live day Effort's zone-1 gate takes every workout touching the scored window (manual, imported,
+/// Health or detected), so a stationary-bike bout pays zone 1 in the live total as in the stored one.
+final class TodayLiveEffortWorkoutWindowTests: XCTestCase {
+
+    private func row(_ start: Int, _ end: Int) -> WorkoutRow {
+        WorkoutRow(startTs: start, endTs: end, sport: "cycling", source: "manual", durationS: nil,
+                   energyKcal: nil, avgHr: nil, maxHr: nil, strain: nil, distanceM: nil,
+                   zonesJSON: nil, notes: nil, steps: nil)
+    }
+
+    func testOnlyWorkoutsTouchingTheWindowAreKept() {
+        let rows = [row(0, 50), row(90, 150), row(200, 300), row(1_000, 1_100)]
+        let windows = TodayView.workoutWindows(rows, from: 100, to: 250)
+        XCTAssertEqual(windows.map(\.start), [90, 200])
+        XCTAssertEqual(windows.map(\.end), [150, 300])
     }
 }

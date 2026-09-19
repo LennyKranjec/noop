@@ -88,4 +88,44 @@ final class LocalDayMidnightTests: XCTestCase {
                            now: now, nextDayStart: Int(transition.nextStart.timeIntervalSince1970)),
                        tStart + 23 * 3600)
     }
+
+    // MARK: - The resumable full-history rescore's plan
+
+    private func planDays(_ n: Int) -> [(key: String, asOf: Int)] {
+        (0..<n).map { i in (key: String(format: "2026-%03d", i), asOf: 1_000_000 + i * 86_400 + 86_399) }
+    }
+
+    /// History is cut into chunks from the OLDEST day; the last piece (at most one chunk, ending today) is
+    /// left to an ordinary pass. Days before the first raw HR are not walked at all.
+    func testRescorePlanChunksFromTheOldestAndLeavesTheLastPieceToAnOrdinaryPass() {
+        let days = planDays(300)
+        let plan = IntelligenceEngine.rescorePlan(oldestFirst: days, firstDataAsOf: days[25].asOf - 3_600,
+                                                  completedThrough: nil, chunkDays: 120)
+        // 275 days with data: 120 + 120 historical, 35 left for the ordinary pass.
+        XCTAssertEqual(plan.historical.map(\.maxDays), [120, 120])
+        XCTAssertEqual(plan.historical.map(\.newestDay), [days[144].key, days[264].key])
+        XCTAssertEqual(plan.historical.map(\.asOf), [days[144].asOf, days[264].asOf])
+        XCTAssertEqual(plan.finalDays, 35)
+    }
+
+    /// A resumed attempt skips everything up to the persisted watermark.
+    func testRescorePlanResumesAfterTheWatermark() {
+        let days = planDays(300)
+        let plan = IntelligenceEngine.rescorePlan(oldestFirst: days, firstDataAsOf: days[0].asOf,
+                                                  completedThrough: days[239].key, chunkDays: 120)
+        XCTAssertTrue(plan.historical.isEmpty)
+        XCTAssertEqual(plan.finalDays, 60)
+        let done = IntelligenceEngine.rescorePlan(oldestFirst: days, firstDataAsOf: days[0].asOf,
+                                                  completedThrough: days[299].key, chunkDays: 120)
+        XCTAssertTrue(done.historical.isEmpty)
+        XCTAssertEqual(done.finalDays, 0, "everything done: only the recent pass is left")
+    }
+
+    /// No raw HR at all: nothing to walk.
+    func testRescorePlanWithNoHeartRateIsEmpty() {
+        let plan = IntelligenceEngine.rescorePlan(oldestFirst: planDays(50), firstDataAsOf: nil,
+                                                  completedThrough: nil, chunkDays: 120)
+        XCTAssertTrue(plan.historical.isEmpty)
+        XCTAssertEqual(plan.finalDays, 0)
+    }
 }

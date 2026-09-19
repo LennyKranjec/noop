@@ -28,7 +28,10 @@ final class RD1LogDomainTests: XCTestCase {
         // (Baselines spine, reject off): the 8 recent 85 ms nights nudge it up from the 42 ms cluster
         // but Winsorization caps their pull, so it lands at 49 — still geometric, not the tail-inflated
         // arithmetic 54.
-        XCTAssertEqual(hrv?.evidence, "50 vs 49 ms")
+        // O9 (cold-start spread from the robust sample spread, deviations measured against the previous
+        // centre) lets the young baseline Winsor-cap the 85 ms nights a little harder, so the centre now
+        // lands at 50 — still the geometric typical night, still far below the arithmetic 54.
+        XCTAssertEqual(hrv?.evidence, "50 vs 50 ms")
         // 50 sits at the typical night → neutral, read against a representative (not tail-inflated) baseline.
         XCTAssertEqual(hrv?.flag, .neutral)
     }

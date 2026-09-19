@@ -169,4 +169,21 @@ final class RangeReportDisplayUnitsTests: XCTestCase {
         let native = ReportDisplayUnits(fahrenheit: false, effortFactor: 1.0, effortCalibration: cal)
         XCTAssertEqual(RangeReportEngine.displayValue(50, metric: .strain, units: native), 50, accuracy: 1e-12)
     }
+
+    /// The half-to-half change shown beside two calibrated half means is THEIR difference, so the chip
+    /// adds up with the numbers printed next to it; without a calibration it equals the linear delta.
+    func testHalfDeltaIsTheDifferenceOfTheDisplayedHalves() {
+        let cal = EffortStrainCalibration(a: 1.35, b: 0.58, pairs: 30)
+        let calibrated = ReportDisplayUnits(fahrenheit: false, effortFactor: 21.0 / 100.0, effortCalibration: cal)
+        let stat = RangeReportEngine.build(metrics: [.strain: ["2026-08-01": 30.0, "2026-08-02": 30.0,
+                                                              "2026-08-03": 60.0, "2026-08-04": 60.0]],
+                                           start: "2026-08-01", end: "2026-08-04").metrics.first { $0.metric == .strain }
+        guard let stat else { return XCTFail("the strain row must be built") }
+        XCTAssertEqual(RangeReportEngine.displayHalfDelta(stat, units: calibrated),
+                       cal.strain21(effort100: stat.secondHalfMean) - cal.strain21(effort100: stat.firstHalfMean),
+                       accuracy: 1e-12)
+        XCTAssertEqual(RangeReportEngine.displayHalfDelta(stat, units: whoopAxis),
+                       RangeReportEngine.displayDelta(stat.halfDelta, metric: .strain, units: whoopAxis),
+                       accuracy: 1e-12)
+    }
 }

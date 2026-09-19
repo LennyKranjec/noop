@@ -78,4 +78,30 @@ final class ChargeBreakdownWiringTests: XCTestCase {
                                                            hrvEpoch: jan9, recoveryEpoch: jan9, respEraEpoch: 0)
         XCTAssertNil(recalibrated, "after the recalibration only one night counts: calibrating, no rows")
     }
+
+    /// E6: the sheet scores its rows against the SAME exact ln(RMSSD) baseline the headline does — the
+    /// history folded over `Baselines.lnHRV` with `Baselines.hrvLnCfg` — not the delta-method view of the
+    /// ms fold. On a skewed history the two differ, so the rows must equal the ln-baseline scoring.
+    func testBreakdownUsesTheExactLnHrvBaseline() {
+        let hrvs: [Double] = [30, 32, 90, 35, 31, 88, 33, 34, 95, 36]
+        let past = hrvs.enumerated().map { day(String(format: "2026-01-%02d", $0.offset + 1), hrv: $0.element) }
+        let today = day("2026-01-20", hrv: 45, rhr: 52, recovery: 60)
+        guard let out = ChargeBreakdownWiring.breakdown(days: past + [today], row: today, sleepPerfPercent: 85,
+                                                        hrvEpoch: 0, recoveryEpoch: 0, respEraEpoch: 0) else {
+            return XCTFail("a ten-night history must score")
+        }
+        let keys = past.map(\.day)
+        func fold(_ values: [Double?], _ cfg: MetricCfg) -> BaselineState {
+            Baselines.foldHistoryAsOf(values, dayKeys: keys, cfg: cfg, baselineEpoch: 0, asOf: [today.day])[today.day]
+                ?? Baselines.foldHistory(values, cfg: cfg)
+        }
+        let hrvBase = fold(past.map(\.avgHrv), Baselines.hrvCfg)
+        let rhrBase = fold(past.map { $0.restingHr.map(Double.init) }, Baselines.restingHRCfg)
+        let expected = RecoveryScorer.chargeDrivers(
+            hrv: 45, rhr: 52, resp: nil, hrvBaseline: hrvBase,
+            rhrBaseline: rhrBase.usable ? rhrBase : nil, respBaseline: nil, sleepPerf: 0.85,
+            skinTempDev: nil,
+            hrvLnBaseline: fold(Baselines.lnHRV(past.map(\.avgHrv)), Baselines.hrvLnCfg))
+        XCTAssertEqual(out.drivers, expected)
+    }
 }

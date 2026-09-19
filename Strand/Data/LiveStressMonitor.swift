@@ -7,9 +7,9 @@ import StrandAnalytics
 // minutes while the app is in front. The reading is already motion-gated — ten minutes spent moving
 // give no reading at all — so a high value here is stress at rest, not a walk up the stairs.
 //
-// THE DAY'S REFERENCE IS KEPT FOR A QUARTER OF AN HOUR. Re-scoring a whole day of heart rate every five
-// minutes to measure ten of them would be the expensive half of the read; the calm reference barely moves
-// within fifteen minutes.
+// THE DAY'S REFERENCE IS KEPT FOR A QUARTER OF AN HOUR, in `StressDayCurve.cachedToday`, shared with the
+// Today stress tile. Re-scoring a whole day of heart rate every five minutes to measure ten of them would
+// be the expensive half of the read; the calm reference barely moves within fifteen minutes.
 
 @MainActor
 final class LiveStressMonitor: ObservableObject {
@@ -27,15 +27,33 @@ final class LiveStressMonitor: ObservableObject {
     @Published private(set) var consecutiveHigh = 0
 
     /// Set by the shell from the scene phase: nothing is read while the app is in the background.
-    var foreground = true
+    ///
+    /// LEAVING THE FOREGROUND ENDS THE STREAK. Two high readings hours apart — one before the phone went
+    /// in a pocket, one after it came out — are not "two in a row"; the warning needs a sustained spell.
+    /// COMING BACK reads at once and restarts the five-minute cadence from there, so the strip is not
+    /// showing a reading from before the app was left.
+    var foreground = true {
+        didSet {
+            guard foreground != oldValue else { return }
+            if foreground {
+                restartLoop()
+            } else {
+                loop?.cancel()
+                loop = nil
+                consecutiveHigh = 0
+            }
+        }
+    }
 
-    private var running = false
-    private var hours: [DaytimeStress.HourPoint] = []
-    private var hoursAt: Date = .distantPast
+    private var repo: Repository?
+    private var loop: Task<Void, Never>?
 
     /// Every five minutes. Two readings in a row decide a warning, so a spell is flagged after ~10 min.
     private static let every: UInt64 = 5 * 60
-    private static let hoursFor: TimeInterval = 15 * 60
+    static let everySeconds = TimeInterval(every)
+    /// A reading further back than this is not the "previous" one of a streak: one and a half cadences,
+    /// so a late tick still counts but a skipped one (or a suspended app) does not.
+    static let streakGap = 1.5 * everySeconds
 
     /// Consecutive high readings needed before `isHigh` warns (E9).
     static let highReadingsRequired = 2
@@ -65,25 +83,48 @@ final class LiveStressMonitor: ObservableObject {
         return streak + 1
     }
 
+    /// The streak after a new reading taken at `now`, when the previous one was taken at `previousAt`.
+    /// A previous reading older than `streakGap` (or none) does not continue the streak: the new one
+    /// starts it afresh.
+    static func nextConsecutiveHigh(_ streak: Int, reading: Double?, previousAt: Date?, now: Date) -> Int {
+        let continuing: Int
+        if let previousAt, now.timeIntervalSince(previousAt) <= streakGap {
+            continuing = streak
+        } else {
+            continuing = 0
+        }
+        return nextConsecutiveHigh(continuing, reading: reading)
+    }
+
     func start(repo: Repository) {
-        guard !running else { return }
-        running = true
-        Task { [weak self] in
-            while let self, !Task.isCancelled {
-                if self.foreground { await self.read(repo: repo) }
+        guard self.repo == nil else { return }
+        self.repo = repo
+        if foreground { restartLoop() }
+    }
+
+    /// Reads NOW, then every five minutes, until cancelled by leaving the foreground.
+    private func restartLoop() {
+        loop?.cancel()
+        guard let repo else { return }
+        loop = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                await self.read(repo: repo)
                 try? await Task.sleep(nanoseconds: Self.every * 1_000_000_000)
             }
         }
     }
 
     private func read(repo: Repository) async {
-        if hours.isEmpty || Date().timeIntervalSince(hoursAt) > Self.hoursFor {
-            hours = await StressDayCurve.today(repo: repo)?.result.hours ?? []
-            hoursAt = Date()
-        }
+        // The day's calm reference: the SHARED curve (`StressDayCurve.cachedToday`), at most a quarter of
+        // an hour old — the Today tile reads the same one, so the day is scored once for both.
+        let hours = await StressDayCurve.cachedToday(repo: repo)?.result.hours ?? []
         let value = await WindowStress.now(repo: repo, dayHours: hours)
-        consecutiveHigh = Self.nextConsecutiveHigh(consecutiveHigh, reading: value)
+        // Cancelled mid-read (the app left the foreground): the streak was just reset; do not add to it.
+        guard !Task.isCancelled, foreground else { return }
+        let now = Date()
+        consecutiveHigh = Self.nextConsecutiveHigh(consecutiveHigh, reading: value, previousAt: at, now: now)
         level = value
-        at = value == nil ? nil : Date()
+        at = value == nil ? nil : now
     }
 }

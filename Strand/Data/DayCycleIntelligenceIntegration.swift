@@ -224,7 +224,18 @@ import WhoopStore
                     for row in rows where gravByTimestamp[row.ts] == nil { gravByTimestamp[row.ts] = row }
                 }
             }
-            let cycleMotion = StrainScorer.movingMinutes(gravity: Array(gravByTimestamp.values))
+            // Every workout inside the cycle — persisted (manual / imported / detected) and freshly detected
+            // this pass — marks its minutes MOVING, exactly as the calendar-day pass passes its bouts, so a
+            // stationary-bike or rowing session pays zone 1 in the cycle total as it does in the bout.
+            let persistedBouts: [(start: Int, end: Int)] = workouts
+                .filter { $0.startTs < window.endExclusive && $0.endTs >= window.onset }
+                .map { (start: $0.startTs, end: $0.endTs) }
+            let detectedBouts: [(start: Int, end: Int)] = nights.flatMap(\.workouts)
+                .filter { $0.start < window.endExclusive && $0.end >= window.onset }
+                .map { (start: $0.start, end: $0.end) }
+            let cycleBouts = persistedBouts + detectedBouts
+            let cycleMotion = StrainScorer.movingMinutes(gravity: Array(gravByTimestamp.values),
+                                                         bouts: cycleBouts)
             if let strain = StrainScorer.strain(cycleHR, maxHR: effectiveMaxHR,
                                                 restingHR: restingHR, method: effortMethod,
                                                 sex: profile.sex,

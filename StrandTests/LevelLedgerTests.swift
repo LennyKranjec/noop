@@ -440,4 +440,50 @@ final class LevelLedgerTests: XCTestCase {
         XCTAssertTrue(written.missingInputs.contains(.strength))
         XCTAssertNoThrow(try JSONEncoder().encode(written))
     }
+
+    /// An unwritten day is looked at again at the EARLIER of its wake + half an hour and its deadline —
+    /// whichever is still ahead — so a landed night is written just after it counts as over, not whenever
+    /// something else happens to reload.
+    func testTheNextLookIsAtWakePlusSettleThenAtTheDeadline() {
+        let series = LevelSeries(vo2max: [], muscleByDay: [:], meditation: [:], sleepTimings: timings(10...16))
+        // 07:10, woke at 07:00: the night is over at 07:30.
+        XCTAssertEqual(LevelLedger.nextSettleCheck(day: "2026-09-16", series: series, beganAt: nil,
+                                                   calendar: calendar, now: at(16, 7, 10)), at(16, 7, 30))
+        // 08:00: only the 14:00 deadline is still ahead.
+        XCTAssertEqual(LevelLedger.nextSettleCheck(day: "2026-09-16", series: series, beganAt: nil,
+                                                   calendar: calendar, now: at(16, 8, 0)), at(16, 14, 0))
+        // No wake time yet (the night has not landed): the deadline.
+        let noTiming = LevelSeries(vo2max: [], muscleByDay: [:], meditation: [:], sleepTimings: timings(10...15))
+        XCTAssertEqual(LevelLedger.nextSettleCheck(day: "2026-09-16", series: noTiming, beganAt: nil,
+                                                   calendar: calendar, now: at(16, 6, 0)), at(16, 14, 0))
+        // Past both: nothing to book — only new data can change the answer now.
+        XCTAssertNil(LevelLedger.nextSettleCheck(day: "2026-09-16", series: series, beganAt: nil,
+                                                 calendar: calendar, now: at(16, 15, 0)))
+    }
+
+    /// The booked delay lands just past the moment and is capped at three hours.
+    func testTheSettleCheckDelayIsJustPastTheMomentAndCapped() {
+        let now = at(16, 7, 10)
+        XCTAssertEqual(LevelLedger.settleCheckDelay(at: at(16, 7, 30), now: now),
+                       20 * 60 + LevelLedger.settleCheckSlack, accuracy: 0.001)
+        XCTAssertEqual(LevelLedger.settleCheckDelay(at: at(16, 14, 0), now: now),
+                       LevelLedger.maxSettleCheckDelay, accuracy: 0.001)
+        XCTAssertEqual(LevelLedger.settleCheckDelay(at: at(16, 7, 0), now: now),
+                       LevelLedger.settleCheckSlack, accuracy: 0.001)
+    }
+
+    /// The brief keeps looking past its ten minutes until just after the night's wake + settle, and
+    /// never past its hard cap.
+    func testTheBriefPollCoversWakePlusSettle() {
+        let now = at(16, 7, 20)
+        XCTAssertTrue(DailyBriefModel.keepPolling(waited: 0, now: now, wakeSettledAt: nil))
+        XCTAssertFalse(DailyBriefModel.keepPolling(waited: DailyBriefModel.pollWindowSeconds, now: now,
+                                                   wakeSettledAt: nil))
+        XCTAssertTrue(DailyBriefModel.keepPolling(waited: DailyBriefModel.pollWindowSeconds, now: now,
+                                                  wakeSettledAt: at(16, 7, 30)))
+        XCTAssertFalse(DailyBriefModel.keepPolling(waited: DailyBriefModel.pollWindowSeconds, now: at(16, 7, 40),
+                                                   wakeSettledAt: at(16, 7, 30)))
+        XCTAssertFalse(DailyBriefModel.keepPolling(waited: DailyBriefModel.pollWindowMaxSeconds, now: now,
+                                                   wakeSettledAt: at(16, 9, 0)))
+    }
 }

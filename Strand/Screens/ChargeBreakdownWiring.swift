@@ -68,15 +68,20 @@ enum ChargeBreakdownWiring {
         guard hrvBase.usable else { return nil }
         let rhrBase = fold(history.map { $0.restingHr.map(Double.init) }, Baselines.restingHRCfg, recoveryCut)
         let respBase = fold(history.map(\.respRateBpm), Baselines.respCfg, respCut)
-        // E6: the HRV row is scored on ln(RMSSD) exactly as the headline is — both derive the ln baseline
-        // from this same ms fold (no `hrvLnBaseline` passed on either side).
+        // E6: the HRV row is scored on ln(RMSSD) exactly as the headline is. The engine folds an EXACT
+        // ln baseline (`Baselines.lnHRV` over the same nights, `Baselines.hrvLnCfg`, the same HRV epoch,
+        // as-of the day) and hands it to the scorer as `hrvLnBaseline`; the sheet must fold the same one,
+        // or its HRV row reads the delta-method view of the ms fold while the headline reads the exact
+        // one, and the two disagree on a skewed history.
+        let hrvLnBase = fold(Baselines.lnHRV(history.map(\.avgHrv)), Baselines.hrvLnCfg, hrvCut)
         let drivers = RecoveryScorer.chargeDrivers(
             hrv: hrv, rhr: Double(rhr), resp: row.respRateBpm,
             hrvBaseline: hrvBase,
             rhrBaseline: rhrBase.usable ? rhrBase : nil,
             respBaseline: respBase.usable ? respBase : nil,
             sleepPerf: sleepPerfPercent.map { $0 / 100.0 },
-            skinTempDev: row.skinTempDevC)
+            skinTempDev: row.skinTempDevC,
+            hrvLnBaseline: hrvLnBase)
         return (drivers, ScoreConfidence.charge(recovery: row.recovery, hrvBaseline: hrvBase))
     }
 }

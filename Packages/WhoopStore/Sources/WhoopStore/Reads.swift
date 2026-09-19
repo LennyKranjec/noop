@@ -187,6 +187,17 @@ extension WhoopStore {
         }
     }
 
+    /// The earliest raw HR timestamp in the store, across every device, or nil with no HR at all.
+    ///
+    /// For the resumable full-history rescore (`IntelligenceEngine.runNightlyMetricsRescoreIfNeeded`): it
+    /// walks history in chunks from the oldest day, and without this it would walk a decade of empty days
+    /// on a store that holds two years. Read once per rescore attempt, never on a hot path.
+    public func hrFirstTs() async throws -> Int? {
+        try syncRead { db in
+            try Int.fetchOne(db, sql: "SELECT MIN(ts) FROM hrSample")
+        }
+    }
+
     /// Cross-device change detector for every raw stream that can change a daily score or sleep session.
     ///
     /// The original analysis watermark covered `hrSample` only. Historical offloads do not commit their

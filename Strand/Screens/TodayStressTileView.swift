@@ -9,13 +9,13 @@ import StrandDesign
 // scored hour.
 //
 // LIVE MEANS RE-SCORED WHILE IT IS ON SCREEN. It reads the same intraday curve the widget publishes
-// (`StressDayCurve`), whose own fingerprint gate makes an unchanged hour cost one indexed count, and
-// asks again every few minutes for as long as Today is visible. Highest / Lowest / Average are taken
+// (`StressDayCurve.cachedToday`, shared with the live stress monitor), at most every quarter hour for as
+// long as Today is visible. Highest / Lowest / Average are taken
 // across SCORED hours only: an hour the motion gate masked as activity carries no level and is skipped
 // rather than counted as calm.
 //
 // THE DIAL IS LIVE. It shows the stress of the last ten minutes (`DaytimeStress.live`), re-read every
-// minute while the tile is on screen, against the same calm reference the day's hours are scored on.
+// five minutes while the tile is on screen, against the same calm reference the day's hours are scored on.
 // When the last ten minutes cannot be read — too little heart rate, or the wearer was moving — it shows
 // the latest scored hour, and the caption says which of the two it is.
 //
@@ -23,8 +23,11 @@ import StrandDesign
 // headlines — and the caption says it is the day's, not this moment's. Highest / Lowest / Average stay
 // blank then, because those genuinely need hours.
 
-/// How often the hourly curve is re-asked. It is hourly-grain, so faster buys nothing.
-private let stressRescoreSeconds: TimeInterval = 5 * 60   // every five minutes, as asked
+/// How often the hourly curve is re-asked. It is hourly-grain, so faster buys nothing — and with the strap
+/// streaming, every ask used to re-read three 200 000-row ranges and re-score the whole day, because live
+/// heart rate changes the fingerprint every time. A QUARTER OF AN HOUR, through the cache the live stress
+/// monitor shares (`StressDayCurve.cachedToday`). The LIVE ten-minute reading below stays at five minutes.
+private let stressRescoreSeconds: TimeInterval = StressDayCurve.sharedMaxAge
 
 /// How often the live reading is re-taken, and the window it reads.
 private let liveEverySeconds: UInt64 = 5 * 60   // every five minutes, as asked
@@ -145,12 +148,12 @@ struct TodayStressTileView: View {
         // phase read INSIDE the loop would never change.
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
-            // One loop for as long as Today is on screen and in front; cancelled with it. The hourly
-            // curve and the live window every five minutes.
+            // One loop for as long as Today is on screen and in front; cancelled with it. The live window
+            // every five minutes; the hourly curve at most every quarter hour, from the shared cache.
             var curveAt = Date.distantPast
             while !Task.isCancelled {
                 if Date().timeIntervalSince(curveAt) >= stressRescoreSeconds,
-                   let curve = await StressDayCurve.today(repo: repo) {
+                   let curve = await StressDayCurve.cachedToday(repo: repo) {
                     stats = Stats(curve.result.timeline)
                     dayHours = curve.result.hours
                     curveAt = Date()

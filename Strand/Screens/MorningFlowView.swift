@@ -312,6 +312,18 @@ final class DailyBriefModel: ObservableObject {
     /// How long the brief keeps looking for today's level after it is first drawn, and how often.
     static let pollSeconds: UInt64 = 15
     static let pollWindowSeconds = 600
+    /// The most the poll is ever extended to reach the night's wake + settle (see `keepPolling`).
+    static let pollWindowMaxSeconds = 90 * 60
+
+    /// Whether the brief keeps looking after `waited` seconds: for its ten minutes, and BEYOND them until
+    /// just past the level day's wake + settle, when the night counts as over and the day becomes
+    /// writable — a brief opened right after waking would otherwise stop looking twenty minutes before
+    /// its own level could be written. Never past `pollWindowMaxSeconds`. Pure.
+    nonisolated static func keepPolling(waited: Int, now: Date, wakeSettledAt: Date?) -> Bool {
+        if waited < pollWindowSeconds { return true }
+        guard waited < pollWindowMaxSeconds, let settled = wakeSettledAt else { return false }
+        return now < settled.addingTimeInterval(2 * TimeInterval(pollSeconds))
+    }
 
     /// Sync, score and freeze the day's level, and gather the night's figures.
     func prepare(repo: Repository, levelBar: LevelBarModel, presentedAt: Date = Date()) async {
@@ -324,12 +336,13 @@ final class DailyBriefModel: ObservableObject {
         ready = true
 
         // THE NIGHT MAY STILL BE ON ITS WAY. Rather than settle for "still syncing", the brief keeps
-        // looking for ten minutes: the ledger is read again every poll (the strip's own retries may have
-        // written the day meanwhile), every new sync reloads the level, and every other minute it reloads
+        // looking for ten minutes — longer when the night's wake + settle is still ahead (`keepPolling`):
+        // the ledger is read again every poll (the strip's own retries may have written the day meanwhile), every new sync reloads the level, and every other minute it reloads
         // anyway, in case the deadline has passed and the day has been written as it stands.
         var seq = repo.refreshSeq
         var waited = 0
-        while level == nil, !noNight, waited < Self.pollWindowSeconds {
+        while level == nil, !noNight,
+              Self.keepPolling(waited: waited, now: Date(), wakeSettledAt: levelBar.levelDayWakeSettledAt) {
             try? await Task.sleep(nanoseconds: Self.pollSeconds * 1_000_000_000)
             if Task.isCancelled { return }
             waited += Int(Self.pollSeconds)

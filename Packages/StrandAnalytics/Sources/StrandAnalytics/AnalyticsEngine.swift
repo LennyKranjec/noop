@@ -364,6 +364,14 @@ public enum AnalyticsEngine {
                                   dayHr: [HRSample]? = nil,
                                   daySteps: [StepSample]? = nil,
                                   dayGravity: [GravitySample]? = nil,
+                                  // The day's KNOWN workout windows (epoch s) — manual / imported / Health
+                                  // sessions the caller already holds. Together with the bouts detected
+                                  // below they mark minutes MOVING for the day Effort's zone-1 gate
+                                  // (`StrainScorer.movingMinutes(gravity:bouts:)`), so a stationary-bike,
+                                  // rowing or treadmill session the wrist barely registers still pays zone 1
+                                  // in the day total, as it does in the bout's own Effort. Default empty
+                                  // keeps every pure-function caller/test byte-identical.
+                                  knownWorkoutWindows: [(start: Int, end: Int)] = [],
                                   // Wear-gated nightly skin-temp mean is harvested here
                                   // (baseline-independent); IntelligenceEngine seeds a personal
                                   // baseline from these means across nights and re-derives
@@ -998,14 +1006,6 @@ public enum AnalyticsEngine {
         // and Effort must be byte-identical whether it did or not (#277, `AnalyticsEngineDayBoundsTests`).
         // The night-window fallback (`hr`, pure-function callers) is passed through as before.
         let strainHr: [HRSample] = dayHr.map { stream in stream.filter { tsInDay($0.ts) } } ?? hr
-        // E1: a whole-DAY integral, so zone 1 pays only in minutes the wrist was MOVING (the day's own gravity,
-        // same local-day filter as the HR) — see `StrainScorer.Zone1Gate`. Per-bout Effort stays ungated.
-        let strain = StrainScorer.strain(strainHr, maxHR: effMaxHR, restingHR: restForStrain,
-                                         method: effortMethod, sex: profile.sex,
-                                         diag: strainDiag, day: day,
-                                         zone1Gate: .day(StrainScorer.movingMinutes(
-                                             gravity: (dayGravity ?? gravity).filter { tsInDay($0.ts) })))
-
         // ── Workouts ──────────────────────────────────────────────────────────
         // Detect over the full CALENDAR day (dayHr/dayGravity) when the caller supplies it, so a
         // current-day afternoon/evening workout is caught on its own day rather than lagging until
@@ -1039,6 +1039,21 @@ public enum AnalyticsEngine {
             // less than the day it sits inside, which is a worse inconsistency than either method.
             effortMethod: effortMethod,
             funnel: { detectionFunnel = $0 })
+
+        // E1: a whole-DAY integral, so zone 1 pays only in minutes the wrist was MOVING (the day's own gravity,
+        // same local-day filter as the HR) — see `StrainScorer.Zone1Gate`. Per-bout Effort stays ungated.
+        // COMPUTED AFTER DETECTION, so every detected bout — and every known workout the caller passed — marks
+        // its minutes moving: a stationary-bike / rowing / treadmill bout the wrist barely registers pays zone 1
+        // in the day total exactly as it does in the bout, and the live Today recompute (which passes the same
+        // windows) agrees with this stored number.
+        let detectedBouts: [(start: Int, end: Int)] = workouts.map { (start: $0.start, end: $0.end) }
+        let dayBouts = detectedBouts + knownWorkoutWindows
+        let strain = StrainScorer.strain(strainHr, maxHR: effMaxHR, restingHR: restForStrain,
+                                         method: effortMethod, sex: profile.sex,
+                                         diag: strainDiag, day: day,
+                                         zone1Gate: .day(StrainScorer.movingMinutes(
+                                             gravity: (dayGravity ?? gravity).filter { tsInDay($0.ts) },
+                                             bouts: dayBouts)))
 
         // ── Steps (APPROXIMATE) ───────────────────────────────────────────────
         // step_motion_counter@57 is a CUMULATIVE u16 running counter (it climbs while you move, holds

@@ -393,6 +393,9 @@ struct TodayView: View {
     // 0.0 (#402). nil below StrainScorer.minReadings (we then fall back to the stored daily row) and on
     // any navigated past day (those use the stored value).
     @State private var liveTodayStrain: Double?
+    /// WHOOP's OWN strain (0–21) for the SELECTED day — its own row, never one carried from another day —
+    /// for the own-zero fallback in `effortStrain`, as Liquid Today has it.
+    @State private var cloudStrainForDay: Double?
 
     // The HR chart's x-axis window. Today → midnight…now; a navigated PAST day → the full calendar
     // day (midnight…next midnight) so a morning with no banked data reads as empty space rather than
@@ -688,6 +691,50 @@ struct TodayView: View {
         // yyyy-MM-dd compares lexicographically, so `$0.day < selectedDayKey` keeps only genuine prior days.
         // Belt-and-suspenders on top of the gate + one-time heal, cheap and never wrong.
         return days.last(where: { $0.recovery != nil && $0.day < selectedDayKey })
+    }
+
+    /// The workout windows (epoch s) touching `[from, to]` — manual, imported, Health and detected rows
+    /// alike — for the live day Effort's zone-1 gate. Pure.
+    nonisolated static func workoutWindows(_ rows: [WorkoutRow], from: Int, to: Int) -> [(start: Int, end: Int)] {
+        rows.filter { $0.startTs <= to && $0.endTs >= from }.map { (start: $0.startTs, end: $0.endTs) }
+    }
+
+    /// Today's live in-progress Effort (0–100) as Today last computed it, for the widget publisher, which
+    /// cannot score a day of heart rate itself on its publish path. Keyed by day so a value from before
+    /// midnight is never read as today's.
+    private static var liveStrainPublished: (day: String, strain: Double)?
+
+    /// Record today's live Effort (called by both Today screens after they score it).
+    static func publishLiveStrain(_ strain: Double, day: String) {
+        liveStrainPublished = (day, strain)
+    }
+
+    /// The live Effort last published for `day`, or nil when none was (or it was for another day).
+    static func publishedLiveStrain(day: String) -> Double? {
+        guard let p = liveStrainPublished, p.day == day else { return nil }
+        return p.strain
+    }
+
+    /// The in-progress day Effort, scored OFF THE MAIN ACTOR.
+    ///
+    /// WHY THE HOP. The moving-minute set walks a whole day of wrist gravity (~86 000 samples) and the
+    /// TRIMP walks the day's heart rate; both used to run on the main actor inside Today's load, a visible
+    /// hitch on every reload. Both are pure over Sendable values, so the whole scoring goes to a detached
+    /// task and only the number comes back.
+    ///
+    /// THE SAME GATE AS THE STORED ROW. Every workout window marks its minutes MOVING (`bouts:`), exactly as
+    /// the daily pass does with its detected + known workouts, so a stationary-bike / rowing / treadmill
+    /// session pays zone 1 in both numbers and `effectiveEffort`'s max cannot pick the ungated one.
+    nonisolated static func liveDayStrain(hr: [HRSample], gravity: [GravitySample],
+                                          bouts: [(start: Int, end: Int)],
+                                          maxHR: Double?, restingHR: Double,
+                                          method: StrainScorer.Method, sex: String) async -> Double? {
+        await Task.detached(priority: .userInitiated) {
+            let motion = StrainScorer.movingMinutes(gravity: gravity, bouts: bouts)
+            return StrainScorer.strain(hr, maxHR: maxHR, restingHR: restingHR,
+                                       method: method, sex: sex,
+                                       zone1Gate: .day(motion))
+        }.value
     }
 
     /// #817 - day-nav swipe/arrow clamp. Pure + unit-testable so the bounds can't drift between the
@@ -3584,8 +3631,17 @@ struct TodayView: View {
         // (#1001), shared with the Kotlin twin so the two platforms cannot resolve Effort differently.
         // `d` (displayDay) for today is ALWAYS today's row or nil, never a prior day, so the floor cannot
         // resurrect a stale day; it only stops a read-out dropping below what today has already earned.
-        return StrainScorer.effectiveEffort(live: selectedDayOffset == 0 ? liveTodayStrain : nil,
-                                            stored: d?.strain)
+        let own = StrainScorer.effectiveEffort(live: selectedDayOffset == 0 ? liveTodayStrain : nil,
+                                               stored: d?.strain)
+        // A ZERO THE STRAP DID NOT EARN — the same rule as Liquid Today's `heroOwnEffort`. The app's own
+        // Effort reads 0 when it saw no heart rate above the floor, which on a day WHOOP held the strap is
+        // absence, not rest; where WHOOP scored real strain for THIS day, that figure is shown instead —
+        // placed on the 0–100 axis through the INVERSE calibration, the axis the target mark is on, so the
+        // arc and the mark agree (and the WHOOP scale reads WHOOP's number back).
+        if let own, own < 0.5, let cloud = cloudStrainForDay, cloud > 0 {
+            return StrainCalibration.effort100(strain21: cloud)
+        }
+        return own
     }
 
     /// When TODAY's Effort scores a genuine near-zero, there's enough HR to score, but it never
@@ -4916,6 +4972,7 @@ struct TodayView: View {
         hrPoints = c.hrPoints
         stepActivityClassToday = c.stepActivityClassToday
         liveTodayStrain = c.liveTodayStrain
+        cloudStrainForDay = c.cloudStrainForDay
         hrZoomDomain = Self.reclampHrZoom(hrZoomDomain, oldAxis: hrAxis, newAxis: c.hrAxis)
         hrAxis = c.hrAxis
         sleepToday = c.sleepToday
@@ -5119,13 +5176,22 @@ struct TodayView: View {
             // ungated live number win and the desk-day inflation would stay on the ring.
             let todayGravity = await repo.gravitySamplesUnion(from: effortStart, to: windowEndInclusive,
                                                               limit: 200_000)
-            liveStrainLocal = StrainScorer.strain(todayHr, maxHR: maxHR, restingHR: restHR,
-                                        method: PuffinExperiment.effortMethod, sex: profile.sex,
-                                        zone1Gate: .day(StrainScorer.movingMinutes(gravity: todayGravity)))
+            // The day's workouts (memoised read, the same rows the list shows) mark their minutes moving.
+            let dayWorkoutRows = await repo.workoutRows()
+            let bouts = Self.workoutWindows(dayWorkoutRows, from: effortStart, to: windowEndInclusive)
+            liveStrainLocal = await Self.liveDayStrain(hr: todayHr, gravity: todayGravity, bouts: bouts,
+                                                       maxHR: maxHR, restingHR: restHR,
+                                                       method: PuffinExperiment.effortMethod, sex: profile.sex)
         } else {
             liveStrainLocal = nil
         }
         liveTodayStrain = liveStrainLocal
+        if selectedDayOffset == 0, let liveStrainLocal {
+            Self.publishLiveStrain(liveStrainLocal, day: selectedDayKey)
+        }
+        // WHOOP's own strain for this day (its own row only), for the own-zero fallback in `effortStrain`.
+        let cloudStrainLocal = await repo.whoopCloudDay(selectedDayKey)?.strain
+        cloudStrainForDay = cloudStrainLocal
         // Pin the chart axis to the loaded window, today midnight→now, a past day the full 24h, so
         // a gap (e.g. a morning the strap wasn't banking) shows as empty space, not a late start.
         let newAxis = Date(timeIntervalSince1970: TimeInterval(windowStart))
@@ -5174,6 +5240,7 @@ struct TodayView: View {
             hrPoints: hrPointsLocal,
             stepActivityClassToday: stepClassLocal,
             liveTodayStrain: liveStrainLocal,
+            cloudStrainForDay: cloudStrainLocal,
             hrAxis: newAxis,
             sleepToday: sleepTodayLocal,
             bankedAt: Date())
@@ -5566,6 +5633,8 @@ struct TodayDayScopedCache {
     let hrPoints: [TrendPoint]
     let stepActivityClassToday: Int?
     let liveTodayStrain: Double?
+    /// WHOOP's own strain for the snapshot's day (its own row only), for the own-zero fallback.
+    let cloudStrainForDay: Double?
     let hrAxis: ClosedRange<Date>
     let sleepToday: CachedSleepSession?
     /// When the snapshot was banked. TODAY hits are age-gated on this (`todayCacheMaxAge`): live banking

@@ -663,21 +663,119 @@ final class IntelligenceEngine: ObservableObject {
     /// a call with no store yet returned at once: either way the flag went up over a history that was never
     /// re-scored, and the level ledger, which waits on this flag, froze the old figures for good. Now a pass
     /// in flight is WAITED FOR (every 2 s, up to ten minutes), and only `analyzeRecent` reporting that it
-    /// passed its gates and completed sets the flag; anything else retries on the next launch.
+    /// passed its gates and completed sets the flag.
+    ///
+    /// RESUMABLE, IN CHUNKS FROM THE OLDEST DAY. One 4000-day pass that the system killed or suspended
+    /// halfway started again from scratch on the next launch, and on a big history might never finish.
+    /// History is now re-scored `rescoreChunkDays` at a time, OLDEST FIRST (`analyzeRecent(asOf:)` bounds
+    /// every window of a chunk to it), and after each chunk the newest day it covered is persisted
+    /// (`nightlyMetricsRescoreWatermarkKey`); a later attempt skips everything up to it. Oldest first so
+    /// each chunk's point-in-time baselines already fold re-scored nights. The last piece, ending today, is
+    /// an ordinary pass.
+    ///
+    /// ONE MORE RECENT PASS BEFORE THE FLAG. Each night's personal sleep-HR baseline is taken from the
+    /// resting HRs banked BEFORE the pass read them — the old recipe's, for the nights it is re-scoring. The
+    /// next forced pass re-trims the last few weeks against the re-scored ones, so a day the level ledger
+    /// froze at the epoch adoption (which waits on this flag) would stop matching its own night. A forced
+    /// `rescoreRecentDays` pass therefore runs after the full history and BEFORE the flag; the flag goes up
+    /// only when both ran.
+    ///
+    /// RETRIED WITHIN THE SESSION: the app's steady-state loop calls this on every tick while the flag is
+    /// unset; `nightlyRescoreRunning` keeps two attempts from overlapping.
     ///
     /// Returns true when the flag was set by this call, so the caller can reload what waits on it.
     @discardableResult
     func runNightlyMetricsRescoreIfNeeded(historyDays: Int = 4000) async -> Bool {
         guard !UserDefaults.standard.bool(forKey: Self.nightlyMetricsRescoreFlagKey) else { return false }
+        guard !nightlyRescoreRunning else { return false }
+        nightlyRescoreRunning = true
+        defer { nightlyRescoreRunning = false }
+        guard let store = await repo.storeHandle() else { return false }
+
+        let now = Int(Date().timeIntervalSince1970)
+        let firstHrTs: Int? = try? await store.hrFirstTs()
+        let days: [(key: String, asOf: Int)] = Self.localDayScan(now: now, count: historyDays).reversed().map {
+            (key: AnalyticsEngine.dayString(Int($0.start.timeIntervalSince1970), offsetSec: $0.utcOffsetSeconds),
+             asOf: Int($0.nextStart.timeIntervalSince1970) - 1)
+        }
+        let completedThrough = UserDefaults.standard.string(forKey: Self.nightlyMetricsRescoreWatermarkKey)
+        let plan = Self.rescorePlan(oldestFirst: days, firstDataAsOf: firstHrTs,
+                                    completedThrough: completedThrough, chunkDays: Self.rescoreChunkDays)
+        for chunk in plan.historical {
+            guard await waitForIdlePass() else { return false }
+            guard await analyzeRecent(maxDays: chunk.maxDays, force: true, asOf: chunk.asOf) else { return false }
+            UserDefaults.standard.set(chunk.newestDay, forKey: Self.nightlyMetricsRescoreWatermarkKey)
+        }
+        if plan.finalDays > 0 {
+            guard await waitForIdlePass() else { return false }
+            guard await analyzeRecent(maxDays: plan.finalDays) else { return false }
+            if let today = days.last?.key {
+                UserDefaults.standard.set(today, forKey: Self.nightlyMetricsRescoreWatermarkKey)
+            }
+        }
+        // The recent pass against the re-scored resting HRs (see above), then the flag.
+        guard await waitForIdlePass() else { return false }
+        guard await analyzeRecent(maxDays: Self.rescoreRecentDays, force: true) else { return false }
+        UserDefaults.standard.set(true, forKey: Self.nightlyMetricsRescoreFlagKey)
+        UserDefaults.standard.removeObject(forKey: Self.nightlyMetricsRescoreWatermarkKey)
+        return true
+    }
+
+    /// Waits for a pass in flight (every 2 s, up to `oneShotWaitSeconds`). False when one is still running
+    /// after the wait, or on cancellation.
+    private func waitForIdlePass() async -> Bool {
         var waited = 0
         while computing, waited < Self.oneShotWaitSeconds, !Task.isCancelled {
             try? await Task.sleep(nanoseconds: 2_000_000_000)
             waited += 2
         }
-        guard !computing, !Task.isCancelled else { return false }
-        guard await analyzeRecent(maxDays: historyDays) else { return false }
-        UserDefaults.standard.set(true, forKey: Self.nightlyMetricsRescoreFlagKey)
-        return true
+        return !computing && !Task.isCancelled
+    }
+
+    /// The newest day the resumable full-history rescore has finished, "yyyy-MM-dd". Versioned with the
+    /// flag: a new rescore version starts from nothing.
+    static let nightlyMetricsRescoreWatermarkKey = "intelligence.nightlyMetricsRescore.v2.completedThrough"
+
+    /// Days per historical chunk of the full-history rescore.
+    nonisolated static let rescoreChunkDays = 120
+
+    /// The recent pass that ends the full-history rescore (see `runNightlyMetricsRescoreIfNeeded`): the
+    /// ~21 nights the next forced pass would re-trim, with room to spare.
+    nonisolated static let rescoreRecentDays = 45
+
+    /// Whether a rescore attempt is running, so the launch call and the steady-state loop never overlap.
+    private var nightlyRescoreRunning = false
+
+    /// One historical chunk of the full-history rescore: `maxDays` days ending on `newestDay`, scored
+    /// `asOf` the last second of that day.
+    struct RescoreChunk: Equatable {
+        let maxDays: Int
+        let asOf: Int
+        let newestDay: String
+    }
+
+    /// What is left of the full-history rescore. `oldestFirst` is every day of the history window (its key
+    /// and the last second of the day), oldest first, ending today. Days that end before the first raw HR
+    /// (`firstDataAsOf`; nil = no HR at all, nothing to do) and days up to `completedThrough` are dropped;
+    /// the rest are cut into `chunkDays` chunks from the oldest, and the LAST piece — at most `chunkDays`,
+    /// ending today — is left to an ordinary pass (`finalDays`, 0 when nothing is left). Pure.
+    nonisolated static func rescorePlan(oldestFirst: [(key: String, asOf: Int)], firstDataAsOf: Int?,
+                                        completedThrough: String?,
+                                        chunkDays: Int) -> (historical: [RescoreChunk], finalDays: Int) {
+        guard let first = firstDataAsOf else { return ([], 0) }
+        var remaining = oldestFirst.filter { day in
+            day.asOf >= first && (completedThrough.map { day.key > $0 } ?? true)
+        }
+        let size = Swift.max(chunkDays, 1)
+        var historical: [RescoreChunk] = []
+        while remaining.count > size {
+            let chunk = remaining.prefix(size)
+            if let newest = chunk.last {
+                historical.append(RescoreChunk(maxDays: chunk.count, asOf: newest.asOf, newestDay: newest.key))
+            }
+            remaining.removeFirst(size)
+        }
+        return (historical, remaining.count)
     }
 
     /// How long a one-shot full-history pass waits for a pass already in flight before giving up until
@@ -761,13 +859,25 @@ final class IntelligenceEngine: ObservableObject {
     /// Returns TRUE ONLY WHEN THE PASS RAN: past every gate below, through to the end. False when it was
     /// dropped for a pass in flight, had no store, or was skipped as unchanged — so a one-shot caller can
     /// tell a pass that happened from one that did not.
+    ///
+    /// `asOf` — A HISTORICAL WINDOW, for the resumable one-shot rescore (`runNightlyMetricsRescoreIfNeeded`).
+    /// The pass runs exactly as if the clock read `asOf`: the scan is the `maxDays` local days ending on the
+    /// day that contains it, and EVERY window derived from `now` (the stream reads, the detected-workout
+    /// delete, the sleep-session heal, the stale-day eviction, the steps and day-cycle phases) is bounded by
+    /// it, so a chunk of old history is re-scored without touching the days after it. What describes the
+    /// store AS A WHOLE is left alone by such a pass: the idle-tick watermark, "last completed analysis",
+    /// the background-rescore debt and cost, the published `results`, and the in-memory day cache. Nil (the
+    /// default) is the normal pass, byte-identical to before.
     @discardableResult
-    func analyzeRecent(maxDays: Int = 21, force: Bool = true, skipIfUnchanged: Bool = false) async -> Bool {
+    func analyzeRecent(maxDays: Int = 21, force: Bool = true, skipIfUnchanged: Bool = false,
+                       asOf: Int? = nil) async -> Bool {
+        let historical = asOf != nil
         // #899-A: a concurrent pass already holds the lock. A NON-forced idle tick is safe to drop (the
         // in-flight pass already covers the same window). But a FORCED call is a real update path (a
         // post-backfill rescore after a sync) , dropping it would leave a freshly-synced night unscored
         // until the next cycle. Re-arm instead: flag it so the running pass's `defer` re-invokes once.
-        guard !computing else { if force { pendingForcedRescore = true }; return false }
+        // A HISTORICAL chunk does not re-arm: its caller waits and retries it itself.
+        guard !computing else { if force && !historical { pendingForcedRescore = true }; return false }
         guard let store = await repo.storeHandle() else { note = String(localized: "No on-device store yet."); return false }
         guard let hrvCfg = Baselines.metricCfg["hrv"],
               let rhrCfg = Baselines.metricCfg["resting_hr"],
@@ -795,7 +905,7 @@ final class IntelligenceEngine: ObservableObject {
         // line asserting `newData` and the gate deciding whether to run must be the SAME comparison by
         // construction, not by the reader checking for an `await`. Twin of the Android AppViewModel hoist.
         let storedWatermark = UserDefaults.standard.string(forKey: Self.analyzeWatermarkKey)
-        if !force, !wmKey.isEmpty, storedWatermark == wmKey {
+        if !force, !historical, !wmKey.isEmpty, storedWatermark == wmKey {
             return false
         }
         // #1196/#1146: a FORCED post-offload pass can opt into the same fingerprint gate. An empty/duplicate
@@ -806,7 +916,7 @@ final class IntelligenceEngine: ObservableObject {
         // `skipIfUnchanged` to the post-offload caller (refreshAfterCompletedBackfill) ONLY, so an
         // import/edit/settings/recalibrate re-score — which changes scores WITHOUT changing the HR
         // fingerprint — always runs. Twin of the Android WhoopBleClient post-offload `newData` gate.
-        if force, skipIfUnchanged, !wmKey.isEmpty, storedWatermark == wmKey {
+        if force, skipIfUnchanged, !historical, !wmKey.isEmpty, storedWatermark == wmKey {
             diagnosticSink?("re-score: trigger=post-offload newData=no — skipped (nothing changed since last run)", nil)
             // A completed offload with nothing new in it: the store is as analysed as it can be.
             Self.noteAnalysisCurrent()
@@ -854,7 +964,9 @@ final class IntelligenceEngine: ObservableObject {
         // state that skipped the capture and just cleared, which is exactly where #1681 lived. The
         // Kotlin post-offload gate makes the same point in its own words: "captured before the run,
         // written only on success".
-        let owedToken = RescoreBackgroundScheduler.markRescoreOwed()
+        // A historical chunk neither records nor settles the background-rescore debt: it is one slice of a
+        // resumable pass, and its short cost would teach `RescoreBackgroundPolicy` the wrong figure.
+        let owedToken: String? = historical ? nil : RescoreBackgroundScheduler.markRescoreOwed()
         // #899-A re-arm: clear the lock, then if a forced rescore was dropped while this pass held it,
         // run it ONCE. The flag is cleared BEFORE the re-invoke (a single re-arm), so a forced call landing
         // DURING the re-invoke re-arms it again but a quiet one does not , this can never recurse unbounded.
@@ -876,7 +988,8 @@ final class IntelligenceEngine: ObservableObject {
                              stepTicksPerStep: profile.stepTicksPerStep)
 
         let maxHR = profile.hrMaxOverride > 0 ? Double(profile.hrMaxOverride) : nil
-        let now = Int(Date().timeIntervalSince1970)
+        // `asOf` for a historical chunk: every window below is measured from it (see the doc comment).
+        let now = asOf ?? Int(Date().timeIntervalSince1970)
         // Device wall-clock offset (seconds east of UTC) for the sleep detector's daytime
         // false-sleep guard (#90): the stager places each window's center on the LOCAL clock
         // so only genuinely-daytime windows face the stricter nap bar. (Computed once; a DST
@@ -1000,7 +1113,10 @@ final class IntelligenceEngine: ObservableObject {
                                                                         age: profile.age)
         // F4: record the pair so every Rest reader outside this pass (the display recomputes, the
         // sleep-debt need) resolves through the SAME need/regularity the pass scores Rest and Charge with.
-        AnalyticsEngine.Rest.recordEngineInputs(needHours: sleepNeedHours, consistency: sleepConsistency)
+        // Not from a HISTORICAL chunk: those are the need/regularity of years ago, not of the nights now.
+        if !historical {
+            AnalyticsEngine.Rest.recordEngineInputs(needHours: sleepNeedHours, consistency: sleepConsistency)
+        }
 
         // ── FIX 1 (main-actor jank): run the ENTIRE per-day enumeration OFF the main actor ───────────
         // Every `await store.…` read inside this loop has its continuation RESUME on the main actor
@@ -1047,6 +1163,19 @@ final class IntelligenceEngine: ObservableObject {
         let effortMethodGlobal = PuffinExperiment.effortMethod
         let dayCycleMode = DayCycleMode.persisted(UserDefaults.standard.string(forKey: DayCycleMode.storageKey))
 
+        // Real (non-detected) workouts in the scored window — manual / re-labelled / imported rows under the
+        // strap source plus Health imports. Read HERE, before the scan loop, for two readers: the de-duplication
+        // of detected bouts after it (see below), and the day Effort's zone-1 gate inside it — every minute of
+        // a known workout counts as MOVING (`AnalyticsEngine.analyzeDay(knownWorkoutWindows:)`), so a stationary
+        // bike or rowing session the wrist barely registers pays zone 1 in the day total as it does in the bout.
+        let windowStart = now - maxDays * 86_400 - StreamReadCap.lookbackSeconds
+        var realWorkouts = (try? await store.workouts(deviceId: deviceId, from: windowStart,
+                                                       to: now, limit: 100_000)) ?? []
+        realWorkouts += (try? await store.workouts(deviceId: "apple-health", from: windowStart,
+                                                    to: now, limit: 100_000)) ?? []
+        // Plain Int pairs, so the detached loop captures Sendable values only.
+        let knownWorkoutWindows: [(start: Int, end: Int)] = realWorkouts.map { (start: $0.startTs, end: $0.endTs) }
+
         // Zero the per-day probe counters so the line emitted after the steps phase describes THIS pass
         // and never accumulates across the back-to-back passes an offload storm is made of. Must precede
         // the day loop below, which is the scoring half of the owner probes. See `StoreProbeTally`.
@@ -1064,7 +1193,9 @@ final class IntelligenceEngine: ObservableObject {
         // the main-actor loop replays all three — so the gate was the only thing costing a full 21-day
         // re-read + re-score on every pass whenever a diagnostic was switched on. (Kotlin emits its trace
         // inline in pass 1 and therefore needed per-day recorders to reach the same place.)
-        let dayCacheEligible = true
+        // A historical chunk neither reads nor feeds the reuse cache: its days are not the window the
+        // steady-state passes reuse, and pruning the cache to them would throw the recent days away.
+        let dayCacheEligible = !historical
         // The pass config signature — every input that feeds `analyzeDay` but is NOT in the per-day key, so
         // a change to any of them must invalidate every cached night. baselines1 is signed structurally
         // (any BaselineState field change ⇒ a different string); Doubles by raw bit-pattern (exact, locale-
@@ -1136,7 +1267,8 @@ final class IntelligenceEngine: ObservableObject {
         // otherwise stay silent on the very case it exists to explain.
         var dayCacheConfigDropped = false
         var dayCacheConfigMoved = ""
-        if dayCacheConfigSig != dayScanCacheConfigSig {
+        // (A historical chunk does not use the cache, so it neither drops it nor moves its signature.)
+        if !historical, dayCacheConfigSig != dayScanCacheConfigSig {
             dayCacheConfigMoved = Self.changedConfigField(previous: dayScanCacheConfigSig,
                                                           current: dayCacheConfigSig)
             dayScanCache.removeAll()
@@ -1220,6 +1352,11 @@ final class IntelligenceEngine: ObservableObject {
                 // day began (already rounded to 1 bpm, so it is stable enough to key the day cache on).
                 let sleepHRBaseline = Self.asOfSleepHRBaseline(sleepHRNights, before: dayStart)
                 let sleepHRKey: String = sleepHRBaseline.map { (v: Double) -> String in String(Int(v)) } ?? "nil"
+                // The known workouts touching this calendar day, for the day Effort's zone-1 gate. They KEY the
+                // night too (below): a manual workout logged after the day was scored changes its Effort
+                // without moving its heart rate.
+                let dayKnownWorkouts = knownWorkoutWindows.filter { $0.start < nextDayStart && $0.end >= dayStart }
+                let knownWorkoutsKey = dayKnownWorkouts.map { "\($0.start)-\($0.end)" }.joined(separator: ",")
                 // Read a generous window around the night that ends on `day`; the stager finds the span.
                 let from = dayStart - StreamReadCap.lookbackSeconds
                 // Sleep read-window END — see `sleepReadWindowEnd`.
@@ -1285,6 +1422,7 @@ final class IntelligenceEngine: ObservableObject {
                             // keys the night. Placed BEFORE `rrAlias5=` so `missReason` reads it as "streams".
                             streams: streamFp
                                 + "|sleepHR=" + sleepHRKey
+                                + "|workouts=" + knownWorkoutsKey
                                 + "|rrAlias5=\(activeWhoop5RR && owner == Repository.whoopSource)",
                             // #1575: `hrvTraceActive &&` matters. With the HRV trace OFF no detail
                             // line is ever produced, so the flag describes nothing — but it would still
@@ -1547,6 +1685,7 @@ final class IntelligenceEngine: ObservableObject {
                                                      vendorResp: vendorResp, gravity: grav,
                                                      steps: steps, dayHr: dayHr, daySteps: daySteps,
                                                      dayGravity: dayGrav,
+                                                     knownWorkoutWindows: dayKnownWorkouts,
                                                      skinTemp: skin,
                                                      skinTempFamily: skinFamily,   // #938
                                                      skinTempAnchorRaw: skinAnchorRaw,   // #938 second capture
@@ -1900,7 +2039,7 @@ final class IntelligenceEngine: ObservableObject {
         }.value
         // #1005: write the loop's updated reuse cache back to the (main-actor) stored property. The pass ran
         // to completion above (`.value` awaited), so there is no concurrent access.
-        dayScanCache = updatedDayScanCache
+        if !historical { dayScanCache = updatedDayScanCache }
         // #1538: the pass after the day loop was never measured. The cost line above brackets the loop and
         // is emitted the moment it returns, so a pass whose time went somewhere later reported a small
         // prep/score and no account of the rest — which is where the steps calibration was re-folding sixty
@@ -2062,7 +2201,8 @@ final class IntelligenceEngine: ObservableObject {
         let respEraEpoch = Baselines.deviceEraEpoch(respDayKeys.map { (day: $0, sourceId: respSourceByDay[$0] ?? deviceId) })
         // Publish the device-era cut so the Charge breakdown (`ChargeBreakdownWiring`), which rebuilds the
         // respiration baseline outside this pass, cuts at the SAME day. 0 = single-brand history (no cut).
-        UserDefaults.standard.set(respEraEpoch, forKey: ChargeBreakdownWiring.respEraEpochKey)
+        // Not from a HISTORICAL chunk: its window may not reach the current device era at all.
+        if !historical { UserDefaults.standard.set(respEraEpoch, forKey: ChargeBreakdownWiring.respEraEpochKey) }
         let respFold = Baselines.foldHistory(respSeq, dayKeys: respDayKeys, cfg: respCfg,
                                              baselineEpoch: max(recoveryEpoch, respEraEpoch))
         // Skin-temp gated the same way for consistency: its only use-site re-checks `.usable`
@@ -2139,11 +2279,7 @@ final class IntelligenceEngine: ObservableObject {
         // re-labelled rows (both written under `deviceId`), and apple-health carries Health imports ,
         // a detected bout overlapping ANY of them is skipped below. Port of the Android dedup block.
         // (`computedId` is bound once above, before the off-actor scan loop.)
-        let windowStart = now - maxDays * 86_400 - StreamReadCap.lookbackSeconds
-        var realWorkouts = (try? await store.workouts(deviceId: deviceId, from: windowStart,
-                                                       to: now, limit: 100_000)) ?? []
-        realWorkouts += (try? await store.workouts(deviceId: "apple-health", from: windowStart,
-                                                    to: now, limit: 100_000)) ?? []
+        // (`realWorkouts` is read BEFORE the scan loop, where it also feeds the day Effort's zone-1 gate.)
 
         markPostLoopPhase("baselines")
         // ── Pass 2: re-score ONLY recovery against the now-seeded baseline (cheap, baseline-dependent);
@@ -2861,13 +2997,17 @@ final class IntelligenceEngine: ObservableObject {
                                                      size: motionCacheLocal.count)
             return (refSteps, motion, motionCacheLocal, motionLog)
         }.value
-        stepsMotionCache = updatedStepsMotionCache
-        // Write the pruned cache back, only when it moved. `serialize` renders sorted, so a pass that reused
-        // every day produces the string already stored and skips the write entirely.
-        let stepsMotionPayload = StepsMotionCache.serialize(stepsMotionCache)
-        if stepsMotionPayload != stepsMotionCachePersisted {
-            stepsMotionCachePersisted = stepsMotionPayload
-            UserDefaults.standard.set(stepsMotionPayload, forKey: Self.stepsMotionCacheDefaultsKey)
+        // A HISTORICAL chunk leaves the cache as it was: pruned to its window, it would throw away the
+        // recent days every steady-state pass reuses.
+        if !historical {
+            stepsMotionCache = updatedStepsMotionCache
+            // Write the pruned cache back, only when it moved. `serialize` renders sorted, so a pass that
+            // reused every day produces the string already stored and skips the write entirely.
+            let stepsMotionPayload = StepsMotionCache.serialize(stepsMotionCache)
+            if stepsMotionPayload != stepsMotionCachePersisted {
+                stepsMotionCachePersisted = stepsMotionPayload
+                UserDefaults.standard.set(stepsMotionPayload, forKey: Self.stepsMotionCacheDefaultsKey)
+            }
         }
         diagnosticSink?(stepsMotionLogLine, nil)
         // What the pass spent on its per-day probe queries, beside the `stepsMotion reused=N/M` line above.
@@ -3095,14 +3235,19 @@ final class IntelligenceEngine: ObservableObject {
         // today and the tail is the oldest day in the window. Taking the last match would have scored
         // today's workout against a resting HR up to `maxDays` old.
         // O7: the WAKING resting HR (sleep + the documented offset), the same the manual save uses.
-        let measuredResting = WakingRestingHR.fromSleep(out.first(where: { $0.rhr != nil })?.rhr.map(Double.init))
-        await rescoreManualWorkouts(store: store, profile: up, restingHR: measuredResting,
-                                    effortMethod: effortMethodGlobal)
+        // A HISTORICAL chunk skips both: its newest resting HR may be years old (the manual workouts are
+        // re-scored by the recent pass that ends the one-shot rescore), and its nights are not the recent
+        // ones the screens read `results` for.
+        if !historical {
+            let measuredResting = WakingRestingHR.fromSleep(out.first(where: { $0.rhr != nil })?.rhr.map(Double.init))
+            await rescoreManualWorkouts(store: store, profile: up, restingHR: measuredResting,
+                                        effortMethod: effortMethodGlobal)
 
-        results = out
-        note = out.isEmpty
-            ? "No scored nights yet. Wear the strap with NOOP connected overnight and the engine will score your charge, effort and rest itself, no WHOOP cloud required."
-            : nil
+            results = out
+            note = out.isEmpty
+                ? "No scored nights yet. Wear the strap with NOOP connected overnight and the engine will score your charge, effort and rest itself, no WHOOP cloud required."
+                : nil
+        }
 
         // Reload the dashboard caches so the freshly computed scores show up immediately. A heal-only
         // pass (#899 dedup deleted stale session rows but no daily changed) must refresh too, so the
@@ -3113,7 +3258,7 @@ final class IntelligenceEngine: ObservableObject {
         // #836/#sleep-sync: record the complete raw-analysis fingerprint this run scored against, so a later
         // NON-forced tick can short-circuit while it's unchanged. Written ONLY at the end of a completed run (never on an
         // early guard-return), so an interrupted/failed run can't advance the watermark past unscored data.
-        if !wmKey.isEmpty { UserDefaults.standard.set(wmKey, forKey: Self.analyzeWatermarkKey) }
+        if !historical, !wmKey.isEmpty { UserDefaults.standard.set(wmKey, forKey: Self.analyzeWatermarkKey) }
         markPostLoopPhase("tail")
         diagnosticSink?(AnalysisPhaseTally.logLine(scope: "postLoop", postLoopPhases), nil)
         // #1538: clear the started-mark and bank how long a COMPLETED pass costs on this install. The
@@ -3121,7 +3266,8 @@ final class IntelligenceEngine: ObservableObject {
         // background wake from one that never could, instead of guessing from a constant — the cost varies
         // by more than an order of magnitude with history size.
         let elapsed = Date().timeIntervalSince(reScoreStart)
-        let settled = RescoreBackgroundScheduler.markRescoreCompleted(seconds: elapsed, owedToken: owedToken)
+        let settled = historical
+            || RescoreBackgroundScheduler.markRescoreCompleted(seconds: elapsed, owedToken: owedToken)
         diagnosticSink?("re-score: done — scored \(scoredNights.count) night(s) in \(Int(elapsed * 1000)) ms (#1005)", nil)
         // #1681: a pass that completes while leaving the mark SET looks identical in a capture to one that
         // cleared it. Rare-event evidence, so always-on: it costs a line only when it actually happens,
@@ -3130,7 +3276,8 @@ final class IntelligenceEngine: ObservableObject {
             diagnosticSink?("re-score: debt NOT settled — a newer re-score was recorded while this pass "
                             + "was running, so the mark stays and another pass will run (#1681)", nil)
         }
-        Self.noteAnalysisCurrent()
+        // A historical chunk says nothing about whether the RECENT days are analysed.
+        if !historical { Self.noteAnalysisCurrent() }
         return true
     }
 

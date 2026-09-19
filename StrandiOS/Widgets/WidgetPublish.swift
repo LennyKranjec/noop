@@ -156,12 +156,23 @@ extension WidgetSnapshot {
         // shown exactly as WHOOP gave it (10.0 reads 10.0) instead of being round-tripped through ×100/21 and
         // a curve fitted to map OUR Effort onto WHOOP's.
         // A ZERO THE STRAP DID NOT EARN yields to WHOOP's own strain for the day, as on Today.
+        //
+        // THE OWN EFFORT IS TODAY'S, resolved as Today resolves it: the computed lane first (`noopScores`,
+        // the app's own row, as Today's `noopEffort`), the merged row only without one, and the live
+        // in-progress value Today last scored (`TodayView.publishedLiveStrain`) through the same
+        // never-drop max (`StrainScorer.effectiveEffort`). Comparing the stored merged row alone left the
+        // strip behind the hero ring all day, and on a day with a cloud row it could show WHOOP's figure
+        // where Today showed the app's own.
         let cloudToday = await model.repo.whoopCloudDay(todayKey)?.strain
-        var ownEffort = row?.strain
+        let computedEffort = await model.repo.noopScores(day: todayKey).effort
+        var ownEffort = StrainScorer.effectiveEffort(live: TodayView.publishedLiveStrain(day: todayKey),
+                                                     stored: computedEffort ?? row?.strain)
         if let own = ownEffort, own < 0.5, let cloud = cloudToday, cloud > 0 { ownEffort = nil }
         var cloudStrain21: Double?
         if ownEffort == nil { cloudStrain21 = cloudToday }
-        let effort = ownEffort ?? cloudStrain21.map { $0 * WhoopExportImporter.dayStrainToEffortScale }
+        // WHOOP's own strain goes on the 0–100 axis through the INVERSE calibration — the mapping the target
+        // mark below uses — so the ring and its mark share one axis, exactly as on Today's hero.
+        let effort = ownEffort ?? cloudStrain21.map { StrainCalibration.effort100(strain21: $0) }
         snap.effortToday = effort.map { Int($0.rounded()) }
         if effortScale == .whoop {
             if let own = ownEffort {
