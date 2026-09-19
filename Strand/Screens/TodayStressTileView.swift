@@ -24,10 +24,10 @@ import StrandDesign
 // blank then, because those genuinely need hours.
 
 /// How often the hourly curve is re-asked. It is hourly-grain, so faster buys nothing.
-private let stressRescoreSeconds: TimeInterval = 15 * 60
+private let stressRescoreSeconds: TimeInterval = 5 * 60   // every five minutes, as asked
 
 /// How often the live reading is re-taken, and the window it reads.
-private let liveEverySeconds: UInt64 = 60
+private let liveEverySeconds: UInt64 = 5 * 60   // every five minutes, as asked
 private let liveWindowSeconds = 10 * 60
 /// PERF: the motion trace is the big read of the three — ten minutes of accelerometer at strap rate.
 /// The live level only needs enough of it to tell sitting from moving, so the read is capped rather
@@ -146,7 +146,7 @@ struct TodayStressTileView: View {
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             // One loop for as long as Today is on screen and in front; cancelled with it. The hourly
-            // curve every five minutes, the live window every minute.
+            // curve and the live window every five minutes.
             var curveAt = Date.distantPast
             while !Task.isCancelled {
                 if Date().timeIntervalSince(curveAt) >= stressRescoreSeconds,
