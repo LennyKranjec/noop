@@ -291,6 +291,23 @@ public struct LocalDayWindows: Sendable {
         return run
     }
 
+    /// The scan the daily analysis walks: up to `count` local days ending on the day that contains
+    /// `referenceInstant`, NEWEST FIRST, each as its own `[start, nextStart)` window carrying the UTC offset
+    /// in effect at its start.
+    ///
+    /// F6 SWITCH-OVER: `IntelligenceEngine` used to take ONE offset (the one in effect now) for the whole
+    /// history and step back in fixed 86,400-second blocks from today's midnight, so every day on the far
+    /// side of a DST transition was read an hour off its real local midnight. This is the per-day answer
+    /// it now walks instead. On a stretch with no transition every window is exactly 24 h, every offset is
+    /// the current one and every start is `todayStart − k·86400`, so the result is identical to the old
+    /// arithmetic there (pinned by `LocalDayWindowsScanTests`). A skipped calendar date is omitted, as in
+    /// `backwardRun`, so the scan can be shorter than `count`.
+    public func trailingWindows(count: Int) -> [LocalDayWindow] {
+        backwardRun(endingAt: localDate(of: referenceInstant), count: count)
+            .reversed()
+            .compactMap { window(of: $0.date) }
+    }
+
     /// The end of the sleep read window of `date`: the earlier of that date's next start and the
     /// reference instant, so the current day's window never reaches into the future. `nil` when the
     /// date does not exist.

@@ -1128,24 +1128,26 @@ final class AICoachEngine: ObservableObject {
         return ctx
     }
 
-    /// One derived stress line for the coach context: the Baevsky Stress Index over TODAY's R-R, read
-    /// via the same device-aware repository R-R union as `StressView`,
-    /// then summarised to a single number with `StressIndex.stressIndex(rr:)`. Returns nil when the
-    /// store is unavailable or there are too few clean beats (the histogram needs >= 20), so the line is
-    /// simply absent, never a fabricated value. Summary-only: the raw R-R never leaves the device.
+    /// One derived stress line for the coach context: the Baevsky Stress Index for TODAY, read via the
+    /// same device-aware repository R-R union as `StressView` and summarised EXACTLY as that screen does —
+    /// the median of today's 5-minute windows (`StressIndex.medianWindowStressIndex(rr:)`, F8). One SI over
+    /// the whole midnight → now series pooled sleep, exercise and rest into a single histogram and measured
+    /// the day's HR spread rather than autonomic rigidity. Returns nil when the store is unavailable or no
+    /// 5-minute window has enough beats, so the line is simply absent, never a fabricated value.
+    /// Summary-only: the raw R-R never leaves the device.
     func stressIndexLine() async -> String? {
         let cal = Calendar.current
         let from = Int(cal.startOfDay(for: Date()).timeIntervalSince1970)
         let to = Int(Date().timeIntervalSince1970)
         let rr = await repo.rrIntervals(from: from, to: to, limit: 200_000)
-        guard let si = StressIndex.stressIndex(rr: rr) else { return nil }
+        guard let si = StressIndex.medianWindowStressIndex(rr: rr) else { return nil }
         return Self.stressIndexSummary(si: si)
     }
 
     /// Pure formatter for the derived stress line, kept separate so it is unit-testable without a store.
     /// One summary number, labelled, with a plain-English note that it's an autonomic-balance proxy.
     static func stressIndexSummary(si: Double) -> String {
-        "Stress (SI): \(Int(si.rounded())) (Baevsky Stress Index over today's R-R; higher means more sympathetic / under load; an autonomic-balance proxy, not a clinical figure)."
+        "Stress (SI): \(Int(si.rounded())) (Baevsky Stress Index, median of 5-minute windows today; higher means more sympathetic / under load; an autonomic-balance proxy, not a clinical figure)."
     }
 
     /// A SUMMARY-ONLY block of the new on-device signals, the user's strongest n-of-1 correlations

@@ -54,6 +54,57 @@ public enum StressIndex {
         components(rr: rr)?.si
     }
 
+    /// Length of one Stress Index window (s). Baevsky's index is defined on a short, stationary recording —
+    /// 5 minutes is the standard cardiointervalography length.
+    public static let windowSec: Int = 300
+
+    /// Raw beats a 5-minute window must carry before it is scored (≈ 1 minute of beats at 60 bpm). Below
+    /// it the window is a sparse fragment rather than a recording, and its histogram says little. The
+    /// clean-beat (`minBeats`) and rejected-fraction gates of `components(rawRR:)` still apply on top.
+    public static let minBeatsPerWindow: Int = 60
+
+    /// Per-window SI components over a long R-R series: the series is cut into `windowSec` windows (aligned
+    /// to the unix clock, so a given beat always lands in the same window), each window with at least
+    /// `minBeatsPerWindow` beats is scored with `components(rawRR:)`, and the scored windows are returned
+    /// oldest first. Beat order inside a window is the input order (the ectopic filter is order-aware).
+    public static func windowComponents(rr: [RRInterval], windowSec: Int = StressIndex.windowSec,
+                                        minBeatsPerWindow: Int = StressIndex.minBeatsPerWindow) -> [Components] {
+        guard windowSec > 0 else { return [] }
+        var byWindow: [Int: [Double]] = [:]
+        for beat in rr {
+            // Floor division, so a negative ts still lands in the window that contains it.
+            let q = beat.ts / windowSec
+            let w = (beat.ts % windowSec != 0 && beat.ts < 0) ? q - 1 : q
+            byWindow[w, default: []].append(Double(beat.rrMs))
+        }
+        return byWindow.keys.sorted().compactMap { key -> Components? in
+            guard let beats = byWindow[key], beats.count >= minBeatsPerWindow else { return nil }
+            return components(rawRR: beats)
+        }
+    }
+
+    /// The day's Stress Index as the MEDIAN of its 5-minute windows (F8), with that window's components.
+    ///
+    /// Computing one histogram over midnight → now pooled sleep, exercise and rest into a single R-R
+    /// distribution: its range (MxDMn) spans the night's slowest beat to the workout's fastest, so the
+    /// "whole-day SI" measured the day's HR SPREAD, not autonomic rigidity. The index is only meaningful
+    /// over a short stationary window, so each 5-minute window is scored on its own and the day reports
+    /// the middle one. For an even count this is the LOWER middle window, so the number shown is always a
+    /// real window's SI and the components beside it describe that same window. nil when no window
+    /// qualifies.
+    public static func medianWindowComponents(rr: [RRInterval], windowSec: Int = StressIndex.windowSec,
+                                              minBeatsPerWindow: Int = StressIndex.minBeatsPerWindow) -> Components? {
+        let scored = windowComponents(rr: rr, windowSec: windowSec, minBeatsPerWindow: minBeatsPerWindow)
+            .sorted { $0.si < $1.si }
+        guard !scored.isEmpty else { return nil }
+        return scored[(scored.count - 1) / 2]
+    }
+
+    /// `medianWindowComponents(rr:)`'s SI alone.
+    public static func medianWindowStressIndex(rr: [RRInterval]) -> Double? {
+        medianWindowComponents(rr: rr)?.si
+    }
+
     /// As `stressIndex(rr:)` but from a raw R-R series in milliseconds.
     public static func stressIndex(rawRR: [Double]) -> Double? {
         components(rawRR: rawRR)?.si

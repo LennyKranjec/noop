@@ -35,6 +35,9 @@ enum ChargeBreakdownWiring {
         guard let hrv = row.avgHrv, let rhr = row.restingHr else { return nil }
         // PERF: one pass per series. The two private copies this replaces each re-folded the full history
         // per body evaluation of the open sheet; the guard above still runs before any fold.
+        // F3: only the nights BEFORE this row's day, matching the engine's point-in-time Charge baseline
+        // (the headline is no longer scored against a baseline holding its own night or later ones).
+        let days = days.filter { $0.day < row.day }
         let hrvBase = Baselines.foldHistory(days.map(\.avgHrv), cfg: Baselines.hrvCfg)
         guard hrvBase.usable else { return nil }
         let rhrBase = Baselines.foldHistory(days.map { $0.restingHr.map(Double.init) },

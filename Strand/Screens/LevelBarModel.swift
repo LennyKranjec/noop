@@ -9,9 +9,15 @@ import WhoopStore
 // The one place the shell asks for a level. It reads the repository's already-loaded days, the four
 // series the formula needs, and the frozen baselines, and produces the snapshot the bar renders.
 //
-// ONE LEVEL A DAY. The headline figure is set at 06:40 and held until the next 06:40 — see
-// `LevelDayFreeze`. The refresh counter still drives this, because the day has to be scored the first
-// time its night arrives, but a refresh after that reads the frozen figure back rather than moving it.
+// ONE LEVEL A DAY, AND EVERY DAY FROM THE LEDGER. A day's level is written to `LevelLedger` once its night
+// has landed (or at its deadline) and read back unchanged every time after that — see `LevelDayFreeze`
+// and `LevelLedger`. The refresh counter still drives this, because a day has to be written the first
+// time its night arrives, but nothing shown here is ever computed on the spot: the headline, the arrows,
+// the means and the timeline all read the ledger, and a day missing from it is a gap.
+//
+// ONE MODEL FOR THE WHOLE APP. The shell's strip and the Health tab used to own an instance each, and
+// both raced to freeze the same morning from their own snapshot of the store. There is one now,
+// `LevelBarModel.shared`, and one load at a time: a load that a newer one has overtaken stops where it is.
 //
 // IT NEVER THROWS AND NEVER BLOCKS THE BAR. Every read is best-effort: a store that is not ready yet
 // produces no snapshot, and the strip draws its empty state rather than a zero.
@@ -76,6 +82,9 @@ enum LevelMissingInput: String, CaseIterable, Identifiable {
 @MainActor
 final class LevelBarModel: ObservableObject {
 
+    /// The one instance: the shell's strip, the Health tab and the morning brief all read this.
+    static let shared = LevelBarModel()
+
     @Published private(set) var trend: LevelTrendSnapshot?
     /// Every scored day over the span the timeline asked for, oldest first.
     @Published private(set) var history: [LevelPoint] = []
@@ -86,18 +95,26 @@ final class LevelBarModel: ObservableObject {
     @Published private(set) var missing: [LevelMissingInput] = [] {
         didSet { Self.lastMissing = missing }
     }
-    /// The latest `missing` from any instance, for the coach's context.
+    /// The latest `missing`, for the coach's context.
     static var lastMissing: [LevelMissingInput] = []
 
+    private let ledger: LevelLedger
+
     private var lastLoadedTick: Int = -1
+    /// Bumped by every load. A load that finds it moved on after an await has been overtaken and stops.
+    private var generation = 0
+    /// The span the timeline last asked for, so a load that writes new days can redraw it.
+    private var historySpan: Int?
 
     /// The series behind the last load, and the tick they were read at.
     ///
-    /// PERF: reading them is a dozen full-history series reads plus the workout log, and `load()` and
-    /// `loadHistory` each used to do their own — so opening the timeline read everything twice, and the
-    /// strip on another tab a third time. They are the same reads for the same data, so they are kept
-    /// until the data behind them changes.
+    /// PERF: reading them is a dozen full-history series reads plus the workout log, and they are the
+    /// same reads for the same data, so they are kept until the data behind them changes.
     private var cachedSeries: (key: String, series: LevelSeries)?
+
+    init(ledger: LevelLedger = .shared) {
+        self.ledger = ledger
+    }
 
     /// Load today's level and the two comparison points, unless nothing has changed since last time.
     func refresh(repo: Repository, tick: Int) async {
@@ -112,137 +129,138 @@ final class LevelBarModel: ObservableObject {
     }
 
     private func load(repo: Repository) async {
-        let days = repo.days
-        guard !days.isEmpty else {
+        generation += 1
+        let gen = generation
+        guard !repo.days.isEmpty else {
             trend = nil
             return
         }
         let calendar = Calendar.current
         let series = await readSeries(repo: repo)
-        let byDay = LevelWiring.byDay(days)
+        guard gen == generation else { return }
+        await settlePending(repo: repo, series: series, calendar: calendar, generation: gen)
+        guard gen == generation else { return }
+        publish(calendar: calendar)
+        if let span = historySpan { rebuildHistory(spanDays: span, calendar: calendar) }
+    }
+
+    /// Write every day that is due and not yet in the ledger, oldest first.
+    ///
+    /// THE FIRST RUN WRITES THE PAST. Days from before the ledger existed are scored once, now, with the
+    /// engine and baselines as they stand, marked `backfilled` — and never again. After that the same
+    /// walk only finds the days the app was not opened on, and today once its night is in.
+    ///
+    /// THE STORE IS READ AFTER THE AWAITS, NOT BEFORE. The day rows are taken fresh here, and again after
+    /// every yield, so a day is never written from a snapshot older than the sync that just finished.
+    private func settlePending(repo: Repository, series: LevelSeries, calendar: Calendar,
+                               generation gen: Int) async {
+        let now = Date()
+        let levelDate = LevelDayFreeze.levelDay(now: now, calendar: calendar)
+        let levelKey = LevelWiring.key(from: levelDate, calendar: calendar)
+        var days = repo.days
+        guard let firstKey = days.lazy.map(\.day).min(),
+              let firstDate = LevelWiring.date(from: firstKey, calendar: calendar) else { return }
+        let floor = calendar.date(byAdding: .day, value: -(LevelLedger.maxDays - 1), to: levelDate) ?? levelDate
+        var cursor = Swift.max(firstDate, floor)
+        let backfilling = !ledger.hasBackfilled
+
+        var byDay = LevelWiring.byDay(days)
         let baselines = LevelBaselineStore.resolve {
             LevelWiring.baselineHistory(days: days, series: series, calendar: calendar)
         }
 
-        /// A day's level and its drivers, from the same frozen-day inputs.
-        func score(_ key: String) -> (LevelBreakdown?, [LevelPart: LevelDriver]) {
-            let inputs = LevelWiring.dayInputs(byDay: byDay, day: key, series: series, calendar: calendar)
-            var drivers: [LevelPart: LevelDriver] = [:]
-            for part in LevelPart.allCases {
-                if let driver = LevelDrivers.driver(for: part, inputs: inputs, baselines: baselines) {
-                    drivers[part] = driver
+        var batch: [LevelSettlement] = []
+        var since = 0
+        while cursor <= levelDate {
+            let key = LevelWiring.key(from: cursor, calendar: calendar)
+            if !ledger.isSettled(key) {
+                let due = LevelLedger.deadlinePassed(day: key, levelDay: levelKey, now: now, calendar: calendar)
+                if let s = LevelLedger.settle(day: key, byDay: byDay, series: series, baselines: baselines,
+                                              calendar: calendar, deadlinePassed: due,
+                                              backfilled: backfilling && key < levelKey, now: now) {
+                    batch.append(s)
                 }
             }
-            return (LevelEngine.compute(inputs: inputs, baselines: baselines), drivers)
+            // A LONG BACKFILL LETS THE SCREEN DRAW. Two years of days scored as one uninterrupted stretch on
+            // the main actor is what a hang looks like from outside — so every forty days what is done is
+            // written, the screen gets a turn, and the walk carries on from fresh rows.
+            since += 1
+            if since >= 40 {
+                since = 0
+                ledger.commit(batch)
+                batch = []
+                await Task.yield()
+                guard gen == generation, !Task.isCancelled else { return }
+                if repo.days.count != days.count || repo.days.last != days.last {
+                    days = repo.days
+                    byDay = LevelWiring.byDay(days)
+                }
+            }
+            guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
+            cursor = next
         }
+        ledger.commit(batch)
+        if backfilling { ledger.markBackfilled() }
+    }
 
-        func shifted(_ key: String, by delta: Int) -> String? {
-            guard let date = LevelWiring.date(from: key, calendar: calendar),
-                  let moved = calendar.date(byAdding: .day, value: delta, to: date) else { return nil }
-            return LevelWiring.key(from: moved, calendar: calendar)
+    /// The snapshot the strip draws — every figure in it read from the ledger.
+    private func publish(calendar: Calendar) {
+        let levelKey = LevelWiring.key(from: LevelDayFreeze.levelDay(calendar: calendar), calendar: calendar)
+        // THE DAY WHOSE LEVEL IS CURRENT, if it is written. If its night has not landed yet, the last
+        // written day stays up — marked pending, so nothing presents it as today's.
+        let today = ledger.entry(levelKey)
+        let shown = today ?? ledger.latest(onOrBefore: levelKey)
+
+        // The comparisons are measured from the day SHOWN, and are ledger values too: a delta compares a
+        // written level with written levels, never with a live recomputation.
+        let base = shown?.day ?? levelKey
+        missing = shown?.missingInputs ?? []
+        func written(_ delta: Int) -> FrozenLevel? {
+            LevelWiring.shift(base, delta, calendar).flatMap { ledger.entry($0) }
         }
-
-        // THE DAY WHOSE LEVEL IS CURRENT, and its frozen figure — computed and frozen the first time its
-        // night is here, read back unchanged every time after that.
-        let dayKey = LevelWiring.key(from: LevelDayFreeze.levelDay(), calendar: calendar)
-        let shown: FrozenLevel?
-        if let frozen = LevelDayFreeze.stored(), frozen.day == dayKey {
-            shown = frozen
-        } else if LevelWiring.nightLanded(days: days, day: dayKey), case let (b?, d) = score(dayKey) {
-            let fresh = FrozenLevel(day: dayKey, breakdown: b, drivers: d)
-            LevelDayFreeze.store(fresh)
-            shown = fresh
-        } else if let frozen = LevelDayFreeze.stored() {
-            // The night has not landed yet: yesterday's level stays up rather than an empty one.
-            shown = frozen
-        } else if let previous = shifted(dayKey, by: -1), case let (b?, d) = score(previous) {
-            // Nothing frozen ever, and no night yet today: score the last complete day and hold that.
-            let fresh = FrozenLevel(day: previous, breakdown: b, drivers: d)
-            LevelDayFreeze.store(fresh)
-            shown = fresh
-        } else {
-            shown = nil
-        }
-
-        // The comparisons are measured from the day SHOWN, with the same inputs, so a delta compares a
-        // frozen level with frozen levels rather than with live ones.
-        let base = shown?.day ?? dayKey
-        missing = LevelMissingInput.from(
-            LevelWiring.dayInputs(byDay: byDay, day: base, series: series, calendar: calendar))
-        /// The mean level over the `span` days before `base`, or nil when fewer than `need` scored.
+        /// The mean level over the `span` days before `base`, or nil when fewer than `need` are written.
         func mean(over span: Int, need: Int) -> Double? {
-            let levels = (1...span).compactMap { shifted(base, by: -$0).flatMap { score($0).0?.level } }
+            let levels = (1...span).compactMap { written(-$0)?.level }
             guard levels.count >= need else { return nil }
             return levels.reduce(0, +) / Double(levels.count)
         }
         trend = LevelTrendSnapshot(
             now: shown?.breakdown,
-            threeDaysAgo: shifted(base, by: -3).flatMap { score($0).0 },
-            monthAgo: shifted(base, by: -30).flatMap { score($0).0 },
+            threeDaysAgo: written(-3)?.breakdown,
+            monthAgo: written(-30)?.breakdown,
             threeDayMean: mean(over: 3, need: 2),
             monthMean: mean(over: 30, need: 10),
-            yesterdayLevel: shifted(base, by: -1).flatMap { score($0).0?.level },
-            drivers: shown?.drivers ?? [:]
+            yesterdayLevel: written(-1)?.level,
+            drivers: shown?.drivers ?? [:],
+            pendingToday: today == nil
         )
     }
 
-    /// Every scored day over `spanDays`, for the timeline.
+    /// Every written day over `spanDays`, for the timeline — straight from the ledger.
     ///
-    /// The span is CLAMPED to the data that actually exists: asking for a year when the store holds
-    /// three months would run the formula over nine months of certain nulls.
+    /// NOTHING IS SCORED HERE. The timeline used to run the formula over every day of the span against
+    /// today's store, which is exactly how a past day came to read differently from what it had shown.
     func loadHistory(repo: Repository, spanDays: Int) async {
         loadingHistory = true
         defer { loadingHistory = false }
+        historySpan = spanDays
+        rebuildHistory(spanDays: spanDays, calendar: Calendar.current)
+    }
 
-        let days = repo.days
-        guard !days.isEmpty else {
-            history = []
-            return
-        }
-        let calendar = Calendar.current
-        let series = await readSeries(repo: repo)
-        let byDay = LevelWiring.byDay(days)
-        let baselines = LevelBaselineStore.resolve {
-            LevelWiring.baselineHistory(days: days, series: series, calendar: calendar)
-        }
-
-        // The curve ends on the day whose level is current, and uses the same frozen-day inputs, so
-        // its last point IS the headline rather than a live figure beside a frozen one.
-        let frozen = LevelDayFreeze.stored()
-        let today = frozen.flatMap { LevelWiring.date(from: $0.day, calendar: calendar) }
-            ?? LevelDayFreeze.levelDay()
-        let requested = calendar.date(byAdding: .day, value: -(spanDays - 1), to: today) ?? today
-        let earliest = days.first.flatMap { LevelWiring.date(from: $0.day, calendar: calendar) }
-        var cursor = (earliest.map { Swift.max($0, requested) }) ?? requested
-
-        var out: [LevelPoint] = []
-        var since = 0
-        while cursor <= today {
-            if Task.isCancelled { return }
-            // A LONG SPAN LETS THE SCREEN DRAW. "All" is ten years of days, and running that as one
-            // uninterrupted stretch on the main actor is what a hang looks like from outside.
-            since += 1
-            if since >= 40 {
-                since = 0
-                await Task.yield()
+    private func rebuildHistory(spanDays: Int, calendar: Calendar) {
+        // The curve ends on the day the headline shows, so its last point IS the headline.
+        let levelKey = LevelWiring.key(from: LevelDayFreeze.levelDay(calendar: calendar), calendar: calendar)
+        let end = ledger.entry(levelKey)?.day ?? ledger.latest(onOrBefore: levelKey)?.day ?? levelKey
+        let start = LevelWiring.shift(end, -(Swift.max(spanDays, 1) - 1), calendar) ?? end
+        let out: [LevelPoint] = ledger.entries(from: start, through: end).map { entry in
+            var parts: [LevelPart: Double] = [:]
+            for part in entry.parts {
+                if let score = part.score { parts[part.part] = score }
             }
-            let key = LevelWiring.key(from: cursor, calendar: calendar)
-            let inputs = LevelWiring.dayInputs(byDay: byDay, day: key, series: series, calendar: calendar)
-            let computed = frozen?.day == key
-                ? frozen?.breakdown
-                : LevelEngine.compute(inputs: inputs, baselines: baselines)
-            if let breakdown = computed {
-                var parts: [LevelPart: Double] = [:]
-                for component in breakdown.components {
-                    if let score = component.score { parts[component.part] = score }
-                }
-                out.append(LevelPoint(day: key, level: breakdown.level, parts: parts))
-            }
-            guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
-            cursor = next
+            return LevelPoint(day: entry.day, level: entry.level, parts: parts)
         }
         history = out
-        // The best each part has reached over the span just walked. Taken from the SAME pass rather than
+        // The best each part has reached over the span just drawn. Taken from the SAME entries rather than
         // from a separate read: a personal best that disagreed with the curve under it would be worse
         // than no best at all.
         var best: [LevelPart: Double] = [:]

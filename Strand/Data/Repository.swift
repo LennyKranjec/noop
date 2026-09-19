@@ -1411,8 +1411,8 @@ final class Repository: ObservableObject {
 
     /// Estimate today's VO₂max from the wearer's runs and walks and bank it — once a day.
     ///
-    /// Resting HR is the 7-day median; HRmax is observed from the wearer's own workouts (the shared
-    /// estimator, which falls back to the age formula without enough history). See `VO2MaxEstimator`.
+    /// Resting HR is the 7-day median; HRmax is observed from the wearer's own workout peaks (the runner-up
+    /// peak, floored at the age formula; the age formula without enough workouts). See `VO2MaxEstimator`.
     func bankNoopVo2Max(age: Int, sex: String = "", waistCm: Double = 0) async {
         let today = Self.localDayKey(Date())
         let tried = UserDefaults.standard.double(forKey: Self.noopVo2TriedKey)
@@ -1424,8 +1424,20 @@ final class Repository: ObservableObject {
         guard !rhrs.isEmpty else { return }
         let rhr = rhrs[rhrs.count / 2]
         let workouts = await workoutRows(days: 365)
-        let hrMax = StrainScorer.estimateHRmax(workouts.compactMap { $0.maxHr.map(Double.init) },
-                                               age: age > 0 ? Double(age) : nil).0
+        // F7: HRmax from the wearer's own per-workout PEAKS. `estimateHRmax` needs a dense HR history
+        // (≥ 600 readings) and was handed one peak per workout, so it fell back to Tanaka every time. The
+        // robust observed peak (runner-up across ≥ 5 plausible workouts) is used instead, with the shared
+        // estimator's policy kept: the observed ceiling wins only when it reaches the age formula, because
+        // a peak list is a LOWER bound (a wearer who never trains flat-out would otherwise get an HRmax
+        // capped at their hardest walk). Too few workouts falls back to the existing estimate/Tanaka.
+        let ageYears: Double? = age > 0 ? Double(age) : nil
+        let workoutPeaks = workouts.compactMap { $0.maxHr.map(Double.init) }
+        let hrMax: Double
+        if let observed = StrainScorer.robustObservedHRmax(workoutPeaks: workoutPeaks) {
+            hrMax = ageYears.map { Swift.max(observed, StrainScorer.tanakaHRmax(age: $0)) } ?? observed
+        } else {
+            hrMax = StrainScorer.estimateHRmax(workoutPeaks, age: ageYears).0
+        }
         let sessions = workouts.compactMap { w -> VO2MaxEstimator.Session? in
             guard let d = w.distanceM, let hr = w.avgHr else { return nil }
             return VO2MaxEstimator.Session(start: Date(timeIntervalSince1970: TimeInterval(w.startTs)),
@@ -2750,8 +2762,9 @@ final class Repository: ObservableObject {
     /// resolver returned no Rest for that day and Today borrowed the latest historical value (#614). Derive
     /// it on the fly from the same banked totals via the single source of truth
     /// `AnalyticsEngine.Rest.composite(daily:)` , the SAME composite the series carries (what
-    /// IntelligenceEngine projects) , so the day resolves to its own Rest. Consistency is left to the
-    /// scorer's neutral default here (the daily row carries no regularity term). Mirrors Android
+    /// IntelligenceEngine projects) , so the day resolves to its own Rest. F4: scored with the need and
+    /// regularity the engine last scored with (`compositeWithEngineInputs`), not the 8 h / neutral-0.5
+    /// defaults, so this derivation and the persisted point agree. Mirrors Android
     /// WhoopRepository.dailyColumn / RestScorer.restFromDaily.
     ///
     /// Internal + nonisolated (not private) so the pure `EditMergePrecedenceTests` can exercise the #614
@@ -2771,7 +2784,7 @@ final class Repository: ObservableObject {
         case "sleep_deep_min", "deep_min": return d.deepMin
         case "sleep_rem_min", "rem_min":   return d.remMin
         case "sleep_light_min", "core_min": return d.lightMin
-        case "sleep_performance": return AnalyticsEngine.Rest.composite(daily: d)
+        case "sleep_performance": return AnalyticsEngine.Rest.compositeWithEngineInputs(daily: d)
         case "steps":            return d.steps.map(Double.init)
         case "active_kcal", "energy_kcal": return d.activeKcalEst
         default:                 return nil

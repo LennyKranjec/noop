@@ -5083,8 +5083,8 @@ struct TodayView: View {
 
         // In-progress Effort for TODAY (#402): score today's strain over the SAME window the HR curve
         // above shows (logical-day midnight → now) so the gauge tracks the day live instead of lagging
-        // on the last persisted daily row. Uses the identical params the daily pass uses, Tanaka HRmax
-        // from age, today's resting HR (else the default), sex, so the live number matches what the
+        // on the last persisted daily row. Uses the identical params the daily pass uses, HRmax (override,
+        // else Tanaka from age), today's resting HR (else the default), sex, so the live number matches what the
         // engine will eventually persist. Below StrainScorer.minReadings the scorer returns nil and the
         // gauge falls back to the stored row (never a fabricated value); a navigated past day clears it.
         let liveStrainLocal: Double?
@@ -5101,7 +5101,10 @@ struct TodayView: View {
             // other whole-window HR consumer already passes.
             let todayHr = await repo.hrSamples(from: effortStart, to: windowEndInclusive,
                                                limit: 200_000)
-            let maxHR = profile.age > 0 ? StrainScorer.tanakaHRmax(age: Double(profile.age)) : nil
+            // F5: the user's HRmax override when set, else Tanaka — the SAME resolution the daily pass
+            // scores the stored row with, so `effectiveEffort`'s max can't pick whichever HRmax is kinder.
+            let maxHR = StrainScorer.effortHRmax(overrideBpm: Double(profile.hrMaxOverride),
+                                                 age: Double(profile.age))
             let restHR = displayDay?.restingHr.map(Double.init) ?? StrainScorer.defaultRestingHR
             liveStrainLocal = StrainScorer.strain(todayHr, maxHR: maxHR, restingHR: restHR,
                                         method: PuffinExperiment.effortMethod, sex: profile.sex)

@@ -2143,7 +2143,10 @@ struct LiquidTodayView: View {
             // max, so the stored row simply won) which is why it went unnoticed. 200_000 is what every
             // other whole-window HR consumer already passes.
             let todayHr = await repo.hrSamples(from: from, to: to, limit: 200_000)
-            let maxHR = profile.age > 0 ? StrainScorer.tanakaHRmax(age: Double(profile.age)) : nil
+            // F5: the user's HRmax override when set, else Tanaka — the SAME resolution the daily pass
+            // scores the stored row with, so `effectiveEffort`'s max can't pick whichever HRmax is kinder.
+            let maxHR = StrainScorer.effortHRmax(overrideBpm: Double(profile.hrMaxOverride),
+                                                 age: Double(profile.age))
             let restHR = day?.restingHr.map(Double.init) ?? StrainScorer.defaultRestingHR
             liveStrainLocal = StrainScorer.strain(todayHr, maxHR: maxHR, restingHR: restHR,
                                                   method: PuffinExperiment.effortMethod, sex: profile.sex)

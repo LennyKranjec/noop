@@ -92,6 +92,13 @@ final class DaytimeStressTests: XCTestCase {
         // The other half of the oracle. The Kotlin `DaytimeStressTest` asserts these same literals for
         // this same scenario, so a change landing on ONE platform moves one of the two and fails here
         // or there. An oracle only guards the direction it is written in.
+        //
+        // RECALIBRATED (day-relative median centre + robust spread + ln 2-shifted curve). These literals
+        // MOVED ON PURPOSE and the Kotlin twin must move with them. Hours 60/64/68/72/76 bpm: median 68,
+        // IQR 64…72 → σ = 8 / 1.349 = 5.93, so z = −1.35/−0.67/0/+0.67/+1.35 → 0.34/0.61/1.00/1.49/1.97.
+        // The old anchor (Q1 = 64, population SD) put the MIDDLE hour at 2.01 and called a gentle
+        // 16 bpm morning ramp "sustained high" — exactly the over-read the recalibration removes. Now no
+        // hour reaches 2.0: zero high minutes, no sustained run, the last hour is still the peak.
         let (hr, rr) = wornMorning()
         let res = DaytimeStress.analyze(hr: hr, rr: rr, includeTimeline: true)
         func render(_ points: [DaytimeStress.HourPoint]) -> String {
@@ -99,13 +106,13 @@ final class DaytimeStressTests: XCTestCase {
                 .joined(separator: " ")
         }
         XCTAssertEqual(render(res.hours),
-                       "25200:0.990715 28800:1.500000 32400:2.009285 36000:2.413289 39600:2.678875")
+                       "25200:0.344545 28800:0.609001 32400:1.000000 36000:1.486015 39600:1.974985")
         XCTAssertEqual(render(res.timeline),
-                       "23400:0.990715 25200:0.990715 27000:1.500000 28800:1.500000 30600:2.009285 "
-                       + "32400:2.009285 34200:2.413289 36000:2.413289 37800:2.678875 39600:2.678875")
-        XCTAssertEqual(res.highStressMinutes, 180)
-        XCTAssertTrue(res.sustainedHigh)
-        XCTAssertEqual(res.sustainedRun, 3)
+                       "23400:0.344545 25200:0.344545 27000:0.609001 28800:0.609001 30600:1.000000 "
+                       + "32400:1.000000 34200:1.486015 36000:1.486015 37800:1.974985 39600:1.974985")
+        XCTAssertEqual(res.highStressMinutes, 0)
+        XCTAssertFalse(res.sustainedHigh)
+        XCTAssertEqual(res.sustainedRun, 0)
         XCTAssertEqual(res.peak?.startTs, 39600)
     }
 
@@ -167,8 +174,12 @@ final class DaytimeStressTests: XCTestCase {
         for h in 8...16 { hr += hourHR(h, bpm: 64) }
         let r = DaytimeStress.analyze(hr: hr, rr: [])
         XCTAssertFalse(r.sustainedHigh)
-        // A flat day sits around the baseline (≈1.5), not pinned high.
-        if let mean = r.dayMean { XCTAssertLessThan(mean, DaytimeStress.highBandFloor) }
+        // A flat day sits at the TYPICAL-hour level (1.0 since the recalibration; it was ≈1.5 on the
+        // old curve), not pinned high. Its IQR is 0, so this also exercises the HR spread floor.
+        if let mean = r.dayMean {
+            XCTAssertLessThan(mean, DaytimeStress.highBandFloor)
+            XCTAssertEqual(mean, 1.0, accuracy: 1e-9)
+        }
     }
 
     func testSleepHoursInTheWindowDoNotShiftTheWakingTimeline() {
@@ -212,6 +223,11 @@ final class DaytimeStressTests: XCTestCase {
     func testRMSSDLowersStressDirectionMatchesDailyScore() {
         // Same HR across hours; the hour with the LOWEST HRV (RMSSD) should read more
         // stressed — the same directionality as the daily score (HRV down = stress).
+        //
+        // CHANGED with the recalibration: day-relative mode now obeys the SAME daytime-RMSSD
+        // reliability gate as the baseline mode. While `daytimeRMSSDScoringEnabled` is false the
+        // RMSSD term is dropped, so identical-HR hours must score IDENTICALLY (the gate works); the
+        // direction itself is then pinned on the RMSSD-active path directly via `dayRelativeZ`.
         var hr: [HRSample] = []
         var rr: [RRInterval] = []
         for h in [8, 9, 10, 11] { hr += hourHR(h, bpm: 65) }
@@ -223,7 +239,178 @@ final class DaytimeStressTests: XCTestCase {
         let r = DaytimeStress.analyze(hr: hr, rr: rr)
         let relaxed = r.scored.first { $0.hour == 9 }!.level!
         let tense = r.scored.first { $0.hour == 11 }!.level!
-        XCTAssertGreaterThan(tense, relaxed)
+        if DaytimeStress.daytimeRMSSDScoringEnabled {
+            XCTAssertGreaterThan(tense, relaxed)
+        } else {
+            XCTAssertEqual(tense, relaxed, accuracy: 1e-9,
+                "gate off: daytime RMSSD must not move the day-relative score")
+        }
+        // The RMSSD-active path, whatever the gate: suppressed HRV reads more stressed.
+        let ref = DaytimeStress.dayReference(hrMeans: [65, 65, 65, 65], rmssds: [80, 80, 80, 4])
+        let zRelaxed = DaytimeStress.dayRelativeZ(hr: 65, rmssd: 80, ref: ref, useRMSSD: true)
+        let zTense = DaytimeStress.dayRelativeZ(hr: 65, rmssd: 4, ref: ref, useRMSSD: true)
+        XCTAssertGreaterThan(zTense, zRelaxed)
+    }
+
+    // MARK: - Recalibrated day-relative scale
+
+    /// A synthetic ordinary day: 16 waking hours (06–21) whose mean HR is spread like a normal sample
+    /// around 70 bpm, deliberately shuffled so nothing depends on time order. Median 70, IQR 66.75…73.25
+    /// → robust σ = 6.5 / 1.349 = 4.82 bpm. The 80 bpm hour is +2.08 robust SDs; the 62 bpm hour −1.66.
+    private let normalDayBPM: [Int] = [70, 66, 74, 62, 71, 68, 75, 65, 80, 69, 73, 64, 72, 67, 76, 70]
+
+    private func normalDay() -> [HRSample] {
+        zip(6...21, normalDayBPM).flatMap { hourHR($0.0, bpm: $0.1) }
+    }
+
+    func testNormalDayTypicalHourReadsAboutOne() {
+        let r = DaytimeStress.analyze(hr: normalDay(), rr: [])
+        XCTAssertEqual(r.scored.count, 16)
+        // The typical (median, 70 bpm) hours of the wearer's own day sit at ≈1.0, NOT on the HIGH
+        // floor as they effectively did under the old calm-quartile anchor (≈1.99).
+        for p in r.scored where p.meanHR == 70 {
+            XCTAssertEqual(p.level!, 1.0, accuracy: 0.25, "a typical hour should read ≈1.0")
+        }
+        // The day as a whole reads as unremarkable.
+        XCTAssertFalse(r.sustainedHigh)
+        XCTAssertLessThan(r.dayMean!, 1.5)
+    }
+
+    func testNormalDayStressedHourIsHighAndCalmestHourIsLow() {
+        let r = DaytimeStress.analyze(hr: normalDay(), rr: [])
+        // +2 robust SDs over the typical hour → HIGH (≈2.39 on the curve).
+        let stressed = r.scored.first { $0.meanHR == 80 }!.level!
+        XCTAssertGreaterThanOrEqual(stressed, DaytimeStress.highBandFloor)
+        // The calmest hour of the day (62 bpm, ≈−1.66 robust SDs) reads clearly low (≈0.26).
+        let calmest = r.scored.first { $0.meanHR == 62 }!.level!
+        XCTAssertLessThan(calmest, 0.7)
+        XCTAssertEqual(r.peak?.meanHR, 80)
+        XCTAssertEqual(r.highStressMinutes, 60, "only the one genuinely elevated hour is HIGH")
+    }
+
+    func testDayRelativeSquashMapping() {
+        // The documented table: z = 0 → exactly 1.0, z = 2·ln 2 → exactly the HIGH floor, clamped 0–3.
+        XCTAssertEqual(DaytimeStress.dayRelativeSquash(0), 1.0, accuracy: 1e-12)
+        XCTAssertEqual(DaytimeStress.dayRelativeSquash(2 * log(2.0)), DaytimeStress.highBandFloor, accuracy: 1e-12)
+        XCTAssertEqual(DaytimeStress.dayRelativeSquash(-1), 0.466, accuracy: 0.001)
+        XCTAssertEqual(DaytimeStress.dayRelativeSquash(2), 2.361, accuracy: 0.001)
+        XCTAssertGreaterThanOrEqual(DaytimeStress.dayRelativeSquash(-1_000), 0)
+        XCTAssertLessThanOrEqual(DaytimeStress.dayRelativeSquash(1_000), 3)
+    }
+
+    func testFlatDayWithSmallWigglesDoesNotExplode() {
+        // IQR ≈ 1 bpm → without the 3 bpm spread floor a ±1 bpm wiggle would be ~±1.3σ and swing the
+        // hours between LOW and HIGH on noise. With the floor every hour stays near the typical 1.0.
+        var hr: [HRSample] = []
+        for (i, h) in (8...16).enumerated() { hr += hourHR(h, bpm: [63, 64, 65][i % 3]) }
+        let r = DaytimeStress.analyze(hr: hr, rr: [])
+        XCTAssertEqual(r.highStressMinutes, 0)
+        XCTAssertFalse(r.sustainedHigh)
+        for p in r.scored {
+            XCTAssertGreaterThan(p.level!, 0.6)
+            XCTAssertLessThan(p.level!, 1.4)
+        }
+    }
+
+    func testRobustSpreadIgnoresOneSpikeHour() {
+        // One 130 bpm hour among eight calm ones must not inflate the spread and hide itself: the IQR
+        // never sees it, so it reads as a (clamped-near-3) HIGH hour, not a mild one.
+        var hr: [HRSample] = []
+        for h in 8...15 { hr += hourHR(h, bpm: 60 + (h % 3)) }
+        hr += hourHR(16, bpm: 130)
+        let r = DaytimeStress.analyze(hr: hr, rr: [])
+        XCTAssertGreaterThan(r.scored.first { $0.hour == 16 }!.level!, 2.8)
+    }
+
+    func testRMSSDSpreadFloors() {
+        // Flat RMSSD → IQR 0 → floored at max(4 ms, 15 % of the median).
+        XCTAssertEqual(DaytimeStress.dayReference(hrMeans: [60], rmssds: [100, 100, 100]).sdRMSSD, 15, accuracy: 1e-9)
+        XCTAssertEqual(DaytimeStress.dayReference(hrMeans: [60], rmssds: [20, 20, 20]).sdRMSSD, 4, accuracy: 1e-9)
+        // And the HR spread is floored at 3 bpm.
+        XCTAssertEqual(DaytimeStress.dayReference(hrMeans: [60, 60, 60], rmssds: []).sdHR, 3, accuracy: 1e-9)
+    }
+
+    func testRMSSDTermIsDownWeightedAndKeepsTheZScale() {
+        let ref = DaytimeStress.DayReference(hr: 70, sdHR: 5, rmssd: 40, sdRMSSD: 10)
+        // HR-only hour and an HR+RMSSD hour where both terms agree at +1σ share one z (a weighted MEAN).
+        XCTAssertEqual(DaytimeStress.dayRelativeZ(hr: 75, rmssd: nil, ref: ref, useRMSSD: true), 1, accuracy: 1e-12)
+        XCTAssertEqual(DaytimeStress.dayRelativeZ(hr: 75, rmssd: 30, ref: ref, useRMSSD: true), 1, accuracy: 1e-12)
+        // RMSSD alone at −3σ moves a typical-HR hour by only w·3/(1+w) = 1σ at w = 0.5.
+        XCTAssertEqual(DaytimeStress.dayRelativeZ(hr: 70, rmssd: 10, ref: ref, useRMSSD: true),
+                       DaytimeStress.dayRelativeRMSSDWeight * 3 / (1 + DaytimeStress.dayRelativeRMSSDWeight),
+                       accuracy: 1e-12)
+        // Gate off → the RMSSD term is ignored entirely.
+        XCTAssertEqual(DaytimeStress.dayRelativeZ(hr: 70, rmssd: 10, ref: ref, useRMSSD: false), 0, accuracy: 1e-12)
+    }
+
+    func testBimodalDaySpreadCapStillFlagsTheTenseHalf() {
+        // Half calm, half genuinely tense: the IQR spans both modes (σ ≈ 49 bpm). Without the
+        // `dayRelativeMaxHRSigma` cap the 120–130 bpm hours would read ≈1.5 and the day would hide its
+        // own stress; with it they read ≈2.9 and the calm hours ≈0.03. (Same scenario as
+        // `testSustainedHighFlagsAfterThreeConsecutiveHighHours`, which is what keeps that test green.)
+        var hr: [HRSample] = []
+        for h in [8, 9, 10] { hr += hourHR(h, bpm: 58) }
+        hr += hourHR(13, bpm: 120)
+        hr += hourHR(14, bpm: 125)
+        hr += hourHR(15, bpm: 130)
+        let r = DaytimeStress.analyze(hr: hr, rr: [])
+        for h in [13, 14, 15] { XCTAssertGreaterThan(r.scored.first { $0.hour == h }!.level!, 2.8) }
+        for h in [8, 9, 10] { XCTAssertLessThan(r.scored.first { $0.hour == h }!.level!, 0.1) }
+    }
+
+    // MARK: - Wake window
+
+    func testWakeWindowReplacesTheFixedWakingHours() {
+        // A late sleeper: asleep until ~10:00 (HR 50), up until ~23:30. With the fixed 06–22 window the
+        // still-asleep 06–09 hours are scored AND drag the day's reference down; with the real window
+        // they are neither, and the 22:00 hour (midpoint 22:30, still awake) is read too.
+        var hr: [HRSample] = []
+        for h in 6...9 { hr += hourHR(h, bpm: 50) }
+        // Awake hours 10–22; their median is 70 bpm (the 16:00 hour).
+        for (h, bpm) in zip(10...22, [64, 68, 70, 66, 73, 71, 70, 69, 75, 67, 72, 65, 70]) {
+            hr += hourHR(h, bpm: bpm)
+        }
+        let window = (10 * 3_600)...(23 * 3_600 + 1_800)
+
+        let fixed = DaytimeStress.analyze(hr: hr, rr: [])
+        let real = DaytimeStress.analyze(hr: hr, rr: [], wakeWindow: window)
+
+        XCTAssertTrue(fixed.hours.contains { $0.hour == 6 }, "precondition: the fixed window reads 06:00")
+        XCTAssertFalse(fixed.hours.contains { $0.hour == 22 })
+        XCTAssertFalse(real.hours.contains { $0.hour < 10 }, "asleep hours must not be scored")
+        XCTAssertTrue(real.hours.contains { $0.hour == 22 }, "an awake hour past 22:00 must be scored")
+        // Sleep hours no longer pull the reference down: the typical awake hour reads ≈1.0 with the real
+        // window, but reads elevated against the sleep-dragged reference of the fixed one.
+        let typicalReal = real.scored.first { $0.hour == 16 }!.level!    // 70 bpm = the awake median
+        let typicalFixed = fixed.scored.first { $0.hour == 16 }!.level!
+        XCTAssertEqual(typicalReal, 1.0, accuracy: 0.1)
+        XCTAssertGreaterThan(typicalFixed, typicalReal)
+    }
+
+    func testWakeWindowIsPartOfTheMemoKey() {
+        // Same streams, different window → different Result (never a stale cached one).
+        var hr: [HRSample] = []
+        for h in 8...14 { hr += hourHR(h, bpm: 60 + h) }
+        let a = DaytimeStress.analyze(hr: hr, rr: [], wakeWindow: (8 * 3_600)...(15 * 3_600))
+        let b = DaytimeStress.analyze(hr: hr, rr: [], wakeWindow: (11 * 3_600)...(15 * 3_600))
+        XCTAssertNotEqual(a.hours.count, b.hours.count)
+    }
+
+    // MARK: - Live stays on the hourly scale
+
+    func testLiveMatchesTheHourlyScale() {
+        // Same centre, spread and curve as the hours: a live window whose HR equals an hour's mean HR must
+        // read exactly that hour's level (no gravity → nothing masked → the reference sets coincide).
+        let day = DaytimeStress.analyze(hr: normalDay(), rr: [])
+        func window(_ bpm: Int) -> [HRSample] { (0..<120).map { HRSample(ts: 90_000 + $0, bpm: bpm) } }
+        for bpm in [62, 70, 80] {
+            let hourLevel = day.scored.first { $0.meanHR == Double(bpm) }!.level!
+            let live = DaytimeStress.live(hr: window(bpm), rr: [], dayHours: day.hours)
+            XCTAssertNotNil(live)
+            XCTAssertEqual(live!, hourLevel, accuracy: 1e-9, "live at \(bpm) bpm drifted off the hourly scale")
+        }
+        // A typical window at rest stays well under the live red warning (2.0).
+        XCTAssertLessThan(DaytimeStress.live(hr: window(70), rr: [], dayHours: day.hours)!, 2.0)
     }
 
     /// R-R for one hour with a controllable beat-to-beat jitter (drives RMSSD).

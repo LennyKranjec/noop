@@ -882,7 +882,8 @@ public enum AnalyticsEngine {
         // today's Effort same-day instead of being cut off at the night window's ≈ noon bound, and
         // the prior evening's HR (the night window's −30h tail) no longer bleeds in. Falls back to the
         // night `hr` for pure-function callers/tests.
-        let effMaxHR: Double? = maxHROverride ?? (profile.age > 0 ? StrainScorer.tanakaHRmax(age: profile.age) : nil)
+        // F5: the SAME resolution the live Today recompute uses (override, else Tanaka, else nil).
+        let effMaxHR: Double? = StrainScorer.effortHRmax(overrideBpm: maxHROverride, age: profile.age)
         let restForStrain = restingHRDaily.map(Double.init) ?? StrainScorer.defaultRestingHR
         // The Effort ring's own funnel. A nil sink builds nothing at all, so a caller that does not want
         // diagnostics pays nothing; IntelligenceEngine passes its per-day recorder, the same one the
@@ -1200,6 +1201,52 @@ public enum AnalyticsEngine {
                              efficiency: eff, restorativeSeconds: restorativeSec,
                              needHours: needHours, consistency: consistency,
                              deepSeconds: deepSec)
+        }
+
+        // ── The ONE personal need/consistency every Rest read uses (F4) ──────────────────────────────
+        // IntelligenceEngine computes the personalised need (`personalizedNeedHours`, population-anchored,
+        // age-floored) and the 28-night regularity ONCE per pass and scores every night's Rest with them in
+        // pass 1. The persisted `sleep_performance`, the pass-2 Charge "Rest quality" term and the display
+        // recomputes all called `composite(daily:)` with its defaults instead (8 h, neutral 0.5), so the
+        // same night had one Rest in the engine and another on screen, and the sleep-debt screen measured
+        // against a third need. The engine now records what it scored with here, and every other reader
+        // resolves through the same pair.
+
+        /// UserDefaults key: the personal sleep need (h) the latest analysis pass scored Rest with.
+        public static let engineNeedHoursKey = "noop.rest.engineNeedHours"
+        /// UserDefaults key: the sleep regularity [0,1] the latest analysis pass scored Rest with (absent =
+        /// no regularity signal, the neutral term).
+        public static let engineConsistencyKey = "noop.rest.engineConsistency"
+
+        /// Record the need/consistency an analysis pass scored with. A nil consistency CLEARS the stored
+        /// value, so a thin-history pass reverts readers to the neutral term with it.
+        public static func recordEngineInputs(needHours: Double, consistency: Double?,
+                                              defaults: UserDefaults = .standard) {
+            defaults.set(needHours, forKey: engineNeedHoursKey)
+            if let consistency { defaults.set(consistency, forKey: engineConsistencyKey) }
+            else { defaults.removeObject(forKey: engineConsistencyKey) }
+        }
+
+        /// The need the latest pass scored with, or nil before any pass has recorded one.
+        public static func engineNeedHours(_ defaults: UserDefaults = .standard) -> Double? {
+            guard defaults.object(forKey: engineNeedHoursKey) != nil else { return nil }
+            let v = defaults.double(forKey: engineNeedHoursKey)
+            return v > 0 ? v : nil
+        }
+
+        /// The regularity the latest pass scored with, or nil (neutral) when none was recorded.
+        public static func engineConsistency(_ defaults: UserDefaults = .standard) -> Double? {
+            guard defaults.object(forKey: engineConsistencyKey) != nil else { return nil }
+            return defaults.double(forKey: engineConsistencyKey)
+        }
+
+        /// `composite(daily:)` scored with the engine's recorded need and regularity — what a display
+        /// surface calls so its Rest agrees with the persisted `sleep_performance` and the Charge term.
+        /// Before the first pass it is exactly the default-argument composite.
+        public static func compositeWithEngineInputs(daily d: DailyMetric,
+                                                     defaults: UserDefaults = .standard) -> Double? {
+            composite(daily: d, needHours: engineNeedHours(defaults) ?? defaultNeedHours,
+                      consistency: engineConsistency(defaults))
         }
     }
 

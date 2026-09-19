@@ -138,6 +138,39 @@ public enum StrainScorer {
     /// Tanaka (2001): HRmax = 208 − 0.7 × age (gender-independent).
     public static func tanakaHRmax(age: Double) -> Double { 208.0 - 0.7 * age }
 
+    /// The HRmax Effort is scored against: the user's Settings override when set (> 0), else Tanaka from
+    /// age, else nil (the scorer's own fallback).
+    ///
+    /// ONE resolution for every Effort path (F5). The daily pass already resolved it this way, but the live
+    /// in-progress recompute on both Today screens used Tanaka unconditionally, so a user with an override
+    /// saw the live ring scored against a different HRmax than the stored row — and because
+    /// `effectiveEffort` takes the MAX of the two, whichever HRmax happened to be more generous won.
+    /// `overrideBpm` is the raw stored override; 0 (the "Auto" setting) or a negative value means unset.
+    public static func effortHRmax(overrideBpm: Double?, age: Double) -> Double? {
+        if let o = overrideBpm, o > 0 { return o }
+        return age > 0 ? tanakaHRmax(age: age) : nil
+    }
+
+    /// Minimum workouts carrying a peak HR before `robustObservedHRmax` trusts them.
+    public static let robustHRmaxMinWorkouts: Int = 5
+    /// Plausible per-workout peak band (bpm). Anything outside is a sensor artefact (a spike from a loose
+    /// strap, or a peak that never left the resting range), not evidence about HRmax.
+    public static let robustHRmaxPlausible: ClosedRange<Double> = 100...220
+
+    /// A robust OBSERVED HRmax from per-workout PEAK heart rates: the SECOND-highest plausible peak, once
+    /// at least `robustHRmaxMinWorkouts` workouts carry one; nil otherwise.
+    ///
+    /// F7: `estimateHRmax` wants a dense HR history (≥ `hrmaxMinSamples` readings) and takes its 99th
+    /// percentile. Handed one peak per workout — a list that almost never reaches 600 entries — it fell
+    /// back to Tanaka every time, so VO₂max never saw the wearer's own ceiling. A peak list is a different
+    /// kind of evidence and needs a different robust statistic: the single highest peak is the one most
+    /// likely to be an artefact, so it is discarded and the runner-up is taken. Pure.
+    public static func robustObservedHRmax(workoutPeaks: [Double]) -> Double? {
+        let peaks = workoutPeaks.filter { $0.isFinite && robustHRmaxPlausible.contains($0) }.sorted(by: >)
+        guard peaks.count >= robustHRmaxMinWorkouts else { return nil }
+        return peaks[1]
+    }
+
     /// Classic 220 − age. Last-resort fallback only.
     public static func defaultMaxHR(age: Int = defaultAge) -> Int { 220 - age }
 

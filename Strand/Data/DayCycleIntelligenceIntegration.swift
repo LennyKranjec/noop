@@ -203,7 +203,7 @@ import WhoopStore
             let cycleHR = hrByTimestamp.values.sorted { $0.ts < $1.ts }
             let restingHR = nights.first(where: { $0.daily.day == day })?.daily.restingHr.map(Double.init)
                 ?? StrainScorer.defaultRestingHR
-            let effectiveMaxHR = maxHROverride ?? (profile.age > 0 ? StrainScorer.tanakaHRmax(age: profile.age) : nil)
+            let effectiveMaxHR = StrainScorer.effortHRmax(overrideBpm: maxHROverride, age: profile.age)
             if let strain = StrainScorer.strain(cycleHR, maxHR: effectiveMaxHR,
                                                 restingHR: restingHR, method: effortMethod,
                                                 sex: profile.sex) { strains[day] = strain }

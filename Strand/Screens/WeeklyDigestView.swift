@@ -54,7 +54,7 @@ enum WeeklyDigestSource {
     /// for a day with no in-bed sleep / missing efficiency, so non-sleep days are simply
     /// absent from the Rest series.
     private static func restScore(for d: DailyMetric) -> Double? {
-        AnalyticsEngine.Rest.composite(daily: d)
+        AnalyticsEngine.Rest.compositeWithEngineInputs(daily: d)   // F4: the engine's need/regularity
     }
 }
 

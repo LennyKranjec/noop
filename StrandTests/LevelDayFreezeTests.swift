@@ -39,11 +39,15 @@ final class LevelDayFreezeTests: XCTestCase {
             components: [LevelComponent(part: .sleep, score: 71, effectiveWeight: 0.3),
                          LevelComponent(part: .lungs, score: nil, effectiveWeight: 0)],
             raw: 64.2, stepPenalty: 0.97, level: 62.3, coverage: 0.93)
-        let frozen = FrozenLevel(day: "2026-09-16", breakdown: breakdown, drivers: [.sleep: .restorativeSleep])
+        let frozen = FrozenLevel(day: "2026-09-16", breakdown: breakdown, drivers: [.sleep: .restorativeSleep],
+                                 missing: [.vo2max, .strength], partial: true, backfilled: false,
+                                 computedAt: Date(timeIntervalSince1970: 1_789_000_000))
         let data = try! JSONEncoder().encode(frozen)
         let back = try! JSONDecoder().decode(FrozenLevel.self, from: data)
         XCTAssertEqual(back, frozen)
         XCTAssertEqual(back.breakdown, breakdown)
+        XCTAssertEqual(back.missingInputs, [.vo2max, .strength])
+        XCTAssertTrue(back.partial)
     }
 
     func testTheFrozenDayReadsTheLastCompleteDaysActivityAndThisMorningsNight() {
@@ -61,8 +65,10 @@ final class LevelDayFreezeTests: XCTestCase {
         XCTAssertEqual(inputs.steps, 10_000)
         // The HRV mean includes this morning's night (seven days: six at 60, one at 90).
         XCTAssertEqual(inputs.hrv ?? 0, (6 * 60.0 + 90) / 7, accuracy: 1e-9)
-        XCTAssertTrue(LevelWiring.nightLanded(days: days, day: "2026-09-16"))
-        XCTAssertFalse(LevelWiring.nightLanded(days: days, day: "2026-09-17"))
+        // A night with HRV, resting HR and sleep but no stages has not fully landed; no row at all has not either.
+        let byDay = LevelWiring.byDay(days)
+        XCTAssertFalse(LevelLedger.isReady(day: "2026-09-16", byDay: byDay, series: series, calendar: calendar))
+        XCTAssertFalse(LevelLedger.isReady(day: "2026-09-17", byDay: byDay, series: series, calendar: calendar))
     }
 
     func testTheMeditationShareIsNotResetByOneMissedDay() {

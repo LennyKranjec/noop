@@ -18,8 +18,19 @@ enum CoachLevelContext {
         var s = "THE LEVEL — YOUR PRIMARY OBJECTIVE IS TO RAISE THIS SCORE. Every recommendation should "
         s += "say which part of the level it moves and roughly how many points it is worth.\n"
 
-        if let frozen = LevelDayFreeze.stored() {
+        // FROM THE LEDGER, like every other surface: the current day's written level, or — while its night
+        // is still syncing — the last day that was written, said to be exactly that.
+        let calendar = Calendar.current
+        let dayKey = LevelWiring.key(from: LevelDayFreeze.levelDay(calendar: calendar), calendar: calendar)
+        let ledger = LevelLedger.shared
+        if let frozen = ledger.entry(dayKey) ?? ledger.latest(onOrBefore: dayKey) {
             let b = frozen.breakdown
+            if frozen.day != dayKey {
+                s += "Today's level is not set yet (last night is still syncing); the figure below is the last day that was.\n"
+            }
+            if frozen.partial {
+                s += "That level was set at the day's deadline with the night only partly synced.\n"
+            }
             s += String(format: "Level for %@: %.1f (no upper limit; 100 = every part at the wearer's own 95th percentile; set on the first app open of the morning and held all day).\n", frozen.day, b.level)
             s += "Parts (score, 50 = average and 100 = own 95th percentile · effective weight · points contributed · points still missing to 100):\n"
             for c in b.components {

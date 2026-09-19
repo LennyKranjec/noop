@@ -248,12 +248,6 @@ enum LevelWiring {
         return inputs
     }
 
-    /// Whether the night that ended on `day` has arrived — the half of a day's level that comes from
-    /// that morning. Until it has, the day cannot be scored and must not be frozen.
-    static func nightLanded(days: [DailyMetric], day: String) -> Bool {
-        days.contains { $0.day == day && ($0.avgHrv != nil || $0.restingHr != nil || $0.totalSleepMin != nil) }
-    }
-
     /// `yyyy-MM-dd`, in the calendar's own zone, matching every other day key in the app.
     ///
     /// BUILT FROM COMPONENTS, not by a `DateFormatter`. These two are the hottest functions in the level

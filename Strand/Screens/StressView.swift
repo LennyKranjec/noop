@@ -181,7 +181,9 @@ struct StressView: View {
         // DB / schema change, and no effect on the 0..3 score above). Each engine returns nil when
         // its own gate is not met (Baevsky needs >= 20 clean beats; freq-HRV needs >= 60 s span),
         // in which case its row is simply hidden.
-        stressIndex = StressIndex.components(rr: rr)
+        // F8: the MEDIAN of today's 5-minute windows, not one histogram over midnight → now — pooling
+        // the night, workouts and rest into one R-R distribution measured the day's HR spread, not rigidity.
+        stressIndex = StressIndex.medianWindowComponents(rr: rr)
         freqHRV = HRVFreqDomain.freqDomain(rr: rr)
     }
 

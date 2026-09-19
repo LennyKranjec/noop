@@ -82,6 +82,8 @@ struct LevelOverlayBarView: View {
                 countUpKey: countUpKey
             )
             .offset(y: levelRadarDrop)
+            // Last written day held up while today's night syncs: dimmed, so it does not read as today's.
+            .opacity(trend?.pendingToday == true ? 0.55 : 1)
             .contentShape(PentagonShape())
             .onTapGesture {
                 guard breakdown != nil else { return }
@@ -269,6 +271,9 @@ struct LevelTrendSnapshot {
     /// Yesterday's level, for the morning brief's arrow.
     let yesterdayLevel: Double?
     let drivers: [LevelPart: LevelDriver]
+    /// The current day is not in the ledger yet — its night is still syncing — so `now` is the last day
+    /// that was written, held up in its place. Nothing should present it as today's.
+    let pendingToday: Bool
 
     init(
         now: LevelBreakdown?,
@@ -277,8 +282,10 @@ struct LevelTrendSnapshot {
         threeDayMean: Double? = nil,
         monthMean: Double? = nil,
         yesterdayLevel: Double? = nil,
-        drivers: [LevelPart: LevelDriver] = [:]
+        drivers: [LevelPart: LevelDriver] = [:],
+        pendingToday: Bool = false
     ) {
+        self.pendingToday = pendingToday
         self.yesterdayLevel = yesterdayLevel
         self.now = now
         self.threeDaysAgo = threeDaysAgo

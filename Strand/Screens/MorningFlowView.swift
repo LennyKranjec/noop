@@ -16,8 +16,13 @@ import WhoopStore
 //
 // THE DAY'S LEVEL IS COMPUTED HERE. Opening the flow marks the day as begun (`LevelDayFreeze.beginDay`),
 // forces a fresh sync of strap and cloud, and reloads the level — so by the time the brief is on screen,
-// today's level has been scored from the night and frozen for the day. The work starts the moment the
+// today's level has been scored from the night and written to the ledger. The work starts the moment the
 // flow opens, and runs while the wearer is writing, so the brief is ready when they reach it.
+//
+// IF THE NIGHT IS NOT IN YET, THE BRIEF SAYS SO. It used to show whatever the strip was holding up, which
+// before the night landed was yesterday's level under the heading "your level today". Now the brief shows
+// a level only once TODAY's entry exists in the ledger, and until then says the night is still syncing —
+// and keeps looking, for a while, as syncs come in.
 
 // MARK: - The look
 
@@ -299,15 +304,53 @@ final class DailyBriefModel: ObservableObject {
 
     private var prepared = false
 
+    /// How long the brief keeps looking for today's level after it is first drawn, and how often.
+    static let pollSeconds: UInt64 = 15
+    static let pollWindowSeconds = 600
+
     /// Sync, score and freeze the day's level, and gather the night's figures.
     func prepare(repo: Repository, levelBar: LevelBarModel) async {
         guard !prepared else { return }
         prepared = true
         await repo.refreshEverything(force: true)
         await levelBar.reload(repo: repo)
-        level = levelBar.trend?.now?.level
-        levelYesterday = levelBar.trend?.yesterdayLevel
+        readLevel()
+        await gatherNight(repo: repo)
+        ready = true
 
+        // THE NIGHT MAY STILL BE ON ITS WAY. Rather than settle for "still syncing", the brief keeps
+        // looking for ten minutes: every new sync reloads the level, and every other minute it checks
+        // anyway, in case the deadline has passed and the day has been written as it stands.
+        var seq = repo.refreshSeq
+        var waited = 0
+        while level == nil, waited < Self.pollWindowSeconds {
+            try? await Task.sleep(nanoseconds: Self.pollSeconds * 1_000_000_000)
+            if Task.isCancelled { return }
+            waited += Int(Self.pollSeconds)
+            guard repo.refreshSeq != seq || waited % 120 == 0 else { continue }
+            seq = repo.refreshSeq
+            await levelBar.reload(repo: repo)
+            readLevel()
+            if level != nil { await gatherNight(repo: repo) }
+        }
+    }
+
+    /// Today's level and yesterday's, from the ledger only. Nil until TODAY is written — the last written
+    /// day is never passed off as this morning's.
+    private func readLevel() {
+        let calendar = Calendar.current
+        let dayKey = LevelWiring.key(from: LevelDayFreeze.levelDay(calendar: calendar), calendar: calendar)
+        guard let entry = LevelLedger.shared.entry(dayKey) else {
+            level = nil
+            levelYesterday = nil
+            return
+        }
+        level = entry.level
+        levelYesterday = LevelWiring.shift(dayKey, -1, calendar).flatMap { LevelLedger.shared.entry($0)?.level }
+    }
+
+    /// Rest, Charge and the night's key figures against the night before.
+    private func gatherNight(repo: Repository) async {
         let today = Repository.localDayKey(Date())
         let own = await repo.noopScores(day: today)
         let row = repo.days.first { $0.day == today }
@@ -318,7 +361,6 @@ final class DailyBriefModel: ObservableObject {
         let yesterdayKey = Repository.localDayKey(Date().addingTimeInterval(-86_400))
         let prev = repo.days.first { $0.day == yesterdayKey }
         metrics = Self.metrics(today: row, yesterday: prev)
-        ready = true
     }
 
     static func metrics(today: DailyMetric?, yesterday: DailyMetric?) -> [Metric] {
@@ -444,7 +486,7 @@ struct DailyBriefView: View {
                 Text(model.ready ? "–" : "…")
                     .font(Diag.display(88))
                     .foregroundStyle(.white)
-                Text(model.ready ? "Last night has not synced yet, so today's level is still to come."
+                Text(model.ready ? "Last night is still syncing. Today's level is set once it lands."
                                  : "Scoring the night…")
                     .font(.system(size: 14))
                     .foregroundStyle(Diag.grey)

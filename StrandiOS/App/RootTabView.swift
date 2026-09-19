@@ -53,8 +53,9 @@ struct RootTabView: View {
     /// The health store, for today's macros.
     @EnvironmentObject private var health: HealthKitBridge
 
-    /// The level strip's own data. Owned by the shell because the strip rides above every tab.
-    @StateObject private var levelBar = LevelBarModel()
+    /// The level strip's data. The app's one `LevelBarModel`, shared with the Health tab, so there is a
+    /// single writer to the level ledger rather than two instances racing to freeze the same morning.
+    @ObservedObject private var levelBar = LevelBarModel.shared
     /// Presents the level timeline the radar opens.
     @State private var showLevelTimeline = false
     /// Remembered for the LIFE OF THE SHELL, so the count-up runs once on opening rather than every

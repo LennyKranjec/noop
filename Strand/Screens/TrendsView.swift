@@ -44,8 +44,9 @@ struct TrendsView: View {
     }
 
     /// The level snapshot the vital trio reads. Loaded once per data change rather than recomputed in
-    /// the body: the formula walks the whole history, and the body runs on every hover.
-    @StateObject private var levelBar = LevelBarModel()
+    /// the body: the formula walks the whole history, and the body runs on every hover. The SHARED model,
+    /// the same one the shell's strip reads — one writer to the level ledger, not one per screen.
+    @ObservedObject private var levelBar = LevelBarModel.shared
     private var levelTrend: LevelTrendSnapshot? { levelBar.trend }
     /// Pushes the Sleep screen from the third vital tile.
     @State private var openSleep = false

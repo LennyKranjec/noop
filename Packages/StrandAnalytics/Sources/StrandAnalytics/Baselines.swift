@@ -525,6 +525,58 @@ public enum Baselines {
                              nightsSinceUpdate: 0, status: .calibrating)
     }
 
+    /// POINT-IN-TIME baselines: for every day key in `asOf`, the state the epoch-aware
+    /// `foldHistory(_:dayKeys:cfg:baselineEpoch:)` would return over ONLY the nights dated STRICTLY
+    /// BEFORE that day. Day D is scored against the baseline as it stood after night D−1, and night D is
+    /// folded in only afterwards.
+    ///
+    /// WHY this exists (F3): the Charge re-score folded the WHOLE history up to the newest night and then
+    /// re-scored every day in the window against that one final state. So a day's Charge was measured
+    /// against a baseline that already contained its own night (pulling every deviation toward zero) and
+    /// every LATER night, which made a stored past score move each time a new night arrived. Scoring each
+    /// day against its own prior state fixes both, and a past day's stored score is now stable: nothing
+    /// dated on or after it can reach its baseline.
+    ///
+    /// Still ONE O(n + m log m) pass: the history is walked once in order and a snapshot is taken as the
+    /// walk crosses each requested day. `dayKeys` must be ascending ("yyyy-MM-dd" sorts chronologically)
+    /// and parallel to `values`; `asOf` may be in any order and may name days with no night of their own.
+    /// A day with no earlier night gets the same empty calibrating seed `foldHistory` returns for an empty
+    /// history. By construction `foldHistoryAsOf(v, k, asOf: [d])[d]` equals `foldHistory` over the
+    /// prefix of `v` whose keys sort before `d` (pinned by `BaselinesAsOfTests`).
+    public static func foldHistoryAsOf(_ values: [Double?], dayKeys: [String], cfg: MetricCfg,
+                                       baselineEpoch: Double? = nil,
+                                       asOf days: [String]) -> [String: BaselineState] {
+        let epoch = baselineEpoch ?? hrvBaselineEpoch()
+        // Same drop rule as the epoch-aware fold: UTC day-start parse, strict `<`. Built only when a
+        // recalibration is actually set, so the no-epoch path does no date parsing at all.
+        let fmt: DateFormatter? = {
+            guard epoch > 0 else { return nil }
+            let f = DateFormatter()
+            f.calendar = Calendar(identifier: .gregorian)
+            f.timeZone = TimeZone(secondsFromGMT: 0)
+            f.dateFormat = "yyyy-MM-dd"
+            return f
+        }()
+        let emptySeed = BaselineState(baseline: (cfg.minVal + cfg.maxVal) / 2.0, spread: cfg.floorSpread,
+                                      nValid: 0, nightsSinceUpdate: 0, status: .calibrating)
+        let n = min(values.count, dayKeys.count)
+        var out: [String: BaselineState] = [:]
+        var state: BaselineState? = nil
+        var i = 0
+        for day in Set(days).sorted() {
+            while i < n && dayKeys[i] < day {
+                let dropped: Bool = {
+                    guard let fmt, let d = fmt.date(from: dayKeys[i]) else { return false }
+                    return d.timeIntervalSince1970 < epoch
+                }()
+                if !dropped { state = update(state, value: values[i], cfg: cfg) }
+                i += 1
+            }
+            out[day] = state ?? emptySeed
+        }
+        return out
+    }
+
     // MARK: - Device-era boundary (#459)
 
     /// The recalibration epoch (seconds, UTC start-of-day) at the LATEST device-era boundary in a

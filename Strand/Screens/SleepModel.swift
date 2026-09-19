@@ -371,8 +371,16 @@ extension SleepModel {
     /// would only raise it for under-18s. One need across every debt surface, agreeing with the engine.
     /// (#242; need-unification from #464 by @vishk23. The descriptive `sleepNeedMin` still drives the
     /// non-debt "hours vs needed" performance tile.)
-    static func debtNeedMin(days: [DailyMetric]) -> Double {
-        AnalyticsEngine.Rest.personalizedNeedHours(
+    ///
+    /// F4: the SAME need, not merely the same estimator. Re-running `personalizedNeedHours` here over the
+    /// screen's daily totals with no age gave a different number from the one the engine scored Rest and
+    /// Charge with (its per-night session history, the profile's age). The engine now records the need it
+    /// used (`Rest.engineNeedHours`), and debt measures against that; the local estimate below is only the
+    /// cold-start fallback before the first analysis pass has recorded one.
+    static func debtNeedMin(days: [DailyMetric],
+                            engineNeedHours: Double? = AnalyticsEngine.Rest.engineNeedHours()) -> Double {
+        if let engineNeedHours { return engineNeedHours * 60.0 }
+        return AnalyticsEngine.Rest.personalizedNeedHours(
             nightlyHours: days.compactMap { $0.totalSleepMin.map { $0 / 60.0 } },
             age: nil) * 60.0
     }
@@ -412,7 +420,7 @@ extension SleepModel {
         let imported = importedSleep
         return metric(days: days) { d in
             if let p = imported[d.day]?.performancePct { return p }   // export-verbatim
-            return AnalyticsEngine.Rest.composite(daily: d)            // real resolved Rest composite
+            return AnalyticsEngine.Rest.compositeWithEngineInputs(daily: d)   // real resolved Rest (F4: engine need)
         }
     }
 
