@@ -302,8 +302,9 @@ final class AICoachEngine: ObservableObject {
     If no data is provided, coach generally and invite them to turn on data access for personalised \
     advice. You are NOT a doctor - never diagnose; suggest a professional for genuine health concerns.
     Format replies in simple Markdown, chat-sized: short paragraphs, **bold** for key numbers, \
-    bullet or numbered lists for plans, ### headings only when structure genuinely helps, and a \
-    small table only for a week-ahead plan. No code blocks.
+    bullet or numbered lists for plans (a week-ahead plan too: one short bullet per day), ### headings \
+    only when structure genuinely helps. Replies are read on a phone: avoid Markdown tables, at most one \
+    very small table (3 columns or fewer, 4 rows or fewer) and only if truly necessary. No code blocks.
     """
 
     /// The system prompt actually sent, read FRESH from UserDefaults on every request so an edit in
@@ -708,6 +709,7 @@ final class AICoachEngine: ObservableObject {
         // A new thread is a new subject: the quest that opened the last one is not the subject of this
         // one, and carrying it would have the coach answering about a directive the wearer has left.
         activeQuest = nil
+        activeWorkoutDossier = nil
         droppedSummary = nil      // K13: reset the summary cache on clear
         droppedSummaryKey = []
         Task { try? await repo.storeHandle()?.clearCoachMessages() }
@@ -779,6 +781,11 @@ final class AICoachEngine: ObservableObject {
     }
 
     @Published private(set) var activeQuest: QuestContext?
+
+    /// The workout the wearer asked "AI feedback" on in Today (`WorkoutFeedbackDossier`), held like
+    /// `activeQuest`: rebuilt into every context of the thread, cleared with the conversation. Set via
+    /// `beginWorkoutFeedback`.
+    @Published var activeWorkoutDossier: String?
 
     /// K11: An optional chart image (base64-encoded PNG) to send with the next user message.
     /// Set by the composer's "Attach chart" toggle when multimodal is enabled and the provider
@@ -1020,8 +1027,13 @@ final class AICoachEngine: ObservableObject {
     /// `grounding` is the data block. It is passed in rather than read here so a caller that needs a
     /// SPECIFIC grounding (the muscle note wants the muscle table, not the sleep summary) is not forced
     /// to send the whole context and hope the model picks the right half out of it.
-    func generateOneShot(systemPrompt: String, question: String) async -> String? {
-        guard isConfigured, dataConsent, let key = resolvedKey else { return nil }
+    ///
+    /// `requiresDataConsent: false` is for a caller that sends NO data block — only the wearer's own
+    /// words and the non-biometric session constraints, exactly what the chat sends without consent
+    /// (the custom-task writer). Every grounded caller keeps the default.
+    func generateOneShot(systemPrompt: String, question: String,
+                         requiresDataConsent: Bool = true) async -> String? {
+        guard isConfigured, dataConsent || !requiresDataConsent, let key = resolvedKey else { return nil }
         backgroundWork += 1
         defer { backgroundWork -= 1 }
         let reply = try? await provider.client.send(
@@ -1119,6 +1131,7 @@ final class AICoachEngine: ObservableObject {
         let extra = await CoachExtraContext.block(repo: repo)
         if !extra.isEmpty { ctx += "\n\n" + extra }
         if let activeQuest { ctx += "\n\n" + activeQuest.promptBlock }
+        if let activeWorkoutDossier { ctx += "\n\n" + activeWorkoutDossier }
         // THE SKY RIDES THE SYSTEM PROMPT, not this block: the weather now and today's forecast go out
         // with every request (`requestSystemPrompt`), consent or not, so adding them here sends them twice.
         if includeOnDeviceSignals {
@@ -1210,7 +1223,7 @@ final class AICoachEngine: ObservableObject {
         try await provider.client.send(
             key: key,
             model: model,
-            systemPrompt: requestSystemPrompt(systemPrompt),
+            systemPrompt: requestSystemPrompt(Self.withMobileFormatting(systemPrompt)),
             messages: messages,
             session: session
         )
@@ -1227,7 +1240,7 @@ final class AICoachEngine: ObservableObject {
         try await provider.client.streamWithImage(
             key: key,
             model: model,
-            systemPrompt: requestSystemPrompt(systemPrompt),
+            systemPrompt: requestSystemPrompt(Self.withMobileFormatting(systemPrompt)),
             messages: messages,
             inlineImage: inlineImage,
             session: session,

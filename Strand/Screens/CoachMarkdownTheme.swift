@@ -130,14 +130,19 @@ extension Theme {
                 .frame(height: 1)
                 .markdownMargin(top: 10, bottom: 10)
         }
+        // Compact on a phone: smaller cell text and tighter padding, and a table wider than the bubble
+        // scrolls sideways (like a code block) instead of blowing the layout up. The system prompt asks
+        // the model to avoid tables altogether; this is only the safety net for when one arrives anyway.
         .table { configuration in
-            configuration.label
-                .fixedSize(horizontal: false, vertical: true)
-                .markdownTableBorderStyle(.init(color: StrandPalette.hairline))
-                .markdownTableBackgroundStyle(
-                    .alternatingRows(Color.clear, StrandPalette.surfaceInset)
-                )
-                .markdownMargin(top: 4, bottom: 8)
+            ScrollView(.horizontal, showsIndicators: false) {
+                configuration.label
+                    .fixedSize(horizontal: false, vertical: true)
+                    .markdownTableBorderStyle(.init(color: StrandPalette.hairline))
+                    .markdownTableBackgroundStyle(
+                        .alternatingRows(Color.clear, StrandPalette.surfaceInset)
+                    )
+            }
+            .markdownMargin(top: 4, bottom: 8)
         }
         .tableCell { configuration in
             configuration.label
@@ -145,11 +150,11 @@ extension Theme {
                     if configuration.row == 0 {
                         FontWeight(.semibold)
                     }
-                    FontSize(.em(0.9))
+                    FontSize(.em(0.8))
                 }
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.vertical, 5)
-                .padding(.horizontal, 10)
-                .relativeLineSpacing(.em(0.2))
+                .padding(.vertical, 3)
+                .padding(.horizontal, 6)
+                .relativeLineSpacing(.em(0.15))
         }
 }

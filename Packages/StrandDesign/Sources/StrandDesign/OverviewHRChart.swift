@@ -8,7 +8,8 @@ import Charts
 //
 // The Today screen's 24h heart-rate line, annotated like WHOOP's "Overview HR":
 // the warm HR curve overlaid with a sleep band, a recovery marker at wake, a
-// strain marker at "now", and a sport glyph at each workout's HR peak. The line +
+// strain marker at "now", and each workout shaded as a tinted span (start/end rules) with its
+// sport glyph above the HR peak. The line +
 // hover affordance mirror `TrendChart`; this view adds the marker layers and pins
 // the x-axis to the HR window so markers never stretch the timeline.
 //
@@ -28,14 +29,32 @@ public struct OverviewHRChart: View {
         }
     }
 
-    /// A workout window; the sport glyph is placed at the HR peak inside [start, end].
+    /// A workout window: shaded as a tinted band with start/end rules, and the sport glyph is placed
+    /// above the HR peak inside the visible part of [start, end].
     public struct WorkoutSpan: Identifiable, Sendable {
         public let id = UUID()
         public var start: Date
         public var end: Date
         public var symbol: String          // SF Symbol (see `sportSymbol`)
-        public init(start: Date, end: Date, symbol: String) {
-            self.start = start; self.end = end; self.symbol = symbol
+        /// Display name for the scrub tooltip (e.g. "Running"); nil falls back to "Workout".
+        public var label: String?
+        public init(start: Date, end: Date, symbol: String, label: String? = nil) {
+            self.start = start; self.end = end; self.symbol = symbol; self.label = label
+        }
+    }
+
+    /// A workout's VISIBLE band: overlapping workouts merged into one union (so a double-logged session
+    /// doesn't stack two translucent fills into a darker one), then clipped to the visible window.
+    /// `startsInWindow` / `endsInWindow` are false where the band was cut at the window edge — that edge
+    /// is the plot boundary, not a real workout start/end, so it gets no rule.
+    public struct WorkoutBand: Equatable, Sendable {
+        public var start: Date
+        public var end: Date
+        public var startsInWindow: Bool
+        public var endsInWindow: Bool
+        public init(start: Date, end: Date, startsInWindow: Bool, endsInWindow: Bool) {
+            self.start = start; self.end = end
+            self.startsInWindow = startsInWindow; self.endsInWindow = endsInWindow
         }
     }
 
@@ -196,6 +215,35 @@ public struct OverviewHRChart: View {
         candidates.filter { $0.end >= window.lowerBound && $0.start <= window.upperBound }
     }
 
+    /// The bands to shade for `spans` inside `window`: degenerate spans (end <= start) dropped, overlapping
+    /// or touching spans merged into their union, then each clipped to the window. A band that would be
+    /// zero-width after clipping (a workout ending exactly at the window start) is dropped. Sorted by start. Pure.
+    public static func workoutBands(_ spans: [WorkoutSpan], clippedTo window: ClosedRange<Date>) -> [WorkoutBand] {
+        let sorted = spans.filter { $0.end > $0.start }.sorted { $0.start < $1.start }
+        var merged: [(start: Date, end: Date)] = []
+        for s in sorted {
+            if let last = merged.last, s.start <= last.end {
+                merged[merged.count - 1].end = max(last.end, s.end)
+            } else {
+                merged.append((start: s.start, end: s.end))
+            }
+        }
+        let lo = window.lowerBound, hi = window.upperBound
+        return merged.compactMap { m in
+            let start = max(m.start, lo), end = min(m.end, hi)
+            guard end > start else { return nil }
+            return WorkoutBand(start: start, end: end, startsInWindow: m.start > lo, endsInWindow: m.end < hi)
+        }
+    }
+
+    /// The workout containing `date` (edges inclusive), for the scrub tooltip. When sessions overlap, the
+    /// most recently started one wins (it's the one the HR at that moment most plausibly belongs to). Pure.
+    public static func workout(at date: Date, in spans: [WorkoutSpan]) -> WorkoutSpan? {
+        spans
+            .filter { $0.start <= date && date <= $0.end }
+            .max(by: { $0.start < $1.start })
+    }
+
     /// The visible domain after panning `base` by `deltaSeconds`, clamped into `bounds` (span preserved). Pure.
     public static func panned(_ base: ClosedRange<Date>, deltaSeconds: Double,
                               bounds: ClosedRange<Date>) -> ClosedRange<Date> {
@@ -248,12 +296,22 @@ public struct OverviewHRChart: View {
         LinearGradient(gradient: gradient, startPoint: .bottom, endPoint: .top)
     }
 
-    /// The peak HR sample inside a workout window, where its glyph is anchored.
-    private func peak(in w: WorkoutSpan) -> TrendPoint? {
+    /// The peak sample inside [start, end], where a workout glyph is anchored vertically.
+    private func peak(from start: Date, to end: Date) -> TrendPoint? {
         points
-            .filter { $0.date >= w.start && $0.date <= w.end }
+            .filter { $0.date >= start && $0.date <= end }
             .max(by: { $0.value < $1.value })
     }
+
+    /// Workout bands clipped to the CURRENT visible domain (zoom-aware), merged where sessions overlap.
+    private var visibleWorkoutBands: [WorkoutBand] {
+        Self.workoutBands(workouts, clippedTo: xDomain)
+    }
+
+    /// Workout span fill / edge-rule tint: the badge tint at low opacity, so the band reads as "this
+    /// stretch was training" in both appearances without competing with the data line drawn over it.
+    private static let workoutBandOpacity: Double = 0.15
+    private static let workoutRuleOpacity: Double = 0.55
 
     private func nearestPoint(toX x: CGFloat, proxy: ChartProxy, plot: CGRect) -> TrendPoint? {
         guard !points.isEmpty else { return nil }
@@ -278,6 +336,30 @@ public struct OverviewHRChart: View {
                 xEnd: .value("Sleep end", clampX(sleep.end))
             )
             .foregroundStyle(StrandPalette.sleepDeep.opacity(0.32))
+        }
+
+        // Workout spans — a tinted band over each (merged, window-clipped) session plus a solid rule at
+        // its start and a dashed rule at its end, so "why is HR different here" reads at a glance. Drawn
+        // BEFORE the area/line so the data sits on top. Edges cut by the window get no rule (see WorkoutBand).
+        let bands = visibleWorkoutBands
+        ForEach(bands.indices, id: \.self) { i in
+            RectangleMark(
+                xStart: .value("Workout start", bands[i].start),
+                xEnd: .value("Workout end", bands[i].end)
+            )
+            .foregroundStyle(workoutTint.opacity(Self.workoutBandOpacity))
+        }
+        let startRules = bands.filter(\.startsInWindow).map(\.start)
+        ForEach(startRules.indices, id: \.self) { i in
+            RuleMark(x: .value("Workout start", startRules[i]))
+                .foregroundStyle(workoutTint.opacity(Self.workoutRuleOpacity))
+                .lineStyle(StrokeStyle(lineWidth: 1))
+        }
+        let endRules = bands.filter(\.endsInWindow).map(\.end)
+        ForEach(endRules.indices, id: \.self) { i in
+            RuleMark(x: .value("Workout end", endRules[i]))
+                .foregroundStyle(workoutTint.opacity(Self.workoutRuleOpacity))
+                .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
         }
 
         ForEach(displayPoints) { p in
@@ -353,15 +435,33 @@ public struct OverviewHRChart: View {
             placed(MarkerLabel(text: effort.label, color: effort.color),
                    atX: sx, topY: topY, width: estWidth(effort.label), plot: plot)
         }
+        // One glyph per workout, centred over the VISIBLE part of its span (so it sits on the band, and a
+        // workout outside the zoom window gets no glyph dragged to the plot edge). Vertically it floats
+        // just above the metric's peak inside that part, or at the band top when there's no sample there.
+        let domain = xDomain
         ForEach(workouts) { w in
-            if let pk = peak(in: w),
-               let px = xPos(pk.date, proxy, plot),
-               let pyRel = proxy.position(forY: pk.value) {
-                let cx = min(max(px, plot.minX + 14), plot.maxX - 14)
+            let visStart = max(w.start, domain.lowerBound)
+            let visEnd = min(w.end, domain.upperBound)
+            if visEnd >= visStart,
+               let x0 = xPos(visStart, proxy, plot),
+               let x1 = xPos(visEnd, proxy, plot) {
+                let cx = min(max((x0 + x1) / 2, plot.minX + 14), plot.maxX - 14)
+                let peakY: CGFloat? = peak(from: visStart, to: visEnd)
+                    .flatMap { proxy.position(forY: $0.value) }
+                    .map { $0 + plot.minY - 20 }
                 WorkoutBadge(symbol: w.symbol, tint: workoutTint)
-                    .position(x: cx, y: max(topY + 26, pyRel + plot.minY - 20))
+                    .position(x: cx, y: max(topY + 26, peakY ?? (topY + 26)))
             }
         }
+    }
+
+    /// Tooltip context line: the time, plus the workout's name when the scrubbed sample falls inside one
+    /// (e.g. "17:42 · Running"), so an elevated stretch explains itself.
+    private func hoverLabel(for date: Date) -> String {
+        let time = dateFormat(date)
+        guard let w = Self.workout(at: date, in: workouts) else { return time }
+        let name = w.label ?? String(localized: "Workout", bundle: .module)
+        return "\(time) · \(name)"
     }
 
     @ViewBuilder
@@ -378,7 +478,7 @@ public struct OverviewHRChart: View {
             PositionedTooltip(
                 anchor: CGPoint(x: cx, y: cy),
                 container: container,
-                tooltip: ChartTooltip(value: valueFormat(p.value), label: dateFormat(p.date), accent: color)
+                tooltip: ChartTooltip(value: valueFormat(p.value), label: hoverLabel(for: p.date), accent: color)
             )
         }
     }
@@ -696,7 +796,7 @@ private struct ZoomPanModifier: ViewModifier {
         OverviewHRChart(
             points: pts,
             sleep: .init(start: pts.first!.date, end: pts.first!.date.addingTimeInterval(6 * 3600 + 6 * 60), label: "6:06"),
-            workouts: [.init(start: pts[200].date, end: pts[215].date, symbol: "figure.run")],
+            workouts: [.init(start: pts[200].date, end: pts[215].date, symbol: "figure.run", label: "Running")],
             recovery: .init(date: pts.first!.date.addingTimeInterval(6 * 3600), label: "67% Recovery", color: StrandPalette.recoveryColor(67)),
             effort: .init(date: pts.last!.date, label: "12.5 Effort", color: StrandPalette.strainColor(12.5), alignment: .trailing),
             valueRange: 45...140

@@ -1011,6 +1011,20 @@ struct MetricDetailView: View {
                 }
             }
         }
+        // TODAY'S EFFORT AS THE TILE THAT OPENED THIS SHOWS IT. The series alone is the merged daily row,
+        // which lags the live in-progress value and ignores the computed-lane precedence Today's hero ring
+        // applies — so the tile and this screen showed two different numbers for the same day. Today's
+        // point is replaced by the one shared resolution (`Repository.todayEffortNow`) the hero, the Key
+        // Metrics tile and the widget all read. Past days are untouched.
+        if metric.key == "strain", metric.source == "my-whoop" {
+            let effortNow = await repo.todayEffortNow()
+            if let value = effortNow.effort100 {
+                var byDay = Dictionary(series.map { ($0.day, $0.value) },
+                                       uniquingKeysWith: { first, _ in first })
+                byDay[effortNow.day] = value
+                series = byDay.sorted { $0.key < $1.key }.map { (day: $0.key, value: $0.value) }
+            }
+        }
         // #943 selection seam: a locked default (.month with under a week of history) no longer
         // OVERWRITES @State range - it renders through `coercedSelection` instead (non-destructive,
         // recomputed every body eval), so a shrinking history re-coerces and a growing one un-coerces

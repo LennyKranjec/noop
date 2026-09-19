@@ -24,6 +24,12 @@ public enum QuestKind: String, Equatable, Codable, CaseIterable, Sendable {
     case daily = "DAILY"
     /// Raised by a condition in the data. Zero or several a day.
     case side = "SIDE"
+    /// Asked for by the wearer in the coach (`CustomTaskParser`). Issued already accepted, never counts
+    /// against the side-quest budget, and may be ticked off by hand as well as closed by its goal.
+    ///
+    /// An older build reading one falls back to `.side` (`QuestCodec.decode`), which only costs it the
+    /// "by you" mark and the check-off button.
+    case custom = "CUSTOM"
 }
 
 /// What finishing a quest is supposed to improve — shown as an icon on the card.
@@ -117,7 +123,14 @@ public struct Quest: Equatable, Sendable {
     }
 
     /// The goal, falling back to reading one out of the directive for a quest stored before goals.
-    public var effectiveGoal: QuestGoal? { goal ?? QuestGoal.parse(target) }
+    ///
+    /// Not for a custom task: its goal was decided when it was written, and nil there MEANS "ticked off
+    /// by hand" — reading "stretch for 10 minutes" as ten minutes of logged training would tie it to a
+    /// metric the wearer never asked for.
+    public var effectiveGoal: QuestGoal? {
+        if kind == .custom { return goal }
+        return goal ?? QuestGoal.parse(target)
+    }
 
     /// Until when the data may still close it.
     ///

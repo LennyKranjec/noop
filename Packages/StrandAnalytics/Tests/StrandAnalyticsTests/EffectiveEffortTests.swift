@@ -104,4 +104,44 @@ final class EffectiveEffortTests: XCTestCase {
             XCTAssertEqual(result.bitPattern, testCase.expected.bitPattern)
         }
     }
+
+    // MARK: - resolvedOwnEffort (tile, detail and widget share it)
+
+    /// The reported case: the computed row is ahead of a live under-read, and the merged row is stale.
+    /// Every surface gets the computed figure, so the tile and the detail it opens agree.
+    func testComputedLaneFloorsLiveAndOutranksMerged() {
+        let v = StrainScorer.resolvedOwnEffort(live: 30, computed: 42, merged: 18, cloudStrain21: nil)
+        XCTAssertEqual(v!, 42, accuracy: 1e-9)
+    }
+
+    /// Live ahead of every stored figure wins.
+    func testLiveAheadWins() {
+        let v = StrainScorer.resolvedOwnEffort(live: 55, computed: 42, merged: 18, cloudStrain21: 9)
+        XCTAssertEqual(v!, 55, accuracy: 1e-9)
+    }
+
+    /// No computed row: the merged row is the stored floor.
+    func testMergedIsTheFallbackStoredFigure() {
+        let v = StrainScorer.resolvedOwnEffort(live: 10, computed: nil, merged: 18, cloudStrain21: nil)
+        XCTAssertEqual(v!, 18, accuracy: 1e-9)
+    }
+
+    /// A zero the strap did not earn yields to WHOOP's own strain for the day.
+    func testUnearnedZeroYieldsToCloud() {
+        XCTAssertNil(StrainScorer.resolvedOwnEffort(live: 0, computed: 0, merged: nil, cloudStrain21: 6.2))
+        XCTAssertNil(StrainScorer.resolvedOwnEffort(live: nil, computed: 0.3, merged: nil, cloudStrain21: 6.2))
+    }
+
+    /// Without real cloud load a zero stays an honest zero.
+    func testZeroStaysWithoutCloudLoad() {
+        XCTAssertEqual(StrainScorer.resolvedOwnEffort(live: 0, computed: 0, merged: nil, cloudStrain21: nil)!,
+                       0, accuracy: 1e-9)
+        XCTAssertEqual(StrainScorer.resolvedOwnEffort(live: 0, computed: 0, merged: nil, cloudStrain21: 0)!,
+                       0, accuracy: 1e-9)
+    }
+
+    /// Nothing anywhere is "No Data".
+    func testNothingIsNil() {
+        XCTAssertNil(StrainScorer.resolvedOwnEffort(live: nil, computed: nil, merged: nil, cloudStrain21: nil))
+    }
 }

@@ -394,6 +394,25 @@ public enum StrainScorer {
         return Swift.max(live, stored)
     }
 
+    /// The app's OWN Effort (0–100) for a day, resolved the ONE way every surface must resolve it — the
+    /// Today hero ring, the Key Metrics tile, the Effort detail screen and the lock-screen widget.
+    ///
+    /// The stored figure is the COMPUTED lane (`computed`, the app's own row) first and the merged row
+    /// (`merged`) only without one; `live` (today's in-progress recompute, nil for a past day) goes over it
+    /// through `effectiveEffort`'s never-drop max. Returns nil when a zero the strap did not earn should
+    /// yield to WHOOP's own strain for that day (`cloudStrain21`, that day's own cloud row, never a carried
+    /// one) — the caller then shows WHOOP's figure instead.
+    ///
+    /// Each surface used to spell this out itself, and the Effort detail read only the merged row: no live
+    /// value, no computed-lane precedence. So the tile and the screen it opens showed two numbers for the
+    /// same day at the same moment.
+    public static func resolvedOwnEffort(live: Double?, computed: Double?, merged: Double?,
+                                         cloudStrain21: Double?) -> Double? {
+        let own = effectiveEffort(live: live, stored: computed ?? merged)
+        if let own, own < 0.5, let cloud = cloudStrain21, cloud > 0 { return nil }
+        return own
+    }
+
     /// Infer per-sample duration (minutes) from the first two timestamps. Falls
     /// back to 1 s when fewer than two samples or coincident timestamps.
     ///

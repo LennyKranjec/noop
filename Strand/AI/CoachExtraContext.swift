@@ -133,7 +133,10 @@ enum CoachExtraContext {
                 case .completed: state = "completed"
                 case .declined: state = "declined or expired unfinished"
                 }
-                lines.append("  \(q.dayKey) \"\(q.title)\": \(q.target) — \(state)")
+                // The wearer's own tasks say so: "they set this themselves" reads differently from a
+                // directive the system issued.
+                let origin = q.kind == .custom ? " (set by them)" : ""
+                lines.append("  \(q.dayKey) \"\(q.title)\"\(origin): \(q.target) — \(state)")
             }
             sections.append(lines.joined(separator: "\n"))
         }
@@ -169,8 +172,14 @@ enum CoachExtraContext {
         // 9. The bedroom and the lights.
         var home: [String] = []
         if let r = BedroomClimate.shared.latest {
-            home.append(String(format: "  Bedroom now: %.1f °C, %.0f %% humidity (%@)", r.temperatureC, r.humidityPct,
-                               ClimateAdvice.isGood(r) ? "in the sleep band" : ClimateAdvice.issues(r).joined(separator: " ")))
+            // Judged for the window the day is in: focus (20–22.5 °C) by day, sleep (16–19.5 °C) from
+            // the wind-down on. The same verdict the Today tile shows.
+            let ctx = RoomClimatePlan.context(for: r)
+            home.append(String(format: "  Bedroom now: %.1f °C, %.0f %% humidity — %@ window, fit %d/100 (%@). Next: %@ window from %@",
+                               r.temperatureC, r.humidityPct, ctx.mode.label.lowercased(), ctx.score,
+                               ctx.isGood ? "within target" : ctx.issues.joined(separator: " "),
+                               ctx.nextMode.label.lowercased(),
+                               ctx.nextStart.formatted(date: .omitted, time: .shortened)))
             let night = ClimateHistory.since(Date().addingTimeInterval(-14 * 3600)).filter {
                 let h = Calendar.current.component(.hour, from: $0.at)
                 return h >= 22 || h < 8

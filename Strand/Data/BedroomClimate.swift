@@ -236,9 +236,10 @@ final class BedroomClimate: NSObject, ObservableObject {
 
     // MARK: - The evening tip
 
-    /// After five in the evening, a room that is out of range gets ONE notification that day, and the
-    /// 21:00 reminder is kept in step with the latest reading — scheduled while the room is off, removed
-    /// the moment it is fine.
+    /// After five in the evening, a room that is out of the SLEEP range gets ONE notification that day,
+    /// and the sleep-window reminder is kept in step with the latest reading — scheduled while the room is
+    /// off, removed the moment it is fine. Judged against the sleep band on purpose: this is the heads-up
+    /// for the coming night, even while the Today tile is judging the room for focus.
     private func adviseIfEvening(_ r: ClimateReading, now: Date = Date()) async {
         let center = UNUserNotificationCenter.current()
         let hour = Calendar.current.component(.hour, from: now)
@@ -254,12 +255,15 @@ final class BedroomClimate: NSObject, ObservableObject {
         content.body = issues.joined(separator: " ")
         content.sound = .default
 
-        // The 21:00 reminder, from this reading.
+        // The reminder, from this reading, when the sleep window opens (bedtime minus the wind-down —
+        // see `RoomClimateContext`), rather than at a fixed 21:00 that was too late for an early sleeper
+        // and hours early for a late one. Only scheduled while the room is still in its day windows.
+        let schedule = RoomClimatePlan.schedule(now: now)
         var at = DateComponents()
-        at.hour = 21
-        at.minute = 0
+        at.hour = schedule.sleepStartMinute / 60
+        at.minute = schedule.sleepStartMinute % 60
         center.removePendingNotificationRequests(withIdentifiers: [reminderId])
-        if hour < 21 {
+        if schedule.mode(at: now) != .sleep {
             try? await center.add(UNNotificationRequest(
                 identifier: reminderId, content: content,
                 trigger: UNCalendarNotificationTrigger(dateMatching: at, repeats: false)))

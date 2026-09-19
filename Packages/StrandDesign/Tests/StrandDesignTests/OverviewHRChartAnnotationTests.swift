@@ -83,5 +83,83 @@ final class OverviewHRChartAnnotationTests: XCTestCase {
     func testWorkoutsEmptyIsEmpty() {
         XCTAssertTrue(OverviewHRChart.workouts([], overlapping: day).isEmpty)
     }
+
+    // MARK: workoutBands — shaded spans, merged + clipped to the visible window
+
+    /// A workout fully inside the window keeps its exact bounds and both real edges get a rule.
+    func testBandInsideWindowKeepsBothEdges() {
+        let bands = OverviewHRChart.workoutBands([workout(110_000, 113_600)], clippedTo: day)
+        XCTAssertEqual(bands, [OverviewHRChart.WorkoutBand(start: date(110_000), end: date(113_600),
+                                     startsInWindow: true, endsInWindow: true)])
+    }
+
+    /// A workout straddling the window start is clipped there, and the cut edge gets NO start rule
+    /// (it's the plot boundary, not when the session began). Same for the end.
+    func testBandClipsToWindowAndDropsCutEdgeRules() {
+        let bands = OverviewHRChart.workoutBands(
+            [workout(95_000, 103_000), workout(185_000, 190_000)], clippedTo: day)
+        XCTAssertEqual(bands, [
+            OverviewHRChart.WorkoutBand(start: date(100_000), end: date(103_000), startsInWindow: false, endsInWindow: true),
+            OverviewHRChart.WorkoutBand(start: date(185_000), end: date(186_400), startsInWindow: true, endsInWindow: false),
+        ])
+    }
+
+    /// A window-spanning session becomes one full-width band with no rules at all.
+    func testBandSpanningWindowHasNoRules() {
+        let bands = OverviewHRChart.workoutBands([workout(90_000, 200_000)], clippedTo: day)
+        XCTAssertEqual(bands, [OverviewHRChart.WorkoutBand(start: date(100_000), end: date(186_400),
+                                     startsInWindow: false, endsInWindow: false)])
+    }
+
+    /// Overlapping (e.g. double-logged) and touching sessions merge into their union so the fill never
+    /// doubles up; a separate later session stays its own band. Input order doesn't matter.
+    func testBandsMergeOverlappingAndTouching() {
+        let a = workout(110_000, 113_600)
+        let b = workout(112_000, 115_000)       // overlaps a
+        let c = workout(115_000, 116_000)       // touches b's end
+        let d = workout(170_000, 173_600)       // separate
+        let bands = OverviewHRChart.workoutBands([d, c, a, b], clippedTo: day)
+        XCTAssertEqual(bands.map(\.start), [date(110_000), date(170_000)])
+        XCTAssertEqual(bands.map(\.end), [date(116_000), date(173_600)])
+    }
+
+    /// A session nested entirely inside another doesn't shrink the union.
+    func testBandsMergeNestedKeepsOuterEnd() {
+        let bands = OverviewHRChart.workoutBands([workout(110_000, 120_000), workout(112_000, 113_000)],
+                                                 clippedTo: day)
+        XCTAssertEqual(bands.count, 1)
+        XCTAssertEqual(bands.first?.end, date(120_000))
+    }
+
+    /// Out-of-window, edge-touching (zero visible width) and degenerate (end <= start) spans yield no band.
+    func testBandsDropInvisibleAndDegenerate() {
+        let bands = OverviewHRChart.workoutBands([
+            workout(10_000, 13_600),        // last week
+            workout(96_400, 100_000),       // ends exactly at the window start
+            workout(186_400, 190_000),      // starts exactly at the window end
+            workout(150_000, 150_000),      // zero-length
+            workout(160_000, 150_000),      // inverted
+        ], clippedTo: day)
+        XCTAssertTrue(bands.isEmpty)
+    }
+
+    // MARK: workout(at:) — scrub tooltip lookup
+
+    func testWorkoutAtFindsContainingSessionEdgesInclusive() {
+        let run = OverviewHRChart.WorkoutSpan(start: date(110_000), end: date(113_600),
+                                              symbol: "figure.run", label: "Running")
+        XCTAssertEqual(OverviewHRChart.workout(at: date(110_000), in: [run])?.label, "Running")
+        XCTAssertEqual(OverviewHRChart.workout(at: date(113_600), in: [run])?.label, "Running")
+        XCTAssertNil(OverviewHRChart.workout(at: date(113_601), in: [run]))
+    }
+
+    func testWorkoutAtPrefersMostRecentlyStartedWhenOverlapping() {
+        let ride = OverviewHRChart.WorkoutSpan(start: date(110_000), end: date(120_000),
+                                               symbol: "figure.outdoor.cycle", label: "Cycling")
+        let run = OverviewHRChart.WorkoutSpan(start: date(115_000), end: date(118_000),
+                                              symbol: "figure.run", label: "Running")
+        XCTAssertEqual(OverviewHRChart.workout(at: date(116_000), in: [run, ride])?.label, "Running")
+        XCTAssertEqual(OverviewHRChart.workout(at: date(112_000), in: [run, ride])?.label, "Cycling")
+    }
 }
 #endif

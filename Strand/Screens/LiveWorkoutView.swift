@@ -1,7 +1,9 @@
 import SwiftUI
+import Charts
 import StrandDesign
 import StrandAnalytics
 import WhoopStore
+import WhoopProtocol
 
 /// Live workout mode (#238) — the in-exercise screen: a big live heart rate, the current HR zone,
 /// elapsed time, and live effort building, all from the SAME live feed and scorers the rest of the
@@ -59,6 +61,9 @@ struct LiveWorkoutView: View {
                     // target Today's hero ring marks — so a session can be paced against the whole day.
                     AnyView(DayEffortTargetCard(sessionEffort: model.activeWorkout?.liveStrain ?? 0,
                                                 effortScale: effortScale)),
+                    // The whole session's HR since start against the zone lines (dashed), with a locked
+                    // zone's band raised — the history the zone slider below shows only the latest point of.
+                    AnyView(hrTraceCard),
                     AnyView(zoneSection),
                     AnyView(statsGrid),
                     // Live GPS distance + pace (#1195) — a self-gating leaf owning its own recorder
@@ -242,6 +247,18 @@ struct LiveWorkoutView: View {
                 .foregroundStyle(StrandPalette.textSecondary)
         }
         .frame(maxWidth: .infinity)
+    }
+
+    /// The full HR trace since the workout started. Reads the same `activeWorkout.samples` that
+    /// `captureWorkoutSample` appends (and `ActiveWorkoutPersistence` restores after a relaunch), and the
+    /// same `zoneSet` / `lockedZone` the slider and lock row below use, so it updates on every sample.
+    @ViewBuilder private var hrTraceCard: some View {
+        if let w = model.activeWorkout {
+            WorkoutHRTraceCard(samples: w.samples,
+                               startSec: Int(w.start.timeIntervalSince1970),
+                               zoneSet: zoneSet,
+                               lockedZone: w.lockedZone)
+        }
     }
 
     /// HR ZONE — the header capsule, the ZONE SLIDER (one continuous bar from zone 1's floor to HRmax with
@@ -562,7 +579,7 @@ private extension View {
 /// HR hero / effort gauge / zone rail above. The gate, layout and `staggeredAppear(index: 5)` are
 /// preserved verbatim (index bumped to 7 — 6 after the glanceable layout split TIME / HR / Effort / zone
 /// into separate stagger slots, then 7 after the live distance/pace card #1195 took the slot before it,
-/// then 8 after the day-Effort/target card took a slot above), so the rendered output matches the
+/// then 8 after the day-Effort/target card took a slot above, then 9 after the HR trace card), so the rendered output matches the
 /// previous inline code.
 private struct SensorRowIfPresent: View {
     @EnvironmentObject private var live: LiveState
@@ -592,7 +609,7 @@ private struct SensorRowIfPresent: View {
                     }
                 }
             }
-            .staggeredAppear(index: 8)
+            .staggeredAppear(index: 9)
         }
     }
 
@@ -667,6 +684,157 @@ private struct DistancePaceRowIfPresent: View {
 
     private var statDivider: some View {
         Rectangle().fill(StrandPalette.hairline).frame(width: 1, height: 48)
+    }
+}
+
+// MARK: - HR trace
+
+/// The whole session's heart rate since the workout started (x = time since start, y = bpm), read
+/// against the wearer's dynamic Karvonen zones: each zone boundary is a dashed line in its zone colour,
+/// labelled Z1…Z5 on the leading axis, every zone band carries a faint wash of its colour, and a LOCKED
+/// zone's band is raised so the target reads at a glance.
+///
+/// All the shaping is `WorkoutHRTrace` (StrandAnalytics, unit-tested): the samples are bucketed to at
+/// most ~600 points so a two-hour session costs the same per render as a ten-minute one, the line breaks
+/// across capture gaps (a pause records no samples), and the y-range frames the data between its
+/// neighbouring zone lines plus the locked band, never 0…220.
+///
+/// The x-axis is WALL time since start, so a pause shows as a gap; the TIME readout above is pause-aware
+/// active time, so the two differ by the paused duration.
+private struct WorkoutHRTraceCard: View {
+    let samples: [HRSample]
+    let startSec: Int
+    let zoneSet: HRZoneSet
+    let lockedZone: Int?
+
+    private struct Band: Identifiable {
+        let zone: Int
+        let lower: Double
+        let upper: Double
+        var id: Int { zone }
+    }
+
+    private struct ZoneLine: Identifiable {
+        let bpm: Double
+        /// The zone this line is the floor of (1…5), or 6 for the HRmax line on top of zone 5.
+        let zone: Int
+        var id: Int { zone }
+        var color: Color { StrandPalette.hrZoneColor(min(zone, 5)) }
+        var label: String { zone <= 5 ? "Z\(zone)" : String(localized: "Max") }
+    }
+
+    private static let chartHeight: CGFloat = 170
+
+    var body: some View {
+        let points = WorkoutHRTrace.downsample(samples, startSec: startSec)
+        let yDomain = WorkoutHRTrace.yDomain(bpms: points.map(\.bpm), zones: zoneSet, lockedZone: lockedZone)
+        let xMax = max(60, points.last?.offset ?? 0)
+        NoopCard(padding: NoopMetrics.cardInnerPadding) {
+            VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                Text("HEART RATE SINCE START")
+                    .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                if points.isEmpty {
+                    Text(String(localized: "Waiting for heart rate."))
+                        .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                        .frame(maxWidth: .infinity, minHeight: Self.chartHeight)
+                } else {
+                    chart(points: points, yDomain: yDomain, xMax: xMax)
+                }
+            }
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("Heart rate since start"))
+        .accessibilityValue(Text(accessibilityValue(points)))
+    }
+
+    private func chart(points: [WorkoutHRTrace.Point], yDomain: ClosedRange<Double>, xMax: Double) -> some View {
+        let edges = Self.edges(zoneSet).filter { yDomain.contains($0.bpm) }
+        let bands = Self.bands(zoneSet, clampedTo: yDomain)
+        return Chart {
+            ForEach(bands) { band in
+                RectangleMark(xStart: .value("Start", 0.0), xEnd: .value("End", xMax),
+                              yStart: .value("Zone floor", band.lower), yEnd: .value("Zone ceiling", band.upper))
+                    .foregroundStyle(StrandPalette.hrZoneColor(band.zone)
+                        .opacity(lockedZone == band.zone ? 0.20 : 0.05))
+            }
+            ForEach(edges) { edge in
+                RuleMark(y: .value("Zone boundary", edge.bpm))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                    .foregroundStyle(edge.color.opacity(isLockedEdge(edge) ? 0.9 : 0.5))
+            }
+            ForEach(points, id: \.offset) { p in
+                LineMark(x: .value("Time", p.offset),
+                         y: .value("BPM", p.bpm),
+                         series: .value("Segment", p.segment))
+                    .interpolationMethod(.monotone)
+                    .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+                    .foregroundStyle(StrandPalette.metricRose)
+            }
+        }
+        .chartXScale(domain: 0...xMax)
+        .chartYScale(domain: yDomain)
+        .chartPlotStyle { plotArea in plotArea.clipped() }
+        .chartXAxis {
+            AxisMarks(values: WorkoutHRTrace.xTicks(maxOffset: xMax)) { value in
+                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.4))
+                AxisValueLabel {
+                    if let s = value.as(Double.self) {
+                        Text(ActiveWorkoutClock.clock(Int(s)))
+                            .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                    }
+                }
+            }
+        }
+        .chartYAxis {
+            // Zone labels at their boundary lines (leading) and a sparse bpm scale (trailing).
+            AxisMarks(position: .leading, values: edges.map(\.bpm)) { value in
+                AxisValueLabel {
+                    if let v = value.as(Double.self), let edge = edges.first(where: { abs($0.bpm - v) < 0.01 }) {
+                        Text(edge.label)
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(edge.color)
+                    }
+                }
+            }
+            AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { _ in
+                AxisValueLabel().foregroundStyle(StrandPalette.textTertiary)
+                    .font(StrandFont.footnote)
+            }
+        }
+        .frame(height: Self.chartHeight)
+    }
+
+    private func isLockedEdge(_ edge: ZoneLine) -> Bool {
+        guard let lockedZone else { return false }
+        return edge.zone == lockedZone || edge.zone == lockedZone + 1
+    }
+
+    /// Zone floors labelled Z1…Z5, plus the HRmax line on top of zone 5.
+    private static func edges(_ set: HRZoneSet) -> [ZoneLine] {
+        var out = set.zones.filter { $0.lower.isFinite }.map { ZoneLine(bpm: $0.lower, zone: $0.number) }
+        if let top = set.zones.last, top.upper.isFinite, top.upper > top.lower {
+            out.append(ZoneLine(bpm: top.upper, zone: 6))
+        }
+        return out
+    }
+
+    /// Each zone's band, clamped to the visible range (a band wholly outside it is dropped) so no mark
+    /// asks the chart to draw beyond the plot.
+    private static func bands(_ set: HRZoneSet, clampedTo domain: ClosedRange<Double>) -> [Band] {
+        set.zones.compactMap { z in
+            let lo = max(z.lower, domain.lowerBound)
+            let hi = min(z.upper, domain.upperBound)
+            guard lo.isFinite, hi.isFinite, hi > lo else { return nil }
+            return Band(zone: z.number, lower: lo, upper: hi)
+        }
+    }
+
+    private func accessibilityValue(_ points: [WorkoutHRTrace.Point]) -> String {
+        guard let lo = points.map(\.bpm).min(), let hi = points.map(\.bpm).max() else {
+            return String(localized: "Waiting for heart rate.")
+        }
+        return String(localized: "\(Int(lo.rounded()))–\(Int(hi.rounded())) bpm")
     }
 }
 

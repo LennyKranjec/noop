@@ -58,6 +58,8 @@ struct CoachView: View {
     @State private var rateLimit: AIRateLimitReading?
     /// The ⋯ sheet holding consent, instructions, the brief and the connection.
     @State private var showCoachMenu = false
+    /// The wearer's own tasks: describe one, the coach structures it, it lands on Today's quest strip.
+    @State private var showTaskSheet = false
 
     // K4: on-device voice input for the composer (iOS only). macOS gets a no-op stub via
     // `#if os(iOS)` guards — the shared file keeps compiling for both targets.
@@ -106,6 +108,11 @@ struct CoachView: View {
             }
         }
         .sheet(isPresented: $showCoachMenu) { coachMenuSheet }
+        // Environment passed explicitly: a sheet on macOS 13 does not inherit it.
+        .sheet(isPresented: $showTaskSheet) {
+            CustomTaskSheet { showTaskSheet = false }
+                .environmentObject(coach)
+        }
         // macOS only. On iOS these two live in `connectionMenu` instead, because this bar is hidden for
         // a primary tab root and VISIBLE in the pillar sheet, so leaving them here would render nothing
         // on the Coach tab and a duplicate of the menu in the sheet. One control per platform, reachable
@@ -940,6 +947,11 @@ struct CoachView: View {
                 .font(StrandFont.title1)
                 .foregroundStyle(StrandPalette.textPrimary)
             Spacer(minLength: 8)
+            // YOUR OWN TASKS. Describe one, the coach turns it into a task, it appears on Today.
+            coachHeaderButton("checklist", "Your tasks") {
+                SystemHaptics.play(.tap)
+                showTaskSheet = true
+            }
             coachHeaderButton("line.3.horizontal", "System settings") { showCoachMenu = true }
             // NO CONFIRMATION. "New chat" is not a destructive act in the sense a dialog is for: the
             // transcript is the app's own notes, the next question rebuilds the context from the same

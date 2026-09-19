@@ -104,8 +104,14 @@ private struct QuestChip: View {
         Button(action: onTap) {
             HStack(spacing: 6) {
                 // The first reward icon stands for the quest: a chip has room for one mark, and the
-                // whole set is on the review sheet a tap away.
-                if let reward = quest.rewards.first {
+                // whole set is on the review sheet a tap away. The wearer's own task shows a person
+                // instead — the one mark that says "you asked for this", kept quiet on purpose.
+                if quest.kind == .custom {
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .accessibilityLabel(Text("Your task"))
+                } else if let reward = quest.rewards.first {
                     Image(systemName: questRewardIcon(reward))
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(questRewardTint(reward))
@@ -145,14 +151,24 @@ struct QuestReviewSheet: View {
     /// How much of the taunt has been typed. See `TypewriterText`.
     @State private var typed = 0
 
+    private var isCustom: Bool { quest.kind == .custom }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            if isCustom {
+                Label("BY YOU · VIA THE COACH", systemImage: "person.fill")
+                    .font(StrandFont.overline)
+                    .tracking(1.4)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
             Text(quest.title.uppercased())
                 .font(StrandFont.headline)
                 .foregroundStyle(StrandPalette.textPrimary)
-            TypewriterText(text: quest.taunt, shown: $typed)
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.textTertiary)
+            if !quest.taunt.isEmpty {
+                TypewriterText(text: quest.taunt, shown: $typed)
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
             Text(quest.target)
                 .font(StrandFont.body)
                 .foregroundStyle(StrandPalette.textPrimary)
@@ -188,17 +204,40 @@ struct QuestReviewSheet: View {
             }
             .buttonStyle(.plain)
 
-            // NO "MARK IT DONE". The quest closes itself when the data meets its goal — see
+            // NO "MARK IT DONE" for a system quest. It closes itself when the data meets its goal — see
             // `QuestAutoComplete` — so what sits here is where the data stands, not a button asking the
-            // wearer to vouch for themselves.
-            QuestProgressPanel(quest: quest)
+            // wearer to vouch for themselves. The wearer's OWN task is the exception: they set it, most
+            // of what people ask for ("stretch after lunch") is nothing a sensor sees, and vouching for
+            // a bar you set yourself is the whole point of it. One with a goal still closes on its own.
+            if !isCustom || quest.goal != nil {
+                QuestProgressPanel(quest: quest)
+            }
+            if isCustom {
+                Button {
+                    SystemHaptics.play(.tap)
+                    store.checkOff(id: quest.id)
+                    onClose()
+                } label: {
+                    Label("Mark it done", systemImage: "checkmark.circle.fill")
+                        .font(StrandFont.footnote.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: 40)
+                        .background(StrandPalette.accent.opacity(0.14),
+                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .foregroundStyle(StrandPalette.accent)
+                }
+                .buttonStyle(.plain)
+            }
 
             Button {
                 SystemHaptics.play(.tap)
-                store.setState(id: quest.id, state: .declined)
+                if isCustom {
+                    store.removeCustom(id: quest.id)
+                } else {
+                    store.setState(id: quest.id, state: .declined)
+                }
                 onClose()
             } label: {
-                Text("Abandon it")
+                Text(isCustom ? "Remove task" : "Abandon it")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .frame(maxWidth: .infinity)

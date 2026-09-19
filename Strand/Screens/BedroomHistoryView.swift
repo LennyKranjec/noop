@@ -14,7 +14,8 @@ struct BedroomClimateChip: View {
             Button(action: onOpen) {
                 HStack(spacing: 8) {
                     if let r = climate.latest {
-                        let good = ClimateAdvice.isGood(r)
+                        // Judged for the window the day is in: focus by day, sleep from the wind-down on.
+                        let good = RoomClimatePlan.context(for: r).isGood
                         Image(systemName: "thermometer.medium")
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(good ? StrandPalette.restColor : StrandPalette.statusWarning)
@@ -144,9 +145,10 @@ struct BedroomHistoryView: View {
                         }
                         Spacer(minLength: 0)
                     }
-                    Text(ClimateAdvice.issues(r).first ?? "A good room to sleep in.")
+                    let ctx = RoomClimatePlan.context(for: r)
+                    Text("\(ctx.mode.label) · \(ctx.hint)")
                         .font(StrandFont.footnote)
-                        .foregroundStyle(ClimateAdvice.isGood(r) ? StrandPalette.statusPositive : StrandPalette.statusWarning)
+                        .foregroundStyle(ctx.isGood ? StrandPalette.statusPositive : StrandPalette.statusWarning)
                         .fixedSize(horizontal: false, vertical: true)
                     Text("\(r.deviceName) · \(r.at.formatted(date: .omitted, time: .shortened))")
                         .font(StrandFont.caption)

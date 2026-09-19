@@ -3,74 +3,123 @@ import StrandDesign
 
 // BedroomClimateViews.swift — the bedroom tile on Today, and where the sensor is set up.
 
-/// The bedroom's temperature and humidity, and whether it is a room to sleep well in.
+/// The bedroom's temperature and humidity, judged against the window the day is in: a room to work in
+/// by day (FOCUS), a room to sleep in from the wind-down on (SLEEP). See `RoomClimateContext`.
 ///
 /// Absent until a sensor is set up: a tile that only ever says "no sensor" is clutter on the screen
 /// people open first. It is set up from More → Bedroom.
 struct BedroomClimateTileView: View {
     @ObservedObject private var climate = BedroomClimate.shared
+    @EnvironmentObject private var repo: Repository
     let onOpen: () -> Void
 
     var body: some View {
         if climate.isConfigured {
             Button(action: onOpen) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "bed.double.fill")
-                            .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(StrandPalette.restColor)
-                        Text("BEDROOM")
-                            .font(StrandFont.overline)
-                            .tracking(1.2)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                        Spacer()
-                        if let r = climate.latest {
-                            Text(age(r.at))
-                                .font(StrandFont.caption)
-                                .foregroundStyle(StrandPalette.textTertiary)
-                        }
-                    }
-                    if let r = climate.latest {
-                        HStack(spacing: 24) {
-                            figure(String(format: "%.1f °C", r.temperatureC), "thermometer.medium",
-                                   ok: (ClimateAdvice.tempLowC...ClimateAdvice.tempHighC).contains(r.temperatureC))
-                            figure(String(format: "%.0f %%", r.humidityPct), "humidity.fill",
-                                   ok: (ClimateAdvice.humidityLow...ClimateAdvice.humidityHigh).contains(r.humidityPct))
-                            Spacer(minLength: 0)
-                        }
-                        Text(ClimateAdvice.issues(r).first ?? "A good room to sleep in.")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(ClimateAdvice.isGood(r) ? StrandPalette.textTertiary : StrandPalette.statusWarning)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        Text(climate.scanning ? "Listening for the sensor…" : "No reading yet.")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
+                // Once a minute, so the window flips at its boundary without waiting for a new reading.
+                TimelineView(.periodic(from: Date(), by: 60)) { timeline in
+                    content(now: timeline.date)
                 }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(StrandPalette.surfaceRaised)
-                .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
             }
             .buttonStyle(.plain)
-            .task { await climate.refresh() }
+            .task {
+                await RoomClimatePlan.refreshTypical(repo: repo)
+                await climate.refresh()
+            }
         }
     }
 
-    private func figure(_ text: String, _ icon: String, ok: Bool) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: icon)
-                .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(ok ? StrandPalette.statusPositive : StrandPalette.statusWarning)
-            Text(text)
-                .font(StrandFont.number(20))
-                .foregroundStyle(StrandPalette.textPrimary)
+    private func content(now: Date) -> some View {
+        let ctx = climate.latest.map { RoomClimatePlan.context(for: $0, now: now) }
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "bed.double.fill")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(StrandPalette.restColor)
+                Text("BEDROOM")
+                    .font(StrandFont.overline)
+                    .tracking(1.2)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                if let ctx {
+                    modeChip(ctx.mode)
+                }
+                Spacer()
+                if let r = climate.latest {
+                    Text(age(r.at, now: now))
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
+            }
+            if let r = climate.latest, let ctx {
+                HStack(alignment: .top, spacing: 24) {
+                    figure(String(format: "%.1f °C", r.temperatureC), "thermometer.medium",
+                           ok: ctx.temperature.status == .good,
+                           target: String(format: "%@–%@ °C", Self.num(ctx.targets.temp.lowerBound),
+                                          Self.num(ctx.targets.temp.upperBound)))
+                    figure(String(format: "%.0f %%", r.humidityPct), "humidity.fill",
+                           ok: ctx.humidity.status == .good,
+                           target: String(format: "%.0f–%.0f %%", ctx.targets.humidity.lowerBound,
+                                          ctx.targets.humidity.upperBound))
+                    Spacer(minLength: 0)
+                }
+                Text(ctx.hint)
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(ctx.isGood ? StrandPalette.textTertiary : StrandPalette.statusWarning)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("\(ctx.nextMode == .sleep ? "Sleep" : "Focus") window from \(ctx.nextStart.formatted(date: .omitted, time: .shortened))")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            } else {
+                Text(climate.scanning ? "Listening for the sensor…" : "No reading yet.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(StrandPalette.surfaceRaised)
+        .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
+    }
+
+    private func modeChip(_ mode: RoomClimateMode) -> some View {
+        let tint: Color
+        switch mode {
+        case .sleep: tint = StrandPalette.restColor
+        case .morning: tint = StrandPalette.stressColor
+        case .focus: tint = StrandPalette.chargeColor
+        }
+        return Text(mode.label)
+            .font(StrandFont.overline)
+            .tracking(1.0)
+            .foregroundStyle(tint)
+            .padding(.horizontal, 7)
+            .padding(.vertical, 2)
+            .background(Capsule().fill(tint.opacity(0.15)))
+    }
+
+    private func figure(_ text: String, _ icon: String, ok: Bool, target: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Image(systemName: icon)
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundStyle(ok ? StrandPalette.statusPositive : StrandPalette.statusWarning)
+                Text(text)
+                    .font(StrandFont.number(20))
+                    .foregroundStyle(StrandPalette.textPrimary)
+            }
+            Text("target " + target)
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
         }
     }
 
-    private func age(_ at: Date) -> String {
-        let minutes = Int(Date().timeIntervalSince(at) / 60)
+    /// 20 → "20", 22.5 → "22.5".
+    private static func num(_ v: Double) -> String {
+        v == v.rounded() ? String(format: "%.0f", v) : String(format: "%.1f", v)
+    }
+
+    private func age(_ at: Date, now: Date) -> String {
+        let minutes = Int(now.timeIntervalSince(at) / 60)
         if minutes < 1 { return "just now" }
         if minutes < 60 { return "\(minutes) min ago" }
         return "\(minutes / 60) h ago"
@@ -86,7 +135,7 @@ struct BedroomClimateSettingsView: View {
 
     var body: some View {
         ScreenScaffold(title: "Bedroom",
-                       subtitle: "Temperature and humidity from a Govee sensor, and an evening tip when the room is off.",
+                       subtitle: "Temperature and humidity from a Govee sensor, judged for focus by day and for sleep from the wind-down on, with an evening tip when the room is off.",
                        topBackground: liquidScaffoldSky()) {
             StrandCard {
                 VStack(alignment: .leading, spacing: 10) {

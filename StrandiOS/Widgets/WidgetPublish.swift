@@ -184,23 +184,13 @@ extension WidgetSnapshot {
         // the app's own row, as Today's `noopEffort`), the merged row only without one, and the live
         // in-progress value Today last scored (`TodayView.publishedLiveStrain`) through the same
         // never-drop max (`StrainScorer.effectiveEffort`).
-        let cloudToday = await model.repo.whoopCloudDay(todayKey)?.strain
-        let computedEffort = await model.repo.noopScores(day: todayKey).effort
-        var ownEffort = StrainScorer.effectiveEffort(live: TodayView.publishedLiveStrain(day: todayKey),
-                                                     stored: computedEffort ?? row?.strain)
-        if let own = ownEffort, own < 0.5, let cloud = cloudToday, cloud > 0 { ownEffort = nil }
-        var cloudStrain21: Double?
-        if ownEffort == nil { cloudStrain21 = cloudToday }
-        // WHOOP's own strain goes on the 0–100 axis through the INVERSE calibration — the mapping the target
-        // mark below uses — so the ring and its mark share one axis, exactly as on Today's hero.
-        let effort = ownEffort ?? cloudStrain21.map { StrainCalibration.effort100(strain21: $0) }
-        snap.effortToday = effort.map { Int($0.rounded()) }
+        // ONE RESOLUTION (`Repository.todayEffortNow`), the same the Effort detail screen reads and the
+        // same pure resolver Today's hero uses, so the widget cannot drift from either. WHOOP's own strain
+        // goes on the 0–100 axis through the INVERSE calibration — the mapping the target mark below uses.
+        let effortNow = await model.repo.todayEffortNow(now: now)
+        snap.effortToday = effortNow.effort100.map { Int($0.rounded()) }
         // The display string as Today's hero (`heroEffortText`) builds it, so the two read identically.
-        if ownEffort == nil, effortScale == .whoop, let cloud = cloudStrain21 {
-            snap.effortTodayDisplay = String(format: "%.1f", cloud)
-        } else {
-            snap.effortTodayDisplay = effort.map { UnitFormatter.effortDisplay($0, scale: effortScale) }
-        }
+        snap.effortTodayDisplay = effortNow.display(scale: effortScale)
         snap.effortDay = todayKey
         // The top of today's recommended band, the same ceiling Today's hero ring marks — placed on the
         // 0–100 axis through the INVERSE calibration, exactly as Today does, so the widget ring crosses the

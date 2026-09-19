@@ -900,14 +900,12 @@ struct LiquidTodayView: View {
     /// Kept apart so the O8 calibration is applied only to a number the app measured — WHOOP's strain is
     /// already on WHOOP's axis and must not be put through a curve fitted to map ours onto it.
     private var heroOwnEffort: Double? {
-        let own = StrainScorer.effectiveEffort(live: selectedDayOffset == 0 ? liveTodayStrain : nil,
-                                               stored: noopEffort ?? displayDay?.strain)
-        // A ZERO THE STRAP DID NOT EARN. The app's own Effort reads 0 when it saw no heart rate above the
-        // floor — which on a day WHOOP held the strap, or the strap barely streamed, is absence, not rest.
-        // When WHOOP scored real strain for THIS day (its own row, not a carried one), that figure wins over
-        // an own zero instead of the ring showing a 0 over a day that plainly had load in it.
-        if let own, own < 0.5, !cloudIsCarried, let cloud = cloudDay?.strain, cloud > 0 { return nil }
-        return own
+        // ONE RESOLVER for the ring, the Key Metrics tile, the Effort detail and the widget
+        // (`StrainScorer.resolvedOwnEffort`; the detail and widget read it via `Repository.todayEffortNow`).
+        // A ZERO THE STRAP DID NOT EARN yields to WHOOP's strain for THIS day (its own row, not a carried one).
+        StrainScorer.resolvedOwnEffort(live: selectedDayOffset == 0 ? liveTodayStrain : nil,
+                                       computed: noopEffort, merged: displayDay?.strain,
+                                       cloudStrain21: cloudIsCarried ? nil : cloudDay?.strain)
     }
     /// Today's Effort on WHOOP's 0–21 axis, for comparing with WHOOP's optimal-strain band: the app's own
     /// Effort through the calibration (linear ×21/100 without one), or WHOOP's own strain when the ring is
@@ -924,6 +922,9 @@ struct LiquidTodayView: View {
         }
         return heroEffort.map { UnitFormatter.effortDisplay($0, scale: effortScale) } ?? "–"
     }
+    /// The Key Metrics Effort tile: the ring's figure, except a CARRIED earlier cloud day (the tile has no
+    /// footer to say it is carried, so it shows no value rather than yesterday's as today's).
+    private var tileEffort: Double? { cloudIsCarried && heroOwnEffort == nil ? nil : heroEffort }
     private var heroRest: Double? { whoopRestToday ?? noopRest ?? restScore ?? cloudSleepScore }
 
     /// Everything the lock-screen strip shows from this screen, as one key for the task that hands it over.
@@ -1444,8 +1445,12 @@ struct LiquidTodayView: View {
             .padding(.horizontal, 2)
             .padding(.top, 4)
 
-            Button { withAnimation(.easeInOut(duration: 0.2)) { synthesisExpanded.toggle() } } label: {
-                card {
+            // NOT ONE BIG BUTTON ANY MORE. The recommendations inside are tappable and the header carries a
+            // refresh, and a Button inside a Button's label swallows the inner tap — so the expand toggle
+            // is a tap on the text area plus the show/hide control, and the inner controls win their own
+            // taps. The WORKOUTS TODAY section sits below, outside the toggle area (StateTileViews.swift).
+            card {
+                VStack(alignment: .leading, spacing: 12) {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack {
                             // STATE, not "Synthesis". The card used to summarise how the day reads;
@@ -1454,11 +1459,18 @@ struct LiquidTodayView: View {
                             Text("STATE").font(StrandFont.overline).tracking(1.6)
                                 .foregroundStyle(StrandPalette.textSecondary)
                             Spacer()
-                            Text(synthesisExpanded
-                                 ? String(localized: "hide")
-                                 : String(localized: "show"))
-                                .font(StrandFont.caption)
-                                .foregroundStyle(StrandPalette.textTertiary)
+                            Button { withAnimation(.easeInOut(duration: 0.2)) { synthesisExpanded.toggle() } } label: {
+                                Text(synthesisExpanded
+                                     ? String(localized: "hide")
+                                     : String(localized: "show"))
+                                    .font(StrandFont.caption)
+                                    .foregroundStyle(StrandPalette.textTertiary)
+                            }
+                            .buttonStyle(.plain)
+                            // Today only: a refresh of a past day's state would regenerate TODAY's mission.
+                            if selectedDayOffset == 0 {
+                                StateRefreshButton { await refreshState() }
+                            }
                         }
                         // While the baseline calibrates, the honest "N of 4 nights" progress replaces the
                         // readiness one-liner here — the same swap classic makes (`calibrationDetail ??
@@ -1472,16 +1484,13 @@ struct LiquidTodayView: View {
                         // a "nothing to report", because the absence of a deficit is not news.
                         if !deficits.isEmpty {
                             VStack(alignment: .leading, spacing: 4) {
+                                // Each line is tappable: it routes to the matching in-app action (log water,
+                                // breathe, sleep, start a walk / workout) or opens its reasoning + Ask coach.
                                 ForEach(deficits.prefix(4)) { deficit in
-                                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                        Circle()
-                                            .fill(deficitTint(deficit.severity))
-                                            .frame(width: 5, height: 5)
-                                        Text(deficit.text)
-                                            .font(StrandFont.footnote)
-                                            .foregroundStyle(StrandPalette.textSecondary)
-                                            .fixedSize(horizontal: false, vertical: true)
-                                    }
+                                    StateRecommendationRow(
+                                        recommendation: StateActionMapper.recommendation(for: deficit),
+                                        tint: deficitTint(deficit.severity),
+                                        navigate: { heroTap = $0 })
                                 }
                             }
                             .padding(.top, 2)
@@ -1515,10 +1524,38 @@ struct LiquidTodayView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
                     }
+                    .contentShape(Rectangle())
+                    .onTapGesture { withAnimation(.easeInOut(duration: 0.2)) { synthesisExpanded.toggle() } }
+                    // THE WORKOUT HALF: further sessions for today. Today only — suggestions for a day
+                    // that is over are instructions nobody can follow.
+                    if selectedDayOffset == 0 {
+                        StateWorkoutsSection(figures: stateFigures)
+                    }
                 }
             }
-            .buttonStyle(LiquidPressStyle())
+            .modifier(StateTilePresentationHost(navigate: { heroTap = $0 }))
         }
+    }
+
+    /// Today's figures for the STATE tile's workout suggestions, on the same axes the hero shows them.
+    private var stateFigures: StateTrainingFigures {
+        StateTrainingFigures(
+            charge: heroCharge,
+            effortNow: heroEffort,
+            effortTarget: optimalStrainCeiling.map { StrainCalibration.effort100(strain21: $0) },
+            sleepDebtMin: sleepDebtMinutes,
+            stress: stress)
+    }
+
+    /// The STATE tile's refresh: recompute the deficits and the energy bank from the latest figures, then
+    /// have the coach rewrite the mission and the workout suggestions (cache bypassed, throttled).
+    private func refreshState() async {
+        let missionUpdated = await StateCoachController.shared.refresh(repo: repo, profile: profile, coach: coach) {
+            await loadStateAndEnergy(stressByDay: await repo.bankedStressMinutes())
+            CoachDaySnapshot.energy = energy
+            return stateFigures
+        }
+        if missionUpdated, let mission = DailyMissionStore.today()?.text { dailyMission = mission }
     }
 
     // MARK: - Recovery vitals
@@ -1673,7 +1710,8 @@ struct LiquidTodayView: View {
             // form, so the tile also ignored the scale toggle — the hero ring above it read ~8 on the WHOOP
             // axis while this read 38. `effortText` is the same shared formatter the ring and the workout
             // rows use, so all three now agree by construction.
-            ktile(String(localized: "Strain"), icon: keyMetricIcon(metric), effortText(effortStrain(displayDay)), "", StrandPalette.effortColor, frac(effortStrain(displayDay)), key: HeroRingMetric.effort)
+            // The ring's own resolution (`heroEffort`/`heroEffortText`), so tile, ring and the detail it opens agree.
+            ktile(String(localized: "Strain"), icon: keyMetricIcon(metric), tileEffort == nil ? effortText(nil) : heroEffortText, "", StrandPalette.effortColor, frac(tileEffort), key: HeroRingMetric.effort)
         case .rest:
             ktile(String(localized: "Rest"), icon: keyMetricIcon(metric), intText(restScore), "%", StrandPalette.restColor, frac(restScore), key: HeroRingMetric.rest)
         case .hrv:
@@ -1821,6 +1859,14 @@ struct LiquidTodayView: View {
                 ForEach(workouts, id: \.startTs) { w in
                     NavigationLink(value: TabRoute.workouts) { workoutCard(w) }
                         .buttonStyle(LiquidPressStyle())
+                        // AI feedback: laid OVER the row as a sibling of the link, never inside its label,
+                        // so a tap on it opens Coach without also pushing Workouts.
+                        .overlay(alignment: .trailing) {
+                            WorkoutFeedbackButton(row: w,
+                                                  stressStart: workoutStress[WorkoutStressDelta.key(w)]?.start,
+                                                  stressEnd: workoutStress[WorkoutStressDelta.key(w)]?.end)
+                                .padding(.trailing, 10)
+                        }
                 }
             } else {
                 card {
@@ -1837,19 +1883,10 @@ struct LiquidTodayView: View {
     }
 
     /// Today's mission, whole and still, under the STATE card.
+    /// Tappable: routes to the action its goal names (see `StateMissionNote`).
     private func missionNote(_ mission: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("MISSION")
-                .font(StrandFont.overline)
-                .tracking(1.6)
-                .foregroundStyle(StrandPalette.textTertiary)
-            Text(mission)
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 4)
+        StateMissionNote(mission: mission, navigate: { heroTap = $0 })
+            .padding(.horizontal, 4)
     }
 
     private func workoutCard(_ w: WorkoutRow) -> some View {
@@ -1891,6 +1928,8 @@ struct LiquidTodayView: View {
                     LiquidTube(frac: (w.strain ?? 0) / 100, tint: StrandPalette.effortColor, height: 12, animated: false)
                 }
             }
+            // Room for the AI-feedback button laid over the row's trailing edge (see lastWorkoutsSection).
+            .padding(.trailing, WorkoutFeedbackButton.reservedWidth)
         }
     }
 
@@ -2245,6 +2284,14 @@ struct LiquidTodayView: View {
         if selectedDayOffset == 0, let liveStrainLocal {
             TodayView.publishLiveStrain(liveStrainLocal, day: selectedDayKey)
         }
+        // The computed-lane Effort the ring floors on, re-read on EVERY data refresh — not only in
+        // `loadCloudDay` (keyed on the cloud tick), which left the ring on the first pass's stale row while
+        // the Effort detail read the fresh one after each analysis pass.
+        // Charge and Rest go stale the same way, so all three own scores are refreshed together here.
+        let ownScores = await repo.noopScores(day: selectedDayKey)
+        noopEffort = ownScores.effort
+        noopCharge = ownScores.charge
+        noopRest = ownScores.rest
 
         async let restA = repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
         async let stressA = repo.series(key: "stress", source: "my-whoop")

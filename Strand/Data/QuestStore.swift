@@ -18,11 +18,16 @@ final class QuestStore: ObservableObject {
 
     private static let key = "system.quests"
 
+    /// Where the list lives. `.standard` for the app; a throwaway suite in tests.
+    private let defaults: UserDefaults
+
     /// Everything kept, oldest first.
     @Published private(set) var quests: [Quest] = []
 
-    private init() {
-        quests = QuestStore.read()
+    /// Internal rather than private so a test can run a store on its own suite; the app uses `shared`.
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        quests = QuestStore.read(defaults)
     }
 
     /// The quest waiting to be answered, if any.
@@ -108,7 +113,9 @@ final class QuestStore: ObservableObject {
             if quest.state == .active, nowMs - quest.checkableUntilMs() < 24 * 3_600_000 {
                 failures.append(Completion(
                     quest: quest.with(state: .declined),
-                    summary: "The window closed before the data showed it done, so the quest has been cancelled."))
+                    summary: quest.kind == .custom
+                        ? "The deadline passed before it was done, so your task has been closed."
+                        : "The window closed before the data showed it done, so the quest has been cancelled."))
             }
         }
     }
@@ -118,16 +125,51 @@ final class QuestStore: ObservableObject {
         if !failures.isEmpty { failures.removeFirst() }
     }
 
+    // MARK: - The wearer's own tasks
+    //
+    // Asked for in the coach's task sheet (`CustomTaskSheet`), stored in this same list as quests of kind
+    // `.custom`: the strip, the countdown, auto-completion by goal and the red failure pop-up all apply
+    // to them unchanged.
+
+    /// The wearer's own tasks, newest first, in every state.
+    var customTasks: [Quest] {
+        quests.filter { $0.kind == .custom }.sorted { $0.createdAtMs > $1.createdAtMs }
+    }
+
+    /// Add a confirmed custom task. It is issued ACTIVE: the wearer asked for it, so there is nothing to
+    /// accept and no pop-up.
+    @discardableResult
+    func addCustom(_ quest: Quest) -> Quest {
+        let task = quest.state == .active ? quest : quest.with(state: .active)
+        upsert(task)
+        return task
+    }
+
+    /// Tick off a custom task by hand. Only custom tasks — a system quest closes on its data, never on
+    /// the wearer's word (see `QuestReviewSheet`).
+    func checkOff(id: String) {
+        guard let quest = quests.first(where: { $0.id == id }), quest.kind == .custom,
+              quest.state == .active || quest.state == .offered else { return }
+        complete(quest, summary: "Checked off by you.")
+    }
+
+    /// Remove a custom task outright. A system quest is abandoned (`.declined`) instead, so the issuer
+    /// does not raise the same one again at once; the wearer's own task has no such history to keep.
+    func removeCustom(id: String) {
+        guard quests.contains(where: { $0.id == id && $0.kind == .custom }) else { return }
+        write(quests.filter { $0.id != id })
+    }
+
     /// Re-read from storage. For a screen that has been away while a background pass wrote one.
-    func reload() { quests = QuestStore.read() }
+    func reload() { quests = QuestStore.read(defaults) }
 
     private func write(_ list: [Quest]) {
-        UserDefaults.standard.set(QuestCodec.encode(list), forKey: QuestStore.key)
+        defaults.set(QuestCodec.encode(list), forKey: QuestStore.key)
         quests = list
     }
 
-    private static func read() -> [Quest] {
-        guard let raw = UserDefaults.standard.string(forKey: key) else { return [] }
+    private static func read(_ defaults: UserDefaults) -> [Quest] {
+        guard let raw = defaults.string(forKey: key) else { return [] }
         return QuestCodec.decode(
             raw,
             fallbackDay: DailyMissionStore.dayKey(),
