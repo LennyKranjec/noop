@@ -182,7 +182,11 @@ struct CoachView: View {
             guard let prompt = coach.pendingPrompt, !prompt.isEmpty else { return }
             coach.pendingPrompt = nil
             guard coach.isConfigured else { return }
-            await coach.send(prompt)
+            // NOT awaited in this task: clearing `pendingPrompt` above changes this task's id, so SwiftUI
+            // cancels it, and a send awaited here died with "cancelled" before the reply arrived. The
+            // engine outlives the view, so the send runs on its own.
+            let engine = coach
+            Task { @MainActor in await engine.send(prompt) }
         }
         // K15: persist the composer draft so it survives an app relaunch.
         //
