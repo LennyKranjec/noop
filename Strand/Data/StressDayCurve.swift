@@ -95,6 +95,15 @@ enum StressDayCurve {
         // Too little signal leaves an EMPTY result, which is a real answer about today rather than a
         // refusal: a reader should drop yesterday's line rather than keep drawing it.
         memo = Memo(count: fingerprint.count, maxTs: fingerprint.maxTs, day: day, result: scored)
+        // E10: BANK the day's high-stress minutes here, where today's curve is actually (re)scored. The
+        // writer existed with no caller, so the energy bank's stress spend / calm return and the
+        // DayDeficits stress input always read nothing. Once per real rescore (the memo hit above returns
+        // before this), REPLACING the day's row, so it is idempotent per day. Minutes are the
+        // recalibrated scale's own `highStressMinutes` (scored hours at or above `highBandFloor`, 2.0).
+        // A day with no scored hour is unmeasured, not calm, so nothing is written for it.
+        if !scored.scored.isEmpty {
+            await repo.bankStressMinutes(day: Repository.localDayKey(now), minutes: scored.highStressMinutes)
+        }
         return (scored, day)
     }
 

@@ -18,16 +18,31 @@ enum CoachLevelContext {
         var s = "THE LEVEL — YOUR PRIMARY OBJECTIVE IS TO RAISE THIS SCORE. Every recommendation should "
         s += "say which part of the level it moves and roughly how many points it is worth.\n"
 
-        // FROM THE LEDGER, like every other surface: the current day's written level, or — while its night
-        // is still syncing — the last day that was written, said to be exactly that.
+        // FROM THE LEDGER, like every other surface: the current day's written level, or — while it is
+        // not today's — the last day that was written, said to be exactly that and why. "Not today's" is
+        // three different things and the coach is told which: the morning flow has not run yet (the level
+        // day is still yesterday), last night is still syncing, or last night was never recorded.
         let calendar = Calendar.current
-        let dayKey = LevelWiring.key(from: LevelDayFreeze.levelDay(calendar: calendar), calendar: calendar)
+        let now = Date()
+        let dayKey = LevelWiring.key(from: LevelDayFreeze.levelDay(now: now, calendar: calendar), calendar: calendar)
+        let todayKey = LevelWiring.key(from: now, calendar: calendar)
         let ledger = LevelLedger.shared
+        let pending = LevelDayFreeze.isPendingToday(ledger: ledger, now: now, calendar: calendar)
+        /// Why today's level is not the one below, or nil when it is.
+        func pendingReason(shownDay: String?) -> String? {
+            guard pending else { return nil }
+            let shown = shownDay.map { "the figure below is the level for \($0)" } ?? "there is no earlier level either"
+            if dayKey != todayKey {
+                return "Today's level is not set yet: it is set when they first open the app this morning; \(shown).\n"
+            }
+            if ledger.isSettled(dayKey) {
+                return "No level for today: last night wasn't recorded; \(shown).\n"
+            }
+            return "Today's level is not set yet (last night is still syncing); \(shown).\n"
+        }
         if let frozen = ledger.entry(dayKey) ?? ledger.latest(onOrBefore: dayKey) {
             let b = frozen.breakdown
-            if frozen.day != dayKey {
-                s += "Today's level is not set yet (last night is still syncing); the figure below is the last day that was.\n"
-            }
+            if let reason = pendingReason(shownDay: frozen.day) { s += reason }
             if frozen.partial {
                 s += "That level was set at the day's deadline with the night only partly synced.\n"
             }
@@ -47,9 +62,13 @@ enum CoachLevelContext {
             let levers = b.levers().prefix(3).map {
                 String(format: "%@ (+%.1f)", $0.part.rawValue, $0.headroom * b.stepPenalty)
             }
-            if !levers.isEmpty { s += "Biggest levers today: " + levers.joined(separator: ", ") + ".\n" }
+            if !levers.isEmpty {
+                // Named by the day they were read from: a lever list off yesterday's level is not today's.
+                let heading = pending ? "Biggest levers on the \(frozen.day) level" : "Biggest levers today"
+                s += heading + ": " + levers.joined(separator: ", ") + ".\n"
+            }
         } else {
-            s += "Today's level has not been computed yet.\n"
+            s += pendingReason(shownDay: nil) ?? "Today's level has not been computed yet.\n"
         }
 
         s += "HOW IT IS CALCULATED (no ceiling, no floor):\n"

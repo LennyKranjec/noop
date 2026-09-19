@@ -156,4 +156,22 @@ final class StrainBanisterDenominatorTests: XCTestCase {
         XCTAssertNotNil(banister)
         XCTAssertGreaterThan(banister!, 20.0, "Banister credits the same hour on the 0–100 axis")
     }
+
+    // MARK: - E3: the sedentary floor sits on the WAKING resting HR
+
+    /// Resting HR for Effort is the WAKING floor since O7, so the Banister sedentary allowance only has to
+    /// cover posture noise above it (4 % HRR), not the sleep-to-waking gap as well (the old 10 %).
+    func testSedentaryFloorIsFourPercentOfReserve() {
+        XCTAssertEqual(StrainScorer.banisterSedentaryHRR, 0.04, accuracy: 1e-12)
+    }
+
+    /// A day held just under the floor still nets to nothing; a day at 8 % HRR — light pottering the old
+    /// 10 % floor erased — now scores.
+    func testLightPotteringAboveTheWakingFloorNowScores() {
+        let rest = 60.0, max = 190.0
+        let under = (0 ..< 3600).map { HRSample(ts: $0, bpm: 65) }   // 3.8 % HRR
+        let potter = (0 ..< 3600).map { HRSample(ts: $0, bpm: 70) }  // 7.7 % HRR
+        XCTAssertEqual(StrainScorer.strain(under, maxHR: max, restingHR: rest, method: .banister), 0.0)
+        XCTAssertGreaterThan(StrainScorer.strain(potter, maxHR: max, restingHR: rest, method: .banister)!, 0.0)
+    }
 }

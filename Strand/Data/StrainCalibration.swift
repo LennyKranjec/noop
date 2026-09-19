@@ -16,11 +16,30 @@ import StrandAnalytics
 //
 // FALLBACK. No calibration (fewer than `EffortStrainCalibration.minPairs` paired days, or a fit that was
 // refused) means the linear ×21/100 the app has always used, byte-identical to before.
+//
+// E4 — ONE RECIPE PER FIT. The stored days only carry the CURRENT Effort recipe once the one-shot
+// full-history rescore (`IntelligenceEngine.nightlyMetricsRescoreFlagKey`) has finished. The first Today
+// load used to fit before that pass ended — mixing pre-O6 and post-O6 Effort in one curve — and then kept
+// that fit for the rest of the day. Now: no fit at all until the rescore flag is up; ONE refit the first
+// refresh after it goes up (whatever day it is); daily after that. Every stored calibration is tagged with
+// `strainRecipeVersion`, and a calibration from an older recipe is ignored (linear fallback) rather than
+// applied to numbers it was never fitted on.
 
 enum StrainCalibration {
 
     static let storageKey = "effort.whoopCalibration.v1"
     static let refreshedDayKey = "effort.whoopCalibration.refreshedDay"
+    /// E4: the `strainRecipeVersion` the stored calibration was fitted against. Absent (0) = pre-E4.
+    static let recipeKey = "effort.whoopCalibration.recipe"
+    /// E4: "<rescore flag key>|r<recipe>" of the last fit made AFTER the full-history rescore. When it does
+    /// not match the current one, the next refresh with the rescore done refits at once, not tomorrow.
+    static let fittedAfterRescoreKey = "effort.whoopCalibration.fittedAfterRescore"
+
+    /// The Effort RECIPE version a calibration belongs to. BUMP whenever the stored day Effort changes shape
+    /// (zones, gates, floors, the log map) — a curve fitted on the old numbers is wrong on the new ones.
+    ///   1 — O6: Edwards zones on %HRmax.
+    ///   2 — E1: the day integral pays zone 1 only while moving; E3: Banister sedentary floor 0.10 → 0.04.
+    static let strainRecipeVersion = 2
     /// How far back paired days are looked for. Long enough to collect ≥ 10 pairs for an occasional
     /// WHOOP-cloud user; short enough that an old scoring recipe ages out of the fit.
     static let lookbackDays = 120
@@ -34,7 +53,9 @@ enum StrainCalibration {
         lock.lock()
         defer { lock.unlock() }
         if !loaded {
-            cached = decode(UserDefaults.standard.data(forKey: storageKey))
+            // A calibration from an older recipe is not a calibration of THESE numbers (E4).
+            let recipe = UserDefaults.standard.integer(forKey: recipeKey)
+            cached = decodeIfCurrent(UserDefaults.standard.data(forKey: storageKey), recipe: recipe)
             loaded = true
         }
         return cached
@@ -48,8 +69,10 @@ enum StrainCalibration {
         lock.unlock()
         if let calibration, let data = try? JSONEncoder().encode(calibration) {
             UserDefaults.standard.set(data, forKey: storageKey)
+            UserDefaults.standard.set(strainRecipeVersion, forKey: recipeKey)
         } else {
             UserDefaults.standard.removeObject(forKey: storageKey)
+            UserDefaults.standard.removeObject(forKey: recipeKey)
         }
     }
 
@@ -67,16 +90,27 @@ enum StrainCalibration {
         return cal.effort100(strain21: strain21)
     }
 
-    /// Refit from the store, at most once per local day. Cheap when already done today (one defaults read).
+    /// Refit from the store when due. Cheap when not due (a few defaults reads).
+    ///
+    /// DUE (E4): never while the full-history rescore is still pending (the store mixes recipes); at once
+    /// on the first refresh after it completes (`fittedAfterRescoreKey` does not match yet); otherwise at
+    /// most once per local day. Called on every Today refresh, so the flag flipping is noticed promptly.
     ///
     /// When BOTH reads come back empty — no store yet, or a user who never connected the WHOOP cloud — the
-    /// persisted calibration is left alone and the day is not marked, so a transient store miss can never
-    /// wipe a good calibration. Otherwise the fit's result replaces it, nil included: a wearer whose paired
-    /// days fell under the minimum goes back to the honest linear mapping.
+    /// persisted calibration is left alone and nothing is marked, so a transient store miss can never wipe
+    /// a good calibration. Otherwise the fit's result replaces it, nil included: a wearer whose paired days
+    /// fell under the minimum goes back to the honest linear mapping.
     @MainActor
     static func refreshIfDue(repo: Repository, now: Date = Date()) async {
+        let defaults = UserDefaults.standard
         let today = Repository.localDayKey(now)
-        guard UserDefaults.standard.string(forKey: refreshedDayKey) != today else { return }
+        let rescoreKey = IntelligenceEngine.nightlyMetricsRescoreFlagKey
+        let marker = fitMarker(rescoreFlagKey: rescoreKey)
+        guard isDue(rescoreDone: defaults.bool(forKey: rescoreKey),
+                    fittedMarker: defaults.string(forKey: fittedAfterRescoreKey),
+                    currentMarker: marker,
+                    refreshedDay: defaults.string(forKey: refreshedDayKey),
+                    today: today) else { return }
         let own = await repo.noopRecentDays(days: lookbackDays)
         let whoop = await repo.whoopRecentDays(days: lookbackDays)
         guard !own.isEmpty || !whoop.isEmpty else { return }
@@ -84,7 +118,22 @@ enum StrainCalibration {
                            whoop: whoop.map { (day: $0.day, strain: $0.strain) },
                            excludingDay: today)
         store(EffortStrainCalibration.fit(paired))
-        UserDefaults.standard.set(today, forKey: refreshedDayKey)
+        defaults.set(today, forKey: refreshedDayKey)
+        defaults.set(marker, forKey: fittedAfterRescoreKey)
+    }
+
+    /// The marker a post-rescore fit leaves behind: which rescore it followed and which recipe it fitted.
+    /// A bumped rescore key (a new full-history pass) or a bumped recipe both make it stale, so both refit.
+    static func fitMarker(rescoreFlagKey: String) -> String {
+        "\(rescoreFlagKey)|r\(strainRecipeVersion)"
+    }
+
+    /// E4's refit rule, pure so it is testable without defaults or a store.
+    static func isDue(rescoreDone: Bool, fittedMarker: String?, currentMarker: String,
+                      refreshedDay: String?, today: String) -> Bool {
+        guard rescoreDone else { return false }                   // the store still mixes recipes
+        guard fittedMarker == currentMarker else { return true }  // first refresh after the rescore / a bump
+        return refreshedDay != today                              // then daily
     }
 
     /// Join the two lanes by day key. Pure, so it is testable without a store.
@@ -101,6 +150,13 @@ enum StrainCalibration {
             out.append((effort100: e, strain21: s))
         }
         return out
+    }
+
+    /// The stored calibration only when it was fitted against the CURRENT recipe (E4); nil otherwise, which
+    /// is the linear fallback. Pure, so the recipe gate is testable without resetting the in-memory copy.
+    static func decodeIfCurrent(_ data: Data?, recipe: Int) -> EffortStrainCalibration? {
+        guard recipe == strainRecipeVersion else { return nil }
+        return decode(data)
     }
 
     private static func decode(_ data: Data?) -> EffortStrainCalibration? {

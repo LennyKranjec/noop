@@ -5114,8 +5114,14 @@ struct TodayView: View {
             let restHR = await repo.wakingRestingHR(day: selectedDayKey,
                                                     sleepRestingHR: displayDay?.restingHr.map(Double.init))
                 ?? StrainScorer.defaultRestingHR
+            // E1: a whole-DAY integral, so zone 1 only pays while the wearer is MOVING — the same gravity
+            // gate the daily pass scores the stored row with, or `effectiveEffort`'s max would let the
+            // ungated live number win and the desk-day inflation would stay on the ring.
+            let todayGravity = await repo.gravitySamplesUnion(from: effortStart, to: windowEndInclusive,
+                                                              limit: 200_000)
             liveStrainLocal = StrainScorer.strain(todayHr, maxHR: maxHR, restingHR: restHR,
-                                        method: PuffinExperiment.effortMethod, sex: profile.sex)
+                                        method: PuffinExperiment.effortMethod, sex: profile.sex,
+                                        zone1Gate: .day(StrainScorer.movingMinutes(gravity: todayGravity)))
         } else {
             liveStrainLocal = nil
         }

@@ -75,9 +75,9 @@ final class DayCacheConfigFieldTests: XCTestCase {
             "hrvBaseline", "rhrBaseline", "age", "sex", "stepTicksPerStep", "maxHROverride",
             "tzOffset", "sleepNeedHours", "sleepConsistency", "habitualMidsleep",
             "experimentalSleepV2", "motionAwareWake", "deepHrvWindow", "spo2CandidateDisplay",
-            // `sleepHRBaseline` (nightly-metrics rework) is Swift-only until the Kotlin twin lands the same
-            // personal overnight HR band; the Kotlin list must gain it in the same position.
-            "effortMethod", "dayCycleMode", "sleepHRBaseline",
+            // The personal sleep-HR baseline is NOT a pass-global field (review S4): it is computed per night,
+            // as of that night, and rides the DAY's own cache key — so this list matches the Kotlin twin again.
+            "effortMethod", "dayCycleMode",
         ])
     }
 }

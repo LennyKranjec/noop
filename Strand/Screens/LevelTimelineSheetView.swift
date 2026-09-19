@@ -126,6 +126,14 @@ struct LevelTimelineSheetView: View {
         .task(id: model.trend?.now?.level) { await loadNote() }
     }
 
+    /// Whose level the missing values belong to, BY THE DAY SHOWN. While today's level is pending the
+    /// sheet shows an earlier day's, and calling that "today's level" was simply wrong.
+    private var missingSubject: String {
+        guard let day = model.shownDay, day != LevelWiring.key(from: Date()),
+              let date = LevelWiring.date(from: day) else { return "Today's level" }
+        return "The level for " + date.formatted(.dateTime.weekday(.wide).day().month(.wide))
+    }
+
     /// What the level was computed without, and what would bring each one in.
     private var missingCard: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -138,7 +146,7 @@ struct LevelTimelineSheetView: View {
                     .tracking(1.2)
                     .foregroundStyle(StrandPalette.statusWarning)
             }
-            Text("Today's level is computed without these. Their weight goes to the parts that have data, so the level is partial rather than low.")
+            Text(missingSubject + " is computed without these. Their weight goes to the parts that have data, so the level is partial rather than low.")
                 .font(StrandFont.caption)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)

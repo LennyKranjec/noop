@@ -16,14 +16,19 @@ import WhoopStore
 //
 // A DAY IS WRITTEN WHEN ITS NIGHT HAS LANDED — all of it, not the first figure to arrive. HRV, resting HR,
 // total sleep, deep and REM, the breathing rate where this wearer's history has one, and the bed and wake
-// times. Freezing on the first of those used to lock in a level scored from half a night.
+// times, with the wake at least half an hour past. Freezing on the first of those used to lock in a level
+// scored from half a night.
 //
 // OR AT THE DEADLINE, WHATEVER HAS ARRIVED. A night that never fully syncs cannot hold the day open
-// forever: at 14:00 on the day — or as soon as the next morning's flow begins — the day is written with
-// what exists, marked PARTIAL and with the list of what it went without.
+// forever: at 14:00 on the day — or two hours after that day's morning flow began, if that is later — the
+// day is written with what exists, marked PARTIAL and with the list of what it went without. A day that
+// is already in the past by the calendar is written at its deadline only once a sync or analysis pass has
+// COMPLETED after that deadline: a day the app was not opened on is otherwise written at launch, seconds
+// before the sync that carries its night.
 //
 // ONE WRITER, AND IT NEVER OVERWRITES. Every write goes through `commit`, which re-checks under the lock
-// that the day is not already there. The one way an entry leaves is `resetAll`, which nothing calls yet.
+// that the day is not already there. The one way entries leave is `resetAll`, which only a new recipe
+// epoch calls (see `currentEpoch`).
 
 /// One row of the ledger's work for a day: a level to keep, or a day settled as having none.
 enum LevelSettlement: Equatable {
@@ -49,30 +54,110 @@ final class LevelLedger: @unchecked Sendable {
     /// The hour on the day after which a night that never fully landed is written down as it stands.
     static let deadlineHour = 14
 
+    /// How long after the morning flow began on a day its night is still given to land. An app first
+    /// opened at 23:00 would otherwise write the day on the spot, before the sync the open started.
+    static let beginGrace: TimeInterval = 2 * 60 * 60
+
+    /// How long a night has to have been over before it counts as landed: the last half hour of sleep is
+    /// still being scored when the first figures for it arrive.
+    static let wakeSettle: TimeInterval = 30 * 60
+
+    /// How long past its deadline a day with NO ROW AT ALL is waited for — and only once a later day has
+    /// one. A missing row is far more often a night that has not synced yet than a night not recorded.
+    static let absentNightGrace: TimeInterval = 48 * 60 * 60
+
+    /// THE RECIPE EPOCH, stored inside the ledger file itself. 1 = the nightly-metrics re-score v1
+    /// (`IntelligenceEngine.nightlyMetricsRescoreFlagKey`) has finished. A ledger below the current epoch
+    /// was written from nights scored the old way, so it is emptied once — in the same save that stamps the
+    /// new epoch, so the two cannot disagree after a crash — and the baselines are frozen again from the
+    /// re-scored history. BUMP IT whenever a recipe change must reach the days already written.
+    static let currentEpoch = 2
+
     private struct Stored: Codable {
         var entries: [String: FrozenLevel]
         var empty: [String]
         var backfilled: Bool
+        var epoch: Int
+        /// Every day from `settledFrom` through `settledThrough` is settled, so a walk can start after it.
+        var settledFrom: String?
+        var settledThrough: String?
+        /// Entries that would not decode. Never written back.
+        var dropped = 0
+
+        private enum CodingKeys: String, CodingKey {
+            case entries, empty, backfilled, epoch, settledFrom, settledThrough
+        }
+
+        init(entries: [String: FrozenLevel], empty: [String], backfilled: Bool, epoch: Int,
+             settledFrom: String?, settledThrough: String?) {
+            self.entries = entries
+            self.empty = empty
+            self.backfilled = backfilled
+            self.epoch = epoch
+            self.settledFrom = settledFrom
+            self.settledThrough = settledThrough
+        }
+
+        /// ONE BAD ENTRY COSTS ONE DAY, NOT THE LEDGER. Each entry is decoded on its own; one that will
+        /// not is counted and left out, and every other day loads as written. A file with no epoch is
+        /// from before there was one, which is epoch 0.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            let raw = try c.decodeIfPresent([String: LossyLevel].self, forKey: .entries) ?? [:]
+            var entries: [String: FrozenLevel] = [:]
+            var dropped = 0
+            for (day, box) in raw {
+                if let level = box.value, level.day == day { entries[day] = level } else { dropped += 1 }
+            }
+            self.entries = entries
+            self.dropped = dropped
+            empty = (try? c.decodeIfPresent([String].self, forKey: .empty)) ?? []
+            backfilled = (try? c.decodeIfPresent(Bool.self, forKey: .backfilled)) ?? false
+            epoch = (try? c.decodeIfPresent(Int.self, forKey: .epoch)) ?? 0
+            settledFrom = (try? c.decodeIfPresent(String.self, forKey: .settledFrom)) ?? nil
+            settledThrough = (try? c.decodeIfPresent(String.self, forKey: .settledThrough)) ?? nil
+        }
+    }
+
+    /// An entry that decodes to nil rather than failing the whole file.
+    private struct LossyLevel: Decodable {
+        let value: FrozenLevel?
+        init(from decoder: Decoder) throws { value = try? FrozenLevel(from: decoder) }
+    }
+
+    /// Whether the file on disk has been read. NOTHING IS WRITTEN UNTIL IT HAS: a ledger that could not
+    /// be read and was then saved from an empty memory would wipe every day it held.
+    private enum LoadState {
+        case loaded
+        /// The file exists but could not be read (a locked device's file protection, an I/O error). It is
+        /// left exactly where it is and read again on the next `retryLoadIfNeeded`.
+        case unreadable
+        /// The file was read but is not a ledger. Moved aside; read-only until the next launch.
+        case corrupt
     }
 
     private let lock = NSLock()
     private let url: URL?
+    private var state: LoadState = .loaded
     private var levels: [String: FrozenLevel] = [:]
     /// Days whose entry would not encode even after cleaning. Kept for the life of the process so the day
     /// is not recomputed on every refresh, but not written to disk.
     private var memoryOnly: [String: FrozenLevel] = [:]
     private var empty: Set<String> = []
     private var backfilled = false
+    private var storedEpoch = 0
+    private var settledFrom: String?
+    private var settledThrough: String?
 
     /// `fileURL` nil keeps the ledger in memory only (tests). `legacy` is where the old single frozen day
     /// is carried over from, the first time the ledger file does not exist yet.
     init(fileURL: URL? = LevelLedger.defaultURL, legacy: UserDefaults = .standard) {
         url = fileURL
-        if let url, let data = try? Data(contentsOf: url),
-           let stored = try? JSONDecoder().decode(Stored.self, from: data) {
-            levels = stored.entries
-            empty = Set(stored.empty)
-            backfilled = stored.backfilled
+        guard let url else { return }
+        // THE FIRST-RUN PATH IS TAKEN ONLY WHEN THERE IS NO FILE. A file that exists but will not read is
+        // not a first run, and treating it as one used to overwrite the whole ledger with an empty one.
+        if FileManager.default.fileExists(atPath: url.path) {
+            loadLocked(from: url)
             return
         }
         // FIRST RUN: the day the old freeze held is the one figure the wearer has already seen, so it is
@@ -81,14 +166,80 @@ final class LevelLedger: @unchecked Sendable {
            let old = try? JSONDecoder().decode(FrozenLevel.self, from: data) {
             levels[old.day] = old
         }
-        persistLocked()
-        legacy.removeObject(forKey: LevelDayFreeze.legacyKey)
+        // The old key goes only once the ledger that now holds its day is safely on disk.
+        if persistLocked() {
+            legacy.removeObject(forKey: LevelDayFreeze.legacyKey)
+        }
     }
 
     static var defaultURL: URL? {
         let base = try? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                                  appropriateFor: nil, create: true)
         return base?.appendingPathComponent("level_ledger.json")
+    }
+
+    /// Read the file into memory. Called from `init`, or with the lock held.
+    private func loadLocked(from url: URL) {
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+        } catch {
+            NSLog("LevelLedger: the ledger could not be read, read-only until it can: %@",
+                  String(describing: error))
+            state = .unreadable
+            return
+        }
+        guard let stored = try? JSONDecoder().decode(Stored.self, from: data) else {
+            NSLog("LevelLedger: the ledger file is not a ledger; moved aside, read-only until the next launch")
+            state = .corrupt
+            putAside(url, copy: false)
+            return
+        }
+        levels = stored.entries
+        empty = Set(stored.empty)
+        backfilled = stored.backfilled
+        storedEpoch = stored.epoch
+        settledFrom = stored.settledFrom
+        settledThrough = stored.settledThrough
+        state = .loaded
+        if stored.dropped > 0 {
+            // The file as it was is kept beside the ledger, because the next save leaves those days out.
+            NSLog("LevelLedger: %d entries would not decode and were left out", stored.dropped)
+            putAside(url, copy: true)
+        }
+    }
+
+    /// The name a bad ledger file is put aside under: beside it, dated.
+    static func asideURL(for url: URL, stamp: Int) -> URL {
+        let ext = url.pathExtension.isEmpty ? "json" : url.pathExtension
+        return url.deletingPathExtension().appendingPathExtension("corrupt-\(stamp)").appendingPathExtension(ext)
+    }
+
+    /// Put the file aside — moved when it is unusable, copied when only some of its entries were.
+    private func putAside(_ url: URL, copy: Bool) {
+        let aside = Self.asideURL(for: url, stamp: Int(Date().timeIntervalSince1970))
+        do {
+            if copy {
+                try FileManager.default.copyItem(at: url, to: aside)
+            } else {
+                try FileManager.default.moveItem(at: url, to: aside)
+            }
+        } catch {
+            NSLog("LevelLedger: could not put the ledger file aside: %@", String(describing: error))
+        }
+    }
+
+    /// Read the file again if it could not be read at launch — a device unlocked since, say.
+    func retryLoadIfNeeded() {
+        lock.lock(); defer { lock.unlock() }
+        guard state == .unreadable, let url, FileManager.default.fileExists(atPath: url.path) else { return }
+        loadLocked(from: url)
+    }
+
+    /// Whether anything may be written: the file on disk has been read, or there was none.
+    var isWritable: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return state == .loaded
     }
 
     // MARK: - Reading
@@ -125,6 +276,19 @@ final class LevelLedger: @unchecked Sendable {
         return backfilled
     }
 
+    /// The recipe epoch the entries were written under — see `currentEpoch`.
+    var epoch: Int {
+        lock.lock(); defer { lock.unlock() }
+        return storedEpoch
+    }
+
+    /// The span known to be settled end to end, so a walk can start the day after it.
+    var settledSpan: (from: String, through: String)? {
+        lock.lock(); defer { lock.unlock() }
+        guard let settledFrom, let settledThrough else { return nil }
+        return (settledFrom, settledThrough)
+    }
+
     // MARK: - Writing
 
     /// Write one day. False when the day was already settled — the entry there is left exactly as it was.
@@ -138,6 +302,7 @@ final class LevelLedger: @unchecked Sendable {
     func commit(_ settlements: [LevelSettlement]) -> Int {
         guard !settlements.isEmpty else { return 0 }
         lock.lock(); defer { lock.unlock() }
+        guard state == .loaded else { return 0 }
         var added = 0
         for s in settlements {
             let day = s.day
@@ -166,19 +331,48 @@ final class LevelLedger: @unchecked Sendable {
 
     func markBackfilled() {
         lock.lock(); defer { lock.unlock() }
-        guard !backfilled else { return }
+        guard state == .loaded, !backfilled else { return }
         backfilled = true
         persistLocked()
     }
 
-    /// Forget every day. The only way an entry is ever removed — for a future "start over" in Settings.
-    func resetAll() {
+    /// Record that every day from `start` through `end` is settled. The end only ever moves forward; the
+    /// start moves back when older history arrived and was walked.
+    func markSettled(from start: String, through end: String) {
         lock.lock(); defer { lock.unlock() }
+        guard state == .loaded, start <= end else { return }
+        let newThrough = Swift.max(end, settledThrough ?? end)
+        guard start != settledFrom || newThrough != settledThrough else { return }
+        settledFrom = start
+        settledThrough = newThrough
+        persistLocked()
+    }
+
+    /// Forget every day, and stamp `epoch` when one is given — in the SAME save, so a ledger emptied for
+    /// a new recipe can never be read back as the old one, nor the old entries under the new epoch.
+    func resetAll(epoch newEpoch: Int? = nil) {
+        lock.lock(); defer { lock.unlock() }
+        guard state == .loaded else { return }
         levels = [:]
         memoryOnly = [:]
         empty = []
         backfilled = false
+        settledFrom = nil
+        settledThrough = nil
+        if let newEpoch { storedEpoch = newEpoch }
         persistLocked()
+    }
+
+    /// Move a ledger written under an older recipe to the current one: `beforeReset` (freezing the
+    /// baselines again from the re-scored history) runs first, then the ledger is emptied and stamped in
+    /// one save. Only once the nights have been re-scored, and only once — a ledger already on the current
+    /// epoch is left alone. True when it reset.
+    @discardableResult
+    func adoptCurrentEpochIfNeeded(rescoreDone: Bool, beforeReset: () -> Void) -> Bool {
+        guard rescoreDone, isWritable, epoch < Self.currentEpoch else { return false }
+        beforeReset()
+        resetAll(epoch: Self.currentEpoch)
+        return true
     }
 
     private func pruneLocked() {
@@ -190,26 +384,50 @@ final class LevelLedger: @unchecked Sendable {
         empty = empty.filter { $0 >= cutoff }
     }
 
-    private func persistLocked() {
-        guard let url else { return }
-        let stored = Stored(entries: levels, empty: empty.sorted(), backfilled: backfilled)
+    /// Save to disk. True when there is nowhere to save to, or the save succeeded.
+    @discardableResult
+    private func persistLocked() -> Bool {
+        guard let url else { return true }
+        guard state == .loaded else { return false }
+        let stored = Stored(entries: levels, empty: empty.sorted(), backfilled: backfilled, epoch: storedEpoch,
+                            settledFrom: settledFrom, settledThrough: settledThrough)
         do {
             let data = try JSONEncoder().encode(stored)
             try data.write(to: url, options: .atomic)
+            return true
         } catch {
             NSLog("LevelLedger: could not save the ledger: %@", String(describing: error))
+            return false
         }
     }
 
     // MARK: - When a day may be written
+
+    /// Whether anything may be settled right now: the nights have been re-scored, and nothing — an
+    /// import, a strap offload, an analysis pass — is writing to the store. A day written mid-import is
+    /// written from a store that is half there.
+    static func maySettle(rescoreDone: Bool, dataInFlight: Bool) -> Bool {
+        rescoreDone && !dataInFlight
+    }
+
+    /// When the night that ended on `day` ended, from its wake time. Nil without one.
+    static func wakeTime(day: String, series: LevelSeries, calendar: Calendar) -> Date? {
+        guard let timing = series.sleepTimings[day],
+              let start = LevelWiring.date(from: day, calendar: calendar) else { return nil }
+        let minute = Swift.min(Swift.max(timing.wakeMinute, 0), 24 * 60 - 1)
+        return calendar.date(bySettingHour: minute / 60, minute: minute % 60, second: 0, of: start)
+    }
 
     /// What the night that ended on `day` is still missing before the day may be written on time.
     /// Empty means the night has landed.
     ///
     /// THE BREATHING RATE IS ASKED FOR ONLY WHERE IT IS NORMALLY THERE. Plenty of sources never record
     /// one; demanding it of them would push every one of their days to the deadline.
+    ///
+    /// WITH `now`, THE NIGHT MUST ALSO BE OVER BY HALF AN HOUR: every figure can be present for a night
+    /// whose last stretch is still being scored.
     static func nightMissing(day: String, byDay: [String: DailyMetric], series: LevelSeries,
-                             calendar: Calendar) -> [String] {
+                             calendar: Calendar, now: Date? = nil) -> [String] {
         func has(_ x: Double?) -> Bool { x.map { $0.isFinite } ?? false }
         var out: [String] = []
         let row = byDay[day]
@@ -222,21 +440,53 @@ final class LevelLedger: @unchecked Sendable {
         let usuallyHasResp = week.contains { byDay[$0]?.respRateBpm != nil }
         if usuallyHasResp, !has(row?.respRateBpm) { out.append("respRate") }
         if series.sleepTimings[day] == nil { out.append("sleepTiming") }
+        if let now, let wake = wakeTime(day: day, series: series, calendar: calendar),
+           now < wake.addingTimeInterval(wakeSettle) {
+            out.append("wakeSettling")
+        }
         return out
     }
 
     static func isReady(day: String, byDay: [String: DailyMetric], series: LevelSeries,
-                        calendar: Calendar) -> Bool {
-        nightMissing(day: day, byDay: byDay, series: series, calendar: calendar).isEmpty
+                        calendar: Calendar, now: Date? = nil) -> Bool {
+        nightMissing(day: day, byDay: byDay, series: series, calendar: calendar, now: now).isEmpty
     }
 
-    /// Whether `day` must be written now whatever has arrived: 14:00 on it has passed, or it is no longer
-    /// the current level day because the next morning's flow has begun.
-    static func deadlinePassed(day: String, levelDay: String, now: Date, calendar: Calendar) -> Bool {
-        if day < levelDay { return true }
+    /// The moment `day` is written whatever has arrived: 14:00 on it — set on the clock, so a DST change
+    /// that morning does not move it an hour — or two hours after that day's morning flow began, if later.
+    static func deadline(day: String, beganAt: Date? = nil, calendar: Calendar) -> Date? {
         guard let start = LevelWiring.date(from: day, calendar: calendar),
-              let deadline = calendar.date(byAdding: .hour, value: deadlineHour, to: start) else { return false }
-        return now >= deadline
+              let afternoon = calendar.date(bySettingHour: deadlineHour, minute: 0, second: 0, of: start)
+        else { return nil }
+        guard let beganAt else { return afternoon }
+        return Swift.max(afternoon, beganAt.addingTimeInterval(beginGrace))
+    }
+
+    /// Whether `day` must be written now whatever has arrived.
+    ///
+    /// The current day: once its deadline has passed. A day ALREADY IN THE PAST — before the level day, or
+    /// before today on the calendar — additionally waits for a sync or analysis pass to have COMPLETED
+    /// after its deadline (`lastCompletedPass`): at launch after days away, those days' deadlines have all
+    /// passed, but their nights are still on the strap or in the cloud.
+    static func deadlinePassed(day: String, levelDay: String, now: Date, calendar: Calendar,
+                               beganAt: Date? = nil, lastCompletedPass: Date? = nil) -> Bool {
+        guard let deadline = deadline(day: day, beganAt: beganAt, calendar: calendar), now >= deadline
+        else { return false }
+        let past = day < levelDay || day < LevelWiring.key(from: now, calendar: calendar)
+        guard past else { return true }
+        guard let pass = lastCompletedPass else { return false }
+        return pass >= deadline
+    }
+
+    /// Whether a day with NO ROW may be closed at its deadline — written as a level from the days around
+    /// it, or as a gap. Only once a LATER day has a row (so the sync has moved past it) and 48 hours have
+    /// passed since its deadline. A day with a row is not held back by this.
+    static func absentNightMayClose(hasRow: Bool, newestRowDay: String?, day: String, deadline: Date?,
+                                    now: Date) -> Bool {
+        if hasRow { return true }
+        guard let deadline, now >= deadline.addingTimeInterval(absentNightGrace),
+              let newest = newestRowDay else { return false }
+        return newest > day
     }
 
     /// Every Double of the inputs finite, or gone. A NaN VO₂max is no VO₂max, and is listed as missing.
@@ -257,6 +507,9 @@ final class LevelLedger: @unchecked Sendable {
     }
 
     /// What to write for `day` now, or nil to wait for its night.
+    ///
+    /// `absentNightMayClose` false holds a deadline write back for a day with no row at all — see
+    /// `absentNightMayClose(hasRow:newestRowDay:day:deadline:now:)`.
     static func settle(
         day: String,
         byDay: [String: DailyMetric],
@@ -265,13 +518,14 @@ final class LevelLedger: @unchecked Sendable {
         calendar: Calendar,
         deadlinePassed: Bool,
         backfilled: Bool = false,
-        now: Date = Date()
+        now: Date = Date(),
+        absentNightMayClose: Bool = true
     ) -> LevelSettlement? {
-        let ready = isReady(day: day, byDay: byDay, series: series, calendar: calendar)
-        guard ready || deadlinePassed else { return nil }
+        let ready = isReady(day: day, byDay: byDay, series: series, calendar: calendar, now: now)
+        guard ready || (deadlinePassed && absentNightMayClose) else { return nil }
         let inputs = sanitized(LevelWiring.dayInputs(byDay: byDay, day: day, series: series, calendar: calendar))
         guard let breakdown = LevelEngine.compute(inputs: inputs, baselines: baselines) else {
-            return deadlinePassed ? .empty(day) : nil
+            return deadlinePassed && absentNightMayClose ? .empty(day) : nil
         }
         var drivers: [LevelPart: LevelDriver] = [:]
         for part in LevelPart.allCases {

@@ -1475,9 +1475,17 @@ final class Repository: ObservableObject {
                                            durationS: w.durationS ?? Double(w.endTs - w.startTs),
                                            distanceM: d, avgHr: Double(hr))
         }
-        // THE WEEKLY ZONES: four weeks of workouts averaged into one week. Zones 4–5 come from the
-        // workout's own zone split where it has one (strap, WHOOP cloud, WHOOP export); a session with no
-        // split counts as hard only when its average HR was already at 85 % of HRmax.
+        // THE WEEKLY ZONES: four weeks of workouts averaged into one week. A session counts as HARD (the
+        // activity model's high-intensity fraction, ≥ 85 % HRmax) when its average HR was at 85 % of HRmax.
+        //
+        // E11 — NOT FROM `zonesJSON` ANY MORE. That split used to be read as "zones 4–5 = hard", but what a
+        // zone MEANS depends on who wrote the row: the strap's own split moved to Edwards %HRmax bands with
+        // O6 (zone 4 now starts at 80 % HRmax, ~150 bpm at age 30), older strap rows sit on %HRR bands, and
+        // WHOOP cloud / export rows carry WHOOP's own bands. None of them has a boundary AT 85 % HRmax, and a
+        // row does not say which table it used, so there is no honest way to map a percentage split onto
+        // "time at ≥ 85 %". One rule for every workout, from a field every source fills the same way, is the
+        // documented approximation: it under-counts intervals inside a moderate session and over-counts
+        // nothing, which errs toward the conservative (lower) VO₂max.
         let fourWeeksAgo = Int(Date().timeIntervalSince1970) - 28 * 86_400
         let recent = workouts.filter { $0.startTs >= fourWeeksAgo }
             .filter { ($0.durationS ?? Double($0.endTs - $0.startTs)) >= 10 * 60 }
@@ -1487,9 +1495,7 @@ final class Repository: ObservableObject {
             let m = (w.durationS ?? Double(w.endTs - w.startTs)) / 60
             activeDayKeys.insert(Self.localDayKey(Date(timeIntervalSince1970: TimeInterval(w.startTs))))
             minutes += m
-            if let p = WorkoutZones.percents(w.zonesJSON) {
-                hardMinutes += m * (p[3] + p[4]) / 100
-            } else if let hr = w.avgHr, Double(hr) >= 0.85 * hrMax {
+            if let hr = w.avgHr, Double(hr) >= 0.85 * hrMax {
                 hardMinutes += m
             }
         }

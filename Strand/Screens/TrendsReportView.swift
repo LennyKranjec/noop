@@ -343,7 +343,8 @@ struct TrendsReportPage: View {
                 ? (up == stat.metric.higherIsBetter ? StrandPalette.statusPositive : StrandPalette.metricRose)
                 : StrandPalette.textTertiary
             let sign = up ? "+" : "−"
-            let shown = abs(RangeReportEngine.displayValue(d, metric: stat.metric, units: units))
+            // A DELTA: linear on every axis (E5), never through the Effort calibration curve.
+            let shown = abs(RangeReportEngine.displayDelta(d, metric: stat.metric, units: units))
             TrendChip(text: "\(sign)\(round1Text(shown))", color: color)
         }
     }
@@ -463,11 +464,13 @@ struct TrendsReportSheet: View {
         let system = UnitSystem(rawValue: unitSystemRaw) ?? .metric
         let temp = UnitPrefs.resolveTemperature(system: system, override: temperatureRaw)
         let scale = UnitPrefs.resolveEffortScale(effortScaleRaw)
-        // Name the canonical constant rather than deriving it from `effortValue(1.0,)`: the report
-        // multiplies by this factor, which is only equivalent while the mapping stays linear.
+        // Name the canonical constant rather than deriving it from `effortValue(1.0,)`: DELTAS multiply by
+        // this factor. LEVELS go through the same O8 calibration `UnitFormatter.effortValue` uses (E5), so
+        // the exported page reads the numbers Today shows; nil calibration = the linear factor, as before.
         return ReportDisplayUnits(
             fahrenheit: temp == .fahrenheit,
-            effortFactor: scale == .whoop ? UnitFormatter.effortScaleFactor : 1.0)
+            effortFactor: scale == .whoop ? UnitFormatter.effortScaleFactor : 1.0,
+            effortCalibration: scale == .whoop ? StrainCalibration.current : nil)
     }
 
     private var report: RangeReport {

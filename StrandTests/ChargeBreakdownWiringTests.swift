@@ -62,4 +62,20 @@ final class ChargeBreakdownWiringTests: XCTestCase {
         XCTAssertTrue(labels.contains("Resting heart rate"), "\(labels)")
         XCTAssertNotEqual(out?.confidence, .calibrating)
     }
+
+    /// E7: the breakdown honours the SAME recalibration epoch as the headline. A Recalibrate on 01-09
+    /// leaves one night on or after it before 01-10, so the headline's HRV baseline is calibrating again —
+    /// and the sheet must hide rather than score rows against the baseline the headline threw away.
+    func testBreakdownHonoursTheHrvRecalibrationEpoch() {
+        let past = (1...9).map { day(String(format: "2026-01-%02d", $0), hrv: 50 + Double($0 % 3)) }
+        let today = day("2026-01-10", hrv: 62, rhr: 51, recovery: 64)
+        let noEpoch = ChargeBreakdownWiring.breakdown(days: past + [today], row: today, sleepPerfPercent: 85,
+                                                      hrvEpoch: 0, recoveryEpoch: 0, respEraEpoch: 0)
+        XCTAssertNotNil(noEpoch, "nine nights: usable without a recalibration")
+        let jan9 = 1_767_916_800.0   // 2026-01-09T00:00:00Z
+        let recalibrated = ChargeBreakdownWiring.breakdown(days: past + [today], row: today,
+                                                           sleepPerfPercent: 85,
+                                                           hrvEpoch: jan9, recoveryEpoch: jan9, respEraEpoch: 0)
+        XCTAssertNil(recalibrated, "after the recalibration only one night counts: calibrating, no rows")
+    }
 }

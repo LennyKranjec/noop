@@ -96,10 +96,15 @@ public enum StrainScorer {
     /// is two axes (#1624).
     ///
     /// THIS IS THE ONE TUNED CONSTANT here, and it is a judgement rather than a measurement: low enough
-    /// not to erase genuine light activity, high enough that ordinary sitting nets to nothing. Resting HR
-    /// is measured asleep, so a waking body sits above it even at complete rest — precisely the gap this
-    /// closes. Treat it as calibratable, not as physiology.
-    public static let banisterSedentaryHRR: Double = 0.10
+    /// not to erase genuine light activity, high enough that ordinary sitting nets to nothing. Treat it as
+    /// calibratable, not as physiology.
+    ///
+    /// E3 — LOWERED 0.10 → 0.04. The old 0.10 was sized for a resting HR measured ASLEEP, so it also had to
+    /// absorb the ~5–10 bpm gap between a sleeping and a waking body. Since O7 the Effort path is handed the
+    /// WAKING resting HR (`WakingRestingHR`), which already sits where a seated body sits — keeping 0.10 on
+    /// top of it corrected the same gap twice and floored genuine light activity. 0.04 is what is left: the
+    /// fidgeting / posture noise above a waking floor.
+    public static let banisterSedentaryHRR: Double = 0.04
 
     /// TRIMP per minute at `banisterSedentaryHRR` — the rate subtracted from every day.
     static func banisterBaselineRatePerMinute(b: Double) -> Double {
@@ -258,6 +263,103 @@ public enum StrainScorer {
         return 0
     }
 
+    // MARK: - Day-integral motion gate (E1)
+
+    /// Which minutes of a day the wearer was MOVING, from the wrist accelerometer.
+    ///
+    /// Minute buckets are floored epoch minutes (`ts / 60`) — no timezone needed, a minute is a minute.
+    /// `covered` holds every minute that had ANY gravity; `moving` the subset where the wearer moved. The
+    /// split matters: a minute with no gravity at all is UNKNOWN, not still, and is credited like a day with
+    /// no motion information (`unknownMotionZone1Weight`) rather than zeroed.
+    public struct MotionMinutes: Sendable, Hashable {
+        public let moving: Set<Int>
+        public let covered: Set<Int>
+        public init(moving: Set<Int>, covered: Set<Int>) {
+            self.moving = moving
+            // A moving minute is by definition a covered one; fold it in so a hand-built value cannot mark
+            // a minute moving and unknown at once.
+            self.covered = covered.union(moving)
+        }
+    }
+
+    /// How zone-1 samples are credited in the Edwards integral.
+    ///
+    /// E1 — WHY. Since O6 the Edwards zones sit on %HRmax, so zone 1 starts at 50 % HRmax (~94 bpm at age
+    /// 30). A seated, caffeinated, talking body sits there for hours, and integrated over a WHOLE DAY those
+    /// hours scored an ordinary desk day at ~43–58/100 (≈ 9–12 on WHOOP's 0–21) where WHOOP puts a rest day
+    /// at ~5–8. Zone 1 is "light activity" — it should pay for light ACTIVITY, not for sitting at a slightly
+    /// elevated HR. Zones 2+ are never gated: nobody sits at 60 % HRmax.
+    public enum Zone1Gate: Sendable, Hashable {
+        /// Zone 1 counts in full wherever it occurs — the pre-E1 recipe. The DEFAULT, and what every
+        /// per-bout / workout Effort uses: a detected bout IS the movement, so gating it is meaningless.
+        case ungated
+        /// A whole-DAY integral: zone 1 counts in full only in `moving` minutes, not at all in covered
+        /// still minutes, and at `unknownMotionZone1Weight` where there is no motion information (nil, or a
+        /// minute outside `covered`).
+        case day(MotionMinutes?)
+    }
+
+    /// Zone-1 credit when a day integral has no motion information for a sample. Half: without the
+    /// accelerometer we cannot tell a stroll from a desk, and splitting the difference is the least wrong
+    /// answer either way (a desk day loses half its phantom load; a walk day keeps half its real one).
+    public static let unknownMotionZone1Weight: Double = 0.5
+
+    /// Fraction of a minute's gravity records that must clear `WorkoutDetector.motionThreshold` for the
+    /// minute to count as MOVING. The same 0.30 as `DaytimeStress.activityMaskFraction`, the codebase's
+    /// other "was this span ambulatory" gate, so Effort and Stress agree on what moving means.
+    public static let movingMinuteFraction: Double = 0.30
+
+    /// Build the moving-minute set from a day's gravity — the SAME activity series and walk floor
+    /// DaytimeStress's motion gate uses (`WorkoutDetector.activitySeries` + `motionThreshold`).
+    ///
+    /// - Parameters:
+    ///   - gravity: the day's wrist gravity samples (any order).
+    ///   - bouts: optional detected workout windows (epoch s, inclusive). Every minute they touch is marked
+    ///     moving, so a stationary-bike or rowing bout the wrist barely registers still pays zone 1.
+    /// - Returns: nil when there is neither gravity nor a bout — "no motion information", which the scorer
+    ///   credits at `unknownMotionZone1Weight`. Pure.
+    public static func movingMinutes(gravity: [GravitySample],
+                                     bouts: [(start: Int, end: Int)] = []) -> MotionMinutes? {
+        if gravity.isEmpty && bouts.isEmpty { return nil }
+        var counts: [Int: (active: Int, total: Int)] = [:]
+        for p in WorkoutDetector.activitySeries(gravity) {
+            let m = minuteBucket(p.ts)
+            var e = counts[m] ?? (active: 0, total: 0)
+            e.total += 1
+            if p.intensity > WorkoutDetector.motionThreshold { e.active += 1 }
+            counts[m] = e
+        }
+        var moving = Set<Int>()
+        var covered = Set<Int>()
+        for (m, e) in counts where e.total > 0 {
+            covered.insert(m)
+            if Double(e.active) / Double(e.total) >= movingMinuteFraction { moving.insert(m) }
+        }
+        for b in bouts where b.end >= b.start {
+            for m in minuteBucket(b.start)...minuteBucket(b.end) { moving.insert(m) }
+        }
+        return MotionMinutes(moving: moving, covered: covered)
+    }
+
+    /// Floored epoch minute (correct for negative timestamps too).
+    static func minuteBucket(_ ts: Int) -> Int {
+        ts >= 0 ? ts / 60 : -((-ts + 59) / 60)
+    }
+
+    /// The zone-1 multiplier for a sample at `ts` under `gate`. Always 1 for `.ungated`.
+    static func zone1Credit(_ gate: Zone1Gate, ts: Int) -> Double {
+        switch gate {
+        case .ungated:
+            return 1.0
+        case .day(let motion):
+            guard let motion else { return unknownMotionZone1Weight }
+            let m = minuteBucket(ts)
+            if motion.moving.contains(m) { return 1.0 }
+            if motion.covered.contains(m) { return 0.0 }
+            return unknownMotionZone1Weight
+        }
+    }
+
     // MARK: - TRIMP accumulation
 
     /// Longest span (minutes) a single reading may be credited with. A wear or connection dropout leaves a
@@ -327,12 +429,18 @@ public enum StrainScorer {
         return out
     }
 
+    /// - Parameter zone1Gate: E1 — how zone-1 samples are credited. `.ungated` (the default) is the original
+    ///   recipe, byte-identical for every existing caller; zones 2+ are never touched by the gate.
     static func edwardsTRIMP(_ hr: [HRSample], restingHR: Double, hrReserve: Double,
-                             durations: [Double]) -> Double {
+                             durations: [Double], zone1Gate: Zone1Gate = .ungated) -> Double {
         var acc = 0.0
         for i in hr.indices {
-            acc += Double(zoneWeight(Double(hr[i].bpm), restingHR: restingHR, hrReserve: hrReserve))
-                * durations[i]
+            let w = zoneWeight(Double(hr[i].bpm), restingHR: restingHR, hrReserve: hrReserve)
+            if w == 1 {
+                acc += zone1Credit(zone1Gate, ts: hr[i].ts) * durations[i]
+            } else {
+                acc += Double(w) * durations[i]
+            }
         }
         return acc
     }
@@ -420,6 +528,10 @@ public enum StrainScorer {
     ///   - sex: "male"/"female" — selects the Banister coefficient (ignored by Edwards).
     ///   - denominator: log-map D. `nil` (the default) resolves to the denominator that BELONGS to
     ///     `method` — Edwards' 7201, or Banister's sex-dependent ceiling. Pass a value only to override.
+    ///   - zone1Gate: E1 — `.ungated` (the default: per-bout / workout Effort, unchanged) or `.day(motion)`
+    ///     for a whole-DAY integral, where zone 1 only pays while moving (`movingMinutes(gravity:bouts:)`)
+    ///     and at half credit when `motion` is nil. Edwards only: Banister already nets a sedentary floor
+    ///     out of every sample (#1624), so it ignores the gate.
     public static func strain(_ hr: [HRSample],
                               maxHR: Double? = nil,
                               restingHR: Double = defaultRestingHR,
@@ -433,7 +545,8 @@ public enum StrainScorer {
                               // line would usually never appear, because the Today view has already cached
                               // the day at live-HR tick rate before the scoring pass asks.
                               diag: ((String) -> Void)? = nil,
-                              day: String = "") -> Double? {
+                              day: String = "",
+                              zone1Gate: Zone1Gate = .ungated) -> Double? {
         // Resolve BEFORE the memo key is built, or a Banister request would be cached under Edwards'
         // denominator and a later Edwards request could collide with it.
         let resolvedDenominator = denominator ?? logMapDenominator(method: method, sex: sex)
@@ -444,7 +557,9 @@ public enum StrainScorer {
         let key = StrainKey(
             hr: StreamFingerprint.of(hr, ts: { $0.ts }, quant: { Int($0.bpm) }),
             maxHR: maxHR, restingHR: restingHR, method: method,
-            sexF: sex.lowercased().hasPrefix("f"), denom: resolvedDenominator)
+            sexF: sex.lowercased().hasPrefix("f"), denom: resolvedDenominator,
+            // Banister ignores the gate, so fold it away there: one cache entry per day, not per gate.
+            gate: method == .edwards ? zone1Gate : .ungated)
         // A diagnostic request BYPASSES the memo, and must. The Today view re-reads this on every
         // live-HR tick with no sink, so by the time the scoring pass asks with one the answer is already
         // cached — and a cache hit never reaches the code that emits, so the line would simply never
@@ -452,11 +567,12 @@ public enum StrainScorer {
         // one. Kotlin has no memo here and always emits; this keeps the two behaving the same.
         guard diag == nil else {
             return strainUncached(hr, maxHR: maxHR, restingHR: restingHR, method: method, sex: sex,
-                                  denominator: resolvedDenominator, diag: diag, day: day)
+                                  denominator: resolvedDenominator, diag: diag, day: day,
+                                  zone1Gate: zone1Gate)
         }
         return strainCache.value(key) {
             strainUncached(hr, maxHR: maxHR, restingHR: restingHR, method: method, sex: sex,
-                           denominator: resolvedDenominator, diag: nil, day: day)
+                           denominator: resolvedDenominator, diag: nil, day: day, zone1Gate: zone1Gate)
         }
     }
 
@@ -497,12 +613,14 @@ public enum StrainScorer {
         let hr: StreamFingerprint
         let maxHR: Double?; let restingHR: Double; let method: Method
         let sexF: Bool; let denom: Double
+        let gate: Zone1Gate
     }
     private static let strainCache = AnalyticsMemoCache<StrainKey, Double?>(capacity: 48)
 
     private static func strainUncached(_ hr: [HRSample], maxHR: Double?, restingHR: Double,
                                        method: Method, sex: String, denominator: Double,
-                                       diag: ((String) -> Void)? = nil, day: String = "") -> Double? {
+                                       diag: ((String) -> Void)? = nil, day: String = "",
+                                       zone1Gate: Zone1Gate = .ungated) -> Double? {
         let effMax = maxHR ?? Double(defaultMaxHR())
         // Enough data to trust the score: a dense stream (≥ minReadings) OR a sparse-but-sustained
         // one spanning ≥ minSpanSeconds with a sample floor (#482 — the 5/MG's ~30 s HR cadence).
@@ -538,7 +656,7 @@ public enum StrainScorer {
                                   floorRatePerMinute: banisterBaselineRatePerMinute(b: b))
         case .edwards:
             trimp = edwardsTRIMP(hr, restingHR: restingHR, hrReserve: hrReserve,
-                                 durations: durations)
+                                 durations: durations, zone1Gate: zone1Gate)
         }
         let scored = trimpToStrain(trimp, denominator: denominator)
         diag?(scoreFunnelLine(day: day, hrSamples: hr.count, enough: enoughData, maxHR: effMax,

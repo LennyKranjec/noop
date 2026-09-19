@@ -153,4 +153,20 @@ final class RangeReportDisplayUnitsTests: XCTestCase {
                                                      units: .stored)
         XCTAssertEqual(implicitDefault, explicitStored)
     }
+
+    // MARK: - E5: calibrated levels, linear deltas
+
+    /// On the 0–21 axis with a calibration, a LEVEL goes through the same curve Today uses; a DELTA stays
+    /// the plain ×21/100. Without a calibration both are the linear factor, byte-identical to before.
+    func testCalibratedLevelLinearDelta() {
+        let cal = EffortStrainCalibration(a: 1.35, b: 0.58, pairs: 30)
+        let calibrated = ReportDisplayUnits(fahrenheit: false, effortFactor: 21.0 / 100.0, effortCalibration: cal)
+        XCTAssertEqual(RangeReportEngine.displayValue(50, metric: .strain, units: calibrated),
+                       cal.strain21(effort100: 50), accuracy: 1e-12)
+        XCTAssertEqual(RangeReportEngine.displayDelta(10, metric: .strain, units: calibrated), 2.1, accuracy: 1e-12)
+        XCTAssertEqual(RangeReportEngine.displayValue(50, metric: .strain, units: whoopAxis), 10.5, accuracy: 1e-12)
+        // The native axis ignores a calibration entirely.
+        let native = ReportDisplayUnits(fahrenheit: false, effortFactor: 1.0, effortCalibration: cal)
+        XCTAssertEqual(RangeReportEngine.displayValue(50, metric: .strain, units: native), 50, accuracy: 1e-12)
+    }
 }

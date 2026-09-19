@@ -79,6 +79,7 @@ enum LevelMissingInput: String, CaseIterable, Identifiable {
     }
 }
 
+
 @MainActor
 final class LevelBarModel: ObservableObject {
 
@@ -95,22 +96,49 @@ final class LevelBarModel: ObservableObject {
     @Published private(set) var missing: [LevelMissingInput] = [] {
         didSet { Self.lastMissing = missing }
     }
+    /// The day whose level is shown: today's once it is written, the last written day before that.
+    @Published private(set) var shownDay: String?
     /// The latest `missing`, for the coach's context.
     static var lastMissing: [LevelMissingInput] = []
 
+    /// Whether an import, a strap offload or an analysis pass is writing to the store right now. Nothing
+    /// is settled while it is — a day scored mid-import is scored from half its rows. Installed by
+    /// `AppModel` at launch; until then nothing counts as in flight.
+    var dataInFlight: @MainActor () -> Bool = { false }
+
+    /// The flag the one-off "start from an empty ledger" used to be keyed on, before the ledger carried
+    /// its own epoch. Removed on the epoch reset; nothing reads it.
+    private static let retiredResetKey = "level.ledger.postRescoreReset.v1"
+
+    /// How long to wait before looking again when the store was being written.
+    private static let retrySeconds: UInt64 = 20
+
     private let ledger: LevelLedger
 
+    /// The refresh counter the last COMPLETED load read the store at.
     private var lastLoadedTick: Int = -1
-    /// Bumped by every load. A load that finds it moved on after an await has been overtaken and stops.
+    /// Bumped by every load. A load that finds it moved on after an await has been overtaken and stops;
+    /// the load that overtook it publishes.
     private var generation = 0
     /// The span the timeline last asked for, so a load that writes new days can redraw it.
     private var historySpan: Int?
 
-    /// The series behind the last load, and the tick they were read at.
+    /// THE LOAD RUNS IN A TASK THIS MODEL OWNS, not in the caller's. The callers are views' `.task`s, and
+    /// SwiftUI cancels those whenever the view goes: the load used to stop on that cancellation without
+    /// publishing, so tapping START THE DAY — which closes the brief whose task was loading — left the
+    /// strip on yesterday, unmarked. A load now runs to the end whoever was waiting for it.
+    private var loadTask: Task<Void, Never>?
+    private var loadTaskTick: Int?
+    /// A reload booked for when the store stops being written.
+    private var retryTask: Task<Void, Never>?
+
+    /// The series behind the last load, what they were read at, and over how many days.
     ///
     /// PERF: reading them is a dozen full-history series reads plus the workout log, and they are the
-    /// same reads for the same data, so they are kept until the data behind them changes.
-    private var cachedSeries: (key: String, series: LevelSeries)?
+    /// same reads for the same data, so they are kept until the data behind them changes. The key carries
+    /// the calendar day too: daytime calm and meditation are banked without moving any refresh counter,
+    /// and the day they matter for is always the one before a day that has just begun.
+    private var cachedSeries: (key: String, width: Int, series: LevelSeries)?
 
     init(ledger: LevelLedger = .shared) {
         self.ledger = ledger
@@ -119,84 +147,180 @@ final class LevelBarModel: ObservableObject {
     /// Load today's level and the two comparison points, unless nothing has changed since last time.
     func refresh(repo: Repository, tick: Int) async {
         guard tick != lastLoadedTick else { return }
-        lastLoadedTick = tick
-        await load(repo: repo)
+        // A second caller for the same data waits for the load already running rather than starting one.
+        if let running = loadTask, loadTaskTick == tick {
+            await running.value
+            return
+        }
+        await startLoad(repo: repo, tick: tick)
     }
 
-    /// Force a reload — used when a screen knows the underlying data changed.
+    /// Force a reload — used when a screen knows the underlying data changed, or the day turned.
     func reload(repo: Repository) async {
-        await load(repo: repo)
+        await startLoad(repo: repo, tick: nil)
     }
 
-    private func load(repo: Repository) async {
+    private func startLoad(repo: Repository, tick: Int?) async {
+        let seq = repo.refreshSeq
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            // THE TICK IS RECORDED ONLY ONCE THE LOAD HAS FINISHED. Recorded up front, a load that was then
+            // overtaken left the tick marked as loaded, and the next caller for it did nothing.
+            if await self.load(repo: repo) { self.lastLoadedTick = seq }
+        }
+        loadTask = task
+        loadTaskTick = tick
+        await task.value
+        if loadTask == task {
+            loadTask = nil
+            loadTaskTick = nil
+        }
+    }
+
+    /// One load. True when it ran to the end; false when a newer one overtook it.
+    private func load(repo: Repository) async -> Bool {
         generation += 1
         let gen = generation
         guard !repo.days.isEmpty else {
             trend = nil
-            return
+            shownDay = nil
+            return true
         }
         let calendar = Calendar.current
-        let series = await readSeries(repo: repo)
-        guard gen == generation else { return }
-        await settlePending(repo: repo, series: series, calendar: calendar, generation: gen)
-        guard gen == generation else { return }
+        ledger.retryLoadIfNeeded()
+        // NOTHING IS WRITTEN UNTIL THE NIGHTS HAVE BEEN RE-SCORED. The one-shot full-history pass
+        // (`IntelligenceEngine.runNightlyMetricsRescoreIfNeeded`) re-derives every night's resting HR,
+        // HRV, breathing and sleep window with the current methods; a day frozen before it finished would
+        // be frozen on the old figures for good. Until the flag is set the strip shows what is there and
+        // writes nothing — and the launch sequence reloads this the moment the flag is set.
+        let rescoreDone = UserDefaults.standard.bool(forKey: IntelligenceEngine.nightlyMetricsRescoreFlagKey)
+        if LevelLedger.maySettle(rescoreDone: rescoreDone, dataInFlight: dataInFlight()) {
+            await settlePending(repo: repo, calendar: calendar, generation: gen)
+            guard gen == generation else { return false }
+        } else if rescoreDone {
+            // The store is being written: look again shortly, once it has settled.
+            scheduleRetry(repo: repo)
+        }
         publish(calendar: calendar)
         if let span = historySpan { rebuildHistory(spanDays: span, calendar: calendar) }
+        return true
+    }
+
+    /// Book one reload for a little later. Only one is ever booked at a time.
+    private func scheduleRetry(repo: Repository) {
+        guard retryTask == nil else { return }
+        retryTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: LevelBarModel.retrySeconds * 1_000_000_000)
+            guard let self else { return }
+            self.retryTask = nil
+            await self.reload(repo: repo)
+        }
     }
 
     /// Write every day that is due and not yet in the ledger, oldest first.
     ///
     /// THE FIRST RUN WRITES THE PAST. Days from before the ledger existed are scored once, now, with the
-    /// engine and baselines as they stand, marked `backfilled` — and never again. After that the same
-    /// walk only finds the days the app was not opened on, and today once its night is in.
+    /// engine and baselines as they stand, marked `backfilled` — and never again. After that the walk
+    /// starts after the span the ledger knows to be settled end to end, so it only finds the days the app
+    /// was not opened on, and today once its night is in — a few days per load, not eight hundred.
     ///
-    /// THE STORE IS READ AFTER THE AWAITS, NOT BEFORE. The day rows are taken fresh here, and again after
-    /// every yield, so a day is never written from a snapshot older than the sync that just finished.
-    private func settlePending(repo: Repository, series: LevelSeries, calendar: Calendar,
-                               generation gen: Int) async {
+    /// THE STORE IS READ AFTER THE AWAITS, NOT BEFORE. The day rows are taken fresh after every await, so a
+    /// day is never written from a snapshot older than the sync that just finished — and a walk that finds
+    /// the store being written again stops, keeps what it has written, and looks again later.
+    private func settlePending(repo: Repository, calendar: Calendar, generation gen: Int) async {
         let now = Date()
         let levelDate = LevelDayFreeze.levelDay(now: now, calendar: calendar)
         let levelKey = LevelWiring.key(from: levelDate, calendar: calendar)
+
+        // A NEW RECIPE EPOCH EMPTIES THE LEDGER ONCE, and freezes the baselines again from the re-scored
+        // history in the same step. Devices that ran the ledger before the nightly re-score had already
+        // backfilled from the old figures; nothing else would ever have replaced those days.
+        if ledger.isWritable, ledger.epoch < LevelLedger.currentEpoch {
+            let full = await readSeries(repo: repo, backfill: true)
+            guard gen == generation else { return }
+            guard !dataInFlight() else { scheduleRetry(repo: repo); return }
+            let rows = repo.days
+            ledger.adoptCurrentEpochIfNeeded(rescoreDone: true) {
+                _ = LevelBaselineStore.refreeze(history: LevelWiring.baselineHistory(days: rows, series: full,
+                                                                                    calendar: calendar))
+            }
+            UserDefaults.standard.removeObject(forKey: Self.retiredResetKey)
+        }
+        guard ledger.isWritable else { return }
+
         var days = repo.days
         guard let firstKey = days.lazy.map(\.day).min(),
               let firstDate = LevelWiring.date(from: firstKey, calendar: calendar) else { return }
-        let floor = calendar.date(byAdding: .day, value: -(LevelLedger.maxDays - 1), to: levelDate) ?? levelDate
-        var cursor = Swift.max(firstDate, floor)
-        // NOTHING IS WRITTEN UNTIL THE NIGHTS HAVE BEEN RE-SCORED. The one-shot full-history pass
-        // (`IntelligenceEngine.runNightlyMetricsRescoreIfNeeded`) re-derives every night's resting HR,
-        // HRV, breathing and sleep window with the current methods; a day frozen before it finished would
-        // be frozen on the old figures for good. Until the flag is set the strip shows what is there and
-        // writes nothing.
-        guard UserDefaults.standard.bool(forKey: IntelligenceEngine.nightlyMetricsRescoreFlagKey) else { return }
         let backfilling = !ledger.hasBackfilled
-        // The first backfill starts from an empty ledger: whatever was carried over from the old single
-        // frozen day was scored on the pre-rescore figures, and keeping it would freeze exactly the value
-        // the rescore exists to correct.
-        // Once only, keyed on its own flag: a backfill interrupted by a newer load must resume from what
-        // it wrote, not start over.
-        let resetKey = "level.ledger.postRescoreReset.v1"
-        if backfilling, !UserDefaults.standard.bool(forKey: resetKey) {
-            ledger.resetAll()
-            UserDefaults.standard.set(true, forKey: resetKey)
+        let floor = calendar.date(byAdding: .day, value: -(LevelLedger.maxDays - 1), to: levelDate) ?? levelDate
+        let start = Swift.max(firstDate, floor)
+        var cursor = start
+        // Where the settled span this walk leaves behind begins: the old span's start when the walk
+        // carries on from it, this walk's own start when it begins afresh (first run, or older history
+        // arrived since).
+        var spanFrom = LevelWiring.key(from: start, calendar: calendar)
+        if !backfilling, let span = ledger.settledSpan, span.from <= spanFrom,
+           let through = LevelWiring.date(from: span.through, calendar: calendar),
+           let next = calendar.date(byAdding: .day, value: 1, to: through) {
+            spanFrom = span.from
+            if next > cursor { cursor = next }
+        }
+        guard cursor <= levelDate else {
+            if backfilling { ledger.markBackfilled() }
+            return
         }
 
+        var series = await readSeries(repo: repo, backfill: backfilling)
+        guard gen == generation else { return }
+        guard !dataInFlight() else { scheduleRetry(repo: repo); return }
+        days = repo.days
+        var seenRefresh = repo.refreshSeq
+        var seenWorkouts = repo.workoutsSeq
         var byDay = LevelWiring.byDay(days)
-        let baselines = LevelBaselineStore.resolve {
-            LevelWiring.baselineHistory(days: days, series: series, calendar: calendar)
-        }
+        var newestRow = days.lazy.map(\.day).max()
+        let lastPass = IntelligenceEngine.lastCompletedAnalysisAt
+        // THE BASELINES ARE RESOLVED ONLY WHEN A DAY IS ACTUALLY SCORED, and once per load. Resolving
+        // them derives every metric that is not frozen yet from the whole history — synchronous, on the
+        // main actor — and it used to run on every refresh whether or not there was a day to score.
+        var baselines: [LevelMetric: Baseline]?
 
         var batch: [LevelSettlement] = []
+        var settledThrough: String?
+        var unbroken = true
         var since = 0
         while cursor <= levelDate {
             let key = LevelWiring.key(from: cursor, calendar: calendar)
-            if !ledger.isSettled(key) {
-                let due = LevelLedger.deadlinePassed(day: key, levelDay: levelKey, now: now, calendar: calendar)
-                if let s = LevelLedger.settle(day: key, byDay: byDay, series: series, baselines: baselines,
-                                              calendar: calendar, deadlinePassed: due,
-                                              backfilled: backfilling && key < levelKey, now: now) {
-                    batch.append(s)
+            var settled = ledger.isSettled(key)
+            if !settled {
+                let beganAt = LevelDayFreeze.beganAt(key)
+                let deadline = LevelLedger.deadline(day: key, beganAt: beganAt, calendar: calendar)
+                let due = LevelLedger.deadlinePassed(day: key, levelDay: levelKey, now: now, calendar: calendar,
+                                                     beganAt: beganAt, lastCompletedPass: lastPass)
+                let mayClose = LevelLedger.absentNightMayClose(hasRow: byDay[key] != nil, newestRowDay: newestRow,
+                                                              day: key, deadline: deadline, now: now)
+                let ready = LevelLedger.isReady(day: key, byDay: byDay, series: series, calendar: calendar, now: now)
+                if ready || (due && mayClose) {
+                    if baselines == nil {
+                        baselines = LevelBaselineStore.resolve {
+                            LevelWiring.baselineHistory(days: days, series: series, calendar: calendar)
+                        }
+                    }
+                    if let s = LevelLedger.settle(day: key, byDay: byDay, series: series,
+                                                  baselines: baselines ?? LevelBaselines.table,
+                                                  calendar: calendar, deadlinePassed: due,
+                                                  backfilled: backfilling && key < levelKey, now: now,
+                                                  absentNightMayClose: mayClose) {
+                        batch.append(s)
+                        settled = true
+                    }
                 }
             }
+            if !settled {
+                unbroken = false
+            } else if unbroken {
+                settledThrough = key
+            }
+
             // A LONG BACKFILL LETS THE SCREEN DRAW. Two years of days scored as one uninterrupted stretch on
             // the main actor is what a hang looks like from outside — so every forty days what is done is
             // written, the screen gets a turn, and the walk carries on from fresh rows.
@@ -206,22 +330,37 @@ final class LevelBarModel: ObservableObject {
                 ledger.commit(batch)
                 batch = []
                 await Task.yield()
-                guard gen == generation, !Task.isCancelled else { return }
-                if repo.days.count != days.count || repo.days.last != days.last {
+                guard gen == generation else { return }
+                if dataInFlight() {
+                    if let t = settledThrough { ledger.markSettled(from: spanFrom, through: t) }
+                    scheduleRetry(repo: repo)
+                    return
+                }
+                // New data since the walk began: the rows AND the series are read again. The refresh
+                // counters say so; a row count or the last row does not (a cloud rewrite changes neither).
+                if repo.refreshSeq != seenRefresh || repo.workoutsSeq != seenWorkouts {
+                    series = await readSeries(repo: repo, backfill: backfilling)
+                    guard gen == generation else { return }
+                    guard !dataInFlight() else { scheduleRetry(repo: repo); return }
                     days = repo.days
+                    seenRefresh = repo.refreshSeq
+                    seenWorkouts = repo.workoutsSeq
                     byDay = LevelWiring.byDay(days)
+                    newestRow = days.lazy.map(\.day).max()
                 }
             }
             guard let next = calendar.date(byAdding: .day, value: 1, to: cursor) else { break }
             cursor = next
         }
         ledger.commit(batch)
+        if let t = settledThrough { ledger.markSettled(from: spanFrom, through: t) }
         if backfilling { ledger.markBackfilled() }
     }
 
     /// The snapshot the strip draws — every figure in it read from the ledger.
     private func publish(calendar: Calendar) {
-        let levelKey = LevelWiring.key(from: LevelDayFreeze.levelDay(calendar: calendar), calendar: calendar)
+        let now = Date()
+        let levelKey = LevelWiring.key(from: LevelDayFreeze.levelDay(now: now, calendar: calendar), calendar: calendar)
         // THE DAY WHOSE LEVEL IS CURRENT, if it is written. If its night has not landed yet, the last
         // written day stays up — marked pending, so nothing presents it as today's.
         let today = ledger.entry(levelKey)
@@ -231,6 +370,7 @@ final class LevelBarModel: ObservableObject {
         // written level with written levels, never with a live recomputation.
         let base = shown?.day ?? levelKey
         missing = shown?.missingInputs ?? []
+        shownDay = shown?.day
         func written(_ delta: Int) -> FrozenLevel? {
             LevelWiring.shift(base, delta, calendar).flatMap { ledger.entry($0) }
         }
@@ -248,7 +388,10 @@ final class LevelBarModel: ObservableObject {
             monthMean: mean(over: 30, need: 10),
             yesterdayLevel: written(-1)?.level,
             drivers: shown?.drivers ?? [:],
-            pendingToday: today == nil
+            // PENDING UNTIL IT IS TODAY'S: the current day's entry is missing, OR the current day is not
+            // today — before the morning flow the level day is yesterday, and its entry, written or not,
+            // is not this morning's number.
+            pendingToday: LevelDayFreeze.isPendingToday(ledger: ledger, now: now, calendar: calendar)
         )
     }
 
@@ -289,15 +432,22 @@ final class LevelBarModel: ObservableObject {
     }
 
     /// ONE READ PER SERIES, for the whole span — see the note in `LevelWiring`.
-    private func readSeries(repo: Repository) async -> LevelSeries {
-        let key = "\(repo.refreshSeq)|\(repo.workoutsSeq)|\(repo.days.count)"
-        if let cached = cachedSeries, cached.key == key { return cached.series }
-        let series = await readSeriesUncached(repo: repo)
-        cachedSeries = (key, series)
+    ///
+    /// A BACKFILL READS AS FAR BACK AS IT SCORES. The day-to-day windows (meditation 180 days, bed times
+    /// and daytime calm 400) are plenty for the last few days, but a backfill scores 800, and every day
+    /// past those windows used to be scored with no meditation, no regularity and no calm at all. So a
+    /// backfill reads the ledger's whole span plus the 28 days the longest window looks back.
+    private func readSeries(repo: Repository, backfill: Bool) async -> LevelSeries {
+        let width = backfill ? LevelLedger.maxDays + LevelEngine.meditationWindowDays : 0
+        let key = "\(repo.refreshSeq)|\(repo.workoutsSeq)|\(repo.days.count)|\(LevelWiring.key(from: Date()))"
+        if let cached = cachedSeries, cached.key == key, cached.width >= width { return cached.series }
+        let series = await readSeriesUncached(repo: repo, width: width)
+        cachedSeries = (key, width, series)
         return series
     }
 
-    private func readSeriesUncached(repo: Repository) async -> LevelSeries {
+    /// `width` 0 reads the day-to-day windows; anything larger reads at least that many days of each.
+    private func readSeriesUncached(repo: Repository, width: Int) async -> LevelSeries {
         // NOOP's own training-based estimate first; the older weekly HR-ratio / non-exercise figure only
         // where there is none.
         var vo2 = await repo.series(key: Repository.noopVo2Key, source: "\(repo.deviceId)-noop", fullHistory: true)
@@ -316,12 +466,19 @@ final class LevelBarModel: ObservableObject {
 
         // The level reads a 28-day share and baselines nothing off meditation, so it asks for months
         // rather than the whole log — the Focus card is the surface that wants the lifetime figure.
-        let meditation = await repo.meditationMinutesByDay(days: 180)
+        let meditation = await repo.meditationMinutesByDay(days: Swift.max(180, width))
+        let timings = await repo.sleepTimingsByDay(days: Swift.max(400, width))
+        var calm: [String: Double] = [:]
+        if width > StressDailyLog.lookbackDays {
+            let rows = await repo.series(key: StressDailyLog.daytimeRmssdKey, source: StressDailyLog.source,
+                                         days: width)
+            for row in rows { calm[row.day] = row.value }
+        } else {
+            calm = await repo.bankedDaytimeRmssd()
+        }
 
         return LevelSeries(vo2max: vo2, muscleByDay: muscle, meditation: meditation,
-                           sleepTimings: await repo.sleepTimingsByDay(),
-                           daytimeRmssd: await repo.bankedDaytimeRmssd(),
-                           strengthIndex: strength)
+                           sleepTimings: timings, daytimeRmssd: calm, strengthIndex: strength)
     }
 
 }

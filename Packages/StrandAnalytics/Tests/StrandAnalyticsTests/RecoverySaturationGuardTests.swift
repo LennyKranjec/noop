@@ -30,7 +30,8 @@ final class RecoverySaturationGuardTests: XCTestCase {
     /// The plain HRV+RHR composite with NO easing: the score pre-guard behaviour produces.
     private func undampedScore(hrv: Double, rhr: Double,
                                hrvB: BaselineState, rhrB: BaselineState) -> Double {
-        let hrvZ = RecoveryScorer.zScore(hrv, mean: hrvB.baseline, spread: hrvB.spread)
+        // E6: the HRV term is on ln(RMSSD); build it with the scorer's own helper.
+        let hrvZ = RecoveryScorer.hrvZ(hrv, baseline: hrvB)
         let rhrZ = RecoveryScorer.zScore(rhrB.baseline, mean: rhr, spread: rhrB.spread)
         let wsum = RecoveryScorer.wHRV + RecoveryScorer.wRHR
         let z = (RecoveryScorer.wHRV * hrvZ + RecoveryScorer.wRHR * rhrZ) / wsum
@@ -106,7 +107,7 @@ final class RecoverySaturationGuardTests: XCTestCase {
         let rhrB = baseline(mean: 55, sigma: 5.0)
 
         // Confirm this fixture really does trip the detector (otherwise the test proves nothing).
-        let hrvZ = RecoveryScorer.zScore(41, mean: hrvB.baseline, spread: hrvB.spread)
+        let hrvZ = RecoveryScorer.hrvZ(41, baseline: hrvB)
         let rhrZ = RecoveryScorer.zScore(rhrB.baseline, mean: 48, spread: rhrB.spread)
         let sat = RecoveryScorer.parasympatheticSaturation(hrvZ: hrvZ, rhrZ: rhrZ)
         XCTAssertTrue(sat.active, "fixture must fire the guard for this test to mean anything")
@@ -183,7 +184,7 @@ final class RecoverySaturationGuardTests: XCTestCase {
         XCTAssertLessThan(delta, 21.0)
 
         // ...and the HRV TERM in the trace is the RAW z, matching what was actually scored.
-        let hrvZRaw = RecoveryScorer.zScore(41, mean: hrvB.baseline, spread: hrvB.spread)
+        let hrvZRaw = RecoveryScorer.hrvZ(41, baseline: hrvB)
         let hrvTerm = satLines.first { $0.hasPrefix("charge term hrv ") }!
         XCTAssertTrue(hrvTerm.contains("z=\((hrvZRaw * 100).rounded() / 100)"),
                       "trace HRV term must be the raw scored z, not the eased one: \(hrvTerm)")

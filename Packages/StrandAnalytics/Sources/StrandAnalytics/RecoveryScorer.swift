@@ -279,17 +279,56 @@ public enum RecoveryScorer {
         return (value - mean) / sigma
     }
 
+    // MARK: - E6: Charge's HRV term on ln(RMSSD)
+    //
+    // RMSSD is right-skewed and its night-to-night spread grows with its level. A z on raw ms therefore
+    // scores the same RELATIVE night differently for different people (a 20 % dip is a bigger z for a
+    // 40 ms wearer on a floored spread than for an 80 ms one) and treats a +20 % and a −20 % night as
+    // mirror images when physiologically the dip matters more. On ln(RMSSD) a relative move is one z for
+    // everyone, and a drop weighs more than the same-sized rise. The approved plan: Charge's HRV z on
+    // ln(RMSSD); stored HRV stays in ms, and every OTHER consumer of the ms baseline is untouched.
+    //
+    // TWO SOURCES FOR THE ln BASELINE:
+    //   - EXACT: a baseline folded over ln values (`Baselines.hrvLnCfg` on `Baselines.lnHRV(history)`),
+    //     passed as `hrvLnBaseline`. Preferred; the engine passes it once its fold is wired.
+    //   - DERIVED (the default when none is passed): the ms baseline mapped into ln space by the delta
+    //     method — centre ln(μ), spread s/μ (d ln x = dx / x). Same history, same fold, same epochs, so
+    //     every existing caller moves onto the ln z without new plumbing.
+
+    /// The ln-space view of an ms HRV baseline (delta method): centre ln(μ), spread s/μ. nil when the
+    /// centre is not positive (no ln exists), which only a corrupt state can produce.
+    static func lnHRVBaseline(fromMs b: DriverBaseline) -> DriverBaseline? {
+        guard b.mean > 0, b.mean.isFinite else { return nil }
+        return DriverBaseline(mean: log(b.mean), spread: b.spread / b.mean)
+    }
+
+    /// Charge's HRV z (E6): ln(hrv) against the ln baseline — `lnBaseline` when given, else derived from
+    /// the ms baseline. Falls back to the raw-ms z only for a non-positive HRV or a corrupt baseline.
+    static func hrvZ(_ hrv: Double, baseline: DriverBaseline, lnBaseline: DriverBaseline? = nil) -> Double {
+        guard hrv > 0, let ln = lnBaseline ?? lnHRVBaseline(fromMs: baseline) else {
+            return zScore(hrv, mean: baseline.mean, spread: baseline.spread)
+        }
+        return zScore(log(hrv), mean: ln.mean, spread: ln.spread)
+    }
+
+    /// `hrvZ` for BaselineState callers (drivers, trace), so they build the same z the score does.
+    static func hrvZ(_ hrv: Double, baseline: BaselineState, lnBaseline: BaselineState? = nil) -> Double {
+        hrvZ(hrv, baseline: DriverBaseline(baseline), lnBaseline: lnBaseline.map(DriverBaseline.init))
+    }
+
     /// Z-score + logistic recovery score in [0, 100]. APPROXIMATE.
     ///
     /// Returns nil when the HRV baseline (dominant driver) is not yet usable, or
     /// no valid driver is available at all.
     ///
     /// - Parameters:
-    ///   - hrv: tonight's HRV (RMSSD, ms).
+    ///   - hrv: tonight's HRV (RMSSD, ms). Scored on ln(RMSSD) (E6, see `hrvZ`).
     ///   - rhr: tonight's resting HR (bpm).
     ///   - resp: tonight's respiration (raw or calibrated — z is scale-invariant);
     ///           nil drops the term.
-    ///   - hrvBaseline: HRV baseline (required for a score — nil returns nil).
+    ///   - hrvBaseline: HRV baseline in ms (required for a score — nil returns nil).
+    ///   - hrvLnBaseline: E6 — the same history folded in ln space (`Baselines.hrvLnCfg`). nil (the
+    ///     default) derives it from `hrvBaseline` by the delta method.
     ///   - rhrBaseline: resting-HR baseline; nil drops the RHR term. On the `BaselineState` overload an
     ///     UNUSABLE baseline (#1988) is treated as nil, so a synthetic cold-start midpoint never scores.
     ///   - respBaseline: respiration baseline; nil drops the resp term.
@@ -324,7 +363,8 @@ public enum RecoveryScorer {
                                 hrvBaselineUsable: Bool = true,
                                 recoveryIndexSlope: Double? = nil,
                                 effortBaseline: DriverBaseline? = nil,
-                                priorDayEffort: Double? = nil) -> Double? {
+                                priorDayEffort: Double? = nil,
+                                hrvLnBaseline: DriverBaseline? = nil) -> Double? {
         // Cold-start gate: HRV is the dominant driver; if its baseline isn't
         // usable, refuse to score (more honest than a fabricated value).
         if !hrvBaselineUsable { return nil }
@@ -343,7 +383,8 @@ public enum RecoveryScorer {
         // signature is still detected and reported out-of-band (Charge trace + ChargeDrivers verdict)
         // so real firings can be counted first. See the MARK header for why, and swap in
         // `parasympatheticSaturation(hrvZ:rhrZ:).easedHrvZ` here to enable it.
-        terms.append((zScore(hrv, mean: hrvB.mean, spread: hrvB.spread), wHRV))
+        // E6: on ln(RMSSD) — see `hrvZ`.
+        terms.append((hrvZ(hrv, baseline: hrvB, lnBaseline: hrvLnBaseline), wHRV))
         // RHR term: lower is better → (μ − x) / σ.
         if let b = rhrBaseline {
             terms.append((zScore(b.mean, mean: rhr, spread: b.spread), wRHR))
@@ -403,7 +444,8 @@ public enum RecoveryScorer {
                                 skinTempDev: Double? = nil,
                                 recoveryIndexSlope: Double? = nil,
                                 effortBaseline: BaselineState? = nil,
-                                priorDayEffort: Double? = nil) -> Double? {
+                                priorDayEffort: Double? = nil,
+                                hrvLnBaseline: BaselineState? = nil) -> Double? {
         recovery(hrv: hrv,
                  rhr: rhr,
                  resp: resp,
@@ -421,6 +463,7 @@ public enum RecoveryScorer {
                  hrvBaselineUsable: hrvBaseline.usable,
                  recoveryIndexSlope: recoveryIndexSlope,
                  effortBaseline: effortBaseline.map(DriverBaseline.init),
-                 priorDayEffort: priorDayEffort)
+                 priorDayEffort: priorDayEffort,
+                 hrvLnBaseline: hrvLnBaseline.map(DriverBaseline.init))
     }
 }

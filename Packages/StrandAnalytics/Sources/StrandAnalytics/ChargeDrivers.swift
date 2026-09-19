@@ -126,7 +126,8 @@ extension RecoveryScorer {
                                      rhrBaseline: BaselineState?,
                                      respBaseline: BaselineState?,
                                      sleepPerf: Double?,
-                                     skinTempDev: Double? = nil) -> [ChargeDriver] {
+                                     skinTempDev: Double? = nil,
+                                     hrvLnBaseline: BaselineState? = nil) -> [ChargeDriver] {
 
         // No score => no real contributions to attribute (cold-start). recovery(...) enforces
         // the usable gate; mirror it so a nil headline never yields fabricated driver rows.
@@ -138,7 +139,7 @@ extension RecoveryScorer {
         guard let full = recovery(hrv: hrv, rhr: rhr, resp: resp,
                                   hrvBaseline: hrvBaseline, rhrBaseline: rhrB,
                                   respBaseline: respBaseline, sleepPerf: sleepPerf,
-                                  skinTempDev: skinTempDev) else {
+                                  skinTempDev: skinTempDev, hrvLnBaseline: hrvLnBaseline) else {
             return []
         }
 
@@ -164,18 +165,22 @@ extension RecoveryScorer {
         // low, decoupled resting HR)? Detection ONLY: the guard's easing is not applied, so deltaPoints
         // below is the full, unguarded HRV penalty. The verdict merely NAMES the detected pattern so the
         // UI can surface it while real firings accumulate. See the MARK header in RecoveryScorer.swift.
-        let hrvZFull = zScore(hrv, mean: hrvBaseline.baseline, spread: hrvBaseline.spread)
+        // E6: the SAME ln(RMSSD) z the score uses, so detection reads the term that was scored.
+        let hrvZFull = hrvZ(hrv, baseline: hrvBaseline, lnBaseline: hrvLnBaseline)
         let rhrZFull: Double? = rhrB.map { zScore($0.baseline, mean: rhr, spread: $0.spread) }
         let hrvSaturationDetected = parasympatheticSaturation(hrvZ: hrvZFull, rhrZ: rhrZFull).active
 
         // ── HRV (dominant driver; always present once the score exists) ──────────
-        // Higher HRV vs baseline supports recovery. Neutral = HRV at the baseline mean.
+        // Higher HRV vs baseline supports recovery. Neutral = HRV at the baseline mean — on the ln
+        // baseline's centre when one is given (E6: z = 0 exactly at exp(ln centre)), else the ms mean,
+        // where the derived ln z is also exactly 0.
+        let hrvNeutral = hrvLnBaseline.map { exp($0.baseline) } ?? hrvBaseline.baseline
         drivers.append(ChargeDriver(
             label: "Heart rate variability",
-            deltaPoints: points(recovery(hrv: hrvBaseline.baseline, rhr: rhr, resp: resp,
+            deltaPoints: points(recovery(hrv: hrvNeutral, rhr: rhr, resp: resp,
                                          hrvBaseline: hrvBaseline, rhrBaseline: rhrB,
                                          respBaseline: respBaseline, sleepPerf: sleepPerf,
-                                         skinTempDev: skinTempDev)),
+                                         skinTempDev: skinTempDev, hrvLnBaseline: hrvLnBaseline)),
             valueText: "\(Int(hrv.rounded())) ms",
             baselineText: "\(Int(hrvBaseline.baseline.rounded())) ms baseline",
             verdict: hrvVerdict(value: hrv, baseline: hrvBaseline.baseline,
@@ -189,7 +194,7 @@ extension RecoveryScorer {
                 deltaPoints: points(recovery(hrv: hrv, rhr: b.baseline, resp: resp,
                                              hrvBaseline: hrvBaseline, rhrBaseline: rhrB,
                                              respBaseline: respBaseline, sleepPerf: sleepPerf,
-                                             skinTempDev: skinTempDev)),
+                                             skinTempDev: skinTempDev, hrvLnBaseline: hrvLnBaseline)),
                 valueText: "\(Int(rhr.rounded())) bpm",
                 baselineText: "\(Int(b.baseline.rounded())) bpm baseline",
                 verdict: rhrVerdict(value: rhr, baseline: b.baseline)))
@@ -202,7 +207,7 @@ extension RecoveryScorer {
                 deltaPoints: points(recovery(hrv: hrv, rhr: rhr, resp: resp,
                                              hrvBaseline: hrvBaseline, rhrBaseline: rhrB,
                                              respBaseline: respBaseline, sleepPerf: sleepPerfCenter,
-                                             skinTempDev: skinTempDev)),
+                                             skinTempDev: skinTempDev, hrvLnBaseline: hrvLnBaseline)),
                 valueText: "\(Int((sp * 100).rounded()))%",
                 baselineText: "",   // centred on a fixed "good night", not a learned baseline
                 verdict: sleepVerdict(sleepPerf: sp)))
@@ -216,7 +221,7 @@ extension RecoveryScorer {
                 deltaPoints: points(recovery(hrv: hrv, rhr: rhr, resp: b.baseline,
                                              hrvBaseline: hrvBaseline, rhrBaseline: rhrB,
                                              respBaseline: respBaseline, sleepPerf: sleepPerf,
-                                             skinTempDev: skinTempDev)),
+                                             skinTempDev: skinTempDev, hrvLnBaseline: hrvLnBaseline)),
                 valueText: String(format: "%.1f br/min", locale: Locale(identifier: "en_US_POSIX"), r),
                 baselineText: String(format: "%.1f br/min baseline", locale: Locale(identifier: "en_US_POSIX"), b.baseline),
                 verdict: respVerdict(value: r, baseline: b.baseline)))
@@ -230,7 +235,7 @@ extension RecoveryScorer {
                 deltaPoints: points(recovery(hrv: hrv, rhr: rhr, resp: resp,
                                              hrvBaseline: hrvBaseline, rhrBaseline: rhrB,
                                              respBaseline: respBaseline, sleepPerf: sleepPerf,
-                                             skinTempDev: 0)),
+                                             skinTempDev: 0, hrvLnBaseline: hrvLnBaseline)),
                 valueText: skinTempDevText(dev),
                 baselineText: "",   // a deviation already; the reference is the personal baseline (0)
                 verdict: skinTempVerdict(dev)))

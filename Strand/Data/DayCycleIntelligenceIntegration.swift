@@ -213,9 +213,22 @@ import WhoopStore
                 ?? WakingRestingHR.fromSleep(night?.daily.restingHr.map(Double.init))
             let restingHR = wakingRHR ?? StrainScorer.defaultRestingHR
             let effectiveMaxHR = StrainScorer.effortHRmax(overrideBpm: maxHROverride, age: profile.age)
+            // E1: the cycle is a whole-DAY integral, so zone 1 only pays while moving — read the cycle's
+            // gravity from the same owners (active first wins a shared timestamp) and gate it exactly as the
+            // calendar-day pass does.
+            var gravByTimestamp: [Int: GravitySample] = [:]
+            if hrEndInclusive >= window.onset {
+                for owner in owners {
+                    let rows = (try? await store.gravitySamples(
+                        deviceId: owner, from: window.onset, to: hrEndInclusive, limit: 200_000)) ?? []
+                    for row in rows where gravByTimestamp[row.ts] == nil { gravByTimestamp[row.ts] = row }
+                }
+            }
+            let cycleMotion = StrainScorer.movingMinutes(gravity: Array(gravByTimestamp.values))
             if let strain = StrainScorer.strain(cycleHR, maxHR: effectiveMaxHR,
                                                 restingHR: restingHR, method: effortMethod,
-                                                sex: profile.sex) { strains[day] = strain }
+                                                sex: profile.sex,
+                                                zone1Gate: .day(cycleMotion)) { strains[day] = strain }
             if !cycleHR.isEmpty {
                 // NEAT only on a KNOWN resting HR (never the 60 default), exactly as the day pass does.
                 calories[day] = Calories.estimateDayCalories(

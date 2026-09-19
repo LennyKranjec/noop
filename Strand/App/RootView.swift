@@ -1,5 +1,8 @@
 import SwiftUI
 import StrandDesign
+#if os(macOS)
+import AppKit
+#endif
 
 enum NavItem: String, CaseIterable, Identifiable, Hashable {
     case today = "Today"
@@ -202,6 +205,7 @@ struct RootView: View {
     @EnvironmentObject var router: NavRouter
     /// The liquid Today (default) vs the classic Today, same flag the iOS shell + Settings toggle read.
     @AppStorage("noop.liquidTodayEnabled") private var liquidTodayEnabled = true
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selection: NavItem? = .today
     /// Which sidebar groups are expanded (S1, #805). Default = the group owning the launch selection
     /// (`.today`). The single-item Today/Sleep sections always read expanded so their one row shows; the
@@ -299,6 +303,7 @@ struct RootView: View {
             .background(StrandPalette.surfaceBase.ignoresSafeArea())
         }
         .task {
+            beginLevelDayIfDue()
             await repo.refresh()
             // Backup & Sync: on-launch catch-up. Gated on the auto toggle being ON (default OFF). A
             // whole-DB ZIP can be 100MB+, so it must never block startup: fire it in a DETACHED,
@@ -310,6 +315,17 @@ struct RootView: View {
                 await FolderBackup.catchUpIfDue(checkpoint: { await backupRepo.checkpointForBackup() })
             }
         }
+        // THE LEVEL'S DAY TURNS ON THE FIRST TIME THE APP COMES TO THE FRONT AFTER 04:00. The iPhone turns
+        // it in the morning flow; the Mac has no morning flow, and without this its level day was never
+        // begun at all — it stayed on the day before for good, and today was never written.
+        .onChangeCompat(of: scenePhase) { phase in
+            if phase == .active { beginLevelDayIfDue() }
+        }
+        #if os(macOS)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            beginLevelDayIfDue()
+        }
+        #endif
         // Honour a cross-screen request to open a top-level destination (e.g. Live's "Manage devices"),
         // then clear it so the same tap can fire again later. Devices maps to the `.devices` sidebar item.
         .onChangeCompat(of: router.requestedDestination) { dest in
@@ -369,6 +385,16 @@ struct RootView: View {
                 }
             }
         }
+    }
+
+    /// Begin the level's day if this morning's has not begun yet (`morningDue` holds the 04:00 rule), and
+    /// redraw the level on it.
+    private func beginLevelDayIfDue() {
+        let now = Date()
+        guard LevelDayFreeze.morningDue(now: now) else { return }
+        LevelDayFreeze.beginDay(now: now)
+        let store = self.repo
+        Task { await LevelBarModel.shared.reload(repo: store) }
     }
 
     /// The filter text that actually applies: trimmed, so a whitespace-only query is no query at all.

@@ -44,6 +44,9 @@ private enum Diag {
 
 struct MorningFlowView: View {
     @ObservedObject var levelBar: LevelBarModel
+    /// When the flow was put up. The day it begins is the day of THIS moment, not of whenever the view's
+    /// task gets to run — a flow presented at 23:59 must not begin tomorrow.
+    var presentedAt: Date = Date()
     let onDone: () -> Void
 
     @EnvironmentObject private var repo: Repository
@@ -85,8 +88,8 @@ struct MorningFlowView: View {
         .preferredColorScheme(.dark)
         .task {
             // The day begins now: today's level from here on, and the work that scores it starts at once.
-            LevelDayFreeze.beginDay()
-            await brief.prepare(repo: repo, levelBar: levelBar)
+            LevelDayFreeze.beginDay(now: presentedAt)
+            await brief.prepare(repo: repo, levelBar: levelBar, presentedAt: presentedAt)
         }
     }
 
@@ -295,6 +298,8 @@ final class DailyBriefModel: ObservableObject {
     @Published private(set) var ready = false
     @Published private(set) var level: Double?
     @Published private(set) var levelYesterday: Double?
+    /// Today is settled with NO level: its night was never recorded. Not the same as still syncing.
+    @Published private(set) var noNight = false
     @Published private(set) var charge: Double?
     @Published private(set) var rest: Double?
     @Published private(set) var metrics: [Metric] = []
@@ -309,42 +314,51 @@ final class DailyBriefModel: ObservableObject {
     static let pollWindowSeconds = 600
 
     /// Sync, score and freeze the day's level, and gather the night's figures.
-    func prepare(repo: Repository, levelBar: LevelBarModel) async {
+    func prepare(repo: Repository, levelBar: LevelBarModel, presentedAt: Date = Date()) async {
         guard !prepared else { return }
         prepared = true
         await repo.refreshEverything(force: true)
         await levelBar.reload(repo: repo)
-        readLevel()
+        readLevel(presentedAt: presentedAt)
         await gatherNight(repo: repo)
         ready = true
 
         // THE NIGHT MAY STILL BE ON ITS WAY. Rather than settle for "still syncing", the brief keeps
-        // looking for ten minutes: every new sync reloads the level, and every other minute it checks
+        // looking for ten minutes: the ledger is read again every poll (the strip's own retries may have
+        // written the day meanwhile), every new sync reloads the level, and every other minute it reloads
         // anyway, in case the deadline has passed and the day has been written as it stands.
         var seq = repo.refreshSeq
         var waited = 0
-        while level == nil, waited < Self.pollWindowSeconds {
+        while level == nil, !noNight, waited < Self.pollWindowSeconds {
             try? await Task.sleep(nanoseconds: Self.pollSeconds * 1_000_000_000)
             if Task.isCancelled { return }
             waited += Int(Self.pollSeconds)
-            guard repo.refreshSeq != seq || waited % 120 == 0 else { continue }
-            seq = repo.refreshSeq
-            await levelBar.reload(repo: repo)
-            readLevel()
+            readLevel(presentedAt: presentedAt)
+            if level == nil, repo.refreshSeq != seq || waited % 120 == 0 {
+                seq = repo.refreshSeq
+                await levelBar.reload(repo: repo)
+                readLevel(presentedAt: presentedAt)
+            }
             if level != nil { await gatherNight(repo: repo) }
         }
     }
 
     /// Today's level and yesterday's, from the ledger only. Nil until TODAY is written — the last written
-    /// day is never passed off as this morning's.
-    private func readLevel() {
+    /// day is never passed off as this morning's, and neither is the level day when it is not today (a
+    /// flow whose day did not begin, before 04:00, leaves the level day on yesterday).
+    private func readLevel(presentedAt: Date) {
         let calendar = Calendar.current
         let dayKey = LevelWiring.key(from: LevelDayFreeze.levelDay(calendar: calendar), calendar: calendar)
-        guard let entry = LevelLedger.shared.entry(dayKey) else {
+        let ledger = LevelLedger.shared
+        let isToday = dayKey == LevelWiring.key(from: presentedAt, calendar: calendar)
+        guard isToday, let entry = ledger.entry(dayKey) else {
             level = nil
             levelYesterday = nil
+            // SETTLED WITH NO ENTRY is a night that was never recorded — no amount of waiting brings it.
+            noNight = isToday && ledger.isSettled(dayKey)
             return
         }
+        noNight = false
         level = entry.level
         levelYesterday = LevelWiring.shift(dayKey, -1, calendar).flatMap { LevelLedger.shared.entry($0)?.level }
     }
@@ -397,7 +411,13 @@ final class DailyBriefModel: ObservableObject {
         // The figures it is grounded in have to be in first.
         while !ready { try? await Task.sleep(nanoseconds: 200_000_000) }
         var extra: [String] = []
-        if let level { extra.append(String(format: "Today's level: %.0f (50 = their own average)", level)) }
+        if let level {
+            extra.append(String(format: "Today's level: %.0f (50 = their own average)", level))
+        } else if noNight {
+            extra.append("No level for today: last night wasn't recorded.")
+        } else {
+            extra.append("Today's level is not set yet: last night is still syncing.")
+        }
         for metric in metrics {
             var line = "\(metric.label): \(metric.value)"
             if let c = metric.change { line += String(format: " (%+.1f vs yesterday)", c) }
@@ -486,8 +506,9 @@ struct DailyBriefView: View {
                 Text(model.ready ? "–" : "…")
                     .font(Diag.display(88))
                     .foregroundStyle(.white)
-                Text(model.ready ? "Last night is still syncing. Today's level is set once it lands."
-                                 : "Scoring the night…")
+                Text(model.noNight ? "No level for today: last night wasn't recorded."
+                     : model.ready ? "Last night is still syncing. Today's level is set once it lands."
+                     : "Scoring the night…")
                     .font(.system(size: 14))
                     .foregroundStyle(Diag.grey)
             }

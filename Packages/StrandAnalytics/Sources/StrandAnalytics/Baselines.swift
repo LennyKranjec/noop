@@ -27,15 +27,22 @@ public struct MetricCfg: Equatable, Sendable {
     /// far, shrunk toward `coldStartPriorCV × centre`, and only then hands over to the EWMA. See
     /// `Baselines.coldStartSpread`.
     public let coldStartPriorCV: Double?
+    /// COLD-START SPREAD PRIOR as an ABSOLUTE Gaussian σ in the cfg's own units, or nil. For a cfg folded
+    /// in the LOG domain (E6, `hrv_ln`) a coefficient of variation IS an absolute σ — 12 % night-to-night
+    /// CV is σ ≈ 0.12 in ln units whatever the centre — so `coldStartPriorCV × centre` would be wrong
+    /// there. Used only when `coldStartPriorCV` is nil. Same cold-start path otherwise.
+    public let coldStartPriorSigma: Double?
 
     public init(minVal: Double, maxVal: Double, floorSpread: Double,
-                halfLifeB: Double, halfLifeS: Double, coldStartPriorCV: Double? = nil) {
+                halfLifeB: Double, halfLifeS: Double, coldStartPriorCV: Double? = nil,
+                coldStartPriorSigma: Double? = nil) {
         self.minVal = minVal
         self.maxVal = maxVal
         self.floorSpread = floorSpread
         self.halfLifeB = halfLifeB
         self.halfLifeS = halfLifeS
         self.coldStartPriorCV = coldStartPriorCV
+        self.coldStartPriorSigma = coldStartPriorSigma
     }
 }
 
@@ -219,29 +226,64 @@ public enum Baselines {
     /// The cold-start spread (internal abs-dev units, floored) for the nights seen so far. Pure.
     ///
     /// spread = max(floor, (k·prior + (n−1)·sampleAbsDev) / (k + n−1)), where
-    /// prior = priorCV·|mean| / 1.253 and sampleAbsDev = mean|x−x̄| · sqrt(n/(n−1)).
+    /// prior = priorCV·|mean| / 1.253 and sampleAbsDev = (1.4826·MAD / 1.253) · sqrt(n/(n−1)).
+    ///
+    /// E8 — ROBUST. This used the MEAN absolute deviation with hard-outlier rejection still off (the
+    /// baseline is young), so ONE artefact night decided the spread: a 150 ms reading among 50s at n = 5
+    /// gave ≈ 22 ms, flattening every z for the next two weeks. The sample is now the MEDIAN absolute
+    /// deviation (× 1.4826 → Gaussian σ, ÷ 1.253 → the abs-dev units the state keeps), and `update` puts
+    /// each night into the sample only after clamping it to the same Winsor band the centre uses.
     public static func coldStartSpread(_ sample: [Double], cfg: MetricCfg, priorCV: Double) -> Double {
+        coldStartSpreadCore(sample, cfg: cfg) { mean in priorCV * abs(mean) / 1.253 }
+    }
+
+    /// The shared cold-start estimator; `priorAbsDev` maps the sample mean to the prior (abs-dev units).
+    static func coldStartSpreadCore(_ sample: [Double], cfg: MetricCfg,
+                                    priorAbsDev: (Double) -> Double) -> Double {
         let n = sample.count
         guard n > 0 else { return cfg.floorSpread }
         let mean = sample.reduce(0, +) / Double(n)
-        let prior = priorCV * abs(mean) / 1.253
+        let prior = priorAbsDev(mean)
         guard n >= 2 else { return max(cfg.floorSpread, prior) }
-        let meanAbsDev = sample.reduce(0.0) { $0 + abs($1 - mean) } / Double(n)
-        let sampleAbsDev = meanAbsDev * (Double(n) / Double(n - 1)).squareRoot()
+        let centre = median(sample)
+        let mad = median(sample.map { abs($0 - centre) })
+        let sampleAbsDev = (1.4826 * mad / 1.253) * (Double(n) / Double(n - 1)).squareRoot()
         let k = coldStartPriorNights
         let dof = Double(n - 1)
         return max(cfg.floorSpread, (k * prior + dof * sampleAbsDev) / (k + dof))
     }
 
+    /// Whether a cfg takes the sample-spread cold start at all (either prior form).
+    static func hasColdStartPrior(_ cfg: MetricCfg) -> Bool {
+        cfg.coldStartPriorCV != nil || cfg.coldStartPriorSigma != nil
+    }
+
+    /// The cold-start spread under whichever prior the cfg carries (CV of the centre, else an absolute
+    /// σ), or nil for a cfg with no prior.
+    static func coldStartSpread(_ sample: [Double], cfg: MetricCfg) -> Double? {
+        if let cv = cfg.coldStartPriorCV { return coldStartSpread(sample, cfg: cfg, priorCV: cv) }
+        if let sigma = cfg.coldStartPriorSigma {
+            return coldStartSpreadCore(sample, cfg: cfg) { _ in sigma / 1.253 }
+        }
+        return nil
+    }
+
+    /// Plain median (mean of the middle two for an even count); 0 for an empty list.
+    static func median(_ v: [Double]) -> Double {
+        guard !v.isEmpty else { return 0 }
+        let s = v.sorted()
+        let m = s.count / 2
+        return s.count % 2 == 0 ? (s[m - 1] + s[m]) / 2 : s[m]
+    }
+
     /// The state for the very first valid night: centre on the value, spread at the floor (or at the
     /// cold-start prior when the cfg has one), and the one-value cold-start sample.
     static func seedState(_ value: Double, cfg: MetricCfg) -> BaselineState {
-        guard let priorCV = cfg.coldStartPriorCV else {
+        guard let spread = coldStartSpread([value], cfg: cfg) else {
             return BaselineState(baseline: value, spread: cfg.floorSpread, nValid: 1,
                                  nightsSinceUpdate: 0, status: .calibrating)
         }
-        return BaselineState(baseline: value,
-                             spread: coldStartSpread([value], cfg: cfg, priorCV: priorCV),
+        return BaselineState(baseline: value, spread: spread,
                              nValid: 1, nightsSinceUpdate: 0, status: .calibrating,
                              coldStartSample: [value])
     }
@@ -303,6 +345,16 @@ public enum Baselines {
         "readiness_hrv_ln": MetricCfg(minVal: 2.079, maxVal: 5.521, floorSpread: 0.08,
                                       halfLifeB: 14.0, halfLifeS: 21.0),
 
+        // E6 — Charge's HRV baseline in the LOG domain (fold `Baselines.lnHRV(values)`). RMSSD is
+        // right-skewed and its night-to-night spread scales with its level, so a z on raw ms makes a
+        // 20 % dip worth twice as much to a 40 ms wearer's Charge as to an 80 ms one's. In ln space the
+        // same relative move is the same z for everyone. Bounds = ln of the raw "hrv" band (5…250 ms);
+        // floorSpread 0.08 ln (≈ 10 % σ, the readiness floor, just under a real wearer's ~0.10); the
+        // cold-start prior is the raw cfg's 12 % CV, which in ln units is an ABSOLUTE σ of 0.12. Same
+        // half-lives and the same incremental fold (hard outliers rejected once settled) as "hrv".
+        "hrv_ln": MetricCfg(minVal: 1.609, maxVal: 5.521, floorSpread: 0.08,
+                            halfLifeB: 14.0, halfLifeS: 21.0, coldStartPriorSigma: 0.12),
+
         // Daytime/waking-hours configs (DaytimeStress baseline-relative mode, added alongside
         // the day-relative default). Distinct from "resting_hr"/"hrv" above, which each fold ONE
         // NIGHTLY value (sleep). These fold ONE DAYTIME aggregate per day into a cross-day
@@ -328,6 +380,15 @@ public enum Baselines {
 
     /// Convenience accessors for the standard configs.
     public static var hrvCfg: MetricCfg { metricCfg["hrv"]! }
+    /// E6: Charge's ln(RMSSD) baseline config — fold `lnHRV(_:)` values with it.
+    public static var hrvLnCfg: MetricCfg { metricCfg["hrv_ln"]! }
+
+    /// E6: nightly RMSSD (ms) → ln(RMSSD), for folding with `hrvLnCfg`. A missing or non-positive value
+    /// stays missing (skip-and-hold), exactly as the raw fold would treat it. Stored HRV stays in ms; only
+    /// the Charge baseline is built in ln space.
+    public static func lnHRV(_ values: [Double?]) -> [Double?] {
+        values.map { v in v.flatMap { $0 > 0 ? log($0) : nil } }
+    }
     public static var restingHRCfg: MetricCfg { metricCfg["resting_hr"]! }
     public static var respCfg: MetricCfg { metricCfg["resp"]! }
     /// Readiness HRV baseline config — folded in the LOG domain (ln ms) with hard-outlier rejection
@@ -496,11 +557,13 @@ public enum Baselines {
         let newN = state.nValid + 1
         let newSpread: Double
         var newSample: [Double] = []
-        if let priorCV = cfg.coldStartPriorCV, usesColdStartSpread(state) {
+        if hasColdStartPrior(cfg), usesColdStartSpread(state) {
             // COLD START: spread from the sample of nights so far, prior-shrunk (`coldStartSpread`). The
             // sample is dropped at the hand-over and the EWMA below continues from this estimate.
-            let sample = state.coldStartSample + [value]
-            newSpread = coldStartSpread(sample, cfg: cfg, priorCV: priorCV)
+            // E8: the night enters the sample WINSORISED (the same clamp the centre just used), so one
+            // artefact night cannot blow the young spread open while hard-outlier rejection is off.
+            let sample = state.coldStartSample + [clamped]
+            newSpread = coldStartSpread(sample, cfg: cfg) ?? cfg.floorSpread
             if newN < coldStartNights { newSample = sample }
         } else {
             // Spread uses the UNCLAMPED value so true deviations are tracked, measured against the OLD
@@ -637,7 +700,14 @@ public enum Baselines {
     /// and parallel to `values`; `asOf` may be in any order and may name days with no night of their own.
     /// A day with no earlier night gets the same empty calibrating seed `foldHistory` returns for an empty
     /// history. By construction `foldHistoryAsOf(v, k, asOf: [d])[d]` equals `foldHistory` over the
-    /// prefix of `v` whose keys sort before `d` (pinned by `BaselinesAsOfTests`).
+    /// prefix of `v` whose keys sort before `d` (pinned by `BaselinesAsOfTests`) — for every day ON OR
+    /// AFTER the epoch.
+    ///
+    /// E8 — DAYS BEFORE THE EPOCH keep the baseline they had BEFORE the recalibration: the plain
+    /// (epoch-free) fold of the nights before them. The epoch means "re-learn from here on"; it never
+    /// meant "those earlier days had no baseline". Handing them the empty seed made their Charge nil on
+    /// the next re-persist — a recalibration silently erased every earlier Charge. The same holds for a
+    /// device-era cut passed as the epoch: a pre-era day folds only pre-era nights, i.e. its own era.
     public static func foldHistoryAsOf(_ values: [Double?], dayKeys: [String], cfg: MetricCfg,
                                        baselineEpoch: Double? = nil,
                                        asOf days: [String]) -> [String: BaselineState] {
@@ -657,17 +727,20 @@ public enum Baselines {
         let n = min(values.count, dayKeys.count)
         var out: [String: BaselineState] = [:]
         var state: BaselineState? = nil
+        // The epoch-free fold, kept only while a recalibration is set, for the days dated before it (E8).
+        var preEpochState: BaselineState? = nil
+        func beforeEpoch(_ key: String) -> Bool {
+            guard let fmt, let d = fmt.date(from: key) else { return false }
+            return d.timeIntervalSince1970 < epoch
+        }
         var i = 0
         for day in Set(days).sorted() {
             while i < n && dayKeys[i] < day {
-                let dropped: Bool = {
-                    guard let fmt, let d = fmt.date(from: dayKeys[i]) else { return false }
-                    return d.timeIntervalSince1970 < epoch
-                }()
-                if !dropped { state = update(state, value: values[i], cfg: cfg) }
+                if fmt != nil { preEpochState = update(preEpochState, value: values[i], cfg: cfg) }
+                if !beforeEpoch(dayKeys[i]) { state = update(state, value: values[i], cfg: cfg) }
                 i += 1
             }
-            out[day] = state ?? emptySeed
+            out[day] = beforeEpoch(day) ? (preEpochState ?? emptySeed) : (state ?? emptySeed)
         }
         return out
     }

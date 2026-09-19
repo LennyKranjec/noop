@@ -55,7 +55,7 @@ final class EffortMethodThreadingTests: XCTestCase {
     func testBanisterReachesTheDayScore() {
         let banister = score(.banister)
         XCTAssertNotNil(banister)
-        // ≈ 28.7 on the shipped constants: 60 min of (0.25·0.64·e^(1.92·0.25) − sedentary floor).
+        // ≈ 30.9 on the shipped constants: 60 min of (0.25·0.64·e^(1.92·0.25) − sedentary floor at 4 % HRR, E3).
         XCTAssertGreaterThan(banister!, 20.0, "an hour at 25% HRR should score under Banister")
     }
 

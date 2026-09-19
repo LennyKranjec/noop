@@ -66,7 +66,11 @@ enum LevelBaselineStore {
     }
 
     /// Derive every metric again from current history, replacing what was stored. The ONLY way a frozen
-    /// yardstick moves.
+    /// yardstick moves — and it moves together with the ledger: `LevelBarModel` calls this once per ledger
+    /// epoch (`LevelLedger.currentEpoch`), right before the ledger is emptied, so the days written from here
+    /// on are scored against baselines built from the SAME re-scored nights.
+    ///
+    /// `resolve` is the other reader, and it is only ever called when a day is about to be scored.
     @discardableResult
     static func refreeze(history: [LevelMetric: [Double]]) -> [LevelMetric: Baseline] {
         var stored: [String: Stored] = [:]

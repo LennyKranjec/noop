@@ -792,6 +792,16 @@ public enum DaytimeStress {
     /// How much recent heart rate a live read needs: a minute of samples at the strap's 1 Hz.
     public static let liveMinHRSamples = 60
 
+    /// E9: floor on the HR spread a LIVE window is scored against (bpm). The hours keep
+    /// `dayRelativeMinHRSigma` (3); a ten-minute window is far noisier than an hourly mean, and on a
+    /// calm day with few scored hours the 3 bpm floor put "HIGH" (2.0, z = 2·ln 2) only ~4 bpm above the
+    /// typical hour — a coffee and a phone call. 6 bpm puts it at ~8 bpm, which still sits inside the
+    /// hours' own ceiling (`dayRelativeMaxHRSigma`).
+    public static let liveMinHRSigma: Double = 6.0
+    /// E9: scored reference hours a live read needs before it says anything. With one or two hours the
+    /// "typical hour" is whatever the morning happened to be, and the spread is the floor by default.
+    public static let liveMinReferenceHours = 4
+
     /// Stress RIGHT NOW, on the same 0–3 scale as the day-relative hours: the last few minutes of heart
     /// rate (and R-R, only while daytime RMSSD scoring is enabled), z-scored against the day's OWN
     /// reference taken from its scored hours.
@@ -802,9 +812,14 @@ public enum DaytimeStress {
     /// hour reads 1.0. (The reference is always day-relative here, whatever mode produced `dayHours`:
     /// only their `meanHR` / `rmssd` are read, never their levels.)
     ///
-    /// NIL, NOT A GUESS, when there is too little signal to say: under a minute of heart rate, no scored
-    /// hour yet to take a reference from, or a window in which the wearer was MOVING — the motion gate
-    /// the hours use, applied to the window, because a flight of stairs is exertion and not stress.
+    /// NIL, NOT A GUESS, when there is too little signal to say: under a minute of heart rate, fewer than
+    /// `liveMinReferenceHours` scored hours to take a reference from (E9), or a window in which the wearer
+    /// was MOVING — the motion gate the hours use, applied to the window, because a flight of stairs is
+    /// exertion and not stress.
+    ///
+    /// E9: the same centre and curve as the hours, but the HR spread is floored at `liveMinHRSigma`
+    /// (6 bpm) rather than the hours' 3, because a few minutes of heart rate wander more than an hour's
+    /// mean does. A window at the typical hour still reads exactly 1.0.
     public static func live(hr: [HRSample], rr: [RRInterval], gravity: [GravitySample] = [],
                             dayHours: [HourPoint]) -> Double? {
         guard hr.count >= liveMinHRSamples else { return nil }
@@ -817,12 +832,18 @@ public enum DaytimeStress {
         }
         let reference = dayHours.filter { $0.level != nil }
         let hrMeans = reference.compactMap(\.meanHR)
-        guard !hrMeans.isEmpty, let liveHR = mean(hr.map { Double($0.bpm) }) else { return nil }
-        let ref = dayReference(hrMeans: hrMeans, rmssds: reference.compactMap(\.rmssd))
+        guard hrMeans.count >= liveMinReferenceHours,
+              let liveHR = mean(hr.map { Double($0.bpm) }) else { return nil }
+        let ref = liveReference(dayReference(hrMeans: hrMeans, rmssds: reference.compactMap(\.rmssd)))
         // Skip the R-R clean-up entirely while the gate holds RMSSD out: it would be computed and ignored.
         let liveRMSSD = daytimeRMSSDScoringEnabled
             ? HRVAnalyzer.analyze(rawRR: rr.map { Double($0.rrMs) }).rmssd : nil
         return dayRelativeSquash(dayRelativeZ(hr: liveHR, rmssd: liveRMSSD, ref: ref))
+    }
+
+    /// The day's reference with the live HR-spread floor applied (E9). Same centre; RMSSD untouched.
+    static func liveReference(_ ref: DayReference) -> DayReference {
+        DayReference(hr: ref.hr, sdHR: max(ref.sdHR, liveMinHRSigma), rmssd: ref.rmssd, sdRMSSD: ref.sdRMSSD)
     }
 
 }

@@ -141,10 +141,16 @@ public struct ReportDisplayUnits: Equatable, Sendable {
     /// Multiplier onto the stored 0–100 Effort value: 1.0 for NOOP's native axis, 21/100 for WHOOP's
     /// 0–21 Day Strain axis. Matches `UnitFormatter.effortScaleFactor` / the Kotlin twin.
     public let effortFactor: Double
+    /// E5: the wearer's O8 Effort → WHOOP-strain calibration, when one exists. On the 0–21 axis a LEVEL
+    /// (mean / min / max / half means) goes through it, exactly like `UnitFormatter.effortValue` does
+    /// everywhere else in the app; a DIFFERENCE stays linear (`displayDelta`). nil = the linear factor.
+    public let effortCalibration: EffortStrainCalibration?
 
-    public init(fahrenheit: Bool, effortFactor: Double) {
+    public init(fahrenheit: Bool, effortFactor: Double,
+                effortCalibration: EffortStrainCalibration? = nil) {
         self.fahrenheit = fahrenheit
         self.effortFactor = effortFactor
+        self.effortCalibration = effortCalibration
     }
 
     /// The identity: values exactly as stored (°C, native 0–100 Effort).
@@ -340,12 +346,30 @@ public enum RangeReportEngine {
     /// Skin temp is a signed DEVIATION from the personal baseline, so °F scales by 9/5 with NO +32
     /// offset — adding it would be wrong for a difference. Matches `SkinTempDisplay.numberString`
     /// and `UnitFormatter.temperatureDeltaFromCelsius`.
+    ///
+    /// E5: an Effort LEVEL on the rescaled axis goes through `units.effortCalibration` when there is one,
+    /// the same curve the app's `UnitFormatter.effortValue` applies, so the report and Today agree. Use
+    /// `displayDelta` for a difference — a calibrated curve is not linear.
     public static func displayValue(_ v: Double, metric: ReportMetric,
                                     units: ReportDisplayUnits) -> Double {
         switch metric {
         case .skinTempDev: return units.fahrenheit ? v * 9.0 / 5.0 : v
-        case .strain:      return v * units.effortFactor
+        case .strain:
+            if units.effortFactor != 1.0, let cal = units.effortCalibration { return cal.strain21(effort100: v) }
+            return v * units.effortFactor
         default:           return v
+        }
+    }
+
+    /// A DIFFERENCE on the display axis: always the plain multiplication (×9/5 for a temperature delta,
+    /// the linear Effort factor), never the calibration curve — a magnitude has no position on the curve
+    /// for a calibration to act on (O8 / E5, matching `UnitFormatter.effortDeltaValue`).
+    public static func displayDelta(_ d: Double, metric: ReportMetric,
+                                    units: ReportDisplayUnits) -> Double {
+        switch metric {
+        case .skinTempDev: return units.fahrenheit ? d * 9.0 / 5.0 : d
+        case .strain:      return d * units.effortFactor
+        default:           return d
         }
     }
 

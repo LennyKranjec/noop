@@ -45,7 +45,8 @@ extension RecoveryScorer {
                                      rhrBaseline: BaselineState?,
                                      respBaseline: BaselineState?,
                                      sleepPerf: Double?,
-                                     skinTempDev: Double? = nil)
+                                     skinTempDev: Double? = nil,
+                                     hrvLnBaseline: BaselineState? = nil)
         -> (score: Double?, trace: [String]) {
 
         // Trace numbers use nearest rounding with half-ties away from zero on both platforms.
@@ -64,7 +65,7 @@ extension RecoveryScorer {
         let score = recovery(hrv: hrv, rhr: rhr, resp: resp,
                              hrvBaseline: hrvBaseline, rhrBaseline: rhrB,
                              respBaseline: respBaseline, sleepPerf: sleepPerf,
-                             skinTempDev: skinTempDev)
+                             skinTempDev: skinTempDev, hrvLnBaseline: hrvLnBaseline)
 
         // Cold-start gate: HRV baseline not usable -> recovery() returns nil before any term is built.
         // Report the gate so a nil Charge is explainable, then stop (no terms were scored).
@@ -103,7 +104,8 @@ extension RecoveryScorer {
         // L9: every WEIGHT / SCALE / centre constant goes through r2() too (not just the z-scores), so a
         // future non-round weight (e.g. 0.333) renders identically on Swift and Kotlin and the parity
         // fixture cannot silently desync. The values render the same as before today.
-        let hrvZRaw = zScore(hrv, mean: hrvBaseline.baseline, spread: hrvBaseline.spread)
+        // E6: ln(RMSSD), the exact z recovery() scores (see `hrvZ`).
+        let hrvZRaw = hrvZ(hrv, baseline: hrvBaseline, lnBaseline: hrvLnBaseline)
         let sat = parasympatheticSaturation(hrvZ: hrvZRaw, rhrZ: rhrZForGuard)
         terms.append(("hrv", hrvZRaw, wHRV))
         lines.append("charge term hrv z=\(r2(hrvZRaw)) w=\(r2(wHRV)) (higher HRV is better)")

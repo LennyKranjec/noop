@@ -198,14 +198,15 @@ final class RecoveryScorerTraceTests: XCTestCase {
             "charge baseline hrv mean=50.0 spread=4.79 nValid=14 status=trusted",
             "charge baseline rhr mean=55.0 spread=2.39 nValid=14 status=trusted",
             "charge baseline resp mean=16.0 spread=1.6 nValid=14 status=trusted",
-            "charge term hrv z=2.0 w=0.55 (higher HRV is better)",
+            // E6: the HRV term is on ln(RMSSD): ln(62/50) / (1.253 × spread/50) = 1.79 (was 2.0 on raw ms).
+            "charge term hrv z=1.79 w=0.55 (higher HRV is better)",
             "charge term rhr z=1.33 w=0.2 (lower RHR is better)",
             "charge term resp z=0.5 w=0.05 (lower resp is better)",
             "charge term sleepPerf z=0.42 w=0.15 (rest=0.9 center=0.85)",
             "charge term skinTempDev z=-0.0 w=0.05 (dev=0.0C penalty=-|dev|/1.0)",
             "charge nilTerm dropped=[] (each dropped term renormalizes the remaining weights)",
-            "charge renorm totalWeight=1.0 compositeZ=1.45 (z = sum(z*w)/sum(w))",
-            "charge score=93.38 band=green (logistic k=1.6 z0=-0.2)",
+            "charge renorm totalWeight=1.0 compositeZ=1.34 (z = sum(z*w)/sum(w))",
+            "charge score=92.16 band=green (logistic k=1.6 z0=-0.2)",
         ])
     }
 }

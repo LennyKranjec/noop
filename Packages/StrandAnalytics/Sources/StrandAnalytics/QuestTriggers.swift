@@ -48,7 +48,14 @@ public enum QuestTriggers {
     public static let stepsTarget = 8_000
 
     /// Effort at or above this, with charge on the floor, is training into a hole.
-    public static let effortHigh: Double = 14
+    ///
+    /// E2 — ON THE 0–100 EFFORT AXIS. This was 14 when Effort was WHOOP's 0–21; left there after the
+    /// rescale it fired on almost any day. 14 × 100/21 ≈ 67 — a hard session, as it was meant to be.
+    public static let effortHigh: Double = 67
+
+    /// A day with REAL training on the 0–100 Effort axis (E2): an easy walk day lands ~40–48, a 60-min
+    /// moderate session ~55. Was a bare `>= 8` from the 0–21 era, which every day now clears.
+    public static let trainingDayEffort: Double = 50
 
     /// Charge at or below this is the body asking for the day off.
     public static let chargeLow: Double = 34
@@ -108,7 +115,11 @@ public enum QuestTriggers {
 
         // NOTHING LOGGED IN DAYS — the quiet drift, only visible across the window.
         let lastFour = recent.suffix(4)
-        let trainedRecently = lastFour.contains { ($0.strain ?? 0) >= 8 }
+        // A logged / detected workout counts on its own (a strength session can land under the Effort
+        // line); otherwise the day's Effort has to reach real-training territory (E2).
+        let trainedRecently = lastFour.contains {
+            ($0.exerciseCount ?? 0) > 0 || ($0.strain ?? 0) >= trainingDayEffort
+        }
         if recent.count >= 4 && !trainedRecently {
             out.append(QuestTrigger(
                 id: "idle-streak",

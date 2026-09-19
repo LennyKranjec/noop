@@ -477,10 +477,6 @@ public enum SleepStagerV2 {
          "light": 0.0, "awake": 0.0]
     }
 
-    /// Window-relative minutes during which the motion-quiescent clamp on the cardiac AWAKE term is NOT
-    /// applied (`stageEpochs`), so genuine pre-sleep wake at the start of the window can still be staged awake.
-    static let preSleepUnclampMinutes = 60.0
-
     /// Sustained non-wake run, in 30 s epochs, that establishes sleep onset — 10 epochs = 5 minutes.
     /// Measured against PSG onset on sleep-accel (n = 31 subjects): bias −3.8 min, MAE 7.4 min.
     static let onsetSustainedEpochs = 10
@@ -580,14 +576,13 @@ public enum SleepStagerV2 {
             // upstream's restored (post-#437) cardiac coefficients verbatim, so a night with any motion stages
             // byte-identical to upstream; the correction only ever holds a still, elevated-HR epoch.
             //
-            // EXCEPT in the window's first `preSleepUnclampMinutes` (nightly-metrics rework): that is exactly
-            // where still-but-awake time sits (reading in bed before sleep), and there a raised HR IS the
-            // evidence of wakefulness — clamping it there staged pre-sleep wake as light sleep and put onset
-            // too early against WHOOP. Past the first hour the clamp stands, so the supplement / fever night
-            // the clamp exists for is unaffected where it matters.
+            // The clamp holds from the window's first epoch. A pre-sleep "unclamp" for the first hour was tried
+            // with the nightly-metrics rework and REMOVED after review (S1): the session-level onset trim
+            // (`SleepStager.hrSettledBounds`) already cuts the clearly-awake still stretch before the window
+            // is staged, so unclamping here corrected the same minutes twice — and on a supplement / fever
+            // night it staged the first real hour of sleep awake. One mechanism, at the session edge.
             let awakeCardiac0 = 0.8 * zhvv + 0.4 * zhrv
-            let clampCardiac = motionQuiescent(f) && f.minutesSinceOnset >= preSleepUnclampMinutes
-            let awakeCardiac = clampCardiac ? min(0.0, awakeCardiac0) : awakeCardiac0
+            let awakeCardiac = motionQuiescent(f) ? min(0.0, awakeCardiac0) : awakeCardiac0
             var em: [String: Double] = [
                 "deep": -1.1 * zhvv - 0.5 * zmvv - gate + baseLogPrior["deep"]!,
                 "rem": 0.6 * zhvv - 0.6 * zmvv + 0.4 * zhrv + baseLogPrior["rem"]!,

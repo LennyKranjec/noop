@@ -171,13 +171,29 @@ final class BaselinesTests: XCTestCase {
                        Baselines.hrvCfg.floorSpread, accuracy: 1e-9)
     }
 
-    /// The pinned formula: k=3 pseudo-nights of prior against n−1 of bias-corrected sample abs-dev.
+    /// The pinned formula: k=3 pseudo-nights of prior against n−1 of bias-corrected sample abs-dev, the
+    /// sample term from the MEDIAN absolute deviation (E8).
     func testColdStartSpreadFormula() {
-        // mean 60; |dev| 12,12,0,6,6 → 7.2 × sqrt(5/4) = 8.050; prior 7.2/1.253 = 5.746.
+        // mean 60, median 60; |dev| 12,12,0,6,6 → MAD 6 → σ 1.4826·6 → abs-dev ÷1.253, × sqrt(5/4).
+        // prior 0.12·60/1.253 = 5.746.
         let v: [Double] = [48, 72, 60, 54, 66]
-        let expected = (3 * (0.12 * 60 / 1.253) + 4 * (7.2 * (5.0 / 4.0).squareRoot())) / 7
+        let sampleAbsDev = 1.4826 * 6 / 1.253 * (5.0 / 4.0).squareRoot()
+        let expected = (3 * (0.12 * 60 / 1.253) + 4 * sampleAbsDev) / 7
         XCTAssertEqual(Baselines.coldStartSpread(v, cfg: Baselines.hrvCfg, priorCV: 0.12), expected, accuracy: 1e-9)
-        XCTAssertEqual(expected, 7.0626, accuracy: 1e-3)
+        XCTAssertEqual(expected, 6.9983, accuracy: 1e-3)
+    }
+
+    /// E8: one artefact night among a young baseline's nights must not blow the spread open. Before, a
+    /// 150 ms reading among 50s at n = 5 made the spread ≈ 23 ms (the raw mean abs-dev, outlier gate off
+    /// while young); now the night enters the sample Winsor-clamped and the spread is the MEDIAN abs-dev.
+    func testColdStartSpreadIgnoresOneArtefactNight() {
+        let s = Baselines.foldHistory([50, 52, 48, 51, 150], cfg: Baselines.hrvCfg)
+        XCTAssertEqual(s.nValid, 5)
+        XCTAssertLessThan(s.spread, 8.0, "one artefact night must not decide the young spread")
+        XCTAssertLessThan(s.coldStartSample.last ?? 999, 150, "the artefact enters the sample clamped")
+        // The raw estimator on the raw sample shows what the clamp + median protect against.
+        XCTAssertLessThan(Baselines.coldStartSpread([50, 52, 48, 51, 150], cfg: Baselines.hrvCfg, priorCV: 0.12),
+                          8.0, "the median abs-dev alone already ignores a single outlier")
     }
 
     /// A wearer with a genuinely wide night-to-night spread gets a spread that reflects it within days,
@@ -187,7 +203,7 @@ final class BaselinesTests: XCTestCase {
         let s = Baselines.foldHistory(v, cfg: Baselines.hrvCfg)
         XCTAssertEqual(s.nValid, 5)
         XCTAssertTrue(s.usable)
-        XCTAssertEqual(s.spread, 7.0626, accuracy: 1e-3)
+        XCTAssertEqual(s.spread, 6.9983, accuracy: 1e-3)
         XCTAssertEqual(s.coldStartSample, [48, 72, 60, 54, 66])
     }
 
@@ -236,7 +252,7 @@ final class BaselinesTests: XCTestCase {
         let vals: [Double?] = [48, 72, 60, 54, 66, 61]
         let asOf = Baselines.foldHistoryAsOf(vals, dayKeys: keys, cfg: Baselines.hrvCfg,
                                              baselineEpoch: 0, asOf: ["2026-03-06"])
-        XCTAssertEqual(asOf["2026-03-06"]?.spread ?? 0, 7.0626, accuracy: 1e-3)
+        XCTAssertEqual(asOf["2026-03-06"]?.spread ?? 0, 6.9983, accuracy: 1e-3)
     }
 
     // MARK: - Manual recalibration epoch (noop.hrvBaselineEpoch)

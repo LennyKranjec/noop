@@ -798,7 +798,10 @@ public enum Calories {
     /// `restingHR` is the WAKING resting HR (`WakingRestingHR`): it sets the 50% HRR gate, the Uth VO₂max
     /// the fitness-adjusted Keytel reads, and the bottom of the NEAT ramp. With `includeNEAT` (and a known
     /// `restingHR`) the sub-gate intervals also earn NEAT — see `neatMaxBMRMultiple`. Off by default so
-    /// every existing caller and the Android parity vectors stay byte-identical.
+    /// every existing caller and the Android parity vectors stay byte-identical. `neatExcluding` (`[start,
+    /// end)` wall-clock spans, the same in-bed mask the waking resting HR uses — `WakingRestingHR.inBedMask`)
+    /// withholds NEAT from samples inside them: a sleeping or in-bed heart rate above the waking floor (a REM
+    /// surge) is not non-exercise activity. Resting and exercise energy are unaffected. Default empty.
     ///
     /// This is an on-device estimate from heart rate alone — NOT laboratory calorimetry, NOT
     /// Apple/WHOOP cloud parity, NOT medical advice.
@@ -806,7 +809,8 @@ public enum Calories {
                                          profile: UserProfile,
                                          hrmax: Double?,
                                          restingHR: Double?,
-                                         includeNEAT: Bool = false) -> DayEnergyEstimate {
+                                         includeNEAT: Bool = false,
+                                         neatExcluding: [(start: Int, end: Int)] = []) -> DayEnergyEstimate {
         if hrSamples.isEmpty {
             return DayEnergyEstimate(restingKcal: 0, activeKcal: 0, observedSeconds: 0)
         }
@@ -875,7 +879,8 @@ public enum Calories {
             guard bpm >= activeThreshold else {
                 // NEAT ramp: 0 at the waking resting HR → neatMaxBMRMultiple × BMR at the gate. Same
                 // cadence-capped duration as the exercise carry, so a gap is never credited as activity.
-                if let neatLo = neatFloor, bpm > neatLo {
+                if let neatLo = neatFloor, bpm > neatLo,
+                   !neatExcluding.contains(where: { ordered[i].ts >= $0.start && ordered[i].ts < $0.end }) {
                     let frac = (bpm - neatLo) / (activeThreshold - neatLo)
                     neatKcal += restingRate * neatMaxBMRMultiple * frac * durationS
                 }

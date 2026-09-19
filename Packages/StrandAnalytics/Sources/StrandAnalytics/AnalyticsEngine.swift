@@ -44,10 +44,16 @@ public enum AnalyticsEngine {
         public let restingHR: BaselineState?
         public let resp: BaselineState?
         public let skinTemp: BaselineState?
+        /// E6: the EXACT ln(RMSSD) baseline for Charge — the same nightly HRV history as `hrv`, folded over
+        /// `Baselines.lnHRV(_:)` with `Baselines.hrvLnCfg` (same epoch). nil → RecoveryScorer derives the ln
+        /// view from `hrv` by the delta method, so callers that don't fold it are unaffected.
+        public let hrvLn: BaselineState?
         public init(hrv: BaselineState? = nil, restingHR: BaselineState? = nil,
-                    resp: BaselineState? = nil, skinTemp: BaselineState? = nil) {
+                    resp: BaselineState? = nil, skinTemp: BaselineState? = nil,
+                    hrvLn: BaselineState? = nil) {
             self.hrv = hrv; self.restingHR = restingHR; self.resp = resp
             self.skinTemp = skinTemp
+            self.hrvLn = hrvLn
         }
     }
 
@@ -555,7 +561,8 @@ public enum AnalyticsEngine {
                 // that used to keep HR-only nights away from this line, so this is now the only thing
                 // standing between the flag and silent loss rather than a belt.
                 return SleepSession(start: s.start, end: s.end, efficiency: s.efficiency,
-                                    stages: s.stages, restingHR: rhr, avgHRV: hrv, hrOnly: s.hrOnly)
+                                    stages: s.stages, restingHR: rhr, avgHRV: hrv, hrOnly: s.hrOnly,
+                                    stillRunStart: s.stillRunStart, stillRunEnd: s.stillRunEnd)
             }
             let keptDetected = refinedSessions.filter { d in
                 !enrichedProvided.contains { $0.start < d.end && d.start < $0.end }
@@ -743,14 +750,23 @@ public enum AnalyticsEngine {
             if !inGroup.isEmpty { return inGroup }
             return physiologySessions.max(by: { ($0.end - $0.start) < ($1.end - $1.start) }).map { [$0] } ?? []
         }()
-        // Daily resting HR = the PRIMARY (longest) main-night fragment's resting HR — each session's value is
-        // already WHOOP-shaped (last-deep-run mean, `SleepStager.sessionSleepRestingHR`). Longest-wins is the
-        // #1169 `PrimarySessionRestingHR` selection rule; a biphasic night's shorter fragment never replaces
-        // the main one. Falls through to the next-longest fragment only when the longest carries none.
-        let restingHRDaily = mainNightPhysiology.filter { $0.restingHR != nil }
+        // Daily resting HR. A one-session night is that session's own value (already WHOOP-shaped: the last-
+        // deep-run mean, `SleepStager.sessionSleepRestingHR`). A night BRIDGED from several fragments (S7) pools
+        // the fragments' 5-min blocks and reads the NIGHT's last deep run (`SleepStager.nightSleepRestingHR`)
+        // — it used to take the longest fragment's value, which is not the night's last deep run whenever the
+        // deep sleep sat in the other fragment. Falls back to the #1169 longest-fragment rule when the pool
+        // yields nothing (e.g. provided sessions carrying a stored value but no HR in this window).
+        let fragmentsForPhysiology = mainNightPhysiology.map { (start: $0.start, end: $0.end, stages: $0.stages) }
+        let longestFragmentRestingHR = mainNightPhysiology.filter { $0.restingHR != nil }
             .max(by: { ($0.end - $0.start) < ($1.end - $1.start) })?.restingHR
-        // Daily avg HRV = in-bed-weighted mean of the main night's per-session HRV (each already the
-        // last-deep-run value, `SleepStager.sessionAvgHRV(…, stages:)`); a single-block night is its own value.
+        let restingHRDaily: Int? = mainNightPhysiology.count > 1
+            ? (SleepStager.nightSleepRestingHR(fragments: fragmentsForPhysiology, hr: hr) ?? longestFragmentRestingHR)
+            : longestFragmentRestingHR
+        // Daily avg HRV. A one-session night is its own value (`SleepStager.sessionAvgHRV(…, stages:)`, the last
+        // deep run). A bridged night (S7) POOLS the fragments' 5-min windows and takes the NIGHT's last deep
+        // run (`SleepStager.nightAvgHRV`), instead of duration-weighting per-fragment values that may each have
+        // come from a different rule (one fragment's last deep run, another's non-wake fallback). The old
+        // weighted blend stays only as the fallback when the pool yields nothing.
         let avgHRVDaily: Double? = {
             if deepHrvWindow {
                 // #141: WHOOP-style HRV — pool RMSSD over DEEP-stage 5-min windows only (slow-wave sleep),
@@ -764,6 +780,10 @@ public enum AnalyticsEngine {
                         .filter { $0.stage == "deep" }.compactMap { $0.rmssd }
                 }
                 return deep.isEmpty ? nil : deep.reduce(0, +) / Double(deep.count)
+            }
+            if mainNightPhysiology.count > 1,
+               let pooled = SleepStager.nightAvgHRV(fragments: fragmentsForPhysiology, rr: rr.sortedByTsStable()) {
+                return pooled
             }
             let pairs = mainNightPhysiology.compactMap { s -> (Double, Double)? in
                 s.avgHRV.map { ($0, Double(s.end - s.start)) }
@@ -815,8 +835,8 @@ public enum AnalyticsEngine {
             let withR = allWin.filter { $0.rmssd != nil }
             let deepW = withR.filter { $0.stage == "deep" }
             let lastSws = SleepStager.lastDeepRun(allWin).filter { $0.rmssd != nil }
-            // `reported` is the value NOOP actually displays (main night, each session's last-deep-run
-            // value, duration-weighted across a bridged night's fragments — so it tracks `lastSWS`);
+            // `reported` is the value NOOP actually displays (main night; a bridged night's fragments are
+            // pooled and the NIGHT's last deep run taken, S7 — so it tracks `lastSWS`);
             // `wholeNight` is the pooled-window mean it equals on single-session nights and the apples-to-
             // apples baseline for the deepOnly/lastSWS comparison (all three are pooled window means).
             let reported = avgHRVDaily.map { "\(r2($0))ms" } ?? "nil"
@@ -922,7 +942,8 @@ public enum AnalyticsEngine {
                 rhrBaseline: baselines.restingHR,
                 respBaseline: baselines.resp,
                 sleepPerf: sleepPerf,
-                skinTempDev: skinTempDevC)  // symmetric penalty; drops + renormalizes when nil
+                skinTempDev: skinTempDevC,  // symmetric penalty; drops + renormalizes when nil
+                hrvLnBaseline: baselines.hrvLn)  // E6 exact ln baseline; nil → delta-method view of hrvBase
             // Driver breakdown from the identical inputs; omits any missing term, never faked.
             chargeDrivers = RecoveryScorer.chargeDrivers(
                 hrv: hrvVal,
@@ -932,7 +953,8 @@ public enum AnalyticsEngine {
                 rhrBaseline: baselines.restingHR,
                 respBaseline: baselines.resp,
                 sleepPerf: sleepPerf,
-                skinTempDev: skinTempDevC)
+                skinTempDev: skinTempDevC,
+                hrvLnBaseline: baselines.hrvLn)
         }
         // A5: skin temp as a RELATIVE deviation marker (trend, not a clinical absolute). nil
         // when no deviation is available (no baseline yet / not worn) so the UI shows nothing.
@@ -954,9 +976,15 @@ public enum AnalyticsEngine {
         // detected sleep session), else sleep RHR + the documented offset. Charge above stays on the
         // SLEEP resting HR. The same LOCAL-day filter the additive totals below use (#277).
         let dayHrFiltered = (dayHr ?? hr).filter { tsInDay($0.ts) }
+        // S9: the mask is the UNTRIMMED in-bed stillness run ± `WakingRestingHR.inBedMaskMarginS`, not the
+        // trimmed session. The onset/wake trim cuts clearly-awake minutes out of the SLEEP session, but lying
+        // awake in bed (06:00–07:00 after the trimmed wake, say) is not a seated waking rest either, and
+        // counting it dragged the waking P10 down toward the sleeping level. The NEAT term below reads the same
+        // mask, so a sleeping (or in-bed) sample is never credited as non-exercise activity.
+        let inBedMask = WakingRestingHR.inBedMask(allSessions.map { $0.stillRunBounds })
         let wakingRestingHRDaily = WakingRestingHR.daytimeEstimate(
             hr: dayHrFiltered,
-            sleepWindows: allSessions.map { (start: $0.start, end: $0.end) },
+            sleepWindows: inBedMask,
             tzOffsetSeconds: tzOffsetSeconds,
             sleepRestingHR: restingHRDaily.map(Double.init))
         let restingHRForEnergy = WakingRestingHR.resolve(daytime: wakingRestingHRDaily,
@@ -970,9 +998,13 @@ public enum AnalyticsEngine {
         // and Effort must be byte-identical whether it did or not (#277, `AnalyticsEngineDayBoundsTests`).
         // The night-window fallback (`hr`, pure-function callers) is passed through as before.
         let strainHr: [HRSample] = dayHr.map { stream in stream.filter { tsInDay($0.ts) } } ?? hr
+        // E1: a whole-DAY integral, so zone 1 pays only in minutes the wrist was MOVING (the day's own gravity,
+        // same local-day filter as the HR) — see `StrainScorer.Zone1Gate`. Per-bout Effort stays ungated.
         let strain = StrainScorer.strain(strainHr, maxHR: effMaxHR, restingHR: restForStrain,
                                          method: effortMethod, sex: profile.sex,
-                                         diag: strainDiag, day: day)
+                                         diag: strainDiag, day: day,
+                                         zone1Gate: .day(StrainScorer.movingMinutes(
+                                             gravity: (dayGravity ?? gravity).filter { tsInDay($0.ts) })))
 
         // ── Workouts ──────────────────────────────────────────────────────────
         // Detect over the full CALENDAR day (dayHr/dayGravity) when the caller supplies it, so a
@@ -1050,7 +1082,7 @@ public enum AnalyticsEngine {
         // window (bounded log).
         let dayEnergy: Calories.DayEnergyEstimate? = dayHrFiltered.isEmpty ? nil : Calories.estimateDayEnergy(
             dayHrFiltered, profile: profile, hrmax: effMaxHR,
-            restingHR: restingHRForEnergy, includeNEAT: true)
+            restingHR: restingHRForEnergy, includeNEAT: true, neatExcluding: inBedMask)
         let activeKcalEst: Double? = dayEnergy?.totalKcal
 
         // ── Assemble DailyMetric ──────────────────────────────────────────────

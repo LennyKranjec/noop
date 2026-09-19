@@ -133,7 +133,8 @@ struct FrozenLevel: Codable, Equatable {
 // flow — the dream, the questions, the daily brief — and the brief is where the day's level is computed
 // and frozen, so the number is set at the moment it is first looked at, from a night that has had time to
 // sync. Until then the level shown is the last settled day's. An open before 04:00 is still the night before and
-// does not count as the morning.
+// does not count as the morning. On macOS, which has no morning flow, the first time the app comes to the
+// front after 04:00 turns the day.
 
 enum LevelDayFreeze {
 
@@ -142,6 +143,12 @@ enum LevelDayFreeze {
 
     /// The day the morning flow last ran for — the day whose level is current.
     private static let briefDayKey = "level.briefDay.v1"
+
+    /// When the morning flow began, by day — the day's deadline is measured from it (see `LevelLedger`).
+    private static let beganAtKey = "level.beganAt.v1"
+
+    /// How many days of begin times are kept. Only a day not yet written ever needs its own.
+    private static let beganAtKept = 21
 
     /// The single frozen day the level used to keep, before the ledger. Read once, to carry it over.
     static let legacyKey = "level.frozenDay.v3"
@@ -163,7 +170,36 @@ enum LevelDayFreeze {
     }
 
     /// Mark this morning's flow as run: from here on the level shown is today's.
+    ///
+    /// `now` IS WHEN THE FLOW WAS PRESENTED, not when this line happens to run: a flow put up at 23:59
+    /// whose task starts after midnight would otherwise begin the NEXT day. And the same 04:00 rule as
+    /// `morningDue` is kept here, so no caller can begin a day in the small hours of the night before.
     static func beginDay(now: Date = Date(), calendar: Calendar = .current, _ d: UserDefaults = .standard) {
-        d.set(LevelWiring.key(from: now, calendar: calendar), forKey: briefDayKey)
+        guard calendar.component(.hour, from: now) >= earliestHour else { return }
+        let day = LevelWiring.key(from: now, calendar: calendar)
+        d.set(day, forKey: briefDayKey)
+        // The FIRST begin of a day is the one its deadline counts from.
+        var began = d.dictionary(forKey: beganAtKey) as? [String: Double] ?? [:]
+        guard began[day] == nil else { return }
+        began[day] = now.timeIntervalSince1970
+        if began.count > beganAtKept {
+            for old in began.keys.sorted().prefix(began.count - beganAtKept) { began[old] = nil }
+        }
+        d.set(began, forKey: beganAtKey)
+    }
+
+    /// When the morning flow began on `day`, or nil when it never ran that day.
+    static func beganAt(_ day: String, _ d: UserDefaults = .standard) -> Date? {
+        guard let t = (d.dictionary(forKey: beganAtKey) as? [String: Double])?[day] else { return nil }
+        return Date(timeIntervalSince1970: t)
+    }
+
+    /// Whether what the strip shows is NOT today's level: the current day's entry is not written yet, or
+    /// the current day is not today on the calendar because this morning's flow has not run — before it,
+    /// the level day is yesterday, and yesterday's entry is not this morning's number.
+    static func isPendingToday(ledger: LevelLedger, now: Date = Date(), calendar: Calendar = .current,
+                               _ d: UserDefaults = .standard) -> Bool {
+        let levelKey = LevelWiring.key(from: levelDay(now: now, calendar: calendar, d), calendar: calendar)
+        return ledger.entry(levelKey) == nil || levelKey != LevelWiring.key(from: now, calendar: calendar)
     }
 }

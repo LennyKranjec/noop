@@ -63,12 +63,27 @@ public struct SleepSession: Equatable, Sendable {
     ///
     /// Kotlin twin: `DetectedSleep.hrOnly` (the model names diverge, `DetectedSleep`/`SleepSession`).
     public let hrOnly: Bool
+    /// The UNTRIMMED stillness run this session was cut from (review S9), or nil when the session is its own
+    /// run (no onset/wake trim happened, or it was not detected here: provided / cached / HR-only sessions).
+    /// The onset/wake trim removes clearly-awake minutes that were still spent lying in bed; those minutes are
+    /// not sleep, but they are not a WAKING seated rest either, so the waking-resting-HR floor and the NEAT
+    /// term mask these bounds (± a margin) rather than the trimmed `start`/`end`. Use `stillRunBounds`.
+    public let stillRunStart: Int?
+    public let stillRunEnd: Int?
 
     public init(start: Int, end: Int, efficiency: Double, stages: [StageSegment],
-                restingHR: Int?, avgHRV: Double?, hrOnly: Bool = false) {
+                restingHR: Int?, avgHRV: Double?, hrOnly: Bool = false,
+                stillRunStart: Int? = nil, stillRunEnd: Int? = nil) {
         self.start = start; self.end = end; self.efficiency = efficiency
         self.stages = stages; self.restingHR = restingHR; self.avgHRV = avgHRV
         self.hrOnly = hrOnly
+        self.stillRunStart = stillRunStart; self.stillRunEnd = stillRunEnd
+    }
+
+    /// The in-bed stillness span behind the session: the untrimmed run when recorded, else the session itself.
+    /// Never narrower than `[start, end]`.
+    public var stillRunBounds: (start: Int, end: Int) {
+        (start: min(start, stillRunStart ?? start), end: max(end, stillRunEnd ?? end))
     }
 }
 
@@ -919,7 +934,8 @@ public enum SleepStager {
     /// HR-confirmation with MOTION CORROBORATION (motion-corroborated wake). A run is confirmed as sleep when
     /// its MEDIAN HR sits within the sleep band relative to `baseline`. The band is normally `hrSleepBaselineMult`
     /// (×1.05); on a run that is DEEPLY MOTION-QUIESCENT (`runIsDeeplyQuiescent` — the wrist barely moved and its
-    /// posture did not change across the whole span) the band widens to `quiescentHRSleepMult`, because a raised
+    /// posture did not change across the whole span) the band widens to `quiescentHRSleepMult` (1.30, runs of at
+    /// least `quiescentLongRunMinS`; shorter runs get `quiescentShortRunHRSleepMult`, 1.15), because a raised
     /// but FLAT overnight HR with a motionless wrist is a supplement / fever / hot-room / alcohol artefact, not
     /// wakefulness — elevated-HR-alone must not reject a still run. The wider band STILL keeps a floor: a
     /// genuinely awake, high-HR run (median above `quiescentHRSleepMult × baseline`) is rejected even when still,
@@ -945,7 +961,9 @@ public enum SleepStager {
         // Median ≤ mean for the right-skewed HR of a real night, so this only ever RELAXES the gate — every
         // run the mean already accepted still passes, and runs the mean wrongly dropped are recovered.
         let medHR = HRVAnalyzer.median(seg.map { Double($0.bpm) })
-        let mult = runIsDeeplyQuiescent(p, grav: grav) ? quiescentHRSleepMult : hrSleepBaselineMult
+        let mult = runIsDeeplyQuiescent(p, grav: grav)
+            ? ((p.end - p.start) >= quiescentLongRunMinS ? quiescentHRSleepMult : quiescentShortRunHRSleepMult)
+            : hrSleepBaselineMult
         if let baseline, medHR <= baseline * mult { return true }
         if let sleepHRBaseline, medHR <= sleepHRBaseline * sleepHRBaselineBandMult { return true }
         return false
@@ -961,15 +979,24 @@ public enum SleepStager {
     // quiescent MOTION floor with UNCHANGED posture cannot be called wake on cardiac evidence alone. The
     // per-epoch half lives in the stagers (`SleepStagerV2.motionQuiescent`); this is the session-detection half.
 
-    /// The relaxed sleep-band multiplier applied to `confirmSleepWithHR` when the run is DEEPLY motion-quiescent.
-    /// Wider than `hrSleepBaselineMult` (1.05) so a supplement-elevated but motionless overnight run is not
-    /// rejected, yet bounded (the floor) so a genuinely awake still run above this band is still dropped.
-    /// LOWERED 1.30 → 1.15 (nightly-metrics rework): at 1.30 a still-but-awake stretch (reading in bed, HR
-    /// ~25% over the day median) sailed through the gate and was staged as light sleep, which is half of why
-    /// sleep onset read too early against WHOOP. The supplement-era case the wide band was for is now covered
-    /// by the personal overnight band (`sleepHRBaseline` × `sleepHRBaselineBandMult`), which tracks the
-    /// wearer's own recent nights instead of a blanket 30% allowance.
-    public static let quiescentHRSleepMult: Double = 1.15
+    /// The relaxed sleep-band multiplier applied to `confirmSleepWithHR` when the run is DEEPLY motion-quiescent
+    /// AND long (≥ `quiescentLongRunMinS`). Wider than `hrSleepBaselineMult` (1.05) so a supplement / fever /
+    /// alcohol-elevated but motionless overnight run is not rejected, yet bounded (the floor) so a genuinely
+    /// awake still run above this band is still dropped.
+    /// RESTORED 1.15 → 1.30 after review (S3): the nightly-metrics rework had cut it to 1.15 so a still-but-awake
+    /// stretch (reading in bed) would not sail through the gate, but that lost whole nights on fever / alcohol,
+    /// where the personal band (≤ 1.15 × the wearer's usual sleeping level) cannot rescue them and at cold start
+    /// nothing can. The pre-sleep reading stretch is now removed by the onset trim (`hrSettledBounds`), which is
+    /// the right tool for it, so a long motionless run gets its wide band back. Short runs keep the tighter
+    /// `quiescentShortRunHRSleepMult`.
+    public static let quiescentHRSleepMult: Double = 1.30
+
+    /// The quiescent band for a SHORT motionless run (< `quiescentLongRunMinS`). A 1–3 h still stretch with a
+    /// raised HR is far more often an evening on the sofa than a fever night, and there is no night-length of
+    /// evidence behind it, so it keeps the tighter 1.15 the rework introduced.
+    public static let quiescentShortRunHRSleepMult: Double = 1.15
+    /// Span (seconds) from which a deeply quiescent run counts as LONG and earns `quiescentHRSleepMult`.
+    public static let quiescentLongRunMinS: Int = 3 * 3_600
 
     /// Band multiplier applied to the PERSONAL overnight baseline (`sleepHRBaseline`) in `confirmSleepWithHR`.
     /// The production baseline is the median of recent main-night resting HRs (the only per-night HR level
@@ -1069,41 +1096,84 @@ public enum SleepStager {
     // MARK: - HR onset / wake trim (nightly-metrics rework, O1)
 
     // The session used to START where the gravity-stillness run started. Stillness is necessary for sleep but
-    // not sufficient: lying still reading in bed is still, so the night opened up to ~2 h early against WHOOP,
-    // and V2 then staged that stretch light sleep (its motion-quiescent clamp forbids HR alone from calling
-    // wake). The heart rate is what separates the two — it falls when sleep actually begins — so after the
-    // run has passed every acceptance gate, the onset is moved to the first point the HR has settled, and the
+    // not sufficient: lying still reading in bed is still, so the night opened up to ~2 h early against WHOOP.
+    // The heart rate is what separates the two — it is CLEARLY higher while awake — so after the run has passed
+    // every acceptance gate, a leading stretch whose HR sits at the run's own AWAKE level is cut off, and the
     // wake mirrors it at the other end. The trimmed stretches are simply not part of the session.
+    //
+    // REVISED AFTER REVIEW (S1/S2): the first version judged "settled" against the median of the whole READ
+    // WINDOW (up to 54 h of day HR), so the SAME night's bounds moved during the day as the window slid (a
+    // morning read with a low window median trimmed to the caps, an evening read trimmed less) and the night
+    // was re-banked under a new startTs. Its "deep-sleep level" threshold also cut real first-cycle and early-
+    // morning sleep (onset too late, wake too early). The trim now reads ONLY the run itself (plus, as a floor,
+    // the wearer's personal trailing sleep-HR baseline), and only removes minutes that are CLEARLY AWAKE —
+    // never minutes that are merely "not yet deep".
 
     /// Most the onset may move later / the wake earlier, in minutes. The trim can only shorten a session.
     public static let onsetTrimMaxMin: Int = 120
     public static let wakeTrimMaxMin: Int = 60
-    /// Consecutive settled minutes that mark onset (and, walked backwards, wake).
+    /// Consecutive not-awake minutes that mark onset (and, walked backwards from the end, wake).
     public static let onsetTrimSustainMin: Int = 10
-    /// Width of the rolling median the settled test reads, in minutes (centered, within the run).
+    /// Width of the rolling median the awake test reads, in minutes (centered, within the run).
     public static let onsetTrimRollingMin: Int = 5
-    /// Threshold = min(dayMedian × `onsetTrimDayMedianFrac`, floor + `onsetTrimFloorFrac` × (dayMedian − floor)),
-    /// floor = the run's `onsetTrimFloorPercentile` HR.
-    public static let onsetTrimDayMedianFrac: Double = 0.90
-    public static let onsetTrimFloorFrac: Double = 0.35
-    public static let onsetTrimFloorPercentile: Double = 0.10
+    /// THE AWAKE LEVEL. Over the run's per-minute mean HRs (P25 = the run's typical sleeping level, P90 = its
+    /// high end), a minute is CLEARLY AWAKE when its rolling median is ABOVE
+    ///     max(P90 × `onsetTrimAwakeHighFrac`,
+    ///         P25 + `onsetTrimAwakeSpreadFrac` × (P90 − P25),
+    ///         P25 + `onsetTrimAwakeMinMarginBpm`,
+    ///         personal sleep-HR baseline + `onsetTrimAwakeMinMarginBpm`   (only when known)).
+    /// WHY EACH TERM: when a real awake stretch is long enough to own the top decile, P90 IS the awake HR and
+    /// ×0.97 keeps a noisy awake stretch recognisable while staying above every ordinary sleep minute; the
+    /// spread term keeps the level in the UPPER part of the run's range when P90 is only a REM/arousal peak;
+    /// the absolute margin stops a flat night (P90 ≈ P25) from trimming on noise, yet still finds a short
+    /// (< 10 % of the run) awake stretch that P90 has not reached. The personal baseline can only RAISE the
+    /// level (it never trims more). Every term is a property of the night itself or of the wearer, so the same
+    /// night yields the same bounds whatever else the read window holds. The 10 bpm margin is chosen so the
+    /// ordinary first-cycle HR descent (a few bpm above the night's P25) is NOT read as awake.
+    public static let onsetTrimAwakeHighPercentile: Double = 0.90
+    public static let onsetTrimAwakeHighFrac: Double = 0.97
+    public static let onsetTrimAwakeLowPercentile: Double = 0.25
+    public static let onsetTrimAwakeSpreadFrac: Double = 0.60
+    public static let onsetTrimAwakeMinMarginBpm: Double = 10.0
     /// Fraction of the run's minutes that must carry HR before the trim is attempted at all. Below it the HR
     /// cannot place an onset, so the gravity boundary stands (sparse-HR nights keep their old behaviour).
     public static let onsetTrimMinCoverage: Double = 0.50
 
-    /// The HR-settled `[start, end]` of an accepted sleep run `p` (unix seconds), or `p`'s own bounds when the
-    /// HR cannot place one. `dayMedian` is the same day-median `hrBaseline` the acceptance gate reads; `hr` must
-    /// be ts-sorted. Onset = the first minute that begins `onsetTrimSustainMin` consecutive minutes whose
-    /// rolling `onsetTrimRollingMin`-minute median HR is ≤ the threshold; wake = the end of the last such
-    /// stretch walking backwards. Each move is capped (`onsetTrimMaxMin` / `wakeTrimMaxMin`).
+    /// The awake level `hrSettledBounds` trims against (see `onsetTrimAwakeHighFrac`), from the run's per-minute
+    /// mean HRs, or nil when there are none. Split out so the level is testable on its own. Pure.
+    static func onsetTrimAwakeLevel(perMinuteHR: [Double], sleepHRBaseline: Double?) -> Double? {
+        let sorted = perMinuteHR.filter { $0.isFinite }.sorted()
+        guard let lo = percentileOfSorted(sorted, onsetTrimAwakeLowPercentile),
+              let hi = percentileOfSorted(sorted, onsetTrimAwakeHighPercentile) else { return nil }
+        var level = max(hi * onsetTrimAwakeHighFrac,
+                        lo + onsetTrimAwakeSpreadFrac * (hi - lo),
+                        lo + onsetTrimAwakeMinMarginBpm)
+        if let sleepHRBaseline, sleepHRBaseline.isFinite, sleepHRBaseline > 0 {
+            level = max(level, sleepHRBaseline + onsetTrimAwakeMinMarginBpm)
+        }
+        return level
+    }
+
+    /// The trimmed `[start, end]` of an accepted sleep run `p` (unix seconds), or `p`'s own bounds when the HR
+    /// cannot place one. `hr` must be ts-sorted. Onset = the first minute that begins `onsetTrimSustainMin`
+    /// consecutive NOT-awake minutes (rolling `onsetTrimRollingMin`-minute median at/below the awake level of
+    /// `onsetTrimAwakeLevel`; a minute with no HR near it is NOT awake — silence proves nothing); wake = the end
+    /// of the last such stretch walking backwards. Each move is capped (`onsetTrimMaxMin` / `wakeTrimMaxMin`).
     ///
-    /// Deliberately a no-op when: there is no day median; HR covers < `onsetTrimMinCoverage` of the run's
-    /// minutes; the HR never settles (a threshold at/below the run's own floor — e.g. a night whose HR never
-    /// dips below the day median — finds no stretch, so nothing moves); or trimming would leave a session no
-    /// longer than `minSleepMin` (the gates accepted the run as a night; the trim must not erase it). Pure.
-    static func hrSettledBounds(_ p: Period, hr: [HRSample], dayMedian: Double?) -> (start: Int, end: Int) {
+    /// `trimOnset` / `trimWake` (S2): the detection loop trims the onset only on the run that OPENS a night (it
+    /// does not continue a chain) and the wake only on the run that CLOSES it (no candidate sleep run follows
+    /// within `nightContinuationGapMin`), so a bathroom break inside a night is not widened into a 1–3 h gap.
+    ///
+    /// `sleepHRBaseline` is the wearer's personal trailing sleep-HR level (`trailingSleepHRBaseline`), nil at
+    /// cold start. Like the run itself it does not depend on the read window.
+    ///
+    /// Deliberately a no-op when: HR covers < `onsetTrimMinCoverage` of the run's minutes; no leading/trailing
+    /// minute is clearly awake; or trimming would leave a session no longer than `minSleepMin` (the gates
+    /// accepted the run as a night; the trim must not erase it). Pure.
+    static func hrSettledBounds(_ p: Period, hr: [HRSample], sleepHRBaseline: Double? = nil,
+                                trimOnset: Bool = true, trimWake: Bool = true) -> (start: Int, end: Int) {
         let untouched = (start: p.start, end: p.end)
-        guard let dayMedian, p.end > p.start else { return untouched }
+        guard trimOnset || trimWake, p.end > p.start else { return untouched }
         let nMin = (p.end - p.start + 59) / 60
         guard nMin >= onsetTrimSustainMin else { return untouched }
         let seg = rowsBetween(hr, start: p.start, end: p.end) { $0.ts }
@@ -1117,29 +1187,31 @@ public enum SleepStager {
         }
         let covered = cnt.reduce(0) { $0 + ($1 > 0 ? 1 : 0) }
         guard Double(covered) / Double(nMin) >= onsetTrimMinCoverage else { return untouched }
-        guard let nightFloor = percentileOfSorted(seg.map { Double($0.bpm) }.sorted(), onsetTrimFloorPercentile)
-        else { return untouched }
-        let threshold = min(dayMedian * onsetTrimDayMedianFrac,
-                            nightFloor + onsetTrimFloorFrac * (dayMedian - nightFloor))
         let perMin: [Double?] = (0..<nMin).map { cnt[$0] > 0 ? sum[$0] / Double(cnt[$0]) : nil }
+        guard let awakeLevel = onsetTrimAwakeLevel(perMinuteHR: perMin.compactMap { $0 },
+                                                   sleepHRBaseline: sleepHRBaseline) else { return untouched }
         let half = onsetTrimRollingMin / 2
-        // A minute is SETTLED when the rolling median of the per-minute means around it (clipped to the run) is
-        // at/below the threshold. A neighbourhood with no HR at all is NOT settled: silence proves nothing.
-        let settled: [Bool] = (0..<nMin).map { i in
+        // A minute is CLEARLY AWAKE when the rolling median of the per-minute means around it (clipped to the
+        // run) is ABOVE the awake level. A neighbourhood with no HR at all is NOT awake.
+        let notAwake: [Bool] = (0..<nMin).map { i in
             let vals = perMin[max(0, i - half)...min(nMin - 1, i + half)].compactMap { $0 }
-            return !vals.isEmpty && HRVAnalyzer.median(vals) <= threshold
+            return vals.isEmpty || HRVAnalyzer.median(vals) <= awakeLevel
         }
         var onsetMin: Int? = nil
         var run = 0
-        for i in 0..<nMin {
-            run = settled[i] ? run + 1 : 0
-            if run >= onsetTrimSustainMin { onsetMin = i - onsetTrimSustainMin + 1; break }
+        if trimOnset {
+            for i in 0..<nMin {
+                run = notAwake[i] ? run + 1 : 0
+                if run >= onsetTrimSustainMin { onsetMin = i - onsetTrimSustainMin + 1; break }
+            }
         }
         var wakeMin: Int? = nil
         run = 0
-        for i in stride(from: nMin - 1, through: 0, by: -1) {
-            run = settled[i] ? run + 1 : 0
-            if run >= onsetTrimSustainMin { wakeMin = i + onsetTrimSustainMin - 1; break }
+        if trimWake {
+            for i in stride(from: nMin - 1, through: 0, by: -1) {
+                run = notAwake[i] ? run + 1 : 0
+                if run >= onsetTrimSustainMin { wakeMin = i + onsetTrimSustainMin - 1; break }
+            }
         }
         let newStart = onsetMin.map { p.start + min($0, onsetTrimMaxMin) * 60 } ?? p.start
         let newEnd = wakeMin.map { w in max(min(p.end, p.start + (w + 1) * 60), p.end - wakeTrimMaxMin * 60) }
@@ -1626,6 +1698,14 @@ public enum SleepStager {
         // dropped by the 60-min gate is the fragmentation signature.
         var sleepRunsSeen = 0
         var minSleepDrops = 0
+        // S2 look-ahead for the wake trim: the starts of every sleep run long enough to become a session. A run
+        // whose NEXT such candidate begins within `nightContinuationGapMin` of its end is not the night's last
+        // run (a bathroom break follows), so its wake is left alone. Judged on candidates, not on accepted
+        // sessions (those are not known yet); a candidate the gates later drop only costs a trim, never a split.
+        let sessionCandidateStarts = runs
+            .filter { $0.stage == "sleep" && ($0.end - $0.start) > minSleepS }
+            .map { $0.start }
+            .sorted()
         var firstSleepStart = Int.max
         var lastSleepEnd = 0
         for p in runs {
@@ -1703,13 +1783,19 @@ public enum SleepStager {
                     detail: "daytime=true restingHR=\(resting ?? -1) baseline=\(baseline.map { Int($0) } ?? -1) nightTail=false"))
                 continue
             }
-            // O1 onset/wake trim (nightly-metrics rework): the run passed every gate as a whole; now move its
-            // onset to where the HR actually settled and its wake to where it last held there, so still-but-
-            // awake time at either edge (reading in bed, lying awake before getting up) is not sessioned as
-            // sleep. A no-op on thin HR or an HR that never settles — see `hrSettledBounds`. Everything below
-            // (staging, efficiency, the physiology) describes the trimmed span; the continuation-chain
-            // bookkeeping at the bottom keeps the gravity run's own end, which is what the next run abuts.
-            let settledBounds = hrSettledBounds(p, hr: hrS, dayMedian: baseline)
+            // O1 onset/wake trim (nightly-metrics rework, revised S1/S2): the run passed every gate as a whole;
+            // now cut the CLEARLY-AWAKE minutes at its edges (reading in bed, lying awake before getting up), judged
+            // against the run's OWN HR (never the read window's day median, so the same night keeps the same
+            // bounds on every pass) — see `hrSettledBounds`. The onset is trimmed only on the run that OPENS a
+            // night (it does not continue a chain) and the wake only on the run that CLOSES it (no session
+            // candidate follows within `nightContinuationGapMin`), so a bathroom break stays a short gap instead
+            // of splitting the night. Everything below (staging, efficiency, the physiology) describes the
+            // trimmed span; the continuation-chain bookkeeping at the bottom keeps the gravity run's own end,
+            // which is what the next run abuts.
+            let nextCandidateStart = sessionCandidateStarts.first { $0 > p.start }
+            let closesNight = nextCandidateStart.map { $0 - p.end > continuationGapS } ?? true
+            let settledBounds = hrSettledBounds(p, hr: hrS, sleepHRBaseline: sleepHRBaseline,
+                                                trimOnset: !continuesChain, trimWake: closesNight)
             let sStart = settledBounds.start, sEnd = settledBounds.end
             if let traceSink, sStart != p.start || sEnd != p.end {
                 traceSink(GateTrace.runLine(index: runIndex, startTs: p.start, endTs: p.end,
@@ -1732,8 +1818,13 @@ public enum SleepStager {
             // whole-window floor / mean. `resting` (the floor) stays the daytime-guard input above.
             let avgHrv = sessionAvgHRV(start: sStart, end: sEnd, rr: rrS, stages: stages)
             let sleepRestingHR = sessionSleepRestingHR(start: sStart, end: sEnd, hr: hrS, stages: stages)
+            // The untrimmed run bounds ride along only when the trim moved an edge (S9), so an untrimmed
+            // session stays field-for-field what it was.
+            let trimmed = sStart != p.start || sEnd != p.end
             sessions.append(SleepSession(start: sStart, end: sEnd, efficiency: eff,
-                                         stages: stages, restingHR: sleepRestingHR, avgHRV: avgHrv))
+                                         stages: stages, restingHR: sleepRestingHR, avgHRV: avgHrv,
+                                         stillRunStart: trimmed ? p.start : nil,
+                                         stillRunEnd: trimmed ? p.end : nil))
             traceSink?(GateTrace.runLine(index: runIndex, startTs: sStart, endTs: sEnd,
                 verdict: .kept, gate: "accepted",
                 detail: "spanMin=\(spanMin) eff=\(round2(eff)) restingHR=\(sleepRestingHR ?? -1) daytime=\(isDaytime)"))
@@ -2177,8 +2268,11 @@ public enum SleepStager {
     /// RSA tachogram resample rate (Hz). 4 Hz is the standard HRV resample grid.
     static let rsaResampleHz = 4.0
 
-    /// Moving-mean detrend window for the RSA tachogram (seconds).
-    static let rsaDetrendWindowS = 8.0
+    // (The RSA tachogram used to be high-passed by an 8 s centred moving mean, `rsaDetrendWindowS`. That filter's
+    // response is not flat across the breathing band — its sidelobes lift ~0.19 Hz and damp ~0.31 Hz — so a
+    // broad breathing peak was tilted toward lower rates, ~0.5–1 br/min low (review S8). Each 120 s window is now
+    // detrended by removing its own least-squares LINE; the Hann taper and the 0.1 Hz lower band edge handle
+    // the remaining slow drift. See `spectralRespRate`.)
 
     /// Length of one spectral window (seconds). 120 s gives a 0.5 breaths/min frequency resolution while
     /// staying short enough to sit inside one sleep stage.
@@ -2264,7 +2358,7 @@ public enum SleepStager {
     ///   2. Tile the rows into `respSpectralWindowS` wall-clock windows from the first beat. A window whose
     ///      centre is wake (or, with a hypnogram, outside every segment) is skipped.
     ///   3. `spectralRespRate` per window: beat times by cumulative sum WITHIN the window (a splice inside
-    ///      the window skips it, #977), 4 Hz resample, centered moving-mean detrend (`rsaDetrendWindowS`),
+    ///      the window skips it, #977), 4 Hz resample, linear (least-squares) detrend over the window,
     ///      Hann taper, power scan, prominence check.
     static func respRateWindows(_ rr: [RRInterval], start: Int, end: Int,
                                 stages: [StageSegment]) -> RespWindowRates? {
@@ -2385,15 +2479,23 @@ public enum SleepStager {
             let v0 = values[seg], v1 = values[seg + 1]
             grid[g] = t1 <= t0 ? v0 : v0 + min(max((t - t0) / (t1 - t0), 0), 1) * (v1 - v0)
         }
-        // Centered moving-mean detrend (prefix sums), then a Hann taper against leakage.
-        let halfW = max(1, Int((rsaDetrendWindowS * rsaResampleHz / 2.0).rounded()))
-        var prefix = [Double](repeating: 0, count: n + 1)
-        for i in 0..<n { prefix[i + 1] = prefix[i] + grid[i] }
-        var y = [Double](repeating: 0, count: n)
+        // LINEAR detrend (S8): subtract the window's own least-squares line, then a Hann taper against leakage.
+        // A line has a flat response across the breathing band, unlike the 8 s moving mean it replaces, whose
+        // sidelobes tilted a broad breathing peak toward lower rates; the taper and the 0.1 Hz band edge handle
+        // what curvature of the slow drift is left.
+        let xMean = Double(n - 1) / 2.0
+        var yMean = 0.0
+        for v in grid { yMean += v }
+        yMean /= Double(n)
+        var sxx = 0.0, sxy = 0.0
         for i in 0..<n {
-            let lo = max(0, i - halfW), hi = min(n - 1, i + halfW)
-            y[i] = grid[i] - (prefix[hi + 1] - prefix[lo]) / Double(hi - lo + 1)
+            let dx = Double(i) - xMean
+            sxx += dx * dx
+            sxy += dx * (grid[i] - yMean)
         }
+        let slope = sxx > 0 ? sxy / sxx : 0.0
+        var y = [Double](repeating: 0, count: n)
+        for i in 0..<n { y[i] = grid[i] - (yMean + slope * (Double(i) - xMean)) }
         if standardDeviation(y) <= 1e-9 { return nil }   // flat → no RSA
         if n > 1 {
             for i in 0..<n { y[i] *= 0.5 - 0.5 * cos(2.0 * Double.pi * Double(i) / Double(n - 1)) }
@@ -3135,20 +3237,27 @@ public enum SleepStager {
     /// A block whose mean is below this is a dropout artefact, not a heart rate.
     public static let rhrSleepMinPlausibleBpm: Double = 30
 
-    /// The session's sleeping resting HR (bpm), or nil with no HR in `[start, end]`. Over 5-min blocks (the
-    /// same closed-final-block partition as `sessionRestingHR`), each tagged with the stage at its CENTRE and
-    /// kept only when it clears the sample-count and plausibility bars above; wake blocks never count:
-    ///   1. mean of the LAST contiguous deep run's blocks (WHOOP's last slow-wave period);
-    ///   2. else the mean of ALL deep blocks;
-    ///   3. else the mean of the lowest quartile of non-wake block means in the LAST THIRD of the sleep span
-    ///      (first → last non-wake segment) — the late-night trough deep sleep would have sat in;
-    ///   4. else the legacy floor (`sessionRestingHR`), so a night with HR never loses its resting HR.
-    /// `stages` empty (no hypnogram) skips 1–2 and treats every block as non-wake in 3. Pure.
-    static func sessionSleepRestingHR(start: Int, end: Int, hr: [HRSample], stages: [StageSegment]) -> Int? {
+    /// Fewest VALID blocks a deep pool (the last deep run, then all deep blocks) needs before it stands for the
+    /// night's resting HR (S6). One 5-min block is a single noisy sample of a slow-wave period — the same reason
+    /// `hrvDeepMinWindows` asks the HRV pools for two — so a one-block run falls through to the next rule.
+    public static let rhrDeepMinBlocks: Int = 2
+
+    /// One 5-min HR block of a session: its centre ts, the stage at that centre ("?" outside every segment),
+    /// the sample count and the mean bpm.
+    struct RHRBlock {
+        let center: Int
+        let stage: String
+        let n: Int
+        let mean: Double
+    }
+
+    /// The 5-min HR blocks of `[start, end]` (the same closed-final-block partition as `sessionRestingHR`),
+    /// each tagged with the stage at its CENTRE. Empty with no HR in the span. Pure.
+    static func sleepRHRBlocks(start: Int, end: Int, hr: [HRSample], stages: [StageSegment]) -> [RHRBlock] {
         let seg = hr.filter { $0.ts >= start && $0.ts <= end }
-        guard !seg.isEmpty else { return nil }
+        guard !seg.isEmpty else { return [] }
         let windowS = 5 * 60
-        var blocks: [(center: Int, stage: String, n: Int, mean: Double)] = []
+        var blocks: [RHRBlock] = []
         var t = start
         repeat {
             let isFinal = t + windowS >= end
@@ -3156,39 +3265,72 @@ public enum SleepStager {
             if !win.isEmpty {
                 let center = t + windowS / 2
                 let stage = stages.first { center >= $0.start && center < $0.end }?.stage ?? "?"
-                blocks.append((center: center, stage: stage, n: win.count,
-                               mean: Double(win.reduce(0) { $0 + $1.bpm }) / Double(win.count)))
+                blocks.append(RHRBlock(center: center, stage: stage, n: win.count,
+                                       mean: Double(win.reduce(0) { $0 + $1.bpm }) / Double(win.count)))
             }
             t += windowS
         } while t < end
+        return blocks
+    }
+
+    /// The session's sleeping resting HR (bpm), or nil with no HR in `[start, end]`. Over 5-min blocks (the
+    /// same closed-final-block partition as `sessionRestingHR`), each tagged with the stage at its CENTRE and
+    /// kept only when it clears the sample-count and plausibility bars above; wake blocks never count:
+    ///   1. mean of the LAST contiguous deep run's blocks (WHOOP's last slow-wave period), when that run holds
+    ///      at least `rhrDeepMinBlocks` valid blocks;
+    ///   2. else the mean of ALL deep blocks (same minimum);
+    ///   3. else the mean of the lowest quartile of non-wake block means in the LAST THIRD of the sleep span
+    ///      (first → last non-wake segment) — the late-night trough deep sleep would have sat in;
+    ///   4. else the legacy floor (`sessionRestingHR`), so a night with HR never loses its resting HR.
+    /// `stages` empty (no hypnogram) skips 1–2 and treats every block as non-wake in 3. Pure. A one-fragment
+    /// `nightSleepRestingHR`.
+    static func sessionSleepRestingHR(start: Int, end: Int, hr: [HRSample], stages: [StageSegment]) -> Int? {
+        nightSleepRestingHR(fragments: [(start: start, end: end, stages: stages)], hr: hr)
+    }
+
+    /// `sessionSleepRestingHR` over a whole NIGHT that may be bridged from several fragments (S7): the blocks
+    /// of every fragment are POOLED, so the rules above read the NIGHT's last deep run, the night's deep
+    /// blocks and the last third of the night's sleep span — not whichever fragment happens to be longest.
+    /// A fragment boundary (an out-of-bed gap) always ends a deep run: two deep stretches either side of a
+    /// bathroom break are two runs. The legacy floor (rule 4) is the lowest of the fragments' floors. Pure.
+    static func nightSleepRestingHR(fragments: [(start: Int, end: Int, stages: [StageSegment])],
+                                    hr: [HRSample]) -> Int? {
+        let frags = fragments.sorted { $0.start < $1.start }
+        let perFrag = frags.map { sleepRHRBlocks(start: $0.start, end: $0.end, hr: hr, stages: $0.stages) }
+        let blocks = perFrag.flatMap { $0 }
+        guard !blocks.isEmpty else { return nil }
         let typical = HRVAnalyzer.median(blocks.map { Double($0.n) })
         let minN = max(rhrMinBinSamples, min(rhrSleepBlockMinSamples, Int(typical / 2)))
-        func valid(_ b: (center: Int, stage: String, n: Int, mean: Double)) -> Bool {
+        func valid(_ b: RHRBlock) -> Bool {
             b.n >= minN && b.mean >= rhrSleepMinPlausibleBpm
         }
         func meanOf(_ xs: [Double]) -> Int? {
             xs.isEmpty ? nil : Int((xs.reduce(0, +) / Double(xs.count)).rounded())
         }
         // 1. The LAST contiguous deep run (contiguity judged on every block, validity applied after, the same
-        // shape `lastDeepRun` gives the HRV windows).
-        var lastRun: [Double] = [], cur: [Double] = [], inRun = false
-        for b in blocks {
-            if b.stage == "deep" {
-                if !inRun { cur.removeAll(); inRun = true }
-                if valid(b) { cur.append(b.mean) }
-            } else if inRun {
-                if !cur.isEmpty { lastRun = cur }
-                inRun = false
+        // shape `lastDeepRun` gives the HRV windows). A fragment boundary closes the run.
+        var lastRun: [Double] = []
+        for fragBlocks in perFrag {
+            var cur: [Double] = [], inRun = false
+            for b in fragBlocks {
+                if b.stage == "deep" {
+                    if !inRun { cur.removeAll(); inRun = true }
+                    if valid(b) { cur.append(b.mean) }
+                } else if inRun {
+                    if !cur.isEmpty { lastRun = cur }
+                    inRun = false
+                }
             }
+            if inRun && !cur.isEmpty { lastRun = cur }
         }
-        if inRun && !cur.isEmpty { lastRun = cur }
-        if let m = meanOf(lastRun) { return m }
+        if lastRun.count >= rhrDeepMinBlocks, let m = meanOf(lastRun) { return m }
         // 2. Every deep block.
-        if let m = meanOf(blocks.filter { $0.stage == "deep" && valid($0) }.map { $0.mean }) { return m }
+        let allDeep = blocks.filter { $0.stage == "deep" && valid($0) }.map { $0.mean }
+        if allDeep.count >= rhrDeepMinBlocks, let m = meanOf(allDeep) { return m }
         // 3. Lowest quartile of the last third of sleep.
-        let sleepSegs = stages.filter { !SleepStageVocabulary.isWake($0.stage) }
-        let onset = sleepSegs.map { $0.start }.min() ?? start
-        let offset = sleepSegs.map { $0.end }.max() ?? end
+        let sleepSegs = frags.flatMap { $0.stages }.filter { !SleepStageVocabulary.isWake($0.stage) }
+        let onset = sleepSegs.map { $0.start }.min() ?? frags.map { $0.start }.min() ?? 0
+        let offset = sleepSegs.map { $0.end }.max() ?? frags.map { $0.end }.max() ?? 0
         let lastThirdFrom = onset + (offset - onset) * 2 / 3
         let late = blocks.filter { valid($0) && !SleepStageVocabulary.isWake($0.stage)
             && $0.center >= lastThirdFrom && $0.center <= offset }.map { $0.mean }.sorted()
@@ -3197,7 +3339,7 @@ public enum SleepStager {
             if let m = meanOf(Array(late.prefix(k))) { return m }
         }
         // 4. Legacy floor.
-        return sessionRestingHR(start: start, end: end, hr: hr)
+        return frags.compactMap { sessionRestingHR(start: $0.start, end: $0.end, hr: hr) }.min()
     }
 
     /// One 5-min HRV window: its start ts, the sleep stage at its center, the clean-beat count, and the
@@ -3226,33 +3368,37 @@ public enum SleepStager {
     /// returned — the pre-rework value, kept for callers that hold no hypnogram.
     static func sessionAvgHRV(start: Int, end: Int, rr: [RRInterval], stages: [StageSegment] = []) -> Double? {
         let windows = sessionHrvWindows(start: start, end: end, rr: rr, stages: stages)
-        let vals: [Double]
-        if stages.isEmpty {
-            vals = windows.compactMap { $0.rmssd }
-        } else {
-            let lastDeep = lastDeepRun(windows).compactMap { $0.rmssd }
-            let allDeep = windows.filter { $0.stage == "deep" }.compactMap { $0.rmssd }
-            if lastDeep.count >= hrvDeepMinWindows {
-                vals = lastDeep
-            } else if allDeep.count >= hrvDeepMinWindows {
-                vals = allDeep
-            } else {
-                // "?" = a window whose centre fell outside every segment; it is not known to be wake, and
-                // excluding it would blank a night whose hypnogram merely has a hole.
-                vals = windows.filter { !SleepStageVocabulary.isWake($0.stage) }.compactMap { $0.rmssd }
-            }
-        }
+        let vals = hrvPoolValues(windows, staged: !stages.isEmpty)
         if vals.isEmpty { return nil }
-        // #1118: refuse the night outright when its own R-R banks more beat-time than the wall clock it
-        // spans. Gated HERE rather than at the caller because this is where RMSSD BECOMES the day's HRV:
-        // one seam covers the daily row, the sleep-session cache, the Health card and the baseline that
-        // later nights are scored against, so none of them can end up disagreeing about whether the night
-        // was trustworthy. See `HRVAnalyzer.successiveDiffIsTrustworthy` for why an over-count corrupts a
-        // successive-difference statistic and why a blank is the right answer.
-        //
-        // Classified over the SAME beats the value was built from, windowed [start, end] exactly as
-        // `sessionHrvWindows` does, so the verdict cannot describe a different set of beats than the number
-        // it is gating.
+        guard hrvBeatsAreTrustworthy(start: start, end: end, rr: rr) else { return nil }
+        return vals.reduce(0, +) / Double(vals.count)
+    }
+
+    /// The RMSSDs the nightly HRV averages, chosen from `windows` (S7: shared by the one-session and the pooled
+    /// night path). STAGED: the LAST deep run's windows (≥ `hrvDeepMinWindows` with an RMSSD); else ALL deep
+    /// windows (same minimum); else every NON-wake window. UNSTAGED: every window (the pre-rework value).
+    static func hrvPoolValues(_ windows: [HrvWindow], staged: Bool) -> [Double] {
+        guard staged else { return windows.compactMap { $0.rmssd } }
+        let lastDeep = lastDeepRun(windows).compactMap { $0.rmssd }
+        if lastDeep.count >= hrvDeepMinWindows { return lastDeep }
+        let allDeep = windows.filter { $0.stage == "deep" }.compactMap { $0.rmssd }
+        if allDeep.count >= hrvDeepMinWindows { return allDeep }
+        // "?" = a window whose centre fell outside every segment; it is not known to be wake, and
+        // excluding it would blank a night whose hypnogram merely has a hole.
+        return windows.filter { !SleepStageVocabulary.isWake($0.stage) }.compactMap { $0.rmssd }
+    }
+
+    /// #1118: false when the span's own R-R banks more beat-time than the wall clock it spans. Gated HERE
+    /// rather than at the caller because this is where RMSSD BECOMES the day's HRV: one seam covers the daily
+    /// row, the sleep-session cache, the Health card and the baseline that later nights are scored against, so
+    /// none of them can end up disagreeing about whether the night was trustworthy. See
+    /// `HRVAnalyzer.successiveDiffIsTrustworthy` for why an over-count corrupts a successive-difference
+    /// statistic and why a blank is the right answer.
+    ///
+    /// Classified over the SAME beats the value was built from, windowed [start, end] exactly as
+    /// `sessionHrvWindows` does, so the verdict cannot describe a different set of beats than the number it is
+    /// gating.
+    static func hrvBeatsAreTrustworthy(start: Int, end: Int, rr: [RRInterval]) -> Bool {
         let seg = rr.filter { $0.ts >= start && $0.ts <= end }
         let segTs = seg.map { $0.ts }
         let segMs = seg.map { Double($0.rrMs) }
@@ -3266,8 +3412,29 @@ public enum SleepStager {
         // buying a distinction the caller discards would hand that back. `rrCoverage` is a single O(n)
         // pass. If a future gate ever needs the two over-count cases apart, compute it then.
         let verdict = HRVAnalyzer.classifyCoverage(coverage: coverage, collapsed: coverage)
-        guard HRVAnalyzer.successiveDiffIsTrustworthy(verdict) else { return nil }
-        return vals.reduce(0, +) / Double(vals.count)
+        return HRVAnalyzer.successiveDiffIsTrustworthy(verdict)
+    }
+
+    /// The nightly HRV of a night bridged from several fragments (S7), or nil. The fragments' 5-min windows are
+    /// POOLED (in time order) and `hrvPoolValues` picks from the pool, so the value is the NIGHT's last deep
+    /// run — not a duration-weighted blend of one fragment's last-deep-run value with another fragment's non-wake
+    /// fallback. A fragment boundary ends a deep run (a wake sentinel is placed between fragments). A fragment
+    /// the #1118 gate refuses contributes no windows, exactly as it contributed no value before. Staged when any
+    /// fragment carries a hypnogram. `rr` must be ts-sorted (see `sessionHrvWindows`). Pure.
+    static func nightAvgHRV(fragments: [(start: Int, end: Int, stages: [StageSegment])],
+                            rr: [RRInterval]) -> Double? {
+        var windows: [HrvWindow] = []
+        for f in fragments.sorted(by: { $0.start < $1.start }) {
+            guard hrvBeatsAreTrustworthy(start: f.start, end: f.end, rr: rr) else { continue }
+            let own = sessionHrvWindows(start: f.start, end: f.end, rr: rr, stages: f.stages)
+            if own.isEmpty { continue }
+            if !windows.isEmpty {
+                windows.append(HrvWindow(startTs: f.start, stage: "wake", cleanBeats: 0, rmssd: nil))
+            }
+            windows.append(contentsOf: own)
+        }
+        let vals = hrvPoolValues(windows, staged: fragments.contains { !$0.stages.isEmpty })
+        return vals.isEmpty ? nil : vals.reduce(0, +) / Double(vals.count)
     }
 
     /// Per-5-min-window RMSSD across a session, each window tagged with the sleep stage at its CENTER

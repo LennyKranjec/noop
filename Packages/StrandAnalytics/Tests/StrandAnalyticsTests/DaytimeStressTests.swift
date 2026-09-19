@@ -399,18 +399,42 @@ final class DaytimeStressTests: XCTestCase {
     // MARK: - Live stays on the hourly scale
 
     func testLiveMatchesTheHourlyScale() {
-        // Same centre, spread and curve as the hours: a live window whose HR equals an hour's mean HR must
-        // read exactly that hour's level (no gravity → nothing masked → the reference sets coincide).
+        // Same centre and curve as the hours: a live window at the typical hour reads exactly that hour's
+        // level. The SPREAD is the hours' floored at `liveMinHRSigma` (E9), so off-centre windows read
+        // closer to 1.0 than the hour with the same mean does, never further.
         let day = DaytimeStress.analyze(hr: normalDay(), rr: [])
         func window(_ bpm: Int) -> [HRSample] { (0..<120).map { HRSample(ts: 90_000 + $0, bpm: bpm) } }
+        let hourMeans = day.scored.compactMap(\.meanHR)
+        let ref = DaytimeStress.liveReference(DaytimeStress.dayReference(hrMeans: hourMeans, rmssds: []))
+        XCTAssertGreaterThanOrEqual(ref.sdHR, DaytimeStress.liveMinHRSigma)
         for bpm in [62, 70, 80] {
             let hourLevel = day.scored.first { $0.meanHR == Double(bpm) }!.level!
             let live = DaytimeStress.live(hr: window(bpm), rr: [], dayHours: day.hours)
             XCTAssertNotNil(live)
-            XCTAssertEqual(live!, hourLevel, accuracy: 1e-9, "live at \(bpm) bpm drifted off the hourly scale")
+            let expected = DaytimeStress.dayRelativeSquash((Double(bpm) - ref.hr!) / ref.sdHR)
+            XCTAssertEqual(live!, expected, accuracy: 1e-9, "live at \(bpm) bpm drifted off the live scale")
+            XCTAssertLessThanOrEqual(abs(live! - 1.0), abs(hourLevel - 1.0) + 1e-9)
         }
+        XCTAssertEqual(DaytimeStress.live(hr: window(70), rr: [], dayHours: day.hours)!,
+                       day.scored.first { $0.meanHR == 70 }!.level!, accuracy: 1e-9)
         // A typical window at rest stays well under the live red warning (2.0).
         XCTAssertLessThan(DaytimeStress.live(hr: window(70), rr: [], dayHours: day.hours)!, 2.0)
+    }
+
+    /// E9: "HIGH" live is ~8 bpm over the typical hour, not ~4, and a morning with fewer than
+    /// `liveMinReferenceHours` scored hours says nothing at all.
+    func testLiveNeedsAReferenceAndARealMargin() {
+        func window(_ bpm: Int) -> [HRSample] { (0..<120).map { HRSample(ts: 90_000 + $0, bpm: bpm) } }
+        // A flat day: every hour at 70, so the day's own spread is ~0 and the floor decides.
+        let flat = DaytimeStress.analyze(hr: (6...21).flatMap { hourHR($0, bpm: 70) }, rr: [])
+        XCTAssertLessThan(DaytimeStress.live(hr: window(75), rr: [], dayHours: flat.hours)!, 2.0,
+                          "5 bpm over a flat day is not HIGH")
+        XCTAssertGreaterThanOrEqual(DaytimeStress.live(hr: window(80), rr: [], dayHours: flat.hours)!, 2.0,
+                                    "10 bpm over a flat day is")
+        // Only three scored hours: no reference yet, so no live reading.
+        let early = DaytimeStress.analyze(hr: (6...8).flatMap { hourHR($0, bpm: 70) }, rr: [])
+        XCTAssertLessThan(early.scored.count, DaytimeStress.liveMinReferenceHours)
+        XCTAssertNil(DaytimeStress.live(hr: window(90), rr: [], dayHours: early.hours))
     }
 
     /// R-R for one hour with a controllable beat-to-beat jitter (drives RMSSD).

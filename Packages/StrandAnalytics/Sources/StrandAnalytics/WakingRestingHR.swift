@@ -15,7 +15,8 @@ import WhoopProtocol
 // Fitness Age ~4 years younger.
 //
 // THE ESTIMATE: the 10th percentile of the day's WAKING per-minute mean HR — minutes inside a detected
-// sleep session, or outside the 06:00–22:00 local waking window, are excluded. Motion is deliberately
+// sleep session's UNTRIMMED in-bed run ± 30 min (`inBedMask`), or outside the 06:00–22:00 local waking
+// window, are excluded. Motion is deliberately
 // NOT masked: movement only ever RAISES heart rate, so it cannot pull a low percentile down; the lowest
 // decile of an awake day is already its still, seated floor. A day with too little waking wear
 // (`minWakingMinutes`), or whose floor sits implausibly far above the night (a day worn only for a
@@ -43,6 +44,16 @@ public enum WakingRestingHR {
     public static let maxAboveSleepBpm: Double = 25.0
     /// Physiological bounds for a waking resting HR.
     public static let plausibleRange: ClosedRange<Double> = 35.0...110.0
+    /// Margin (seconds) added on both sides of every in-bed stillness run before its minutes are excluded
+    /// (review S9): the settling-in and getting-up minutes around a night are neither sleep nor a seated
+    /// waking rest.
+    public static let inBedMaskMarginS: Int = 30 * 60
+
+    /// The `sleepWindows` to exclude for a day: each in-bed span (a session's UNTRIMMED stillness run,
+    /// `SleepSession.stillRunBounds`) widened by `inBedMaskMarginS` on both sides. Also the NEAT sleep mask.
+    public static func inBedMask(_ inBed: [(start: Int, end: Int)]) -> [(start: Int, end: Int)] {
+        inBed.map { (start: $0.start - inBedMaskMarginS, end: $0.end + inBedMaskMarginS) }
+    }
 
     /// The day's own waking resting HR from its HR stream, or nil when it can't be measured.
     ///

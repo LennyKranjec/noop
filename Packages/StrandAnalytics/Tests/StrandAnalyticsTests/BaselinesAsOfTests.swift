@@ -53,16 +53,33 @@ final class BaselinesAsOfTests: XCTestCase {
         XCTAssertEqual(asOf["2026-03-20"], Baselines.foldHistory(values, cfg: Baselines.hrvCfg))
     }
 
-    /// The recalibration epoch is honoured exactly as the day-keyed fold honours it.
+    /// The recalibration epoch is honoured exactly as the day-keyed fold honours it — for every day on or
+    /// after the epoch. A day BEFORE it keeps the baseline it had before the recalibration (E8): the plain
+    /// fold of the nights before it, never the empty seed that would null its Charge on re-persist.
     func testRecalibrationEpochMatchesTheDayKeyedFold() {
-        // 2026-03-05T00:00:00Z — nights dated before it are dropped.
+        // 2026-03-05T00:00:00Z — nights dated before it are dropped for days on/after it.
         let epoch = 1_772_668_800.0
         let asOf = Baselines.foldHistoryAsOf(values, dayKeys: keys, cfg: Baselines.hrvCfg,
                                              baselineEpoch: epoch, asOf: keys)
         for (i, day) in keys.enumerated() {
-            let expected = Baselines.foldHistory(Array(values[..<i]), dayKeys: Array(keys[..<i]),
-                                                 cfg: Baselines.hrvCfg, baselineEpoch: epoch)
+            let preEpoch = day < "2026-03-05"
+            let expected = preEpoch
+                ? Baselines.foldHistory(Array(values[..<i]), cfg: Baselines.hrvCfg)
+                : Baselines.foldHistory(Array(values[..<i]), dayKeys: Array(keys[..<i]),
+                                        cfg: Baselines.hrvCfg, baselineEpoch: epoch)
             XCTAssertEqual(asOf[day], expected, "epoch-aware as-of state for \(day)")
         }
+    }
+
+    /// E8: a recalibration must not erase the baseline of the days before it.
+    func testDaysBeforeTheEpochKeepAUsableBaseline() {
+        let epoch = 1_772_668_800.0   // 2026-03-05
+        let asOf = Baselines.foldHistoryAsOf(values, dayKeys: keys, cfg: Baselines.hrvCfg,
+                                             baselineEpoch: epoch, asOf: ["2026-03-04", "2026-03-05"])
+        let before = Baselines.foldHistory(Array(values[..<3]), cfg: Baselines.hrvCfg)
+        XCTAssertEqual(asOf["2026-03-04"], before)
+        XCTAssertGreaterThan(asOf["2026-03-04"]?.nValid ?? 0, 0, "not the empty seed")
+        // ...while the epoch day itself re-learns from scratch, exactly as before.
+        XCTAssertEqual(asOf["2026-03-05"]?.nValid, 0)
     }
 }

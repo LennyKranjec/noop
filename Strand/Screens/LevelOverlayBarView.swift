@@ -271,8 +271,10 @@ struct LevelTrendSnapshot {
     /// Yesterday's level, for the morning brief's arrow.
     let yesterdayLevel: Double?
     let drivers: [LevelPart: LevelDriver]
-    /// The current day is not in the ledger yet — its night is still syncing — so `now` is the last day
-    /// that was written, held up in its place. Nothing should present it as today's.
+    /// What is shown is not today's level: the current day is not in the ledger yet (its night is still
+    /// syncing, or was never recorded), or this morning's flow has not run and the current day is still
+    /// yesterday. `now` is the last day that was written, held up in its place. Nothing should present it
+    /// as today's.
     let pendingToday: Bool
 
     init(

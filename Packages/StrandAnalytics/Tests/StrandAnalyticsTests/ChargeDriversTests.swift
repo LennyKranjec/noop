@@ -34,15 +34,17 @@ final class ChargeDriversTests: XCTestCase {
             return (full - neutral, row.deltaPoints)
         }
 
+        // E6: the HRV term is on ln(RMSSD), so the exact-tie inputs were re-derived for the ln z (an
+        // exact −0.5 does not exist near the old 0.55 spread on the ln curve; 1.33 has one).
         let negativeBaseline = BaselineState(
-            baseline: 30.0, spread: 0.55, nValid: 14,
+            baseline: 30.0, spread: 1.33, nValid: 14,
             nightsSinceUpdate: 0, status: .trusted)
         let negativeBelowTie = hrvMarginal(
-            hrv: 29.991177275907276, rhr: 60.0, hrvBaseline: negativeBaseline)
+            hrv: 29.97867259098, rhr: 60.0, hrvBaseline: negativeBaseline)
         let negativeTie = hrvMarginal(
-            hrv: 29.99117725828923, rhr: 60.0, hrvBaseline: negativeBaseline)
+            hrv: 29.978672590976295, rhr: 60.0, hrvBaseline: negativeBaseline)
         let negativeBeyondTie = hrvMarginal(
-            hrv: 29.991177240671185, rhr: 60.0, hrvBaseline: negativeBaseline)
+            hrv: 29.97867259097, rhr: 60.0, hrvBaseline: negativeBaseline)
         XCTAssertGreaterThan(negativeBelowTie.raw, -0.5)
         XCTAssertEqual(negativeBelowTie.points, 0)
         XCTAssertEqual(negativeTie.raw, -0.5)
@@ -57,13 +59,13 @@ final class ChargeDriversTests: XCTestCase {
             baseline: 60.0, spread: 0.1, nValid: 14,
             nightsSinceUpdate: 0, status: .trusted)
         let positiveBelowTie = hrvMarginal(
-            hrv: 33.09890762408082, rhr: 58.541,
+            hrv: 33.26487003316, rhr: 58.541,
             hrvBaseline: positiveHRVBaseline, rhrBaseline: positiveRHRBaseline)
         let positiveTie = hrvMarginal(
-            hrv: 33.099135135290354, rhr: 58.541,
+            hrv: 33.264870033169295, rhr: 58.541,
             hrvBaseline: positiveHRVBaseline, rhrBaseline: positiveRHRBaseline)
         let positiveBeyondTie = hrvMarginal(
-            hrv: 33.09936273466694, rhr: 58.541,
+            hrv: 33.26487003318, rhr: 58.541,
             hrvBaseline: positiveHRVBaseline, rhrBaseline: positiveRHRBaseline)
         XCTAssertLessThan(positiveBelowTie.raw, 0.5)
         XCTAssertEqual(positiveBelowTie.points, 0)
@@ -75,10 +77,10 @@ final class ChargeDriversTests: XCTestCase {
 
     func testIssue51NegativeHalfTieUsesDefaultArg8WithoutChangingScoreOrDriverFields() {
         let hrvBaseline = BaselineState(
-            baseline: 30.0, spread: 0.55, nValid: 14,
+            baseline: 30.0, spread: 1.33, nValid: 14,
             nightsSinceUpdate: 0, status: .trusted)
         let scoreBefore = RecoveryScorer.recovery(
-            hrv: 29.99117725828923, rhr: 60.0, resp: nil,
+            hrv: 29.978672590976295, rhr: 60.0, resp: nil,
             hrvBaseline: hrvBaseline, rhrBaseline: nil,
             respBaseline: nil, sleepPerf: nil)
         let neutralScore = RecoveryScorer.recovery(
@@ -88,11 +90,11 @@ final class ChargeDriversTests: XCTestCase {
 
         // Intentionally omit arg 8 (skinTempDev) to exercise the real default path from #51.
         let drivers = RecoveryScorer.chargeDrivers(
-            hrv: 29.99117725828923, rhr: 60.0, resp: nil,
+            hrv: 29.978672590976295, rhr: 60.0, resp: nil,
             hrvBaseline: hrvBaseline, rhrBaseline: nil,
             respBaseline: nil, sleepPerf: nil)
         let scoreAfter = RecoveryScorer.recovery(
-            hrv: 29.99117725828923, rhr: 60.0, resp: nil,
+            hrv: 29.978672590976295, rhr: 60.0, resp: nil,
             hrvBaseline: hrvBaseline, rhrBaseline: nil,
             respBaseline: nil, sleepPerf: nil)
 

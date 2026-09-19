@@ -414,6 +414,13 @@ final class AppModel: ObservableObject {
         // main thread free for SwiftUI during the deep-history pass right after an import / first launch.
         Task(priority: .utility) { [weak self] in
             guard let self else { return }
+            // THE LEVEL LEDGER WRITES NOTHING WHILE THE STORE IS BEING WRITTEN: an import, a strap offload
+            // or an analysis pass in flight would have it score a day from half its rows. Installed first,
+            // before the launch refresh below triggers the first level load.
+            LevelBarModel.shared.dataInFlight = { [weak self] in
+                guard let self else { return false }
+                return self.intelligence.computing || self.hasActiveImport || self.live.backfilling
+            }
             #if DEBUG
             // DEBUG-only: when launched with `--demo-seed`, populate a deterministic synthetic
             // dataset so an empty simulator/dev build can walk every screen (verification + marketing
@@ -456,7 +463,11 @@ final class AppModel: ObservableObject {
             await self.intelligence.runEffortRescoreIfNeeded()
             // One-shot on-upgrade re-score of the FULL history under the nightly-metrics rework (sleep onset,
             // resting HR, HRV, respiration). Persisted flag → no-op on every later launch.
-            await self.intelligence.runNightlyMetricsRescoreIfNeeded()
+            // The level ledger writes nothing until this has run, so the moment it does the level is
+            // reloaded — otherwise the first days wait for an unrelated refresh to be written.
+            if await self.intelligence.runNightlyMetricsRescoreIfNeeded() {
+                await LevelBarModel.shared.reload(repo: self.repo)
+            }
             while !Task.isCancelled {
                 // #547 RE-POLLUTION: a sync since the last tick may have armed a re-heal (its ingest gate
                 // dropped bad-clock records). `runTimestampHealIfNeeded` honours the pending flag even after

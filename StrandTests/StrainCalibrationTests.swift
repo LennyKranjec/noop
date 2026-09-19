@@ -69,5 +69,34 @@ final class StrainCalibrationTests: XCTestCase {
         // Persisted: a fresh decode of the stored JSON is the same calibration.
         let data = UserDefaults.standard.data(forKey: StrainCalibration.storageKey)
         XCTAssertEqual(data.flatMap { try? JSONDecoder().decode(EffortStrainCalibration.self, from: $0) }, cal)
+        // E4: and tagged with the recipe it was fitted against.
+        XCTAssertEqual(UserDefaults.standard.integer(forKey: StrainCalibration.recipeKey),
+                       StrainCalibration.strainRecipeVersion)
+    }
+
+    // MARK: - E4: one recipe per fit
+
+    /// A calibration fitted on an older Effort recipe (or an untagged pre-E4 one) is ignored.
+    func testOlderRecipeCalibrationIsIgnored() throws {
+        let data = try JSONEncoder().encode(EffortStrainCalibration(a: 1.35, b: 0.58, pairs: 30))
+        XCTAssertNil(StrainCalibration.decodeIfCurrent(data, recipe: 0), "untagged = pre-E4")
+        XCTAssertNil(StrainCalibration.decodeIfCurrent(data, recipe: StrainCalibration.strainRecipeVersion - 1))
+        XCTAssertNotNil(StrainCalibration.decodeIfCurrent(data, recipe: StrainCalibration.strainRecipeVersion))
+    }
+
+    /// Never before the rescore; at once when it completes (even if a fit already ran today); then daily.
+    func testRefitWaitsForTheRescoreThenRefitsOnceThenDaily() {
+        let marker = StrainCalibration.fitMarker(rescoreFlagKey: "rescore.v1.done")
+        XCTAssertFalse(StrainCalibration.isDue(rescoreDone: false, fittedMarker: nil, currentMarker: marker,
+                                               refreshedDay: nil, today: "2026-09-19"))
+        XCTAssertTrue(StrainCalibration.isDue(rescoreDone: true, fittedMarker: nil, currentMarker: marker,
+                                              refreshedDay: "2026-09-19", today: "2026-09-19"),
+                      "the flag just flipped: refit now even though a (pre-rescore) fit ran today")
+        XCTAssertFalse(StrainCalibration.isDue(rescoreDone: true, fittedMarker: marker, currentMarker: marker,
+                                               refreshedDay: "2026-09-19", today: "2026-09-19"))
+        XCTAssertTrue(StrainCalibration.isDue(rescoreDone: true, fittedMarker: marker, currentMarker: marker,
+                                              refreshedDay: "2026-09-18", today: "2026-09-19"))
+        // A bumped rescore key (a new full-history pass) invalidates the marker.
+        XCTAssertNotEqual(marker, StrainCalibration.fitMarker(rescoreFlagKey: "rescore.v2.done"))
     }
 }

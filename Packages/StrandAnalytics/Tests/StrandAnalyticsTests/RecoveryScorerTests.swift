@@ -341,4 +341,41 @@ final class RecoveryScorerTests: XCTestCase {
             sleepPerf: 0.85)
         XCTAssertEqual(scored!, 57.932425214874954, accuracy: 1e-12)
     }
+
+    // MARK: - E6: Charge's HRV term on ln(RMSSD)
+
+    /// The ln property: a night 20 % above baseline is the SAME z whether the baseline is 40 or 80 ms,
+    /// with the baseline folded in ln space from the same (scaled) history. On raw ms the floored spread
+    /// made the 40 ms wearer's night count twice as much.
+    func testTwentyPercentAboveIsTheSameZAtFortyAndEightyMs() {
+        let history: [Double] = [40, 42, 38, 41, 39, 40, 43, 37]
+        let ln40 = Baselines.foldHistory(Baselines.lnHRV(history.map { Optional($0) }), cfg: Baselines.hrvLnCfg)
+        let ln80 = Baselines.foldHistory(Baselines.lnHRV(history.map { Optional($0 * 2) }), cfg: Baselines.hrvLnCfg)
+        XCTAssertTrue(ln40.usable)
+        let ms40 = Baselines.foldHistory(history.map { Optional($0) }, cfg: Baselines.hrvCfg)
+        let ms80 = Baselines.foldHistory(history.map { Optional($0 * 2) }, cfg: Baselines.hrvCfg)
+        let z40 = RecoveryScorer.hrvZ(exp(ln40.baseline) * 1.2, baseline: ms40, lnBaseline: ln40)
+        let z80 = RecoveryScorer.hrvZ(exp(ln80.baseline) * 1.2, baseline: ms80, lnBaseline: ln80)
+        XCTAssertEqual(z40, z80, accuracy: 1e-9)
+        XCTAssertGreaterThan(z40, 0)
+        // And so the Charge itself: identical nights on two scales score identically.
+        let r40 = RecoveryScorer.recovery(hrv: 48, rhr: 55, resp: nil, hrvBaseline: ms40, rhrBaseline: nil,
+                                          respBaseline: nil, sleepPerf: nil, hrvLnBaseline: ln40)
+        let r80 = RecoveryScorer.recovery(hrv: 96, rhr: 55, resp: nil, hrvBaseline: ms80, rhrBaseline: nil,
+                                          respBaseline: nil, sleepPerf: nil, hrvLnBaseline: ln80)
+        XCTAssertEqual(r40!, r80!, accuracy: 1e-9)
+    }
+
+    /// The DERIVED ln baseline (no `hrvLnBaseline` passed — every current caller) keeps the same
+    /// property for proportional baselines, and a dip weighs more than the same-sized rise.
+    func testDerivedLnBaselineIsScaleFreeAndAsymmetric() {
+        let b40 = RecoveryScorer.DriverBaseline(mean: 40, spread: 4)
+        let b80 = RecoveryScorer.DriverBaseline(mean: 80, spread: 8)
+        XCTAssertEqual(RecoveryScorer.hrvZ(48, baseline: b40), RecoveryScorer.hrvZ(96, baseline: b80), accuracy: 1e-9)
+        let up = RecoveryScorer.hrvZ(48, baseline: b40)     // +20 %
+        let down = RecoveryScorer.hrvZ(32, baseline: b40)   // −20 %
+        XCTAssertGreaterThan(abs(down), abs(up), "on ln(RMSSD) a 20 % dip outweighs a 20 % rise")
+        // At the baseline mean the term is exactly neutral, as before.
+        XCTAssertEqual(RecoveryScorer.hrvZ(40, baseline: b40), 0, accuracy: 1e-12)
+    }
 }

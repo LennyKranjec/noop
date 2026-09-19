@@ -57,7 +57,7 @@ extension Baselines {
                                + "seeded at midpoint, nValid stays 0 \(stateSuffix)"])
             }
             // A cfg with a cold-start prior starts the spread at max(floor, prior), not on the floor.
-            let spreadStart = cfg.coldStartPriorCV == nil
+            let spreadStart = !hasColdStartPrior(cfg)
                 ? "floor=\(r2(cfg.floorSpread))"
                 : "prior=\(r2(next.spread)) (floor=\(r2(cfg.floorSpread)))"
             return (next, ["\(head) night=seed value=\(r2(v)) "
@@ -98,7 +98,7 @@ extension Baselines {
         // since a spread sitting on its floor is indistinguishable from a settled one in every other log.
         let atFloor = next.spread <= cfg.floorSpread
         // Same predicate `update` uses to pick the sample-spread cold start over the EWMA (O9).
-        let fromSample = cfg.coldStartPriorCV != nil && usesColdStartSpread(state)
+        let fromSample = hasColdStartPrior(cfg) && usesColdStartSpread(state)
 
         return (next, ["\(head) night=folded value=\(r2(value)) young=\(yn(isYoung)) "
                        + "effSpread=\(r2(effSpread)) halfLifeB=\(r2(effHalfLifeB)) "

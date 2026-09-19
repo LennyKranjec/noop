@@ -133,7 +133,7 @@ final class QuestTests: XCTestCase {
     }
 
     func testHardTrainingOnNoRecoveryIsTheMostUrgentThing() {
-        let fired = QuestTriggers.evaluate(today: day(steps: 500, strain: 16, recovery: 20), recent: [])
+        let fired = QuestTriggers.evaluate(today: day(steps: 500, strain: 76, recovery: 20), recent: [])
         XCTAssertEqual(fired.first?.id, "overreach")
     }
 
@@ -169,8 +169,35 @@ final class QuestTests: XCTestCase {
     func testTheObservationSentenceIsLocaleFixed() {
         // It is handed to a model as prose. A German phone must not put a comma in the decimal and
         // send the model a different sentence than an American one does.
-        let fired = QuestTriggers.evaluate(today: day(strain: 16.5, recovery: 20), recent: [])
-        XCTAssertTrue(fired[0].observation.contains("16.5"))
-        XCTAssertFalse(fired[0].observation.contains("16,5"))
+        let fired = QuestTriggers.evaluate(today: day(strain: 76.5, recovery: 20), recent: [])
+        XCTAssertTrue(fired[0].observation.contains("76.5"))
+        XCTAssertFalse(fired[0].observation.contains("76,5"))
+    }
+
+    // MARK: - E2: thresholds on the 0–100 Effort axis
+
+    func testAnEasyDayIsNotHardTrainingOnTheNewAxis() {
+        // 30/100 is a quiet day now; under the old `>= 14` it read as "training into a hole".
+        let fired = QuestTriggers.evaluate(today: day(strain: 30, recovery: 20), recent: [])
+        XCTAssertFalse(fired.contains { $0.id == "overreach" })
+    }
+
+    func testIdleStreakFiresOnFourQuietDaysAndNotAfterATrainingDay() {
+        let quiet = (1...4).map { day(strain: 35, key: String(format: "2026-09-%02d", $0)) }
+        XCTAssertTrue(QuestTriggers.evaluate(today: day(), recent: quiet).contains { $0.id == "idle-streak" },
+                      "four ~35/100 days are rest days on the 0–100 axis")
+        var trained = quiet
+        trained[2] = day(strain: 58, key: "2026-09-03")
+        XCTAssertFalse(QuestTriggers.evaluate(today: day(), recent: trained).contains { $0.id == "idle-streak" })
+    }
+
+    func testALoggedWorkoutBreaksTheIdleStreakWhateverItsEffort() {
+        var recent = (1...4).map { day(strain: 20, key: String(format: "2026-09-%02d", $0)) }
+        recent[3] = DailyMetric(
+            day: "2026-09-04", totalSleepMin: nil, efficiency: nil, deepMin: nil, remMin: nil,
+            lightMin: nil, disturbances: nil, restingHr: nil, avgHrv: nil, recovery: nil,
+            strain: 20, exerciseCount: 1, steps: nil
+        )
+        XCTAssertFalse(QuestTriggers.evaluate(today: day(), recent: recent).contains { $0.id == "idle-streak" })
     }
 }

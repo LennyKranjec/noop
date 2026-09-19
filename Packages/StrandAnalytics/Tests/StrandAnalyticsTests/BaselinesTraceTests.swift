@@ -63,8 +63,8 @@ final class BaselinesTraceTests: XCTestCase {
         XCTAssertEqual(
             Baselines.updateTrace(s, value: 70.0, cfg: hrv, metric: "hrv").lines[0],
             "baseline hrv night=folded value=70.0 young=yes effSpread=14.37 halfLifeB=3.0 "
-            + "winsor=16.9..103.1 clamped=no spread 5.75->6.44 from=sample(n=2) atFloor=no "
-            + "-> mean=62.06 spread=6.44 nValid=2 status=calibrating")
+            + "winsor=16.9..103.1 clamped=no spread 5.75->6.76 from=sample(n=2) atFloor=no "
+            + "-> mean=62.06 spread=6.76 nValid=2 status=calibrating")
     }
 
     /// A hard outlier is "seen, NOT folded" — the case that otherwise leaves no trace at all.
