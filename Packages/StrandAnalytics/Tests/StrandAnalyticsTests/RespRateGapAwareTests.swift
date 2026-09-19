@@ -38,24 +38,35 @@ final class RespRateGapAwareTests: XCTestCase {
     /// A contiguous night is untouched. This is the regression guard: the change must alter nothing when
     /// the clock and the beats agree, or it would move every existing user's reported rate.
     func testContiguousNightStillProducesARate() {
-        // 330 beats at ~0.9 s is ~297 s, which is ONE ~5-min window (nGrid 1189 < windowSamples 1200).
-        // Sized deliberately: with two windows a splice in the first would leave the second to carry the
-        // median, and the test would pass whether or not the skip worked.
+        // 330 beats at ~0.9 s is ~297 s: two full 120 s spectral windows plus a ~57 s tail that is below
+        // `respSpectralMinSpanS` and is not measured.
         let rr = series(beats: 330)
         let rate = SleepStager.respRateFromRR(rr, start: 0, end: 2_000_000)
         XCTAssertFalse(rate.isNaN, "a clean series must still yield a rate")
         XCTAssertTrue((6.0...24.0).contains(rate), "expected a plausible breathing rate, got \(rate)")
     }
 
-    /// The same beat VALUES, with a 40 s wall-clock hole punched in the middle: the only difference is
-    /// `ts`. Before this fix the two inputs were indistinguishable, because `ts` was dropped before the
-    /// cumulative sum. Now the spliced window is skipped, and with a single window's worth of beats that
-    /// leaves nothing to take a median over — NaN, which is the honest answer rather than a fabricated one.
+    /// The same beat VALUES, with a 40 s wall-clock hole punched in: the only difference is `ts`. The window
+    /// holding the splice is skipped. Resized with the nightly-metrics rework (spectral 120 s windows, beat
+    /// times rebuilt PER WINDOW): the old fixture was one 5-min window, but at 330 beats the new recipe has
+    /// clean windows either side of the hole and rightly measures them — a splice now costs only its own
+    /// window. So this uses ~140 beats: ONE measurable window, which holds the splice, and a post-gap tail too
+    /// short to measure. Clean → a rate; spliced → NaN, and nothing but `ts` differs between the two.
     func testASplicedWindowIsNotMeasured() {
-        let clean = series(beats: 330)
-        let spliced = series(beats: 330, gapAfter: 165)
+        let clean = series(beats: 140)
+        let spliced = series(beats: 140, gapAfter: 70)
         XCTAssertEqual(clean.map(\.rrMs), spliced.map(\.rrMs), "the fixture must differ only in ts")
+        XCTAssertFalse(SleepStager.respRateFromRR(clean, start: 0, end: 2_000_000).isNaN,
+                       "the unspliced twin must be measurable, else the NaN below proves nothing")
         XCTAssertTrue(SleepStager.respRateFromRR(spliced, start: 0, end: 2_000_000).isNaN)
+    }
+
+    /// With clean windows on both sides of the hole, the night still reads its true ~15/min: the spliced
+    /// window is dropped rather than contributing a fabricated interval.
+    func testASpliceCostsOnlyItsOwnWindow() {
+        let spliced = series(beats: 330, gapAfter: 165)
+        let rate = SleepStager.respRateFromRR(spliced, start: 0, end: 2_000_000)
+        XCTAssertEqual(rate, 15.0, accuracy: 1.0)
     }
 
     /// A one-second discrepancy is `ts` quantisation, not a dropout: `ts` is whole seconds while beats

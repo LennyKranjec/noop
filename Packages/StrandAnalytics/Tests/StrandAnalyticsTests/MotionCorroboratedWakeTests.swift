@@ -142,9 +142,14 @@ final class MotionCorroboratedWakeTests: XCTestCase {
 
     // MARK: - detection level: confirmSleepWithHR motion corroboration
 
-    /// A supplement night whose whole in-bed run is motionless but HR-elevated (median ~58 vs baseline 48,
-    /// i.e. above the strict ×1.05 = 50.4 bar) must NOT be rejected by the HR gate when gravity proves the
-    /// wrist was still — the widened quiescent band keeps it. Without gravity evidence the strict bar stands.
+    /// A supplement night whose whole in-bed run is motionless but HR-elevated (median ~59 vs baseline 53,
+    /// i.e. above the strict ×1.05 = 55.65 bar) must NOT be rejected by the HR gate when gravity proves the
+    /// wrist was still — the widened quiescent band (×1.15 = 60.95) keeps it. Without gravity evidence the
+    /// strict bar stands.
+    ///
+    /// Baseline moved 48 → 53 with the nightly-metrics rework, which lowered `quiescentHRSleepMult` from 1.30
+    /// to 1.15: against 48 the widened bar is now 55.2, below this fixture's ~59, so the old numbers would
+    /// have tested a rejection. 53 keeps the fixture on the rule it pins (strict rejects, quiescent keeps).
     func testMotionlessElevatedRunConfirmedWithGravity() {
         let start = 1_000_000
         let dur = 90 * 60
@@ -152,15 +157,15 @@ final class MotionCorroboratedWakeTests: XCTestCase {
         let hr = elevatedFlatHR(start: start, durationS: dur, base: 58)
         let stillGrav = stillGravity(start: start, durationS: dur)
         // With gravity proving stillness → confirmed (widened band).
-        XCTAssertTrue(SleepStager.confirmSleepWithHR(p, hr: hr, baseline: 48.0, grav: stillGrav),
+        XCTAssertTrue(SleepStager.confirmSleepWithHR(p, hr: hr, baseline: 53.0, grav: stillGrav),
                       "a motionless but HR-elevated run must be confirmed as sleep when stillness is proven")
         // Without gravity → strict band → rejected (the pre-existing behaviour is preserved).
-        XCTAssertFalse(SleepStager.confirmSleepWithHR(p, hr: hr, baseline: 48.0),
+        XCTAssertFalse(SleepStager.confirmSleepWithHR(p, hr: hr, baseline: 53.0),
                        "with no motion evidence the strict HR band still rejects an elevated run")
     }
 
     /// The floor holds: a genuinely awake, motionless run whose median HR is far above the band (72 vs
-    /// baseline 48 → above even the widened ×1.30 = 62.4 bar) is STILL rejected even with stillness proven,
+    /// baseline 48 → above even the widened ×1.15 = 55.2 bar) is STILL rejected even with stillness proven,
     /// so all-night in-bed wakefulness is not scored asleep.
     func testGenuinelyHighHRStillRunStillRejected() {
         let start = 1_000_000

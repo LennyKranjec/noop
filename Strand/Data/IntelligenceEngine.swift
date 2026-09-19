@@ -100,7 +100,7 @@ final class IntelligenceEngine: ObservableObject {
         "hrvBaseline", "rhrBaseline", "age", "sex", "stepTicksPerStep", "maxHROverride",
         "tzOffset", "sleepNeedHours", "sleepConsistency", "habitualMidsleep",
         "experimentalSleepV2", "motionAwareWake", "deepHrvWindow", "spo2CandidateDisplay",
-        "effortMethod", "dayCycleMode",
+        "effortMethod", "dayCycleMode", "sleepHRBaseline",
     ]
 
     /// Which config field(s) moved between two signatures, for the `configDropped` tally.
@@ -611,6 +611,22 @@ final class IntelligenceEngine: ObservableObject {
         if !computing { UserDefaults.standard.set(true, forKey: Self.effortRescoreFlagKey) }
     }
 
+    /// One-shot, on-upgrade FULL-history re-score for the nightly-metrics rework (HR-settled sleep onset/wake,
+    /// last-deep-run resting HR + HRV, spectral sleep-only respiration, all main-night only). Those change what
+    /// every banked night's session bounds and physiology SHOULD be, but a normal pass only revisits the last
+    /// `maxDays`, so deep history would keep the old values and the personal baselines would fold two recipes
+    /// together. BUMP THE VERSION SUFFIX whenever a later change to the nightly sleep/physiology recipe must
+    /// reach history too — a new key is what makes the pass run again. Same shape and retry rule as the
+    /// Effort rescore above; a moved onset re-banks under a new startTs and the #899 overlap heal retires the
+    /// stale row, exactly as a drifted onset always has.
+    static let nightlyMetricsRescoreFlagKey = "intelligence.nightlyMetricsRescore.v1.done"
+
+    func runNightlyMetricsRescoreIfNeeded(historyDays: Int = 4000) async {
+        guard !UserDefaults.standard.bool(forKey: Self.nightlyMetricsRescoreFlagKey) else { return }
+        await analyzeRecent(maxDays: historyDays)
+        if !computing { UserDefaults.standard.set(true, forKey: Self.nightlyMetricsRescoreFlagKey) }
+    }
+
     /// UserDefaults flag guarding the one-shot #547 implausible-timestamp DB heal (below). Set once the
     /// heal completes so it never re-runs.
     static let timestampHealFlagKey = "intelligence.timestampHeal.v547.done"
@@ -889,6 +905,12 @@ final class IntelligenceEngine: ObservableObject {
         // window for regularity (a recent-behaviour signal); full history for the need's upper-quartile
         // "unrestricted nights" estimate. Both degrade honestly on thin history (consistency → nil →
         // neutral term; need → population default), so cold-start is unchanged.
+        // Nightly-metrics rework (O1): the wearer's personal overnight HR level for the sleep-detection HR gate,
+        // from the trailing banked nights' resting HRs. Pass-global like the habitual midsleep, so it rides the
+        // day-cache config signature below. nil on cold start (the day-median gate alone, as before).
+        let sleepHRBaseline = await Self.trailingSleepHRBaseline(
+            store: store, importedId: deviceId, computedId: deviceId + "-noop",
+            windowStart: now - 30 * 86_400, windowEnd: now)
         let sleepConsistency = VitalityEngine.sleepConsistency(nightlyHours: Array(nightlyHours.suffix(28)))
         let sleepNeedHours = AnalyticsEngine.Rest.personalizedNeedHours(nightlyHours: nightlyHours,
                                                                         age: profile.age)
@@ -1001,6 +1023,8 @@ final class IntelligenceEngine: ObservableObject {
             // window of days scored by a recipe the user just turned off, with nothing to explain it.
             "\(effortMethodGlobal)",
             dayCycleMode.rawValue,
+            // Nightly-metrics rework (O1): feeds every day's sleep-detection HR gate.
+            sleepHRBaseline.map { String($0.bitPattern) } ?? "nil",
         ].joined(separator: "|")
         // Drop the whole cache on a config change, then snapshot it into a Sendable `let` for the detached
         // loop (the engine is @MainActor; the loop can't touch `self`). The loop returns the updated cache
@@ -1426,6 +1450,8 @@ final class IntelligenceEngine: ObservableObject {
                                                      // #690: thread the V2 toggle into the NORMAL staging path so
                                                      // it affects detected nights, not just the self-heal restage.
                                                      useSleepStagerV2: useSleepStagerV2,
+                                                     // Nightly-metrics rework (O1): personal overnight HR band.
+                                                     sleepHRBaseline: sleepHRBaseline,
                                                      // #364 follow-up: same threading for the motion-aware wake
                                                      // refinement post-pass.
                                                      useMotionAwareWake: useMotionAwareWake,
@@ -3387,6 +3413,21 @@ final class IntelligenceEngine: ObservableObject {
             }
         }
         return samples
+    }
+
+    /// The personal overnight HR baseline `analyzeDay` threads into sleep detection (nightly-metrics rework):
+    /// `SleepStager.trailingSleepHRBaseline` over the imported + computed sessions banked in the window,
+    /// overlap-deduplicated the same way `computeHabitualSleep` does it. nil under the helper's minimum.
+    private static func trailingSleepHRBaseline(
+        store: WhoopStore, importedId: String, computedId: String, windowStart: Int, windowEnd: Int
+    ) async -> Double? {
+        let imported = (try? await store.sleepSessions(deviceId: importedId, from: windowStart,
+                                                       to: windowEnd, limit: 400)) ?? []
+        let computed = (try? await store.sleepSessions(deviceId: computedId, from: windowStart,
+                                                       to: windowEnd, limit: 400)) ?? []
+        let merged = SleepSessionDedup.dedupe(imported + computed).kept
+        return SleepStager.trailingSleepHRBaseline(
+            nights: merged.map { (start: $0.effectiveStartTs, end: $0.endTs, restingHR: $0.restingHr) })
     }
 
     /// Habitual midsleep (local seconds) AND the trailing per-night sleep DURATIONS (hours,

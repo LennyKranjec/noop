@@ -454,6 +454,9 @@ final class AppModel: ObservableObject {
             // history once, so any deep-history rows an older build left on the 0–21 axis regenerate on
             // the 0–100 axis. Guarded by a persisted flag, so this is a no-op on every subsequent launch.
             await self.intelligence.runEffortRescoreIfNeeded()
+            // One-shot on-upgrade re-score of the FULL history under the nightly-metrics rework (sleep onset,
+            // resting HR, HRV, respiration). Persisted flag → no-op on every later launch.
+            await self.intelligence.runNightlyMetricsRescoreIfNeeded()
             while !Task.isCancelled {
                 // #547 RE-POLLUTION: a sync since the last tick may have armed a re-heal (its ingest gate
                 // dropped bad-clock records). `runTimestampHealIfNeeded` honours the pending flag even after

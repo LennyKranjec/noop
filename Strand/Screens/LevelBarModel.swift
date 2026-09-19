@@ -162,7 +162,23 @@ final class LevelBarModel: ObservableObject {
               let firstDate = LevelWiring.date(from: firstKey, calendar: calendar) else { return }
         let floor = calendar.date(byAdding: .day, value: -(LevelLedger.maxDays - 1), to: levelDate) ?? levelDate
         var cursor = Swift.max(firstDate, floor)
+        // NOTHING IS WRITTEN UNTIL THE NIGHTS HAVE BEEN RE-SCORED. The one-shot full-history pass
+        // (`IntelligenceEngine.runNightlyMetricsRescoreIfNeeded`) re-derives every night's resting HR,
+        // HRV, breathing and sleep window with the current methods; a day frozen before it finished would
+        // be frozen on the old figures for good. Until the flag is set the strip shows what is there and
+        // writes nothing.
+        guard UserDefaults.standard.bool(forKey: IntelligenceEngine.nightlyMetricsRescoreFlagKey) else { return }
         let backfilling = !ledger.hasBackfilled
+        // The first backfill starts from an empty ledger: whatever was carried over from the old single
+        // frozen day was scored on the pre-rescore figures, and keeping it would freeze exactly the value
+        // the rescore exists to correct.
+        // Once only, keyed on its own flag: a backfill interrupted by a newer load must resume from what
+        // it wrote, not start over.
+        let resetKey = "level.ledger.postRescoreReset.v1"
+        if backfilling, !UserDefaults.standard.bool(forKey: resetKey) {
+            ledger.resetAll()
+            UserDefaults.standard.set(true, forKey: resetKey)
+        }
 
         var byDay = LevelWiring.byDay(days)
         let baselines = LevelBaselineStore.resolve {
