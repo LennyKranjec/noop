@@ -1136,8 +1136,14 @@ struct StateWorkoutEdits: Codable, Equatable {
     /// the wearer — dismissing by id would let it walk straight back in. Selection key (the sport, or the
     /// recovery variant) plus the start of its window rounded to the nearest half hour.
     static func dismissKey(_ s: WorkoutSuggestion) -> String {
-        let slot = WorkoutSuggestionFallback.startMinute(of: s.window)
-            .map { String((((($0 + 15) / 30) * 30) % (24 * 60))) } ?? "-"
+        // Written out rather than chained: the one-line `.map { ... } ?? "-"` version of this rounding
+        // blew the type-checker's budget on CI.
+        var slot = "-"
+        if let start: Int = WorkoutSuggestionFallback.startMinute(of: s.window) {
+            let rounded: Int = ((start + 15) / 30) * 30
+            let wrapped: Int = rounded % (24 * 60)
+            slot = String(wrapped)
+        }
         return s.choiceKey.lowercased() + "@" + slot
     }
 
