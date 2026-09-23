@@ -234,9 +234,17 @@ final class AppModel: ObservableObject {
     /// Daily re-arm timer for the single-instant firmware smart alarm (see scheduleDailySmartAlarmRearm).
     private var smartAlarmRearmTimer: Timer?
 
+    /// The Sleep tab's app-driven WAKE BUZZ — the repeating strap buzz the alarm button in the Sleep
+    /// header arms, which keeps going until a strap double-tap, its auto-stop window, or Stop. Kept
+    /// separate from `behavior.smartAlarm*` (the strap's own firmware alarm, armed from SmartAlarmView)
+    /// on purpose: one is a single silent strap-fired buzz, the other is this repeating app-driven one,
+    /// and arming either must never silently re-time the other.
+    let wakeBuzz: WakeBuzzRinger
+
     init() {
         let live = LiveState()
         self.live = live
+        self.wakeBuzz = WakeBuzzRinger()
         // SEED every subsystem with the same id (`deviceId`, "my-whoop" at launch). The store/registry
         // aren't open yet here, so the registry's active id can't be read synchronously; `bootstrapStore`
         // (write side) and `wireSourceCoordinator → adoptActiveDevice` (read spine, #814) re-point them to
@@ -293,6 +301,13 @@ final class AppModel: ObservableObject {
             guard isConnected, let self else { return }
             Task { await self.refreshRRTransportFacts() }
         }.store(in: &hrCancellables)
+
+        // The wake buzz drives the strap through the SAME confirmed one-shot buzz every other
+        // user-facing "vibrate now" uses (#921), and reports into the shared strap log like the
+        // firmware alarm does, so a "it didn't buzz" report stays one-log decidable.
+        wakeBuzz.buzz = { [weak self] in self?.buzzStrapOnce() }
+        wakeBuzz.cancelBuzz = { [weak self] in self?.stopHaptics() }
+        wakeBuzz.log = { [live] line in live.append(log: line) }
 
         // Physical-input + wear hooks (fired live by FrameRouter).
         live.onDoubleTap = { [weak self] in self?.handleDoubleTap() }
@@ -384,6 +399,10 @@ final class AppModel: ObservableObject {
         // fire once and never re-arm , silent from day two. Re-arm daily so an always-on session keeps
         // waking the user.
         scheduleDailySmartAlarmRearm()
+        // The wake buzz is scheduled the same way, from the same persisted settings: arm it at launch.
+        // `scheduleDailySmartAlarmRearm`'s just-after-midnight tick re-runs it for the day rollover, and
+        // the iOS foreground hook re-runs it for every resume (a suspended app cannot run its timer).
+        wakeBuzz.reschedule()
         // Re-apply "Continuous HRV capture" on every (re)bond: if on, the strap should hold the dense
         // realtime stream armed even with no Live screen open, so it banks beat-to-beat R-R 24/7 for
         // better overnight HRV/recovery/sleep. The BLE reconciler arms it on the off→on edge; pushing it
@@ -1818,7 +1837,13 @@ final class AppModel: ObservableObject {
         let timer = Timer(fire: firstFire, interval: 24 * 60 * 60, repeats: true) { [weak self] _ in
             // Timer fires on the main run loop; hop to the main actor for the @MainActor model.
             // applySmartAlarm self-gates on smartAlarmEnabled (and re-asserts the disarmed state if off).
-            Task { @MainActor in self?.applySmartAlarm() }
+            Task { @MainActor in
+                self?.applySmartAlarm()
+                // Same reason for the wake buzz: its fire timer is a single instant, so a session that
+                // stays up past midnight needs the next day's armed. `reschedule` self-gates on the
+                // alarm being enabled.
+                self?.wakeBuzz.reschedule()
+            }
         }
         RunLoop.main.add(timer, forMode: .common)
         smartAlarmRearmTimer = timer
@@ -1830,6 +1855,10 @@ final class AppModel: ObservableObject {
         let now = Date()
         guard now.timeIntervalSince(lastDoubleTapAt) > 1.2 else { return }   // debounce repeats
         lastDoubleTapAt = now
+        // A ringing wake buzz OWNS the gesture: the tap that silences the alarm must not also fire
+        // whatever the user mapped double-tap to (buzzing back at a wrist you just silenced, say).
+        // `handleDoubleTap` returns false whenever nothing is ringing, so this is inert otherwise.
+        if wakeBuzz.handleDoubleTap(at: now) { return }
         live.append(log: "Double-tap → \(behavior.doubleTapAction.label)")
         runMacAction(behavior.doubleTapAction, shortcut: behavior.doubleTapShortcut)
     }

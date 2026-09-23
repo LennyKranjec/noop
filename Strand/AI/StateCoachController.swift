@@ -41,12 +41,22 @@ final class StateCoachController: ObservableObject {
         }
     }
 
+    /// The list as the tile shows it: `generated` with the wearer's own edits applied.
     @Published private(set) var suggestions: [WorkoutSuggestion] = []
     @Published private(set) var source: Source = .none
     /// A manual refresh is running (the button spins and is disabled).
     @Published private(set) var isRefreshing = false
     /// An automatic coach generation is running.
     @Published private(set) var isGenerating = false
+    /// The coach is writing a workout the wearer asked for through the "+".
+    @Published private(set) var isAddingWorkout = false
+    /// Today's pins and removals. Read back per day, so both reset by themselves at midnight.
+    @Published private(set) var edits = StateWorkoutEditsStore.read(dayKey: DailyMissionStore.dayKey())
+
+    /// What the coach (or the fallback) produced, BEFORE the wearer's edits. Kept apart from
+    /// `suggestions` so removing a row does not have to be re-derived out of the list it left behind:
+    /// every regeneration replaces this, and the edits are re-applied on top.
+    private var generated: [WorkoutSuggestion] = []
     /// One line under the section when a refresh did not land (or was throttled). nil when all is well.
     @Published private(set) var notice: String?
     @Published var presented: Presentation?
@@ -64,6 +74,78 @@ final class StateCoachController: ObservableObject {
     private var generationToken = 0
 
     private init() {}
+
+    // MARK: The wearer's edits
+
+    /// A fresh generated list, with today's pins and removals applied over it.
+    private func setGenerated(_ items: [WorkoutSuggestion]) {
+        generated = items
+        suggestions = edits.applied(to: items)
+    }
+
+    /// Re-read the edits when the day has rolled over under a long-running app: the singleton outlives
+    /// midnight, and yesterday's removals must not silently keep filtering this morning's list.
+    private func syncEditsDay(_ day: String = DailyMissionStore.dayKey()) {
+        guard edits.dayKey != day else { return }
+        edits = StateWorkoutEditsStore.read(dayKey: day)
+        suggestions = edits.applied(to: generated)
+    }
+
+    private func commit(_ new: StateWorkoutEdits) {
+        edits = new
+        StateWorkoutEditsStore.write(new)
+        suggestions = new.applied(to: generated)
+    }
+
+    /// Remove a suggestion for the rest of today: the wearer's own workout is deleted, a generated one is
+    /// suppressed by key so the next regeneration does not hand it back.
+    func remove(_ s: WorkoutSuggestion) {
+        syncEditsDay()
+        var e = edits
+        e.dismiss(s)
+        commit(e)
+    }
+
+    /// Pin a workout the wearer asked for. It rides every regeneration for the rest of the day.
+    func pin(_ s: WorkoutSuggestion) {
+        syncEditsDay()
+        var e = edits
+        e.pin(s)
+        commit(e)
+    }
+
+    /// The "+" sheet: the coach writes `request` up as a suggestion at the time the wearer picked, and it
+    /// is pinned. Never fails to add — an unreachable coach falls back to the wearer's own words
+    /// (`CustomWorkoutWriter.fallback`), which is also why the allowed-workouts selection is not consulted:
+    /// they named this session themselves.
+    @discardableResult
+    func addCustomWorkout(request: String, at time: CustomWorkoutTime, figures: StateTrainingFigures,
+                          repo: Repository, profile: ProfileStore, coach: AICoachEngine,
+                          now: Date = Date()) async -> WorkoutSuggestion? {
+        let text = request.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !isAddingWorkout else { return nil }
+        let startMinute = time.startMinute(now: now)
+        isAddingWorkout = true
+        // Cleared on EVERY path out — the give-up branch and a cancellation included.
+        defer { isAddingWorkout = false }
+
+        var answer: String?
+        if coach.isConfigured, coach.dataConsent {
+            let snap = await snapshot(repo: repo, profile: profile, now: now)
+            let f = completed(figures, snap)
+            let grounding = await stateGrounding(coach: coach, figures: f, snap: snap)
+            answer = await coach.generateOneShot(
+                systemPrompt: CustomWorkoutWriter.systemPrompt(grounding: grounding, request: text,
+                                                               startMinute: startMinute),
+                question: CustomWorkoutWriter.question)
+        }
+        let made = CustomWorkoutWriter.resolve(answer: answer, request: text, startMinute: startMinute)
+        pin(made)
+        notice = answer == nil && coach.isConfigured && coach.dataConsent
+            ? String(localized: "Couldn't reach the coach. Added your workout from your own words.")
+            : nil
+        return made
+    }
 
     // MARK: Snapshot
 
@@ -153,7 +235,9 @@ final class StateCoachController: ObservableObject {
         generation = nil
         isGenerating = false
         notice = nil
-        suggestions = new.filter(suggestions)
+        // Only the GENERATED half is held to the selection: a workout the wearer asked for themselves is
+        // always allowed, whatever is ticked.
+        setGenerated(new.filter(generated))
     }
 
     // MARK: Automatic
@@ -162,6 +246,7 @@ final class StateCoachController: ObservableObject {
     /// (coach permitting) a generation in the background.
     func load(figures: StateTrainingFigures, repo: Repository, profile: ProfileStore, coach: AICoachEngine) async {
         let day = DailyMissionStore.dayKey()
+        syncEditsDay(day)
         // The cache check first, from the (memoised) workout list alone: a current coach answer needs none
         // of the per-workout heart-rate reads the snapshot makes.
         let dayStart = Int(Calendar.current.startOfDay(for: Date()).timeIntervalSince1970)
@@ -170,7 +255,7 @@ final class StateCoachController: ObservableObject {
                                                     choices: choices)
         if let cached = WorkoutSuggestionStore.current(dayKey: day, fingerprint: fp),
            let items = allowed(cached.items) {
-            suggestions = items
+            setGenerated(items)
             source = .coach
             return
         }
@@ -178,7 +263,7 @@ final class StateCoachController: ObservableObject {
         let f = completed(figures, snap)
         // While a generation is out, keep whatever is on screen; its answer lands shortly.
         guard generation == nil, !isRefreshing else { return }
-        suggestions = fallback(f, snap)
+        setGenerated(fallback(f, snap))
         source = .fallback
         // Only ask the coach once the day's figures are in: a generation from a half-loaded screen would
         // be cached for the whole day.
@@ -209,7 +294,7 @@ final class StateCoachController: ObservableObject {
                                                                   createdAt: Date(), items: items))
             // Only if nothing newer (a manual refresh) replaced the list meanwhile.
             if !self.isRefreshing {
-                self.suggestions = items
+                self.setGenerated(items)
                 self.source = .coach
             }
         }
@@ -243,11 +328,12 @@ final class StateCoachController: ObservableObject {
         let snap = await snapshot(repo: repo, profile: profile)
         let f = completed(figures, snap)
         let day = DailyMissionStore.dayKey()
+        syncEditsDay(day)
         let fp = WorkoutSuggestionStore.fingerprint(today: snap.today, choices: choices)
         let choicesNow = choices
 
         guard coach.isConfigured, coach.dataConsent else {
-            suggestions = fallback(f, snap)
+            setGenerated(fallback(f, snap))
             source = .fallback
             notice = coach.isConfigured
                 ? String(localized: "Coach data access is off. Showing the built-in suggestions.")
@@ -279,19 +365,19 @@ final class StateCoachController: ObservableObject {
         }
         var workoutsUpdated = false
         if choicesNow.allowedKeys.isEmpty {
-            // Nothing may be suggested: an empty list, and the section says why.
-            suggestions = []
+            // Nothing may be suggested: an empty generated list (the wearer's own pins still show).
+            setGenerated([])
             source = .fallback
             workoutsUpdated = true
         } else if let wAnswer, let items = allowed(WorkoutSuggestionParser.parse(wAnswer)) {
             WorkoutSuggestionStore.write(StoredWorkoutSuggestions(dayKey: day, fingerprint: fp,
                                                                   createdAt: Date(), items: items))
-            suggestions = items
+            setGenerated(items)
             source = .coach
             workoutsUpdated = true
-        } else if source != .coach || suggestions.isEmpty {
+        } else if source != .coach || generated.isEmpty {
             // Nothing from the coach to keep: the rules, on the fresh figures.
-            suggestions = fallback(f, snap)
+            setGenerated(fallback(f, snap))
             source = .fallback
         }
 

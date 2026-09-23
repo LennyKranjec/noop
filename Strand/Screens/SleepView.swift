@@ -128,6 +128,11 @@ struct SleepView: View {
     @AppStorage(SleepLayoutPrefs.orderKey) private var sleepSectionOrderRaw = ""
     @AppStorage(SleepLayoutPrefs.hiddenKey) private var sleepHiddenSectionsRaw = ""
     @State private var showSleepCustomize = false
+    /// The wake-buzz alarm sheet (the alarm button mirrored to Customize in the hero foot).
+    @State private var showSleepAlarm = false
+    /// Whether that alarm is armed — drives the filled/empty glyph. One bool from the same defaults key
+    /// `WakeBuzzAlarm` writes, so no AppModel observation is needed here (see the type note above).
+    @AppStorage(WakeBuzzAlarm.Key.enabled) private var wakeBuzzOn = false
 
     /// The analytical cards to render, in saved order minus the hidden set.
     private var sleepVisibleSections: [SleepSection] {
@@ -266,6 +271,9 @@ struct SleepView: View {
                     sectionOrderRaw: $sleepSectionOrderRaw,
                     hiddenSectionsRaw: $sleepHiddenSectionsRaw
                 )
+            }
+            .sheet(isPresented: $showSleepAlarm) {
+                SleepAlarmSheet()
             }
             .sheet(item: $addNap) { seed in
                 SleepTimeEditor(bedTs: seed.bedTs, wakeTs: seed.wakeTs,
@@ -446,9 +454,11 @@ struct SleepView: View {
     }
 
     /// The compact "Customize" affordance above the arrangeable cards — opens the Arrange sheet. Mirrors
-    /// the Today tab's arrange entry and the Android Sleep affordance.
+    /// the Today tab's arrange entry and the Android Sleep affordance. The wake-buzz alarm sits mirrored
+    /// at the leading end of the same row, so the hero foot reads as one balanced control strip.
     private var sleepArrangeAffordance: some View {
         HStack(spacing: 0) {
+            sleepAlarmAffordance
             Spacer()
             Button {
                 showSleepCustomize = true
@@ -459,6 +469,24 @@ struct SleepView: View {
             }
             .buttonStyle(.plain)
         }
+    }
+
+    /// The wake-buzz alarm entry — the Customize button's mirror image. The glyph is FILLED and accented
+    /// only while the alarm is actually armed, so the row states the alarm's real condition rather than
+    /// just offering a door to it. Reads the `WakeBuzzAlarm` defaults key directly (a one-bool
+    /// `@AppStorage`), which keeps this screen's deliberate "do not observe AppModel" rule intact.
+    private var sleepAlarmAffordance: some View {
+        Button {
+            showSleepAlarm = true
+        } label: {
+            Label("Alarm", systemImage: wakeBuzzOn ? "alarm.fill" : "alarm")
+                .font(StrandFont.footnote)
+                .foregroundStyle(wakeBuzzOn ? StrandPalette.accent : StrandPalette.textTertiary)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(wakeBuzzOn
+                            ? String(localized: "Wake buzz, on. Open alarm settings")
+                            : String(localized: "Wake buzz, off. Open alarm settings"))
     }
 
     /// Immersive Rest-world hero: compact Bevel-like hierarchy — centered "Sleep", muted circular
@@ -2062,6 +2090,12 @@ struct SleepView: View {
     @ViewBuilder
     private var emptyState: some View {
         SleepFreshnessNote(latestWakeTs: nil)
+        // The alarm is about the night AHEAD, so it must be reachable before the first night has been
+        // recorded — otherwise a fresh install can see the Sleep tab and not the alarm on it.
+        HStack(spacing: 0) {
+            sleepAlarmAffordance
+            Spacer()
+        }
         if repo.loaded {
             ComingSoon(what: "No nights here yet. Import your WHOOP export in Data Sources to see every night, your sleep stages and trends straight away. Or open Intelligence to see last night computed from the strap after you wear it to bed.")
         } else {

@@ -23,6 +23,12 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
     /// root has wired it.
     var onCoachBriefTapped: (() -> Void)?
 
+    /// Wired by `WakeBuzzRinger` (which owns the ring) so the Stop action on the wake-buzz backup
+    /// notification silences a buzzing strap. The action carries no foreground option, so iOS wakes the
+    /// app in the BACKGROUND to run this — which is the only reason a Stop from the lock screen works
+    /// at all. nil is a safe no-op.
+    var onWakeBuzzStop: (() -> Void)?
+
     func userNotificationCenter(
         _ center: UNUserNotificationCenter,
         willPresent notification: UNNotification,
@@ -41,6 +47,11 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
     ) {
         if response.notification.request.content.categoryIdentifier == CoachBriefScheduler.notificationCategoryId {
             onCoachBriefTapped?()
+        }
+        // The wake buzz's Stop action — matched on the ACTION, not the category, so merely opening the
+        // notification (default action) leaves the alarm ringing rather than silently killing it.
+        if response.actionIdentifier == WakeBuzzAlarm.stopActionId {
+            onWakeBuzzStop?()
         }
         completionHandler()
     }

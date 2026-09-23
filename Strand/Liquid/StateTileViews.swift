@@ -212,6 +212,9 @@ struct StateWorkoutsSection: View {
     @EnvironmentObject private var router: NavRouter
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
     private var effortScale: EffortScale { UnitPrefs.resolveEffortScale(effortScaleRaw) }
+    /// The "+" sheet. Held here rather than in the controller's `presented` because writing the workout
+    /// needs this view's repository, profile and figures, which the shared presentation host does not have.
+    @State private var addingWorkout = false
 
     /// Re-read when the day's figures or its workouts move. Effort in steps of 5 so the live score
     /// creeping up does not re-run this every few seconds.
@@ -231,18 +234,17 @@ struct StateWorkoutsSection: View {
                 Text("WORKOUTS TODAY").font(StrandFont.overline).tracking(1.6)
                     .foregroundStyle(StrandPalette.textSecondary)
                 Spacer()
-                if controller.isGenerating {
+                if controller.isGenerating || controller.isAddingWorkout {
                     ProgressView().controlSize(.mini)
                 } else if controller.source == .fallback {
                     Text("Built-in").font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
                 } else if controller.source == .coach {
                     Text("Coach").font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
                 }
+                addButton
             }
             if controller.suggestions.isEmpty {
-                Text(controller.choices.isUnrestricted
-                     ? String(localized: "Nothing more to suggest for today.")
-                     : String(localized: "None of your selected workouts fits the rest of today. Adjust the selection below."))
+                Text(emptyText)
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -260,6 +262,50 @@ struct StateWorkoutsSection: View {
         .task(id: loadKey) {
             await controller.load(figures: figures, repo: repo, profile: profile, coach: coach)
         }
+        .sheet(isPresented: $addingWorkout) {
+            // Snapshotted out of the environment here, so the closure the sheet calls back on does not
+            // reach into a view that may be gone by the time the coach answers.
+            let r = repo
+            let p = profile
+            let c = coach
+            let f = figures
+            StateAddWorkoutSheet { request, when in
+                Task { @MainActor in
+                    await StateCoachController.shared.addCustomWorkout(
+                        request: request, at: when, figures: f, repo: r, profile: p, coach: c)
+                }
+            }
+        }
+    }
+
+    /// What an empty section says — and it says which of the three reasons it is, rather than reporting
+    /// "nothing to suggest" at someone who has just removed every row themselves.
+    private var emptyText: String {
+        if !controller.edits.dismissed.isEmpty {
+            return String(localized: "You've cleared today's suggestions. Refresh, or add your own with +.")
+        }
+        return controller.choices.isUnrestricted
+            ? String(localized: "Nothing more to suggest for today.")
+            : String(localized: "None of your selected workouts fits the rest of today. Adjust the selection below.")
+    }
+
+    /// The "+" in the section header: the wearer describes a workout and picks a time, the coach writes it
+    /// into today's list.
+    private var addButton: some View {
+        Button {
+            SystemHaptics.play(.tap)
+            addingWorkout = true
+        } label: {
+            Image(systemName: "plus")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(StrandPalette.textSecondary)
+                .frame(width: 26, height: 26)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(controller.isAddingWorkout)
+        .accessibilityLabel(Text("Add your own workout"))
+        .accessibilityHint(Text("Describe a workout and pick a time; the coach writes it into today's list."))
     }
 
     /// Bottom of the section: which workouts may be suggested.
@@ -320,9 +366,12 @@ struct StateWorkoutsSection: View {
                     }
                     .frame(width: 34, height: 34)
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("\(StateWorkoutChoiceTitle.title(for: s)) · \(s.minutes) min")
-                            .font(StrandFont.subhead.weight(.semibold))
-                            .foregroundStyle(StrandPalette.textPrimary)
+                        HStack(spacing: 6) {
+                            Text("\(StateWorkoutChoiceTitle.title(for: s)) · \(s.minutes) min")
+                                .font(StrandFont.subhead.weight(.semibold))
+                                .foregroundStyle(StrandPalette.textPrimary)
+                            if s.byUser { byYouTag }
+                        }
                         let detail = detailLine(s)
                         if !detail.isEmpty {
                             Text(detail).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
@@ -356,12 +405,137 @@ struct StateWorkoutsSection: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel(Text("Why this workout"))
+
+            // A SIBLING button, not something layered over the row: the start tap and the removal must
+            // never be the same gesture.
+            Button {
+                SystemHaptics.play(.tap)
+                controller.remove(s)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .frame(width: 28, height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text(removeLabel(s)))
+            .accessibilityHint(Text("It stays off today's list."))
         }
         .contextMenu {
             Button {
                 StateActionPerformer.askCoach(s.askCoachPrompt, coach: coach, router: router)
             } label: { Label("Ask coach", systemImage: "sparkles") }
+            Button(role: .destructive) {
+                SystemHaptics.play(.tap)
+                controller.remove(s)
+            } label: { Label("Remove for today", systemImage: "xmark.circle") }
         }
+    }
+
+    /// The remove button reads differently on a workout the wearer added: theirs is deleted outright,
+    /// a suggested one is only held off today's list.
+    private func removeLabel(_ s: WorkoutSuggestion) -> String {
+        let title = StateWorkoutChoiceTitle.title(for: s)
+        return s.byUser
+            ? String(localized: "Delete \(title)")
+            : String(localized: "Remove \(title) from today's suggestions")
+    }
+
+    /// The marker on a workout the wearer asked for themselves.
+    private var byYouTag: some View {
+        Text("by you")
+            .font(StrandFont.caption)
+            .foregroundStyle(StrandPalette.accent)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(StrandPalette.accent.opacity(0.14)))
+            .accessibilityLabel(Text("Added by you"))
+    }
+}
+
+// MARK: - The wearer's own workout
+
+/// The "+" sheet: describe a workout in your own words, pick when it starts, and the coach writes it into
+/// today's list as a suggestion like its own — pinned for the rest of the day.
+///
+/// The sheet only COLLECTS. `onAdd` hands the request to the section, which owns the repository, the
+/// profile and today's figures the coach is grounded on; the header then spins until the workout appears.
+/// Nothing here waits on the network, so dismissing the sheet can never strand a request.
+struct StateAddWorkoutSheet: View {
+    let onAdd: (String, CustomWorkoutTime) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var text = ""
+    @State private var asSoonAsPossible = true
+    @State private var time = Date()
+
+    private var canAdd: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("Describe the workout you want and when it should start. The coach writes it up with a target zone and an effort estimate, and says so if it is a bad idea today. It stays on today's list until you remove it.")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    TextField("e.g. 30 min easy run, upper body strength", text: $text, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .font(StrandFont.body)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .lineLimit(1...4)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 10)
+                        .background(StrandPalette.surfaceInset,
+                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .overlay(RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .strokeBorder(StrandPalette.hairline, lineWidth: 1))
+                        .accessibilityLabel(Text("Describe a workout"))
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Toggle(isOn: $asSoonAsPossible) {
+                            Text("As soon as possible")
+                                .font(StrandFont.subhead)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                        }
+                        if !asSoonAsPossible {
+                            DatePicker(selection: $time, displayedComponents: .hourAndMinute) {
+                                Text("Start at")
+                                    .font(StrandFont.subhead)
+                                    .foregroundStyle(StrandPalette.textPrimary)
+                            }
+                        }
+                    }
+
+                    NoopButton("Add to today", systemImage: "plus", kind: .primary, fullWidth: true) {
+                        SystemHaptics.play(.tap)
+                        onAdd(text.trimmingCharacters(in: .whitespacesAndNewlines), chosenTime)
+                        dismiss()
+                    }
+                    .disabled(!canAdd)
+                }
+                .padding(16)
+            }
+            .background(StrandPalette.surfaceBase.ignoresSafeArea())
+            .navigationTitle(String(localized: "Your own workout"))
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private var chosenTime: CustomWorkoutTime {
+        guard !asSoonAsPossible else { return .asap }
+        let c = Calendar.current.dateComponents([.hour, .minute], from: time)
+        return .clock((c.hour ?? 0) * 60 + (c.minute ?? 0))
     }
 }
 

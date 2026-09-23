@@ -130,6 +130,10 @@ struct WorkoutSuggestion: Codable, Equatable, Identifiable {
     /// `StateWorkoutChoices.variants` key). `sport` then holds the activity it is RECORDED as (Meditation /
     /// Yoga), so a tap starts that activity. nil for a plain sport. Optional so stored lists still decode.
     var label: String? = nil
+    /// The wearer asked for this one themselves, through the "+" in the section header. It is pinned for
+    /// the rest of the day, marked "by you", and the allowed-workouts selection does not apply to it —
+    /// an explicitly requested session is always allowed.
+    var byUser: Bool = false
 
     var id: String { "\(sport)|\(minutes)|\(zone)|\(window ?? "")|\(label ?? "")" }
 
@@ -148,6 +152,41 @@ struct WorkoutSuggestion: Codable, Equatable, Identifiable {
         let win = window.map { " (\($0))" } ?? ""
         let name = label ?? sport
         return String(localized: "You suggested this workout for today: \(name), \(minutes) min in zone \(zone)\(win). Why this one, and how should I pace it given my data today?")
+    }
+}
+
+extension WorkoutSuggestion {
+
+    private enum CodingKeys: String, CodingKey {
+        case sport, minutes, zone, effort, window, why, label, byUser
+    }
+
+    /// Hand-written, and in an extension so the memberwise init survives: a list stored before `byUser`
+    /// existed must still decode. The synthesised reader would throw on the missing key and take the
+    /// whole day's cached suggestions down with it.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        sport = try c.decode(String.self, forKey: .sport)
+        minutes = try c.decode(Int.self, forKey: .minutes)
+        zone = try c.decode(Int.self, forKey: .zone)
+        effort = try c.decodeIfPresent(Double.self, forKey: .effort)
+        window = try c.decodeIfPresent(String.self, forKey: .window)
+        why = try c.decode(String.self, forKey: .why)
+        label = try c.decodeIfPresent(String.self, forKey: .label)
+        byUser = try c.decodeIfPresent(Bool.self, forKey: .byUser) ?? false
+    }
+
+    /// Written out by hand as well, so the two sides cannot drift apart from each other.
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(sport, forKey: .sport)
+        try c.encode(minutes, forKey: .minutes)
+        try c.encode(zone, forKey: .zone)
+        try c.encodeIfPresent(effort, forKey: .effort)
+        try c.encodeIfPresent(window, forKey: .window)
+        try c.encode(why, forKey: .why)
+        try c.encodeIfPresent(label, forKey: .label)
+        try c.encode(byUser, forKey: .byUser)
     }
 }
 
@@ -1065,6 +1104,310 @@ enum WorkoutSuggestionStore {
     static func fingerprint(today: [StateWorkoutFact], choices: StateWorkoutChoices = .all) -> String {
         let latest = today.map { Int($0.start.timeIntervalSince1970) }.max() ?? 0
         return "\(today.count)|\(latest)|\(choices.signature)"
+    }
+}
+
+// MARK: - The wearer's own hand on the list
+
+/// What the wearer did to today's WORKOUTS TODAY list themselves: the workouts they asked for (pinned —
+/// they survive every regeneration) and the ones they removed (gone for the rest of the day).
+///
+/// PER DAY, AND THE DAY ROLLS OVER BY ITSELF. A stored set from another day is never returned
+/// (`StateWorkoutEditsStore.read`): a removal is "not today", not "never again", and a workout the wearer
+/// asked for yesterday has no business on this morning's list.
+struct StateWorkoutEdits: Codable, Equatable {
+
+    let dayKey: String
+    /// The workouts the wearer asked for, oldest request first.
+    var pinned: [WorkoutSuggestion]
+    /// `dismissKey` of every suggestion they removed.
+    var dismissed: Set<String>
+
+    init(dayKey: String, pinned: [WorkoutSuggestion] = [], dismissed: Set<String> = []) {
+        self.dayKey = dayKey
+        self.pinned = pinned
+        self.dismissed = dismissed
+    }
+
+    var isEmpty: Bool { pinned.isEmpty && dismissed.isEmpty }
+
+    /// The key a removal suppresses. NOT the id: the coach re-words and re-times its list on every
+    /// regeneration, and "Running at 17:00" coming back as "Running at 17:05" is the same suggestion to
+    /// the wearer — dismissing by id would let it walk straight back in. Selection key (the sport, or the
+    /// recovery variant) plus the start of its window rounded to the nearest half hour.
+    static func dismissKey(_ s: WorkoutSuggestion) -> String {
+        let slot = WorkoutSuggestionFallback.startMinute(of: s.window)
+            .map { String((((($0 + 15) / 30) * 30) % (24 * 60))) } ?? "-"
+        return s.choiceKey.lowercased() + "@" + slot
+    }
+
+    func isDismissed(_ s: WorkoutSuggestion) -> Bool { dismissed.contains(Self.dismissKey(s)) }
+
+    /// Remove `s` for the rest of today. A workout the wearer added themselves is DELETED — it was theirs,
+    /// nothing regenerates it, and suppressing its key would also block asking for it again in an hour.
+    /// Anything else is suppressed by key, so the next regeneration does not bring it back.
+    mutating func dismiss(_ s: WorkoutSuggestion) {
+        if s.byUser || pinned.contains(where: { $0.id == s.id }) {
+            pinned.removeAll { $0.id == s.id }
+            return
+        }
+        dismissed.insert(Self.dismissKey(s))
+    }
+
+    /// Pin a workout the wearer asked for. Asking twice for the same session at the same time replaces the
+    /// first rather than listing it twice, and it is no longer dismissed — they just asked for it.
+    mutating func pin(_ s: WorkoutSuggestion) {
+        var item = s
+        item.byUser = true
+        let key = Self.dismissKey(item)
+        pinned.removeAll { Self.dismissKey($0) == key }
+        dismissed.remove(key)
+        pinned.append(item)
+    }
+
+    /// Today's list as the tile shows it: `generated` with the removed ones dropped and the wearer's own
+    /// pinned in, in clock order.
+    ///
+    /// `limit` caps the GENERATED half only. A workout the wearer asked for is theirs and is never squeezed
+    /// out by the coach's three; and because the cap is applied AFTER the removals, taking one row away
+    /// lets the next generated one through when more than `limit` were produced.
+    func applied(to generated: [WorkoutSuggestion],
+                 limit: Int = WorkoutSuggestionParser.maxCount) -> [WorkoutSuggestion] {
+        var kept: [WorkoutSuggestion] = []
+        for s in generated {
+            guard !isDismissed(s),
+                  // The wearer's own copy of the same session wins: it is not shown twice.
+                  !pinned.contains(where: { Self.dismissKey($0) == Self.dismissKey(s) }),
+                  !kept.contains(where: { $0.id == s.id })
+            else { continue }
+            kept.append(s)
+            if kept.count == limit { break }
+        }
+        return WorkoutSuggestionFallback.inClockOrder(pinned + kept)
+    }
+}
+
+enum StateWorkoutEditsStore {
+    static let key = "state.workoutEdits"
+
+    /// The edits for `dayKey`, or an empty set — including when what is stored belongs to another day.
+    static func read(dayKey: String, _ d: UserDefaults = .standard) -> StateWorkoutEdits {
+        guard let data = d.data(forKey: key),
+              let v = try? JSONDecoder().decode(StateWorkoutEdits.self, from: data),
+              v.dayKey == dayKey
+        else { return StateWorkoutEdits(dayKey: dayKey) }
+        return v
+    }
+
+    static func write(_ v: StateWorkoutEdits, _ d: UserDefaults = .standard) {
+        guard let data = try? JSONEncoder().encode(v) else { return }
+        d.set(data, forKey: key)
+    }
+}
+
+// MARK: - A workout the wearer asks for
+
+/// When the wearer wants their own workout to start.
+enum CustomWorkoutTime: Equatable {
+    /// As soon as possible: the next five-minute mark.
+    case asap
+    /// A clock time, in minutes past local midnight.
+    case clock(Int)
+
+    /// The start, in minutes past local midnight. Kept inside the day; never moved into tomorrow, because
+    /// the whole list is today's.
+    func startMinute(now: Date, calendar: Calendar = .current) -> Int {
+        switch self {
+        case .asap:
+            let c = calendar.dateComponents([.hour, .minute], from: now)
+            let m = (c.hour ?? 0) * 60 + (c.minute ?? 0)
+            return Swift.min(((m + 4) / 5) * 5, 23 * 60 + 55)
+        case .clock(let m):
+            return Swift.min(Swift.max(m, 0), 23 * 60 + 55)
+        }
+    }
+}
+
+/// The coach turning "30 min easy run, 18:00" into one suggestion in exactly the shape the other ones have.
+///
+/// Same request path as every other headless generation, same tolerant JSON read
+/// (`WorkoutSuggestionParser`), and a deterministic fallback so tapping Add always produces a workout:
+/// no provider, no consent or an unreadable answer maps the wearer's words to the closest sport (or
+/// "Other") at the time they picked.
+///
+/// THE SELECTION DOES NOT APPLY HERE. `StateWorkoutChoices` governs what the coach may *suggest*; this is
+/// the wearer naming a session themselves, and the whole catalogue is on the table.
+///
+/// THE START TIME IS OURS, NOT THE MODEL'S. The window is built here from the time the wearer picked and
+/// the length that comes back, so the row can never sit at an hour they did not choose.
+enum CustomWorkoutWriter {
+
+    static let question = "Write the requested workout as JSON."
+
+    /// A request longer than this is not a workout description any more; the tail is dropped rather than
+    /// carried into the prompt.
+    static let maxRequestChars = 300
+
+    static func clock(_ minute: Int) -> String {
+        let m = Swift.min(Swift.max(minute, 0), 24 * 60 - 1)
+        return String(format: "%02d:%02d", m / 60, m % 60)
+    }
+
+    /// "HH:MM–HH:MM" for a session of `minutes` starting at `startMinute`. Unlike the suggestion rules'
+    /// own window this is never refused for being late: the wearer asked for this time.
+    static func window(startMinute: Int, minutes: Int) -> String {
+        let start = Swift.min(Swift.max(startMinute, 0), 24 * 60 - 1)
+        let end = Swift.min(start + Swift.max(minutes, 0), 24 * 60 - 1)
+        return clock(start) + "–" + clock(end)
+    }
+
+    static func systemPrompt(grounding: String, request: String, startMinute: Int) -> String {
+        var s = "You are the user's training coach. The user has ASKED FOR ONE SPECIFIC WORKOUT and chosen "
+        s += "when it starts. Your job is not to talk them out of it: write it up as one proper session, "
+        s += "sized and paced for the state their data is in.\n\n"
+        s += "THE REQUEST: \"" + String(request.prefix(maxRequestChars)) + "\"\n"
+        s += "START TIME: " + clock(startMinute) + " local, today. Do not change it.\n\n"
+        s += "Answer with JSON ONLY, no prose and no code fence, exactly in this shape:\n"
+        s += #"{"sport":"Running","minutes":30,"zone":2,"effort":11,"why":"one short sentence"}"#
+        s += "\n"
+        s += "sport: the closest name from this list, or \"Other\" when nothing fits: "
+        s += StateWorkoutChoices.options.map(\.key).joined(separator: ", ") + ".\n"
+        s += "minutes: the length they asked for; when they named none, a sensible one for that session.\n"
+        s += "zone: the target heart-rate zone 1-5 on the user's own zones in the data below "
+        s += "(a recovery or mobility session: 1).\n"
+        s += "effort: the estimated Effort points (0-100 scale) the session adds to today.\n"
+        s += "why: ONE short sentence in the user's language. If their charge, the effort they have already "
+        s += "done against today's target, their stress or their sleep make this a bad idea, say so plainly "
+        s += "in that same sentence — and still give them the session they asked for.\n"
+        s += "One workout only. No second suggestion, no list.\n\n"
+        s += grounding
+        return s
+    }
+
+    /// The coach's answer if it is usable, otherwise the fallback. Never nil, and always at the wearer's
+    /// own start time.
+    static func resolve(answer: String?, request: String, startMinute: Int) -> WorkoutSuggestion {
+        guard let answer, let first = WorkoutSuggestionParser.parse(answer)?.first else {
+            return fallback(request: request, startMinute: startMinute)
+        }
+        var s = first
+        s.window = window(startMinute: startMinute, minutes: s.minutes)
+        s.byUser = true
+        if s.why.isEmpty { s.why = String(localized: "You asked for this one.") }
+        return s
+    }
+
+    /// The wearer's words as a workout, for when the coach cannot be reached. The reason says exactly that:
+    /// nothing here has been weighed against today's state, and it must not pretend otherwise.
+    static func fallback(request: String, startMinute: Int) -> WorkoutSuggestion {
+        let option = sport(matching: request)
+        let sportName = option?.sport ?? WorkoutCatalog.defaultSportName
+        let label = (option?.isVariant ?? false) ? option?.key : nil
+        let recovery = label != nil || WorkoutCatalog.isRecovery(sportName)
+        let mins = minutes(in: request) ?? (recovery ? 15 : 40)
+        let zone = requestedZone(request) ?? ((recovery || sportName == StateActionMapper.walkSport) ? 1 : 2)
+        return WorkoutSuggestion(
+            sport: sportName,
+            minutes: mins,
+            zone: zone,
+            effort: (Double(mins) * WorkoutSuggestionFallback.effortPerMinute(zone: zone)).rounded(),
+            window: window(startMinute: startMinute, minutes: mins),
+            why: String(localized: "You asked for this one. The coach wasn't reachable, so it has not been weighed against today's state."),
+            label: label,
+            byUser: true)
+    }
+
+    /// The catalogue sport (or recovery variant) a free-text request names, else nil.
+    ///
+    /// Longest name first, so "Treadmill run" wins over "Running" and "Restorative yoga" never lands on
+    /// plain Yoga. The alias table is the words people actually type instead of a catalogue name — in
+    /// English and in German, because the request is written in the wearer's own language.
+    static func sport(matching text: String) -> StateWorkoutChoices.Option? {
+        if let v = StateWorkoutChoices.variant(matching: text) { return v }
+        let haystack = text.lowercased()
+        let names = WorkoutCatalog.all.map(\.name)
+            .filter { $0 != WorkoutCatalog.defaultSportName }
+            .sorted { $0.count > $1.count }
+        if let hit = names.first(where: { haystack.contains($0.lowercased()) }) {
+            return StateWorkoutChoices.Option(key: hit, sport: hit)
+        }
+        if let hit = requestAliases.sorted(by: { $0.key.count > $1.key.count })
+            .first(where: { haystack.contains($0.key) }) {
+            return StateWorkoutChoices.Option(key: hit.value, sport: hit.value)
+        }
+        return nil
+    }
+
+    /// Word stems → catalogue sport. Stems, not whole words, so "laufen", "Radfahren" and "stretching"
+    /// all land. Deliberately not exhaustive: this is the offline safety net, the coach does the real
+    /// reading.
+    static let requestAliases: [String: String] = [
+        "run": "Running", "jog": "Running", "lauf": "Running", "joggen": "Running",
+        "walk": "Walking", "spazier": "Walking",
+        "bike": "Cycling", "cycle": "Cycling", "radfahr": "Cycling", "fahrrad": "Cycling",
+        "swim": "Pool swim", "schwimm": "Pool swim",
+        "row": "Rowing", "ruder": "Rowing",
+        "hike": "Hiking", "wander": "Hiking",
+        "weights": "Weightlifting", "gewichte": "Weightlifting", "deadlift": "Weightlifting",
+        "gym": "Strength", "kraft": "Strength", "upper body": "Strength", "lower body": "Strength",
+        "oberkörper": "Strength", "unterkörper": "Strength", "leg day": "Strength", "beintag": "Strength",
+        "interval": "HIIT", "sprint": "HIIT",
+        "stretch": "Stretching", "dehn": "Stretching", "mobility": "Stretching", "mobilit": "Stretching",
+        "meditat": "Meditation", "achtsam": "Meditation",
+        "treadmill": "Treadmill run", "laufband": "Treadmill run",
+        "climb": "Climbing", "kletter": "Climbing", "boulder": "Climbing",
+        "fußball": "Soccer", "fussball": "Soccer",
+    ]
+
+    /// The length the request names ("30 min", "45 Minuten", "1.5 h"), clamped to the range a suggestion
+    /// may carry, else nil. A bare number is NOT a length: "5k easy" is not a five-minute run.
+    static func minutes(in text: String) -> Int? {
+        let chars = Array(text.lowercased())
+        var i = 0
+        while i < chars.count {
+            guard chars[i].isASCII, chars[i].isNumber else { i += 1; continue }
+            var num = ""
+            while i < chars.count, chars[i].isASCII,
+                  chars[i].isNumber || ((chars[i] == "." || chars[i] == ",") && !num.contains(".")) {
+                num.append(chars[i] == "," ? "." : chars[i])
+                i += 1
+            }
+            if num.hasSuffix(".") { num.removeLast() }
+            var j = i
+            while j < chars.count, chars[j] == " " { j += 1 }
+            var word = ""
+            while j < chars.count, chars[j].isLetter, word.count < 8 {
+                word.append(chars[j])
+                j += 1
+            }
+            guard let v = Double(num), v > 0 else { continue }
+            let hours = word == "h" || word == "hr" || word == "hrs" || word.hasPrefix("hour")
+                || word == "std" || word.hasPrefix("stunde")
+            let mins = word == "m" || word.hasPrefix("min")
+            guard hours || mins else { continue }
+            let total = hours ? v * 60 : v
+            return Swift.min(Swift.max(Int(total.rounded()), WorkoutSuggestionParser.minutesRange.lowerBound),
+                             WorkoutSuggestionParser.minutesRange.upperBound)
+        }
+        return nil
+    }
+
+    /// A zone the request names EXPLICITLY ("zone 2", "Z4"), else nil. A bare digit is not a zone:
+    /// `WorkoutSuggestionParser.zoneNumber` would read "30 min" as Zone 3.
+    static func requestedZone(_ text: String) -> Int? {
+        let chars = Array(text.lowercased())
+        var i = 0
+        while i < chars.count {
+            defer { i += 1 }
+            guard chars[i] == "z" else { continue }
+            let atWordStart = i == 0 || !(chars[i - 1].isLetter || chars[i - 1].isNumber)
+            guard atWordStart else { continue }
+            var j = i + 1
+            if j + 2 < chars.count, chars[j] == "o", chars[j + 1] == "n", chars[j + 2] == "e" { j += 3 }
+            while j < chars.count, chars[j] == " " || chars[j] == ":" || chars[j] == "-" { j += 1 }
+            if j < chars.count, let d = chars[j].wholeNumberValue, (1...5).contains(d) { return d }
+        }
+        return nil
     }
 }
 

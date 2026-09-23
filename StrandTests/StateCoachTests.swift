@@ -547,4 +547,229 @@ final class StateCoachTests: XCTestCase {
         let b = WorkoutSuggestionStore.fingerprint(today: [fact("Running", hoursAgo: 1)])
         XCTAssertNotEqual(a, b)
     }
+
+    // MARK: - The wearer's own hand: pinned and removed
+
+    private func suggestion(_ sport: String, _ window: String?, minutes: Int = 30, zone: Int = 2,
+                            label: String? = nil, byUser: Bool = false) -> WorkoutSuggestion {
+        WorkoutSuggestion(sport: sport, minutes: minutes, zone: zone, effort: nil, window: window,
+                          why: "", label: label, byUser: byUser)
+    }
+
+    func testPinnedWorkoutSurvivesEveryRegeneration() {
+        var edits = StateWorkoutEdits(dayKey: "2026-05-04")
+        edits.pin(suggestion("Running", "18:00–18:40", minutes: 40))
+        for generated in [[suggestion("Cycling", "14:00–15:00")],
+                          [suggestion("Walking", "09:00–09:30"), suggestion("Yoga", "20:00–20:20")],
+                          []] {
+            let out = edits.applied(to: generated)
+            XCTAssertTrue(out.contains { $0.sport == "Running" && $0.byUser },
+                          "the wearer's own workout must ride every regeneration: \(out.map(\.sport))")
+        }
+        XCTAssertEqual(edits.applied(to: []).map(\.sport), ["Running"])
+    }
+
+    func testPinnedWorkoutIsNotSqueezedOutByTheCoachsThree() {
+        var edits = StateWorkoutEdits(dayKey: "d")
+        edits.pin(suggestion("Running", "18:00–18:40"))
+        let generated = [suggestion("Walking", "07:00–07:30"), suggestion("Cycling", "09:00–10:00"),
+                         suggestion("Yoga", "11:00–11:20")]
+        let out = edits.applied(to: generated)
+        XCTAssertEqual(out.count, 4, "the cap counts the generated half only")
+        XCTAssertEqual(out.filter(\.byUser).count, 1)
+    }
+
+    func testPinnedWorkoutIgnoresTheAllowedSelection() {
+        var edits = StateWorkoutEdits(dayKey: "d")
+        edits.pin(suggestion("Running", "18:00–18:40"))
+        let choices = StateWorkoutChoices(excluded: ["Running"])
+        let generated = choices.filter([suggestion("Running", "12:00–12:40")])
+        XCTAssertTrue(generated.isEmpty, "the coach may not suggest a deselected sport")
+        XCTAssertEqual(edits.applied(to: generated).map(\.sport), ["Running"],
+                       "but a session they asked for themselves is always allowed")
+    }
+
+    func testAPinnedWorkoutIsNotAlsoShownAsACoachSuggestion() {
+        var edits = StateWorkoutEdits(dayKey: "d")
+        edits.pin(suggestion("Running", "18:00–18:40", minutes: 40))
+        let out = edits.applied(to: [suggestion("Running", "18:10–18:50", minutes: 40)])
+        XCTAssertEqual(out.count, 1)
+        XCTAssertTrue(out[0].byUser)
+    }
+
+    func testDismissedSuggestionStaysGoneEvenWhenItComesBackSlightlyMoved() {
+        var edits = StateWorkoutEdits(dayKey: "d")
+        edits.dismiss(suggestion("Running", "17:00–17:40"))
+        XCTAssertTrue(edits.applied(to: [suggestion("Running", "17:05–17:45")]).isEmpty,
+                      "same sport in the same half hour is the same suggestion")
+        XCTAssertTrue(edits.applied(to: [suggestion("Running", "16:55–17:35")]).isEmpty)
+        XCTAssertEqual(edits.applied(to: [suggestion("Running", "20:00–20:40")]).count, 1,
+                       "a different time of day is a different suggestion")
+        XCTAssertEqual(edits.applied(to: [suggestion("Cycling", "17:00–17:40")]).count, 1,
+                       "a different sport is a different suggestion")
+    }
+
+    func testDismissingARecoveryVariantDoesNotDismissAPlainMeditation() {
+        var edits = StateWorkoutEdits(dayKey: "d")
+        edits.dismiss(suggestion("Meditation", "19:00–19:20", zone: 1, label: "NSDR"))
+        XCTAssertEqual(edits.applied(to: [suggestion("Meditation", "19:00–19:10", zone: 1)]).count, 1,
+                       "NSDR and a plain sit are two suggestions, and removing one keeps the other")
+    }
+
+    func testRemovingTheWearersOwnWorkoutDeletesIt() {
+        var edits = StateWorkoutEdits(dayKey: "d")
+        edits.pin(suggestion("Running", "18:00–18:40", minutes: 40))
+        XCTAssertEqual(edits.pinned.count, 1)
+        edits.dismiss(edits.pinned[0])
+        XCTAssertTrue(edits.pinned.isEmpty)
+        XCTAssertTrue(edits.dismissed.isEmpty,
+                      "their own workout is deleted, not suppressed — they may ask for it again in an hour")
+    }
+
+    func testAskingForTheSameWorkoutTwiceReplacesIt() {
+        var edits = StateWorkoutEdits(dayKey: "d")
+        edits.pin(suggestion("Running", "18:00–18:30", minutes: 30))
+        edits.pin(suggestion("Running", "18:00–19:00", minutes: 60))
+        XCTAssertEqual(edits.pinned.map(\.minutes), [60])
+    }
+
+    func testRemovingOneSuggestionRevealsAFurtherOne() {
+        let generated = [suggestion("Walking", "07:00–07:30"), suggestion("Cycling", "09:00–10:00"),
+                         suggestion("Yoga", "11:00–11:20"), suggestion("Stretching", "19:00–19:15")]
+        var edits = StateWorkoutEdits(dayKey: "d")
+        XCTAssertEqual(edits.applied(to: generated).map(\.sport), ["Walking", "Cycling", "Yoga"])
+        edits.dismiss(generated[0])
+        let after = edits.applied(to: generated)
+        XCTAssertEqual(after.map(\.sport), ["Cycling", "Yoga", "Stretching"],
+                       "the fourth one was generated and takes the freed place")
+    }
+
+    func testAppliedListStaysInClockOrder() {
+        var edits = StateWorkoutEdits(dayKey: "d")
+        edits.pin(suggestion("Running", "12:00–12:40"))
+        let generated = [suggestion("Yoga", "20:00–20:20"), suggestion("Walking", "08:00–08:30")]
+        XCTAssertEqual(edits.applied(to: generated).map(\.window),
+                       ["08:00–08:30", "12:00–12:40", "20:00–20:20"])
+    }
+
+    func testEditsPersistForTheDayAndResetTheNextOne() throws {
+        let d = try XCTUnwrap(UserDefaults(suiteName: "StateCoachTests.edits"))
+        d.removePersistentDomain(forName: "StateCoachTests.edits")
+        XCTAssertTrue(StateWorkoutEditsStore.read(dayKey: "2026-05-04", d).isEmpty)
+
+        var edits = StateWorkoutEdits(dayKey: "2026-05-04")
+        edits.dismiss(suggestion("Running", "17:00–17:40"))
+        edits.pin(suggestion("Yoga", "19:00–19:20", zone: 1))
+        StateWorkoutEditsStore.write(edits, d)
+        XCTAssertEqual(StateWorkoutEditsStore.read(dayKey: "2026-05-04", d), edits, "same day: still there")
+
+        let tomorrow = StateWorkoutEditsStore.read(dayKey: "2026-05-05", d)
+        XCTAssertTrue(tomorrow.isEmpty, "a removal is \"not today\", not \"never again\"")
+        XCTAssertEqual(tomorrow.dayKey, "2026-05-05")
+        d.removePersistentDomain(forName: "StateCoachTests.edits")
+    }
+
+    func testSuggestionsStoredBeforeByUserExistedStillDecode() throws {
+        let legacy = #"{"dayKey":"2026-05-04","fingerprint":"f","createdAt":0,"items":[{"sport":"Running","minutes":40,"zone":2,"why":"Base."}]}"#
+        let stored = try JSONDecoder().decode(StoredWorkoutSuggestions.self, from: Data(legacy.utf8))
+        XCTAssertEqual(stored.items.count, 1, "a missing byUser must not take the whole day's cache down")
+        XCTAssertFalse(stored.items[0].byUser)
+        XCTAssertNil(stored.items[0].label)
+        let round = try JSONDecoder().decode(WorkoutSuggestion.self,
+                                             from: try JSONEncoder().encode(stored.items[0]))
+        XCTAssertEqual(round, stored.items[0])
+    }
+
+    // MARK: - The workout the wearer asks for
+
+    func testCustomWorkoutTakesTheCoachsObjectAtTheWearersOwnTime() {
+        let raw = """
+        Sure thing:
+        {"sport":"running","minutes":30,"zone":3,"effort":18,"window":"09:00-09:30","why":"Charge is low — keep it honest."}
+        """
+        let s = CustomWorkoutWriter.resolve(answer: raw, request: "30 min run", startMinute: 18 * 60)
+        XCTAssertEqual(s.sport, "Running")
+        XCTAssertEqual(s.minutes, 30)
+        XCTAssertEqual(s.zone, 3)
+        XCTAssertEqual(s.effort, 18)
+        XCTAssertEqual(s.window, "18:00–18:30", "the model's own window never overrides the chosen time")
+        XCTAssertEqual(s.lockZone, 3, "it locks its zone like any other suggestion")
+        XCTAssertTrue(s.byUser)
+        XCTAssertTrue(s.why.contains("Charge is low"), "the coach's warning is kept")
+    }
+
+    func testCustomWorkoutFallsBackToTheWearersWordsWhenTheCoachIsUnavailable() {
+        for answer in [nil, "", "Sorry, I can't help with that."] as [String?] {
+            let s = CustomWorkoutWriter.resolve(answer: answer, request: "30 min easy run",
+                                                startMinute: 17 * 60 + 30)
+            XCTAssertEqual(s.sport, "Running")
+            XCTAssertEqual(s.minutes, 30)
+            XCTAssertEqual(s.window, "17:30–18:00")
+            XCTAssertTrue(s.byUser)
+            XCTAssertFalse(s.why.isEmpty, "the reason must say the coach was not reached")
+        }
+    }
+
+    func testCustomWorkoutFallbackMapsTheTextToTheClosestSport() {
+        XCTAssertEqual(CustomWorkoutWriter.fallback(request: "upper body strength", startMinute: 600).sport,
+                       "Strength")
+        XCTAssertEqual(CustomWorkoutWriter.fallback(request: "an hour of tennis", startMinute: 600).sport,
+                       "Tennis")
+        let rad = CustomWorkoutWriter.fallback(request: "45 Minuten Radfahren", startMinute: 600)
+        XCTAssertEqual(rad.sport, "Cycling", "the alias table reads the wearer's own language too")
+        XCTAssertEqual(rad.minutes, 45)
+        let nsdr = CustomWorkoutWriter.fallback(request: "yoga nidra before bed", startMinute: 21 * 60)
+        XCTAssertEqual(nsdr.label, "NSDR")
+        XCTAssertEqual(nsdr.sport, "Meditation", "recorded as the existing activity, like every NSDR row")
+        XCTAssertEqual(nsdr.zone, 1)
+        XCTAssertNil(nsdr.lockZone)
+    }
+
+    func testCustomWorkoutFallbackUsesOtherWhenNothingMatches() {
+        let s = CustomWorkoutWriter.fallback(request: "20 min of whatever this is", startMinute: 12 * 60)
+        XCTAssertEqual(s.sport, "Other", "no guessing a sport the words do not name")
+        XCTAssertEqual(s.minutes, 20)
+        XCTAssertEqual(s.zone, 2)
+        XCTAssertEqual(s.window, "12:00–12:20")
+    }
+
+    func testCustomWorkoutReadsLengthAndZoneFromTheText() {
+        XCTAssertEqual(CustomWorkoutWriter.minutes(in: "30 min easy run"), 30)
+        XCTAssertEqual(CustomWorkoutWriter.minutes(in: "45Minuten Kraft"), 45)
+        XCTAssertEqual(CustomWorkoutWriter.minutes(in: "1.5 h bike ride"), 90)
+        XCTAssertEqual(CustomWorkoutWriter.minutes(in: "4 hours hiking"), 180, "clamped to the usable range")
+        XCTAssertNil(CustomWorkoutWriter.minutes(in: "5k easy"), "a bare number is not a length")
+        XCTAssertNil(CustomWorkoutWriter.minutes(in: "an easy run"))
+
+        XCTAssertEqual(CustomWorkoutWriter.requestedZone("tempo run in zone 4"), 4)
+        XCTAssertEqual(CustomWorkoutWriter.requestedZone("30 min Z2"), 2)
+        XCTAssertNil(CustomWorkoutWriter.requestedZone("30 min easy run"), "30 min is not Zone 3")
+        XCTAssertNil(CustomWorkoutWriter.requestedZone("zone 9"))
+    }
+
+    func testCustomWorkoutPromptCarriesTheRequestTheTimeAndTheWholeCatalogue() {
+        let p = CustomWorkoutWriter.systemPrompt(grounding: "GROUNDING", request: "30 min easy run",
+                                                 startMinute: 18 * 60 + 30)
+        XCTAssertTrue(p.contains("\"30 min easy run\""))
+        XCTAssertTrue(p.contains("18:30 local"))
+        XCTAssertTrue(p.contains("Do not change it."))
+        XCTAssertTrue(p.contains("NSDR"), "the selection does not narrow an explicit request")
+        XCTAssertTrue(p.contains("Running"))
+        XCTAssertTrue(p.contains("say so plainly"), "it must warn when today's state is against it")
+        XCTAssertTrue(p.hasSuffix("GROUNDING"))
+    }
+
+    func testCustomWorkoutTimeResolvesToTheNextFiveMinuteMark() throws {
+        let cal = Calendar.current
+        let at = try XCTUnwrap(cal.date(bySettingHour: 14, minute: 3, second: 0, of: now))
+        XCTAssertEqual(CustomWorkoutTime.asap.startMinute(now: at, calendar: cal), 14 * 60 + 5)
+        XCTAssertEqual(CustomWorkoutTime.clock(19 * 60).startMinute(now: at, calendar: cal), 19 * 60)
+        XCTAssertEqual(CustomWorkoutTime.clock(-10).startMinute(now: at, calendar: cal), 0)
+        XCTAssertEqual(CustomWorkoutTime.clock(9_999).startMinute(now: at, calendar: cal), 23 * 60 + 55)
+    }
+
+    func testCustomWorkoutWindowIsNeverRefusedForBeingLate() {
+        XCTAssertEqual(CustomWorkoutWriter.window(startMinute: 22 * 60 + 30, minutes: 20), "22:30–22:50")
+        XCTAssertEqual(CustomWorkoutWriter.window(startMinute: 23 * 60 + 55, minutes: 60), "23:55–23:59")
+    }
 }

@@ -339,6 +339,11 @@ struct StrandiOSApp: App {
                 // Re-arm the strap's smart alarm on foreground: the firmware alarm is a single instant
                 // and iOS can't re-arm it while suspended, so it would otherwise fire once and stop.
                 model.applySmartAlarm()
+                // Same for the Sleep tab's wake buzz: its fire timer cannot run while the app is
+                // suspended, so re-resolve the schedule on every resume. `reschedule` also rings an
+                // instant that was missed by less than one ring window, and re-checks the auto-stop
+                // window of a ring that was still "on" when we were suspended.
+                model.wakeBuzz.reschedule()
                 // #267: pull a reasonably fresh sync on open rather than waiting for the 900s periodic
                 // timer or an incidental reconnect. Floored at 90s and never clock/empty-streak-suppressed
                 // (BackfillPolicy.shouldRun's .foreground case), so this is a safe no-op on rapid re-opens.
