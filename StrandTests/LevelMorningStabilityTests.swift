@@ -123,7 +123,8 @@ final class LevelMorningStabilityTests: XCTestCase {
     }
 
     /// The one move there is: the level day's OWN entry. Before it the state is provisional and says so;
-    /// after it, it is not, and the stand-in is out of the picture.
+    /// after it, it is not, and the composed read every surface does answers with today rather than with
+    /// the stand-in it was holding.
     func testTheLevelDaysOwnEntryIsTheOnlyMoveAndIsDistinguishable() throws {
         let d = try defaults()
         let ledger = LevelLedger(fileURL: nil, legacy: d)
@@ -139,8 +140,19 @@ final class LevelMorningStabilityTests: XCTestCase {
         ledger.write(level("2026-09-16", 57))
         XCTAssertEqual(ledger.entry("2026-09-16")?.level, 57)
         XCTAssertFalse(LevelDayFreeze.isPendingToday(ledger: ledger, now: at(16, 8, 2), calendar: calendar, d))
-        // And a stand-in is never the level day itself, so it can never be mistaken for it.
-        XCTAssertNil(LevelDayFreeze.standIn(levelDay: "2026-09-16", ledger: ledger, d))
+
+        // THE COMMITTED DAY WINS OVER THE HELD STAND-IN. This is the read every surface does — the strip,
+        // the timeline and the coach all take `entry(levelDay) ?? standIn(levelDay)` — so what is pinned
+        // is the composed answer, not that the stand-in forgets itself. It is still held, harmlessly, and
+        // simply never consulted again for this level day; holding it is what stops a day landing later in
+        // the morning from becoming a new headline.
+        let shown = ledger.entry("2026-09-16") ?? LevelDayFreeze.standIn(levelDay: "2026-09-16", ledger: ledger, d)
+        XCTAssertEqual(shown?.day, "2026-09-16")
+        XCTAssertEqual(shown?.level, 57)
+        // And a stand-in is never the level day's OWN entry: asked for a level day that IS written but has
+        // no stand-in held, it offers nothing rather than passing that day's level off as a stand-in for
+        // itself. (Without the `day < levelDay` guard this would hand back the 15th's own level.)
+        XCTAssertNil(LevelDayFreeze.standIn(levelDay: "2026-09-15", ledger: ledger, d))
     }
 
     /// Nothing written before the level day is no number at all — "–" — rather than a figure that will
