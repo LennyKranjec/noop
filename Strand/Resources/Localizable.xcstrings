@@ -4,6 +4,9 @@
     "Alarm": { "localizations": {
       "de": { "stringUnit": { "state": "translated", "value": "Wecker" } }, "en": { "stringUnit": { "state": "translated", "value": "Alarm" } }, "es": { "stringUnit": { "state": "translated", "value": "Alarma" } }, "fr": { "stringUnit": { "state": "translated", "value": "Alarme" } }, "it": { "stringUnit": { "state": "translated", "value": "Sveglia" } }, "pl": { "stringUnit": { "state": "translated", "value": "Alarm" } }, "pt-PT": { "stringUnit": { "state": "translated", "value": "Alarme" } }, "ru": { "stringUnit": { "state": "translated", "value": "Будильник" } }, "zh-Hans": { "stringUnit": { "state": "translated", "value": "闹钟" } }, "zh-Hant": { "stringUnit": { "state": "translated", "value": "鬧鐘" } }
     } },
+    "Focus, today's meditation is still open": { "localizations": {
+      "de": { "stringUnit": { "state": "translated", "value": "Fokus, die heutige Meditation fehlt noch" } }, "en": { "stringUnit": { "state": "translated", "value": "Focus, today's meditation is still open" } }
+    } },
     "Test": { "localizations": {
       "de": { "stringUnit": { "state": "translated", "value": "Test" } }, "en": { "stringUnit": { "state": "translated", "value": "Test" } }, "es": { "stringUnit": { "state": "translated", "value": "Probar" } }, "fr": { "stringUnit": { "state": "translated", "value": "Tester" } }, "it": { "stringUnit": { "state": "translated", "value": "Prova" } }, "pl": { "stringUnit": { "state": "translated", "value": "Test" } }, "pt-PT": { "stringUnit": { "state": "translated", "value": "Testar" } }, "ru": { "stringUnit": { "state": "translated", "value": "Тест" } }, "zh-Hans": { "stringUnit": { "state": "translated", "value": "测试" } }, "zh-Hant": { "stringUnit": { "state": "translated", "value": "測試" } }
     } },

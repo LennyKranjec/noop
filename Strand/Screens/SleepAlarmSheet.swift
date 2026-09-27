@@ -61,6 +61,11 @@ private struct SleepAlarmSheetContent: View {
             // A value written by an older build (or a corrupted defaults entry) could sit between two
             // slots, which would leave the wheel showing no selection. Snap it once on open.
             minutes = WakeBuzzAlarm.snapped(minutes)
+            // Re-resolve the schedule as the sheet opens. `reschedule` is idempotent and cheap, and it is
+            // what fills `nextFire` — without this, opening the sheet on a launch where the resolve was
+            // skipped shows "Not scheduled yet" under an alarm that is switched on, and the caption is the
+            // only place the user can check the alarm is really armed.
+            ringer.reschedule()
         }
     }
 
@@ -99,10 +104,12 @@ private struct SleepAlarmSheetContent: View {
     }
 
     /// The armed time, from the ringer's OWN resolved instant rather than the picker's raw minutes — if
-    /// the two ever disagree, the one that will actually buzz is the one worth showing. "—" when the
-    /// alarm is off or nothing resolved; never an invented time.
+    /// the two ever disagree, the one that will actually buzz is the one worth showing. Never an invented
+    /// time: the switch being ON with nothing resolved is its own line, not "Off", because reading "Off"
+    /// next to a switch that is on tells the user the opposite of the truth.
     private var nextFireCaption: String {
-        guard alarmOn, let next = ringer.nextFire else { return String(localized: "Off") }
+        guard alarmOn else { return String(localized: "Off") }
+        guard let next = ringer.nextFire else { return String(localized: "Not scheduled yet") }
         let c = Calendar.current.dateComponents([.hour, .minute], from: next)
         return String(localized: "Next buzz \(WakeBuzzAlarm.timeLabel((c.hour ?? 0) * 60 + (c.minute ?? 0)))")
     }

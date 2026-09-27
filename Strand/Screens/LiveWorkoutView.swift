@@ -68,8 +68,10 @@ struct LiveWorkoutView: View {
                 // Listed directly (not an [AnyView] walked by a ForEach): SwiftUI keeps each card's static
                 // type, so it can diff them instead of rebuilding type-erased boxes on every live tick.
                 heroRow.staggeredAppear(index: 0)
-                // AVG / PEAK plus Today's Effort so far (live) against the day's recommended ceiling —
-                // the same target Today's hero ring marks — so a session can be paced against the whole day.
+                // AVG / PEAK plus today's Effort against the day's recommended ceiling — the SAME two
+                // shared resolutions Today's hero ring and the lock-screen strip read (`todayEffortNow` /
+                // `todayEffortTarget`), so a session can be paced against the whole day without this
+                // screen ever printing a day figure the other surfaces disagree with.
                 SessionSummaryCard(avgHr: model.activeWorkout?.avgHr ?? 0,
                                    peakHr: model.activeWorkout?.peakHr ?? 0,
                                    sessionEffort: model.activeWorkout?.liveStrain ?? 0,
@@ -1042,28 +1044,30 @@ private struct ZoneSlider: View {
 /// card. They were two cards with a 26pt gap between them, and the stat row's third column repeated the
 /// Effort already shown in the hero above — so the merge costs no information.
 ///
-/// Today's Effort so far — live — against the day's recommended ceiling, on the wearer's Effort scale:
-/// "9.8 / 14". A bar shows the day before this session (dim), what this session has added (bright), and
-/// a notch at the target.
+/// Today's Effort against the day's recommended ceiling, on the wearer's Effort scale: "9.8 / 14". A bar
+/// fills to the day's figure with a notch at the target.
 ///
-/// THE SAME NUMBERS AS TODAY, resolved as Today resolves them (and as the widget publisher mirrors it):
-///   - DAY BEFORE THE SESSION: the app's own Effort (computed lane, else the merged row, through the
-///     never-drop max with the live value Today last published), yielding to WHOOP's own strain when the
-///     app's own is a zero the strap did not earn — read ONCE when the screen opens.
-///   - TARGET: the top of `CoupledView.optimalStrainRange(recovery:)`, recovery being WHOOP's own for
-///     today when it has one, else the app's own Charge; placed on the 0–100 axis through the INVERSE
-///     `StrainCalibration`, exactly like the hero ring's mark.
+/// THE SAME NUMBER TODAY AND THE WIDGET SHOW, AT THE SAME MOMENT — because it is literally the same
+/// resolution: `Repository.todayEffortNow()` printed through its own `display(scale:)`, and
+/// `Repository.todayEffortTarget()` for the ceiling. This card used to resolve both itself — a
+/// calendar-day key instead of Today's logical day, its own (computed ?? merged) read of the day, its own
+/// recovery precedence for the band, and its own `StrainCombine` sum of the live session on top — so it
+/// printed a different day figure from Today and the lock-screen strip for the whole session.
 ///
-/// CHEAP ON PURPOSE. Nothing here rescans the day's heart rate: the day figure is loaded once, and the
-/// session's running `liveStrain` (already recomputed per sample by `AppModel`) is folded in on the log
-/// axis via `StrainScorer.combinedStrain` — Effort is not additive, TRIMP is.
+/// THE SESSION IS NOT ADDED INTO THE DAY FIGURE. The day's Effort is measured from the day's heart rate,
+/// and this session's beats reach it through the strap's history; adding the session's own running Effort
+/// on top would count the overlap twice the moment a drain lands, and it would have to be added on Today,
+/// the Key Metrics tile, the Effort detail and the widget too or the four would disagree again. The
+/// session's own live Effort is the hero number at the top of this screen, and the line under the bar
+/// states it as its own figure — see `TodayEffortNow`.
 ///
-/// ABSENT INPUT ABSTAINS: AVG/PEAK show "—" until the session has a reading, and the DAY column shows
-/// "—" until the one-off load lands. Nothing is substituted for a missing value.
+/// CHEAP ON PURPOSE. Nothing here rescans the day's heart rate: the two shared resolutions are day-scoped
+/// reads on a 30 s task of their own, never on the live-HR path (`captureWorkoutSample`, its accumulator
+/// and the trace's downsample cache are untouched by this card).
 ///
-/// KNOWN LIMIT: if Today (or the daily pass) had already scored part of THIS session's heart rate before
-/// the screen opened — e.g. reopened after a relaunch mid-workout — that part is counted twice. It is a
-/// live pacing read-out, not a stored score; the day's number of record is still the daily pass.
+/// ABSENT INPUT ABSTAINS: AVG/PEAK show "—" until the session has a reading; the day figure and the
+/// target each show a dash on their own until they resolve, and the bar does not draw until the day
+/// figure does. Nothing is substituted for a missing value.
 private struct SessionSummaryCard: View {
     @EnvironmentObject private var model: AppModel
     let avgHr: Int
@@ -1071,23 +1075,25 @@ private struct SessionSummaryCard: View {
     let sessionEffort: Double
     let effortScale: EffortScale
 
-    @State private var loaded = false
-    @State private var baseline: Double = 0
-    @State private var target100: Double?
-    @State private var targetUpper21: Int?
+    /// How often the shared day figure + target are re-read while the session runs. Slow on purpose: both
+    /// move on a sync or a Today reload, not per heartbeat.
+    private static let dayRefreshNanos: UInt64 = 30_000_000_000
+
+    @State private var effortNow: TodayEffortNow?
+    @State private var target: TodayEffortTarget?
 
     var body: some View {
         // The stat row renders immediately (it needs no load), and the day-vs-target strip appears under
-        // it when the one-off read lands. The card is never zero-height, so `.task` is always attached to
+        // it when the first read lands. The card is never zero-height, so `.task` is always attached to
         // a view that actually renders — the reason the old card carried a 1pt stand-in.
         NoopCard(padding: NoopMetrics.space3, tint: StrandPalette.effortColor) {
             VStack(alignment: .leading, spacing: NoopMetrics.space2) {
                 statRow
-                if loaded { dayStrip }
+                if let day100 = effortNow?.effort100 { dayStrip(day100: day100) }
             }
         }
         .accessibilityElement(children: .combine)
-        .task { await load() }
+        .task { await trackDayEffort() }
     }
 
     private var statRow: some View {
@@ -1098,33 +1104,33 @@ private struct SessionSummaryCard: View {
             stat(String(localized: "PEAK"), peakHr > 0 ? "\(peakHr)" : "—",
                  tint: peakHr > 0 ? StrandPalette.metricRose : StrandPalette.textPrimary)
             statDivider
-            // Day Effort so far / today's recommended ceiling, on the wearer's scale. The label reuses
-            // the already-translated "Day" and "target" keys rather than introducing a new string.
+            // Day Effort / today's recommended ceiling, on the wearer's scale, both from the shared
+            // resolutions. The label reuses the already-translated "Day" and "target" keys rather than
+            // introducing a new string.
             stat(Self.dayTargetLabel,
-                 loaded ? "\(UnitFormatter.effortDisplay(dayEffort, scale: effortScale))/\(targetText)" : "—",
+                 TodayEffortNow.dayTargetText(effort: effortNow, target: target, scale: effortScale),
                  tint: pastTarget ? StrandPalette.metricRose : StrandPalette.textPrimary)
         }
     }
 
-    /// The bar: the whole day so far, the part this session added, and a notch at the target.
-    private var dayStrip: some View {
-        let day = dayEffort
-        let domain = min(StrainScorer.maxStrain, max((target100 ?? 0) * 1.2, day * 1.1, 10))
-        let beforeFrac = min(max(baseline / domain, 0), 1)
-        let dayFrac = min(max(day / domain, 0), 1)
+    /// The bar: the day so far on the 0–100 axis with a notch at the target — the same axis and the same
+    /// inverse-calibrated mark Today's hero ring uses.
+    private func dayStrip(day100: Double) -> some View {
+        let target100 = target?.upper100
+        let domain = min(StrainScorer.maxStrain, max((target100 ?? 0) * 1.2, day100 * 1.1, 10))
+        let dayFrac = min(max(day100 / domain, 0), 1)
         let targetFrac = target100.map { min(max($0 / domain, 0), 1) }
-        let sessionText = UnitFormatter.effortDeltaDisplay(max(0, day - baseline), scale: effortScale)
+        // The session's OWN Effort, stated as its own figure. Not a delta of the day number: the day
+        // number does not contain it (see the type comment), so `effortDisplay` — the stored-value
+        // formatter every other session read-out uses — is the right one here.
+        let sessionText = UnitFormatter.effortDisplay(sessionEffort, scale: effortScale)
         return VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
             GeometryReader { geo in
                 let w = geo.size.width
                 ZStack(alignment: .leading) {
                     Capsule().fill(StrandPalette.hairline)
-                    // The whole day so far in full colour, then the day-before span dimmed over its
-                    // start, so the bright remainder is exactly what this session added.
                     Capsule().fill(StrandPalette.effortColor)
                         .frame(width: max(0, CGFloat(dayFrac) * w))
-                    Capsule().fill(StrandPalette.effortColor.opacity(0.4))
-                        .frame(width: max(0, CGFloat(beforeFrac) * w))
                     if let targetFrac {
                         Rectangle()
                             .fill(StrandPalette.textPrimary)
@@ -1137,7 +1143,7 @@ private struct SessionSummaryCard: View {
             }
             .frame(height: 16)
             Text(pastTarget ? String(localized: "Past today's recommended ceiling.")
-                            : String(localized: "This workout +\(sessionText)"))
+                            : String(localized: "This workout \(sessionText) so far"))
                 .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
                 .lineLimit(1).minimumScaleFactor(0.8)
         }
@@ -1170,43 +1176,29 @@ private struct SessionSummaryCard: View {
         "\(String(localized: "Day").localizedUppercase) / \(String(localized: "target").localizedUppercase)"
     }
 
-    private var dayEffort: Double {
-        let denominator = StrainScorer.logMapDenominator(method: PuffinExperiment.effortMethod,
-                                                         sex: model.profile.sex)
-        return StrainScorer.combinedStrain(baseline, sessionEffort, denominator: denominator)
-    }
-
+    /// Past the ceiling, compared on the one axis both figures are already on (0–100, the target through
+    /// the inverse calibration) — the monotone image of Today's own strain21-vs-band-top comparison.
     private var pastTarget: Bool {
-        guard loaded, let target100 else { return false }
-        return dayEffort >= target100
+        guard let day100 = effortNow?.effort100, let target100 = target?.upper100 else { return false }
+        return day100 >= target100
     }
 
-    private var targetText: String {
-        guard let target100 else { return "–" }
-        // On the WHOOP scale the band top is a whole WHOOP strain (14), shown as WHOOP states it.
-        if effortScale == .whoop, let targetUpper21 { return "\(targetUpper21)" }
-        return "\(Int(target100.rounded()))"
-    }
-
-    /// Read the day-before-session Effort and today's target once. Mirrors `LiquidTodayView.heroOwnEffort`
-    /// / `optimalStrainCeiling` and `WidgetPublish.fillStrip`.
-    private func load() async {
-        guard !loaded else { return }
+    /// Keep the day figure + target current while the session runs.
+    ///
+    /// They must be the numbers Today and the widget show AT THE SAME MOMENT, and both of those move
+    /// without notifying this screen: the live in-progress value is a static Today publishes when it
+    /// reloads, and the day's own rows land on a history drain. The card used to read its figures exactly
+    /// ONCE, latched behind a `loaded` flag, so a session that outlived a sync kept showing the day as it
+    /// stood when the screen opened. A slow poll of the two shared resolutions is what keeps them level;
+    /// it is its own task, cancelled with the screen, and never touches the live-HR path.
+    private func trackDayEffort() async {
         let repo = model.repo
-        let todayKey = Repository.localDayKey(Date())
-        let cloud = await repo.whoopCloudDay(todayKey)
-        let computed = await repo.noopScores(day: todayKey)
-        let row = repo.days.first { $0.day == todayKey }
-        var own = StrainScorer.effectiveEffort(live: TodayView.publishedLiveStrain(day: todayKey),
-                                               stored: computed.effort ?? row?.strain)
-        // A ZERO THE STRAP DID NOT EARN yields to WHOOP's own strain for the day, as on Today.
-        if let o = own, o < 0.5, let c = cloud?.strain, c > 0 { own = nil }
-        baseline = own ?? cloud?.strain.map { StrainCalibration.effort100(strain21: $0) } ?? 0
-        let recovery = cloud?.recovery ?? computed.charge ?? row?.recovery
-        if let band = CoupledView.optimalStrainRange(recovery: recovery) {
-            targetUpper21 = band.upperBound
-            target100 = StrainCalibration.effort100(strain21: Double(band.upperBound))
+        while !Task.isCancelled {
+            let now = await repo.todayEffortNow()
+            let resolvedTarget = await repo.todayEffortTarget()
+            effortNow = now
+            target = resolvedTarget
+            try? await Task.sleep(nanoseconds: Self.dayRefreshNanos)
         }
-        loaded = true
     }
 }

@@ -978,10 +978,12 @@ struct LiquidTodayView: View {
         return min(StrainCalibration.strain21(effort100: local), whoopStrainMax)
     }
 
-    /// The top of the day's recommended strain band, on WHOOP's scale.
+    /// The top of the day's recommended strain band, on WHOOP's scale. Through the ONE target resolution
+    /// (`TodayEffortTarget`) the live-workout card and the lock-screen strip also read, so the band lookup
+    /// and its placement on the 0–100 axis live in a single place. Same inputs, same result as before.
     private var optimalStrainCeiling: Double? {
-        guard let recovery = cloudDay?.recovery ?? displayDay?.recovery else { return nil }
-        return CoupledView.optimalStrainRange(recovery: recovery).map { Double($0.upperBound) }
+        TodayEffortTarget.resolve(recovery: cloudDay?.recovery ?? displayDay?.recovery)
+            .map { Double($0.upper21) }
     }
 
     private func heroPercentText(_ value: Double?) -> String {

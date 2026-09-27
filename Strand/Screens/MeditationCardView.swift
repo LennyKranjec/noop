@@ -36,7 +36,9 @@ struct MeditationCardView: View {
     @State private var daysInWindow = 0
     @State private var recent: [WorkoutRow] = []
 
-    private var doneToday: Bool { (week.last ?? 0) >= LevelEngine.meditationMinMinutes }
+    /// The shared rule, not a local copy of the threshold — the Focus tab's reminder badge clears on
+    /// exactly this, so the two must be one expression.
+    private var doneToday: Bool { MeditationLog.isDayDone(minutes: week.last ?? 0) }
 
     var body: some View {
         StrandCard {
@@ -96,7 +98,7 @@ struct MeditationCardView: View {
     private var circles: some View {
         HStack(spacing: 8) {
             ForEach(Array(week.enumerated()), id: \.offset) { i, minutes in
-                DayCircle(lit: minutes >= LevelEngine.meditationMinMinutes, isToday: i == week.count - 1)
+                DayCircle(lit: MeditationLog.isDayDone(minutes: minutes), isToday: i == week.count - 1)
             }
             Spacer(minLength: 8)
             playButton
@@ -169,7 +171,7 @@ struct MeditationCardView: View {
         }
         week = (0..<7).reversed().map { minutes(back: $0) }
         daysInWindow = (0..<LevelEngine.meditationWindowDays)
-            .filter { minutes(back: $0) >= LevelEngine.meditationMinMinutes }.count
+            .filter { MeditationLog.isDayDone(minutes: minutes(back: $0)) }.count
         // The same window `meditationMinutesByDay` just read, so both come out of one workout read
         // rather than two.
         recent = Array(await repo.meditationSessions().prefix(3))

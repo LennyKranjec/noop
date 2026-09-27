@@ -194,6 +194,43 @@ enum LevelDayFreeze {
         return Date(timeIntervalSince1970: t)
     }
 
+    /// Which day's written level stood in for a level day while that day had none, by level day.
+    private static let standInKey = "level.standIn.v1"
+
+    /// How many level days of stand-ins are kept. Only the current one is ever read.
+    private static let standInKept = 7
+
+    /// The written level that stands in for `levelDay` while that day has none: the newest day written
+    /// before it, CHOSEN ONCE AND THEN HELD for the rest of that level day.
+    ///
+    /// WHY IT IS HELD, AND WHAT MOVED WITHOUT IT. Every day in the ledger is immutable, but "the newest
+    /// day written" is not. The ledger legitimately gains days through the morning: yesterday is written
+    /// at its deadline only once an analysis pass has completed after it (`LevelLedger.deadlinePassed`),
+    /// and that pass is usually this morning's sync — and any older day the app was not opened on lands
+    /// in the same walk, which commits in batches and can stop part-way and carry on later. Reading the
+    /// newest written day afresh on every load therefore stepped the headline through two or three
+    /// different frozen days before today's own level had even arrived, and each step re-ran the count-up.
+    /// So the first stand-in picked for a level day is written down here and kept: the number moves
+    /// exactly once, when the level day's OWN entry lands, and that one move is the marked
+    /// provisional → committed transition (`isPendingToday`).
+    ///
+    /// KEPT ON DISK, not in memory, so a relaunch mid-morning holds the same stand-in.
+    ///
+    /// Nil until there is a written day before `levelDay` to hold — then the headline is "–", which is
+    /// the honest answer and not a number that will move.
+    static func standIn(levelDay: String, ledger: LevelLedger, _ d: UserDefaults = .standard) -> FrozenLevel? {
+        var held = d.dictionary(forKey: standInKey) as? [String: String] ?? [:]
+        if let day = held[levelDay], day < levelDay, let entry = ledger.entry(day) { return entry }
+        // Nothing held yet, or what was held is gone (a new recipe epoch emptied the ledger): pick again.
+        guard let entry = ledger.latest(onOrBefore: levelDay), entry.day < levelDay else { return nil }
+        held[levelDay] = entry.day
+        if held.count > standInKept {
+            for old in held.keys.sorted().prefix(held.count - standInKept) { held[old] = nil }
+        }
+        d.set(held, forKey: standInKey)
+        return entry
+    }
+
     /// Whether what the strip shows is NOT today's level: the current day's entry is not written yet, or
     /// the current day is not today on the calendar because this morning's flow has not run — before it,
     /// the level day is yesterday, and yesterday's entry is not this morning's number.

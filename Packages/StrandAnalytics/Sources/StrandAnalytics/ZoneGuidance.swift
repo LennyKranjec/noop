@@ -20,8 +20,17 @@ import Foundation
 //     earns its own settle period rather than inheriting the old run.
 //
 // CADENCE. Within a run the first cue fires as the run starts, then every `cueInterval` seconds. The
-// clock is the sample timestamps, so the schedule is only as fine as the HR feed (≈1 Hz with the
-// realtime stream armed, which the workout screen does).
+// clock is whatever `now` the owner passes, so the schedule is only as fine as the owner's tick —
+// `AppModel` drives this from a 1 Hz timer while a lock is live, NOT from HR arrivals. It used to be fed
+// only from the live-HR sink, and both HR publishers are change-guarded (`state.heartRate != hr`), so a
+// steady effort emitted nothing and the cadence stalled indefinitely: the cue that should have repeated
+// every few seconds arrived whenever the wearer's bpm happened to tick over. Any owner MUST pump this on
+// a wall clock; `settleSeconds` and `cueInterval` are both budgets against real time, and they STACK, so
+// a first cue costs `settleSeconds + one tick` and every repeat costs `cueInterval`.
+//
+// A cue the owner could not play (the motor was still busy with another pattern) must be handed back via
+// `deferLastCue()`, not dropped — otherwise the run's clock has already advanced and the wearer waits a
+// whole extra `cueInterval` for a buzz that was never delivered.
 
 /// Where a bpm reading sits relative to the locked zone.
 public enum ZonePosition: Equatable, Sendable {
@@ -50,10 +59,17 @@ public struct ZoneGuidance: Equatable, Sendable {
 
     /// How far outside the zone (bpm) a reading must be before it counts toward starting a cue run.
     public static let defaultMarginBPM: Double = 2
-    /// How long (s) the reading must stay beyond the margin before the first cue.
-    public static let defaultSettleSeconds: TimeInterval = 10
-    /// Seconds between repeated cues while the wearer stays out of the zone.
-    public static let defaultCueInterval: TimeInterval = 8
+    /// How long (s) the reading must stay beyond the margin before the first cue. Deliberately SHORT: this
+    /// budget stacks on top of the owner's tick and its cue-bpm smoothing, and at the original 10 s it
+    /// stacked with an 8 s `cueInterval` into a 15–20 s wait for a correction the wearer needed inside a
+    /// couple of seconds. 3 s is still two to three ticks of confirmation — enough that a single stray beat
+    /// or a median wobbling across a boundary cannot buzz the wrist — and it is the one number to raise if
+    /// the cue ever starts firing on noise.
+    public static let defaultSettleSeconds: TimeInterval = 3
+    /// Seconds between repeated cues while the wearer stays out of the zone. Must stay comfortably longer
+    /// than the owner's buzz walk (two spaced pulses ≈ 1.7 s on the strap motor) so consecutive cues cannot
+    /// run into one another and read as one long mush.
+    public static let defaultCueInterval: TimeInterval = 4
 
     /// The locked zone's bounds (bpm), inclusive at both ends — a reading exactly on the edge is IN.
     public let lower: Double
@@ -91,6 +107,14 @@ public struct ZoneGuidance: Equatable, Sendable {
     /// True when the reading is outside the zone by at least the margin — far enough to start a run.
     public func isBeyondMargin(_ bpm: Double) -> Bool {
         bpm <= lower - marginBPM || bpm >= upper + marginBPM
+    }
+
+    /// Hand back the cue `update` just returned because the owner could NOT play it (another haptic pattern
+    /// was still on the motor). The run itself stands — the wearer is still on the wrong side — but its
+    /// cadence clock is rewound, so the very next tick re-offers the cue instead of the drop silently
+    /// costing a whole `cueInterval`. Safe to call when there is no run: it only clears the clock.
+    public mutating func deferLastCue() {
+        lastCueAt = nil
     }
 
     /// Back to silent with nothing building — for pause, unlock, a lost HR signal.

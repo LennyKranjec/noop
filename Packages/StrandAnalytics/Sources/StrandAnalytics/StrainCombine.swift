@@ -3,13 +3,19 @@ import Foundation
 // StrainCombine.swift — adding two Efforts on the log axis.
 //
 // Effort is NOT additive: it is 100 × ln(TRIMP + 1) / ln(D), so a day at 40 plus a workout at 40 is not
-// 80. The live-workout "day so far" read-out needs exactly that sum (the day's Effort before the session
-// + the session's running Effort), so both are taken back to TRIMP, added there — where load IS
-// additive — and mapped forward again through the same denominator.
+// 80. Where two Efforts genuinely have to be summed, both are taken back to TRIMP, added there — where
+// load IS additive — and mapped forward again through the same denominator.
 //
 // An approximation, stated plainly: Banister's day score also nets off a sedentary baseline over the
-// day's minutes, which a two-number combine cannot see. It is a live estimate for a progress bar, not a
+// day's minutes, which a two-number combine cannot see. It is an estimate for a progress bar, not a
 // stored score; the daily pass remains the number of record.
+//
+// NOT FOR "THE DAY PLUS THE LIVE SESSION". The live-workout screen used to build its day read-out that
+// way — the day's resolved Effort plus the in-progress session's running Effort — and it drifted from the
+// figure Today, the Key Metrics tile, the Effort detail and the widget show (they all read
+// `Repository.todayEffortNow`), because the two are readings of the SAME beats: the session's heart rate
+// reaches the day's own score through the strap's history, so the sum counts the overlap twice. No
+// production caller sums a day and a session any more; the session's Effort is shown as its own figure.
 
 public extension StrainScorer {
 

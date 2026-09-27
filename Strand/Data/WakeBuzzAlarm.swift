@@ -82,6 +82,22 @@ enum WakeBuzzAlarm {
     /// than none.
     static let missedGraceSeconds: TimeInterval = autoStopSeconds
 
+    /// Whether a scheduled instant is still worth ringing at `now` — the single gate BOTH delivery paths
+    /// go through, so the grace window above is one rule rather than one rule and one omission.
+    ///
+    /// It has to be applied where the FIRE TIMER lands as well as where the catch-up scan runs. The timer
+    /// is armed for an absolute instant on the main run loop, and that run loop does not turn while iOS
+    /// has the app suspended: a 07:00 timer on a phone that is not woken until 10:00 fires the moment the
+    /// loop spins up, three hours late. Without this gate that fired the alarm at 10:00 — which is the
+    /// case the comment on `missedGraceSeconds` says must be dropped, not resurrected.
+    ///
+    /// A `now` BEFORE the instant is early (a run loop firing a hair ahead of the fire date, or a clock
+    /// that moved backwards) and still rings: the instant has arrived as far as anyone can tell, and
+    /// refusing it would drop the alarm entirely.
+    static func shouldRing(scheduled: Date, now: Date) -> Bool {
+        now.timeIntervalSince(scheduled) <= missedGraceSeconds
+    }
+
     /// Whether a ring that started at `startedAt` has outlived the auto-stop window. The ringer arms a
     /// timer for this, but also re-checks it whenever it is woken, so a ring that was still "on" while
     /// the app was suspended can never come back ringing.

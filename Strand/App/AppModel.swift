@@ -113,13 +113,45 @@ final class AppModel: ObservableObject {
     /// Transient on purpose — only the LOCK itself is persisted; after a relaunch the settle window simply
     /// starts over, which is the safe direction.
     private var zoneGuidance: ZoneGuidance?
+    /// The 1 Hz pump for `evaluateZoneGuidance`, armed for exactly as long as a lock is actually being cued
+    /// (workout running, zone locked, not paused) and invalidated the moment it is not. Cueing USED to ride
+    /// the live-HR sink alone — and both HR publishers are change-guarded (`FrameRouter`'s
+    /// `state.heartRate != hr`, `BLEManager`'s standard-profile twin), so a steady effort published nothing
+    /// and the cue cadence stalled for as long as the wearer's bpm held still. That is the "far too late,
+    /// far too big gaps" report: the cadence was never a clock, it was a bpm-change counter.
+    private var zoneCueTimer: Timer?
+    /// When the zone cue's own multi-pulse buzz walk finishes on the motor. A cue offered while a walk is
+    /// still in flight is DEFERRED (handed back to `ZoneGuidance`, retried on the next tick), never queued
+    /// behind it — a correction that arrives late corrects nothing, and stacked patterns read as one mush.
+    /// A Date, not a flag, so it cannot latch on a failure path (§ the sticky-boolean family of bugs).
+    private var zoneCueWalkUntil: Date = .distantPast
     /// When the strap was last asked to buzz, from ANY path (`buzz` / `buzzStrapOnce`). The zone-lock cue
     /// holds off within `zoneCueMinGap` of it, so a lock cue never lands on top of the start buzz, a coach
-    /// cue or a user buzz still playing on the motor — BLE writes are queued, but two patterns fired back
-    /// to back read as one long mush on the wrist.
+    /// cue or a user buzz still playing on the motor: two patterns fired back to back read as one long mush
+    /// on the wrist. NOTE this is an app-side spacing decision only — `BLEManager.send` writes straight to
+    /// the characteristic with no queue and no pacer, so the delay a late cue shows is never "stuck behind
+    /// other writes"; it is this gap, the settle window and the cadence.
     private var lastStrapBuzzAt: Date = .distantPast
-    /// Minimum quiet gap (s) before a zone-lock cue may fire after any other strap buzz.
-    static let zoneCueMinGap: TimeInterval = 3
+    /// Minimum quiet gap (s) before a zone-lock cue may fire after any other strap buzz. Only has to cover a
+    /// FOREIGN pattern (the workout-start buzz, a coach cue, a user buzz) — the zone cue's own walk is
+    /// tracked separately by `zoneCueWalkUntil` — so it no longer needs to be longer than the cadence it
+    /// sits inside. A cue held off by this is deferred, not dropped, so it lands on the next tick.
+    static let zoneCueMinGap: TimeInterval = 2
+    /// How often the zone-cue evaluation runs while a lock is live. One second: the finest the ~1 Hz HR feed
+    /// can support, and fine enough that `settleSeconds` / `cueInterval` are honoured to within a tick.
+    static let zoneCueTick: TimeInterval = 1
+    /// Trailing window (s) of raw samples the zone DECISION medians over. Much shorter than the ~10 s window
+    /// behind the displayed `bpm`: a 10 s median lags a real HR move by ~5 s, which the wearer feels as the
+    /// cue arriving long after they left the zone. The DISPLAYED number is deliberately untouched — only the
+    /// cue reads this faster value.
+    static let zoneCueSmoothingSeconds: TimeInterval = 2
+    /// Start-to-start spacing (s) of the pulses inside one zone cue. The strap has no "two taps" pattern:
+    /// `runHapticsPattern` with `loops` = 2 is ONE longer motor run (and on a 5/MG `MaverickHaptics`
+    /// `overallLoop` simply repeats the waveform back-to-back), so "two buzzes" and "one buzz" differed only
+    /// in length — not something a wearer can tell apart mid-effort. Two DISCRETE single-loop buzzes with a
+    /// real silence between them can be. 1 s matches `HapticClock`'s own long-pulse spacing
+    /// (550 ms pulse + 450 ms `intraGapMs`), the repo's existing felt-tested "these are separate" gap.
+    static let zoneCuePulseSpacing: TimeInterval = 1
 
     /// A manual workout in progress. `samples` accumulate from the smoothed live `bpm`; `liveStrain`
     /// is recomputed as the window grows so the active card can show strain building in real time.
@@ -987,6 +1019,12 @@ final class AppModel: ObservableObject {
                 pausedDurationMs: Int64(snap.pausedDurationSec ?? 0) * 1000
             )
         }
+
+        // The LOCK is persisted, so a rehydrated session is still being cued — re-arm the 1 Hz cue pump
+        // (a restored PAUSED session self-gates and leaves it down). The settle window starts over, which
+        // is the safe direction. Without this the pump existed only from a lock toggle, so a session
+        // restored after an OS kill would cue only as a side effect of the wearer's bpm changing.
+        evaluateZoneGuidance()
     }
 
     func toggleWorkoutPause() {
@@ -1001,8 +1039,10 @@ final class AppModel: ObservableObject {
         }
         activeWorkout = w
         // ZONE LOCK: a pause silences cueing at once, and a resume starts the settle window over rather
-        // than buzzing on a run that was building before the break.
-        zoneGuidance = nil
+        // than buzzing on a run that was building before the break. Re-evaluating immediately re-arms the
+        // cue pump on resume (and leaves it down on pause), so the cadence doesn't wait for an HR change.
+        stopZoneCueing()
+        evaluateZoneGuidance()
         persistActiveWorkout()
     }
 
@@ -1013,35 +1053,126 @@ final class AppModel: ObservableObject {
         guard var w = activeWorkout, (1...5).contains(zone) else { return }
         w.lockedZone = w.lockedZone == zone ? nil : zone
         activeWorkout = w
-        zoneGuidance = nil
+        // Fresh state either way, then re-evaluate: locking arms the 1 Hz cue pump here and now, so the
+        // first cue lands on the settle window rather than waiting for the wearer's bpm to change.
+        stopZoneCueing()
+        evaluateZoneGuidance()
         persistActiveWorkout()
     }
 
-    /// ZONE LOCK cueing, run on every live HR ingest. Feeds the smoothed `bpm` into `ZoneGuidance` and
-    /// turns its verdict into a STRAP buzz: two below the zone (speed up), one above (ease off), none
-    /// inside. Silent — with the guidance dropped — when there is no workout, no lock, or it is paused,
-    /// which also covers End / Discard (they clear `activeWorkout`). Gated by the workout haptics pref.
+    /// ZONE LOCK cueing. Feeds the fast cue bpm into `ZoneGuidance` and turns its verdict into a STRAP
+    /// buzz: two below the zone (speed up), one above (ease off), none inside. Silent — with the guidance
+    /// dropped and the pump disarmed — when there is no workout, no lock, or it is paused, which also
+    /// covers End / Discard (they clear `activeWorkout`). Gated by the workout haptics pref.
+    ///
+    /// Driven from BOTH the live-HR ingest and the 1 Hz `zoneCueTimer`. The timer is what makes the
+    /// cadence a clock: the HR sinks only fire when the published bpm CHANGES, so on a steady effort the
+    /// ingest path alone can go silent for tens of seconds and the repeat cue never comes.
     private func evaluateZoneGuidance(now: Date = Date()) {
         guard let w = activeWorkout, let locked = w.lockedZone, !w.isPaused,
               let band = profile.hrZoneSet.zones.first(where: { $0.number == locked }) else {
-            zoneGuidance = nil
+            stopZoneCueing()
             return
         }
+        // A lock is live, so the pump must be running — arming here (rather than only at the lock toggle)
+        // means every entry point into cueing re-establishes it, including a session rehydrated after an
+        // OS kill and a resume from pause.
+        armZoneCueTimer()
         // Rebuild when the bounds moved (HRmax / custom zones edited mid-session) or on first use.
         if zoneGuidance?.lower != band.lower || zoneGuidance?.upper != band.upper {
             zoneGuidance = ZoneGuidance(lower: band.lower, upper: band.upper)
         }
-        guard let cue = zoneGuidance?.update(bpm: bpm.map { Double($0) }, now: now) else { return }
-        // Never stack on another buzz still playing; the guidance's own cadence brings the next one.
-        guard now.timeIntervalSince(lastStrapBuzzAt) >= Self.zoneCueMinGap else { return }
-        buzz(loops: UInt8(cue.buzzCount), gate: HapticPrefs.workout)
+        guard let cue = zoneGuidance?.update(bpm: zoneCueBPM(now: now), now: now) else { return }
+        // Never stack on a pattern still playing — this cue's own walk, or any other buzz path's. DEFER it
+        // rather than swallow it: the run's cadence clock is rewound so the next tick (≤ 1 s away) re-offers
+        // the same cue, instead of the wearer paying a whole `cueInterval` for a buzz that never played.
+        // The old code checked this AFTER `update` had already banked the cue, so a cue landing inside the
+        // workout-start buzz's quiet window — the common case, since locking a zone at the start is the
+        // point — was lost outright and the first correction came a full interval late.
+        guard now >= zoneCueWalkUntil,
+              now.timeIntervalSince(lastStrapBuzzAt) >= Self.zoneCueMinGap else {
+            zoneGuidance?.deferLastCue()
+            return
+        }
+        playZoneCue(cue, now: now)
+    }
+
+    /// The bpm the zone DECISION runs on: the median of the raw samples from the last
+    /// `zoneCueSmoothingSeconds`, falling back to the displayed `bpm` when the feed hasn't moved inside that
+    /// window (a change-guarded publisher on a steady HR). Never invents a reading — nil exactly when `bpm`
+    /// is nil, i.e. when the live signal is genuinely gone, which `ZoneGuidance.update` treats as a reset.
+    ///
+    /// Deliberately a SECOND read of `hrWindow` rather than a change to the smoothing: the displayed hero
+    /// number keeps its ~10 s median (stable, which is what a readout wants), while the cue gets a value
+    /// that follows the wearer within a second or so — a 10 s median lags a real HR change by about half
+    /// its window, and that lag was landing on top of the settle and cadence budgets.
+    private func zoneCueBPM(now: Date) -> Double? {
+        guard let displayed = bpm.map(Double.init) else { return nil }
+        let recent = hrWindow.filter { now.timeIntervalSince($0.t) <= Self.zoneCueSmoothingSeconds }
+            .map(\.v).sorted()
+        guard !recent.isEmpty else { return displayed }
+        return recent[recent.count / 2]
+    }
+
+    /// Play one zone cue as `cue.buzzCount` DISCRETE single-loop buzzes spaced `zoneCuePulseSpacing` apart,
+    /// so "two buzzes" (below — speed up) reads as two taps against "one buzz" (above — ease off) rather
+    /// than as one buzz that happens to be longer. Same hardware-confirmed pattern and the same walk
+    /// mechanism the Haptic Clock and the Live Session coach already use.
+    ///
+    /// The `HapticPrefs.workout` gate is checked ONCE, here, for the whole walk (matching
+    /// `LiveSessionRunner.fire`); each pulse then goes out through `buzz(loops:)`, which stamps
+    /// `lastStrapBuzzAt` so other cue sites keep backing off this one.
+    private func playZoneCue(_ cue: ZoneGuidance.Cue, now: Date) {
+        guard HapticPrefs.enabled(HapticPrefs.workout) else { return }
+        let pulses = max(1, cue.buzzCount)
+        // Claim the motor for the whole walk BEFORE the first pulse, so a tick landing mid-walk defers
+        // instead of interleaving. The last pulse ends one spacing after it starts, near enough.
+        zoneCueWalkUntil = now.addingTimeInterval(Double(pulses) * Self.zoneCuePulseSpacing)
+        buzz(loops: 1)
+        guard pulses > 1 else { return }
+        for i in 1..<pulses {
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.zoneCuePulseSpacing * Double(i)) {
+                [weak self] in
+                // Same main-actor hop as the other scheduled work on this model (see
+                // `scheduleDailySmartAlarmRearm`): the delay is a run-loop concern, the model is not.
+                Task { @MainActor in
+                    // Only a run that is STILL cueing should buzz: the wearer may have corrected in the
+                    // ~1 s since the first pulse, and buzzing a wrist already back inside reads as
+                    // "still wrong".
+                    guard let self, let g = self.zoneGuidance, g.cueing != .inside else { return }
+                    self.buzz(loops: 1)
+                }
+            }
+        }
+    }
+
+    /// Arm the 1 Hz cue pump if it isn't already. Idempotent — every cueing entry point calls it.
+    private func armZoneCueTimer() {
+        guard zoneCueTimer == nil else { return }
+        // `.common` mode so a scroll on the workout screen can't pause the cadence; the `Task { @MainActor }`
+        // hop is the same shape `scheduleDailySmartAlarmRearm` uses for the @MainActor model.
+        let timer = Timer(timeInterval: Self.zoneCueTick, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.evaluateZoneGuidance() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        zoneCueTimer = timer
+    }
+
+    /// Stop cueing completely: drop the decision state AND the pump, and release the motor claim. The single
+    /// teardown for pause, unlock, End, Discard and "no workout at all", so none of them can leave a timer
+    /// ticking or a stale walk window blocking the next session's first cue.
+    private func stopZoneCueing() {
+        zoneGuidance = nil
+        zoneCueTimer?.invalidate()
+        zoneCueTimer = nil
+        zoneCueWalkUntil = .distantPast
     }
 
     /// Abort the active session without saving a workout.
     func discardWorkout() {
         guard activeWorkout != nil else { return }
         activeWorkout = nil
-        zoneGuidance = nil
+        stopZoneCueing()
         if activeWorkoutIsGps { gpsRecorder.stop() }
         activeWorkoutIsGps = false
         workoutStrain = nil
@@ -1055,7 +1186,7 @@ final class AppModel: ObservableObject {
     func endWorkout() {
         guard let w = activeWorkout else { return }
         activeWorkout = nil
-        zoneGuidance = nil
+        stopZoneCueing()
         let wasGps = activeWorkoutIsGps
         activeWorkoutIsGps = false
         // Drop the durable snapshot the instant the session ends , whether it saves below or is discarded

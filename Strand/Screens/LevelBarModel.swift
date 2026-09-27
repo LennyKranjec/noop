@@ -96,7 +96,8 @@ final class LevelBarModel: ObservableObject {
     @Published private(set) var missing: [LevelMissingInput] = [] {
         didSet { Self.lastMissing = missing }
     }
-    /// The day whose level is shown: today's once it is written, the last written day before that.
+    /// The day whose level is shown: today's once it is written, and until then the ONE stand-in day held
+    /// for it (`LevelDayFreeze.standIn`) — so this moves at most once per level day.
     @Published private(set) var shownDay: String?
     /// The latest `missing`, for the coach's context.
     static var lastMissing: [LevelMissingInput] = []
@@ -188,13 +189,16 @@ final class LevelBarModel: ObservableObject {
     private func load(repo: Repository) async -> Bool {
         generation += 1
         let gen = generation
-        guard !repo.days.isEmpty else {
-            trend = nil
-            shownDay = nil
-            return true
-        }
         let calendar = Calendar.current
         ledger.retryLoadIfNeeded()
+        // AN EMPTY STORE DOES NOT BLANK A WRITTEN LEVEL. There is nothing to settle a new day from, but
+        // the ledger still holds every day that was written; clearing the snapshot here dropped the
+        // headline to "–" and brought it back on the next load, which is one more move of a number that
+        // must not move.
+        guard !repo.days.isEmpty else {
+            publish(calendar: calendar)
+            return true
+        }
         // NOTHING IS WRITTEN UNTIL THE NIGHTS HAVE BEEN RE-SCORED. The one-shot full-history pass
         // (`IntelligenceEngine.runNightlyMetricsRescoreIfNeeded`) re-derives every night's resting HR,
         // HRV, breathing and sleep window with the current methods; a day frozen before it finished would
@@ -399,8 +403,13 @@ final class LevelBarModel: ObservableObject {
         let levelKey = LevelWiring.key(from: LevelDayFreeze.levelDay(now: now, calendar: calendar), calendar: calendar)
         // THE DAY WHOSE LEVEL IS CURRENT, if it is written. If its night has not landed yet, the last
         // written day stays up — marked pending, so nothing presents it as today's.
+        //
+        // THE STAND-IN IS PICKED ONCE PER LEVEL DAY AND THEN HELD (`LevelDayFreeze.standIn`). Reading
+        // "the newest written day" afresh on every load is what moved the morning's headline more than
+        // once before today's own level arrived: the ledger keeps gaining days through the morning, and
+        // every one of them newer than the last stand-in became a new number on the strip.
         let today = ledger.entry(levelKey)
-        let shown = today ?? ledger.latest(onOrBefore: levelKey)
+        let shown = today ?? LevelDayFreeze.standIn(levelDay: levelKey, ledger: ledger)
 
         // The comparisons are measured from the day SHOWN, and are ledger values too: a delta compares a
         // written level with written levels, never with a live recomputation.
@@ -443,9 +452,13 @@ final class LevelBarModel: ObservableObject {
     }
 
     private func rebuildHistory(spanDays: Int, calendar: Calendar) {
-        // The curve ends on the day the headline shows, so its last point IS the headline.
+        // The curve ends on the day the headline shows, so its last point IS the headline — which means
+        // the SAME held stand-in the headline uses while the level day is unwritten, not a fresh read of
+        // the newest written day.
         let levelKey = LevelWiring.key(from: LevelDayFreeze.levelDay(calendar: calendar), calendar: calendar)
-        let end = ledger.entry(levelKey)?.day ?? ledger.latest(onOrBefore: levelKey)?.day ?? levelKey
+        let end = ledger.entry(levelKey)?.day
+            ?? LevelDayFreeze.standIn(levelDay: levelKey, ledger: ledger)?.day
+            ?? levelKey
         let start = LevelWiring.shift(end, -(Swift.max(spanDays, 1) - 1), calendar) ?? end
         let out: [LevelPoint] = ledger.entries(from: start, through: end).map { entry in
             var parts: [LevelPart: Double] = [:]

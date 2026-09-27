@@ -1,4 +1,5 @@
 import Foundation
+import StrandAnalytics
 import WhoopStore
 
 // MeditationLog.swift — the meditation log's storage contract.
@@ -49,6 +50,19 @@ enum MeditationLog {
 
     /// How many days in a window carried a meditation.
     static func countDays(window: [Double]) -> Int { window.filter { $0 > 0 }.count }
+
+    /// Whether a day's logged minutes count as that day's meditation DONE.
+    ///
+    /// ONE rule, not a second one. `LevelEngine.meditationMinMinutes` is the line the Focus card's day
+    /// circles light on and the line the level's focus term counts a day by, so anything else that asks
+    /// "has today's meditation happened" — the Focus tab's reminder badge — asks exactly the question the
+    /// screen already answers. A reminder that cleared on its own threshold would be contradicting the
+    /// circles the wearer can see.
+    ///
+    /// Pure, and TAKES the minutes rather than reading them, so the rule is testable with no store behind
+    /// it (`MeditationDoneRuleTests`). Note this is deliberately NOT `countDays`' `> 0`: that helper
+    /// counts the *legacy timer's* window and is left as it is.
+    static func isDayDone(minutes: Double) -> Bool { minutes >= LevelEngine.meditationMinMinutes }
 
     /// What a `log` actually did, so the screen can say it rather than appear to do nothing.
     enum Outcome {

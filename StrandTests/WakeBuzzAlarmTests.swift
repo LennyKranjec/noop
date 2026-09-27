@@ -198,6 +198,30 @@ final class WakeBuzzAlarmTests: XCTestCase {
         XCTAssertEqual(WakeBuzzAlarm.missedGraceSeconds, WakeBuzzAlarm.autoStopSeconds)
     }
 
+    /// `shouldRing` is the gate BOTH delivery paths share — the fire timer and the catch-up scan. The
+    /// timer case is the one that shipped broken: a `Timer` armed for 07:00 cannot fire while iOS has the
+    /// app suspended, so it fires when the run loop next turns, which can be hours later. Anything past
+    /// one ring window must be dropped, not delivered.
+    func testShouldRing_dropsAnInstantThatIsMoreThanOneRingWindowLate() {
+        let scheduled = self.at(2026, 3, 10, 7, 0, berlin())
+        let cases: [(offset: TimeInterval, rings: Bool)] = [
+            (-2.0, true),    // a hair early (run loop ahead of the fire date, or the clock stepped back)
+            (0.0, true),     // dead on the wake minute
+            (5.0, true),
+            (WakeBuzzAlarm.missedGraceSeconds, true),         // the boundary still rings
+            (WakeBuzzAlarm.missedGraceSeconds + 0.001, false),
+            (20 * 60, false),      // "a buzz twenty minutes after the wake time is worse than none"
+            (3 * 3600, false),     // the suspended-until-10:00 case
+        ]
+        for c in cases {
+            XCTAssertEqual(
+                WakeBuzzAlarm.shouldRing(scheduled: scheduled, now: scheduled.addingTimeInterval(c.offset)),
+                c.rings,
+                "fire \(c.offset)s from the scheduled instant"
+            )
+        }
+    }
+
     // MARK: - Defaults round-trip
 
     func testSettings_defaultOffAtSevenAndSnapOnWrite() {

@@ -89,7 +89,7 @@ final class WakeBuzzRinger: ObservableObject {
             return
         }
         if target <= now {
-            fireIfNotAlreadyRung(for: target)
+            fireIfNotAlreadyRung(for: target, now: now)
             // Whichever way that went, the NEXT instant is the one after the missed one.
             guard let after = WakeBuzzAlarm.nextFireDate(minutes: minutes, from: now) else {
                 nextFire = nil
@@ -117,11 +117,21 @@ final class WakeBuzzRinger: ObservableObject {
 
     /// Ring for a scheduled instant, at most once. The stamp is what makes the catch-up path safe to
     /// re-run from a foreground, a day rollover and a settings edit that all land in the same minute.
-    private func fireIfNotAlreadyRung(for scheduled: Date) {
+    ///
+    /// The grace check lives HERE rather than at each caller, because there are two delivery paths — the
+    /// fire timer and `reschedule`'s catch-up scan — and only the scan used to apply it. A `Timer` armed
+    /// for an absolute instant cannot fire while iOS has the app suspended, so it fires the moment the run
+    /// loop spins up again: a 07:00 alarm on a phone first woken at 10:00 buzzed at 10:00. The stamp is
+    /// written either way, so a dropped instant is CONSUMED and cannot be retried by a later pass.
+    private func fireIfNotAlreadyRung(for scheduled: Date, now: Date = Date()) {
         let epoch = Int(scheduled.timeIntervalSince1970)
         guard defaults.integer(forKey: WakeBuzzAlarm.Key.lastFired) != epoch else { return }
         defaults.set(epoch, forKey: WakeBuzzAlarm.Key.lastFired)
-        start(reason: "wake time")
+        guard WakeBuzzAlarm.shouldRing(scheduled: scheduled, now: now) else {
+            log?("Wake buzz: skipped — the wake time passed \(Int(now.timeIntervalSince(scheduled)))s ago while NOOP was suspended, too late to buzz")
+            return
+        }
+        start(reason: "wake time", now: now)
     }
 
     // MARK: - Ringing

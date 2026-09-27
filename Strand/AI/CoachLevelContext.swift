@@ -40,7 +40,9 @@ enum CoachLevelContext {
             }
             return "Today's level is not set yet (last night is still syncing); \(shown).\n"
         }
-        if let frozen = ledger.entry(dayKey) ?? ledger.latest(onOrBefore: dayKey) {
+        // The SAME held stand-in the strip shows (`LevelDayFreeze.standIn`), not a fresh read of the
+        // newest written day: the coach citing a different day from the one on the bar is two answers.
+        if let frozen = ledger.entry(dayKey) ?? LevelDayFreeze.standIn(levelDay: dayKey, ledger: ledger) {
             let b = frozen.breakdown
             if let reason = pendingReason(shownDay: frozen.day) { s += reason }
             if frozen.partial {

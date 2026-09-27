@@ -273,8 +273,9 @@ struct LevelTrendSnapshot {
     let drivers: [LevelPart: LevelDriver]
     /// What is shown is not today's level: the current day is not in the ledger yet (its night is still
     /// syncing, or was never recorded), or this morning's flow has not run and the current day is still
-    /// yesterday. `now` is the last day that was written, held up in its place. Nothing should present it
-    /// as today's.
+    /// yesterday. `now` is then the stand-in written day — one day, picked once for this level day and
+    /// held until the level day's own entry lands (`LevelDayFreeze.standIn`), so the figure does not move
+    /// while it waits. Nothing should present it as today's.
     let pendingToday: Bool
 
     init(

@@ -272,9 +272,6 @@ struct SleepView: View {
                     hiddenSectionsRaw: $sleepHiddenSectionsRaw
                 )
             }
-            .sheet(isPresented: $showSleepAlarm) {
-                SleepAlarmSheet()
-            }
             .sheet(item: $addNap) { seed in
                 SleepTimeEditor(bedTs: seed.bedTs, wakeTs: seed.wakeTs,
                                 title: "Add a nap",
@@ -286,6 +283,18 @@ struct SleepView: View {
                     await repo.refresh()
                 }
             }
+        }
+        // The wake-buzz sheet hangs off the SCAFFOLD, deliberately NOT off the content `Group` that
+        // carries the three sheets above it. That Group is the worst place in this file to anchor a
+        // presenter: it is a `Group` (a modifier on one is applied per CHILD, and the `emptyState` branch
+        // is three children, not one), it wraps an `if let resolved` / `else emptyState` conditional whose
+        // branch swaps the instant the night finishes loading, and the whole thing is a child of the
+        // scaffold's `LazyVStack`. The other three sheets are all opened from cards that exist only in the
+        // `resolved` branch, so they never meet any of that. The alarm is the one affordance that lives in
+        // BOTH branches — it has to be reachable before the first night is recorded — and it was the one
+        // that did not open. Here the presenter is single, unconditional, and outside the lazy stack.
+        .sheet(isPresented: $showSleepAlarm) {
+            SleepAlarmSheet()
         }
     }
 
@@ -458,30 +467,61 @@ struct SleepView: View {
     /// at the leading end of the same row, so the hero foot reads as one balanced control strip.
     private var sleepArrangeAffordance: some View {
         HStack(spacing: 0) {
-            sleepAlarmAffordance
+            // `onScene: true` — this copy of the row sits on the night scene, not on the canvas.
+            sleepAlarmAffordance(onScene: true)
             Spacer()
             Button {
                 showSleepCustomize = true
             } label: {
                 Label("Customize", systemImage: "slider.horizontal.3")
                     .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .foregroundStyle(Self.heroFootTint)
+                    // Same hit-target treatment as the alarm at the other end of the strip, so the two
+                    // halves of one row are not a 44pt target next to a 15pt one.
+                    .padding(.vertical, 8)
+                    .padding(.leading, 10)
+                    .frame(minHeight: 44, alignment: .trailing)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
         }
     }
 
+    /// Foreground for the hero-foot controls. The night scene is dark in BOTH appearances, so the
+    /// palette's `textTertiary` (#7D808A either way) was the only thing in this hero not painted for that
+    /// backdrop — every other element here already uses an explicit white with a shadow. On a bright phone
+    /// in light appearance a mid-grey label on the dark lake is easy to miss entirely, which is half of
+    /// "tapping the alarm does nothing": you cannot tap what you cannot see.
+    private static let heroFootTint = Color.white.opacity(0.80)
+
     /// The wake-buzz alarm entry — the Customize button's mirror image. The glyph is FILLED and accented
     /// only while the alarm is actually armed, so the row states the alarm's real condition rather than
     /// just offering a door to it. Reads the `WakeBuzzAlarm` defaults key directly (a one-bool
     /// `@AppStorage`), which keeps this screen's deliberate "do not observe AppModel" rule intact.
-    private var sleepAlarmAffordance: some View {
-        Button {
+    ///
+    /// `onScene` says which backdrop this copy is drawn on: the hero's dark night scene, or the plain
+    /// `surfaceBase` canvas of the empty state, where the normal palette colour is the correct one.
+    private func sleepAlarmAffordance(onScene: Bool) -> some View {
+        // Written out rather than nested in the modifier: a ternary inside a ternary inside a
+        // `.foregroundStyle` on a `Label` is exactly the shape that has blown this project's
+        // type-checker budget on CI before (see 9e5387ec).
+        let idleTint: Color = onScene ? Self.heroFootTint : StrandPalette.textTertiary
+        let tint: Color = wakeBuzzOn ? StrandPalette.accent : idleTint
+        return Button {
             showSleepAlarm = true
         } label: {
             Label("Alarm", systemImage: wakeBuzzOn ? "alarm.fill" : "alarm")
                 .font(StrandFont.footnote)
-                .foregroundStyle(wakeBuzzOn ? StrandPalette.accent : StrandPalette.textTertiary)
+                .foregroundStyle(tint)
+                // A bare `Label` in a `.plain` Button is hit-tested on the text + glyph boxes alone —
+                // a ~15pt-tall strip at footnote size, well under the 44pt minimum, and here it sits at
+                // the foot of a hero that is itself pulled 24pt up and bled 16pt out. Pad it out and
+                // give it an explicit rectangular content shape (the `MoreRow` idiom in RootTabView) so
+                // the whole strip is the target, not just the letters.
+                .padding(.vertical, 8)
+                .padding(.trailing, 10)
+                .frame(minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(wakeBuzzOn
@@ -2093,7 +2133,9 @@ struct SleepView: View {
         // The alarm is about the night AHEAD, so it must be reachable before the first night has been
         // recorded — otherwise a fresh install can see the Sleep tab and not the alarm on it.
         HStack(spacing: 0) {
-            sleepAlarmAffordance
+            // No night scene in the empty state (the scaffold's `topBackground` is nil here), so this copy
+            // sits on the plain canvas and keeps the palette's own tertiary colour.
+            sleepAlarmAffordance(onScene: false)
             Spacer()
         }
         if repo.loaded {

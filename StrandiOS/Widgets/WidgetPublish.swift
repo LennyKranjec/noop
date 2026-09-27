@@ -104,13 +104,28 @@ extension WidgetSnapshot {
         let effortScale = UnitPrefs.resolveEffortScale(
             UserDefaults.standard.string(forKey: UnitPrefs.effortScaleKey) ?? ""
         )
-        let strain = day?.strain
-        let effortDisplay: String? = strain.map { stored in
-            if effortScale == .whoop {
-                return String(format: "%.1f", UnitFormatter.effortValue(stored, scale: .whoop))
+        // EFFORT IS RESOLVED ONCE, HERE, and handed to both the headline snapshot and the strip below.
+        //
+        // When the anchor day IS today, the figure is the shared `Repository.todayEffortNow()` — the same
+        // resolution Today's hero ring, the Key Metrics tile, the Effort detail screen, the live-workout
+        // card and this file's own lock-screen strip read. It used to be the anchor row's STORED strain,
+        // which carries neither the live in-progress value Today publishes nor the computed-lane
+        // precedence, so the headline widget sat below Today's figure for the whole of a workout and only
+        // caught up on the next daily pass — and disagreed with this file's own strip at the same moment.
+        //
+        // A CARRIED prior anchor keeps that row's stored strain with its own formatting: there is no "now"
+        // resolution for a past day, and the widget must still describe ONE day throughout.
+        let effortNow = await model.repo.todayEffortNow(now: now)
+        let anchorIsEffortDay = day?.day == effortNow.day
+        let strain = anchorIsEffortDay ? effortNow.effort100 : day?.strain
+        let effortDisplay: String? = anchorIsEffortDay
+            ? effortNow.display(scale: effortScale)
+            : day?.strain.map { stored in
+                if effortScale == .whoop {
+                    return String(format: "%.1f", UnitFormatter.effortValue(stored, scale: .whoop))
+                }
+                return "\(Int(stored.rounded()))"
             }
-            return "\(Int(stored.rounded()))"
-        }
         // #2040: today's stress curve. Self-gating on a cheap heart-rate fingerprint, so a publish that
         // changed nothing costs one indexed COUNT and no rows. Only the FULL path scores it; the live
         // fast path below reuses the previous snapshot and so carries the curve forward untouched.
@@ -157,7 +172,7 @@ extension WidgetSnapshot {
         )
         var full = snap
         await fillStrip(&full, model: model, recovery: recovery, effortScale: effortScale,
-                        dayHours: stress?.result.hours, now: now)
+                        effortNow: effortNow, dayHours: stress?.result.hours, now: now)
         fillWater(&full, model: model, now: now)
         full.waterMl = Int((await model.repo.hydrationTotal(day: Repository.localDayKey(now))).rounded())
         // Read AFTER every await above, so figures the Today screen published meanwhile are not lost.
@@ -178,13 +193,15 @@ extension WidgetSnapshot {
     /// under today's clock, so these read today's own row and are stamped with the day they were read for.
     @MainActor
     private static func fillStrip(_ snap: inout WidgetSnapshot, model: AppModel, recovery: Double?,
-                                  effortScale: EffortScale, dayHours: [DaytimeStress.HourPoint]?,
-                                  now: Date) async {
+                                  effortScale: EffortScale, effortNow: TodayEffortNow,
+                                  dayHours: [DaytimeStress.HourPoint]?, now: Date) async {
         // Today's key exactly as Today's `selectedDayKey` resolves it at offset 0: `repo.today`'s day
         // (which carries the pre-04:00 logical-day rule), else the logical day. The calendar day this
         // used before disagreed with Today — and with the live effort Today publishes under ITS key —
         // for the four hours after every midnight.
-        let todayKey = model.repo.today?.day ?? Repository.logicalDayKey(now)
+        // It is `effortNow.day` — `Repository.todayEffortDayKey(now:)`, the same expression — so the day
+        // the figures are stamped with and the day the Effort was resolved for cannot come apart.
+        let todayKey = effortNow.day
         let row = model.repo.today ?? model.repo.days.last { $0.day == todayKey }
         // STEPS, in Today's precedence: the strap's measured count, else Apple Health's imported count,
         // else the on-device estimate. The estimate is written under the COMPUTED ("-noop") source,
@@ -215,7 +232,8 @@ extension WidgetSnapshot {
         // ONE RESOLUTION (`Repository.todayEffortNow`), the same the Effort detail screen reads and the
         // same pure resolver Today's hero uses, so the widget cannot drift from either. WHOOP's own strain
         // goes on the 0–100 axis through the INVERSE calibration — the mapping the target mark below uses.
-        let effortNow = await model.repo.todayEffortNow(now: now)
+        // Resolved by the caller and handed in, so the headline snapshot and this strip publish the ONE
+        // figure rather than two reads of it a few awaits apart.
         snap.effortToday = effortNow.effort100.map { Int($0.rounded()) }
         // The display string as Today's hero (`heroEffortText`) builds it, so the two read identically.
         snap.effortTodayDisplay = effortNow.display(scale: effortScale)
@@ -223,8 +241,12 @@ extension WidgetSnapshot {
         // The top of today's recommended band, the same ceiling Today's hero ring marks — placed on the
         // 0–100 axis through the INVERSE calibration, exactly as Today does, so the widget ring crosses the
         // mark at the same moment the hero ring does (linear ×100/21 without a calibration, as before).
-        snap.effortTarget = CoupledView.optimalStrainRange(recovery: recovery)
-            .map { Int(StrainCalibration.effort100(strain21: Double($0.upperBound)).rounded()) }
+        // ONE target resolution (`TodayEffortTarget`), the same the hero mark and the live-workout card
+        // read, so the band lookup and the inverse calibration cannot drift between the three. The
+        // recovery handed in here is the widget's own anchored one (today's row when scored, else the
+        // freshest strictly-prior scored row — see `publish`), which is what keeps the strip from blanking
+        // right after the rollover.
+        snap.effortTarget = TodayEffortTarget.resolve(recovery: recovery).map { Int($0.upper100.rounded()) }
         // A publish that cannot read the last ten minutes leaves these nil; `mergeStripFallback` then keeps
         // the stored reading while it is recent rather than blanking a figure that was true a moment ago.
         if let dayHours, let level = await WindowStress.now(repo: model.repo, dayHours: dayHours) {

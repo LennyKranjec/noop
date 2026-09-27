@@ -126,6 +126,77 @@ struct RootTabView: View {
     /// level: a flag would re-fire on every re-render.
     @State private var coachFinishedElsewhere = 0
 
+    // MARK: - Today's meditation is still open (the Focus tab's reminder)
+    //
+    // WHAT "DONE" MEANS IS NOT DECIDED HERE. `MeditationLog.isDayDone` is the single rule — the level's
+    // `meditationMinMinutes` — and it is the same expression the Focus card's day circles light on. A
+    // badge that cleared on its own threshold would be contradicting the circles on the screen it points
+    // at.
+    //
+    // NOT OBSERVED, for the reason `coachWorking` and `workoutActive` are not: the shell needs one bool,
+    // and the previous pass deliberately took broad observation out of this file. A `@State` refreshed on
+    // `.task(id:)` over a CHEAP signal is the shape that leaves.
+
+    /// Whether today has no meditation yet. FALSE until the first read lands, so the wearer never sees a
+    /// warning the data has not backed yet — an absent read is not a missed meditation.
+    @State private var meditationDue = false
+
+    /// The in-app / system motion gate (`NoopMotionState.poseStill`), so the pulse stops in Low Power
+    /// Mode and under "Reduce motion in NOOP" as well as system Reduce Motion. A singleton that publishes
+    /// only when one of those settings changes.
+    @ObservedObject private var motionState = NoopMotionState.shared
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// What the reminder re-reads on. All three are counters the shell already holds:
+    ///
+    /// * `refreshSeq` — any data refresh, including the one a strap sync causes.
+    /// * `workoutsSeq` — EVERY workout write, which is what ending a Meditation session is. A session
+    ///   that ends often leaves the daily caches byte-identical and so never bumps `refreshSeq`; without
+    ///   this counter the badge would survive the meditation that cleared it.
+    /// * the day key, but ONLY while the app is active — which is both the "app came forward" signal and
+    ///   the day roll, so the badge comes back the next morning. Off-screen the key collapses to a
+    ///   constant, so a phase change costs one string comparison rather than a `DateFormatter` call.
+    private var meditationDueKey: String {
+        let day = scenePhase == .active ? Repository.localDayKey(Date()) : ""
+        return "\(repo.refreshSeq)|\(repo.workoutsSeq)|\(day)"
+    }
+
+    /// What VoiceOver reads for the Focus item while the reminder is up — the badge is a punctuation mark,
+    /// and "Focus, one item" is not a thing anybody can act on. `nil` = read the plain tab title.
+    private var meditationA11yLabel: LocalizedStringKey? {
+        meditationDue ? "Focus, today's meditation is still open" : nil
+    }
+
+    /// The corner mark itself, or nothing. Typed `Text?` deliberately: `.badge` is overloaded on `Int`,
+    /// `LocalizedStringKey?`, `StringProtocol?` and `Text?`, and a bare `nil` in a ternary leaves the
+    /// compiler to guess which. `verbatim` because "!" is punctuation, not a string to translate.
+    private var meditationBadge: Text? {
+        meditationDue ? Text(verbatim: "!") : nil
+    }
+
+    /// Whether the badge should be pulsing right now — as opposed to merely showing.
+    ///
+    /// It SHOWS whenever today's meditation is open; it MOVES only when the movement can be seen and is
+    /// worth paying for: not behind the background, not under any of the three motion gates, and not while
+    /// the wearer is already on Focus reading the card that says the same thing.
+    private var meditationPulsing: Bool {
+        meditationDue
+            && scenePhase == .active
+            && selectedTab != 2
+            && !motionState.poseStill(reduceMotion)
+    }
+
+    /// Re-read whether today's meditation is outstanding.
+    ///
+    /// `days: 4` is the SAME window `QuestAutoComplete.gather` reads, so this joins that memoised workout
+    /// read instead of opening a fourth cache window (`workoutRowsCacheLimit` is 3, and a new window
+    /// evicts somebody else's rows).
+    private func reloadMeditationDue() async {
+        let minutes = await repo.meditationMinutesByDay(days: 4)[repo.meditationToday] ?? 0
+        let due = !MeditationLog.isDayDone(minutes: minutes)
+        if meditationDue != due { meditationDue = due }
+    }
+
     /// The Today tab root, honouring the liquid/classic preference.
     @ViewBuilder private var todayTabRoot: some View {
         if liquidTodayEnabled { LiquidTodayView() } else { TodayView() }
@@ -199,7 +270,26 @@ struct RootTabView: View {
             // FOCUS TOOK SLEEP'S SLOT, matching the Android bar. Sleep is not gone — it is reached from
             // the Health tab and from its own More row below — and Focus is the tab with something to do
             // on it, which is what earns a slot in a five-slot bar.
-            tab(MindfulnessView(), "Focus", "figure.mind.and.body", path: $tabPaths[2], scrollSignal: scrollTop[2]).tag(2)
+            //
+            // TODAY'S MEDITATION IS STILL OPEN → the item carries a warning mark until it is done.
+            //
+            // THE PLATFORM'S OWN BADGE, not a drawn one. `.tabItem` renders a Text + Image and nothing
+            // else: a `ZStack` with a dot in the corner is simply dropped, so an overlay here would be a
+            // badge that never appeared. `.badge` puts the mark exactly where the corner mark belongs, in
+            // the system's own attention colour, and it clears the moment the state does.
+            //
+            // THE PULSE IS THE GLYPH'S, for the same reason — nothing can animate the badge itself, so the
+            // gentle ~1 s `.pulse` rides the Focus symbol underneath it (the same channel the System tab's
+            // finished-generation bounce uses). Reduce Motion / Low Power / quiet motion, the background,
+            // and being on Focus already all leave a STATIC badge, which is the correct degradation: the
+            // mark is the message and the movement is only what draws the eye to it.
+            tab(MindfulnessView(), "Focus", "figure.mind.and.body",
+                path: $tabPaths[2], scrollSignal: scrollTop[2],
+                // The label must SAY it, not leave VoiceOver to infer a warning from a punctuation mark.
+                a11yLabel: meditationA11yLabel)
+                .tag(2)
+                .badge(meditationBadge)
+                .symbolEffectPulseCompat(isActive: meditationPulsing)
             // K3: Coach promoted to a top-level tab (was behind the More list). The sparkles icon
             // matches the More-tab row and the macOS sidebar entry.
             // THE GLYPH SAYS WHETHER THE SYSTEM IS WORKING. While a generation is in flight — the
@@ -239,6 +329,12 @@ struct RootTabView: View {
         }
         .task(id: repo.refreshSeq) {
             await levelBar.refresh(repo: repo, tick: repo.refreshSeq)
+        }
+        // The Focus tab's reminder. Only while the app is actually in front: a read fired as the shell
+        // goes away would be work nobody can see the result of, and the key re-fires on the way back.
+        .task(id: meditationDueKey) {
+            guard scenePhase == .active else { return }
+            await reloadMeditationDue()
         }
         // Both publishers replay their current value on subscription, which seeds the state on appear.
         .onReceive(coachWorkingPublisher) { working in
@@ -560,8 +656,11 @@ struct RootTabView: View {
         }
     }
 
+    /// - Parameter a11yLabel: what VoiceOver reads instead of `title`, for an item whose state the visible
+    ///   label cannot carry (the Focus tab's "meditation still open" badge). `nil` = read the title.
     private func tab<V: View>(_ view: V, _ title: LocalizedStringKey, _ icon: String,
-                              path: Binding<NavigationPath>, scrollSignal: Int) -> some View {
+                              path: Binding<NavigationPath>, scrollSignal: Int,
+                              a11yLabel: LocalizedStringKey? = nil) -> some View {
         // Each primary tab gets its OWN NavigationStack so the in-content NavigationLinks (e.g. the Today
         // dashboard card rows) both navigate AND render opaque. An ORPHANED NavigationLink (no
         // NavigationStack ancestor) renders its whole label in a disabled/translucent state — that was
@@ -586,7 +685,14 @@ struct RootTabView: View {
         // Drive this tab's root scroll-to-top on an at-root re-tap (#198 follow-up); read by ScreenScaffold
         // / LiquidTodayView inside. Only THIS tab's token changes on its reselect, so the others don't scroll.
         .environment(\.scrollToTopSignal, scrollSignal)
-        .tabItem { Label(title, systemImage: icon) }
+        // ONE SHAPE, whatever `a11yLabel` is. The modifier is applied UNCONDITIONALLY and only its
+        // ARGUMENT varies — the rule this file already states for `noopTabBarAutoHide`: a runtime
+        // condition that selects between `_ConditionalContent` branches changes the view's identity, and
+        // #519 is what that costs. `?? title` means the four tabs that pass nothing read exactly as before.
+        .tabItem {
+            Label(title, systemImage: icon)
+                .accessibilityLabel(Text(a11yLabel ?? title))
+        }
     }
 
     // The "More" tab is the app's catch-all index. It was a plain SwiftUI `List` with system large-title
@@ -994,6 +1100,25 @@ private extension View {
     func symbolEffectPopCompat(trigger: Int) -> some View {
         if #available(iOS 17.0, *) {
             self.symbolEffect(.bounce, value: trigger)
+        } else {
+            self
+        }
+    }
+
+    /// Breathe a tab's symbol for as long as `isActive`, where the OS can do it.
+    ///
+    /// `.pulse` is the platform's own ~1 s opacity breath, which is exactly the tempo asked for and costs
+    /// nothing we render ourselves — no `repeatForever` of ours, so nothing for the quiet-motion census to
+    /// find and nothing left looping if this view goes away.
+    ///
+    /// `isActive` is the whole gate: false leaves the symbol still, so Reduce Motion, Low Power Mode,
+    /// "Reduce motion in NOOP", the background and being on the tab already are all handled by the CALLER
+    /// passing false rather than by a branch here. Below iOS 17 the glyph simply never moves, which is the
+    /// same correct degradation the pop above documents — the badge is the message.
+    @ViewBuilder
+    func symbolEffectPulseCompat(isActive: Bool) -> some View {
+        if #available(iOS 17.0, *) {
+            self.symbolEffect(.pulse, options: .repeating, isActive: isActive)
         } else {
             self
         }
