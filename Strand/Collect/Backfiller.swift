@@ -400,6 +400,27 @@ final class Backfiller {
         return (rows, counts.gravity, Set(timestamps.map { $0 / 86400 }))
     }
 
+    /// One line per chunk describing the @57 step-counter half of the offload: how many step records the
+    /// chunk decoded, the wrap-aware locomotion ticks in them (the SAME `StepsCounter` kernel the daily
+    /// total sums, so the number is comparable with the tile), how many of the records carried a @63
+    /// activity class, and how many of those read walk(1)/run(2).
+    ///
+    /// Why it is keyed on the HR count rather than on the steps being non-empty: a chunk that banked HR and
+    /// NO step record is the exact signature of the reported bug, and a steps-only log would have stayed
+    /// silent for it. nil for a chunk with neither (nothing to say) so a caught-up session stays quiet.
+    ///
+    /// `ticks=0` beside a healthy `records=N` and `locomotion=0` says the counter climbed but nothing was
+    /// classed as walking, which is what empties `StepsCounter.stepsInWindow`. Counts only, no timestamps.
+    nonisolated static func chunkStepsLine(hrRecords: Int, steps: [StepSample], trim: UInt32) -> String? {
+        guard hrRecords > 0 || !steps.isEmpty else { return nil }
+        let classed = steps.filter { $0.activityClass != nil }.count
+        let locomotion = steps.filter { $0.activityClass == 1 || $0.activityClass == 2 }.count
+        let ticks = StepsCounter.stepsInWindow(steps) ?? 0
+        return "Backfill: steps trim=\(trim) records=\(steps.count) ticks=\(ticks) "
+            + "classed=\(classed) locomotion=\(locomotion) hrRecords=\(hrRecords)"
+            + (steps.isEmpty ? " - this chunk carried HR but NO @57 step counter" : "")
+    }
+
     /// The one-line session success summary (#150) — the success-side log that never existed. Returns nil
     /// when nothing persisted (so a console-only / caught-up session stays quiet and the existing
     /// empty-banking diagnostics speak instead).
@@ -884,6 +905,13 @@ final class Backfiller {
             sessionMotionRows += tally.motion
             sessionSkinTempRows += counts.skinTemp
             sessionNightKeys.formUnion(tally.nights)
+            // Steps arrival (the "HR syncs but steps stopped" class). Emitted whenever the chunk carried
+            // HR, so the line is present BOTH when step records arrive and when they are absent beside a
+            // healthy HR chunk — the absent case is the whole diagnosis and a count-only log would have
+            // printed nothing for it.
+            if let line = Backfiller.chunkStepsLine(hrRecords: counts.hr, steps: decoded.steps, trim: trim) {
+                log?(line)
+            }
 
             // Connection test mode: per-chunk offload PROGRESS (running session totals), so a report shows
             // the offload advancing rather than only its final outcome. Gated zero-cost.

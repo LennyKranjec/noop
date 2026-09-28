@@ -50,7 +50,38 @@ final class AlphaprogRealWorldTests: XCTestCase {
     func testTheBomAndTheCarriageReturnsDoNotReachTheParser() {
         let t = text()
         XCTAssertFalse(t.hasPrefix("\u{FEFF}"))
-        XCTAssertFalse(t.contains("\r"))
+        // ASSERTED ON `utf8`, NOT `contains("\r")`. The first cut of this line used the Character form,
+        // and a Swift Character is an extended grapheme cluster: CR+LF is ONE cluster, which is not equal
+        // to the cluster "\r". So `contains("\r")` answered false for a string full of CRLF, and the
+        // assertion passed while the file it was guarding was not normalised at all. A test that cannot
+        // fail is worse than no test.
+        XCTAssertFalse(t.utf8.contains(0x0D), "no CR of any kind may survive the decode")
+    }
+
+    func testTheParserItselfHandlesCRLFWithoutTheDecodeHelper() {
+        // BELT AND BRACES, and the regression that matters most. `parse` is a public entry point: the
+        // Android-parity call sites and any future caller can hand it text that never went through
+        // `ImportText.decode`. Splitting on "\n" made THAT case read the whole file as one line — one
+        // spurious session header, no exercises, and therefore zero workouts.
+        let crlf = [
+            "\"Upper A (Mo) · Einzelnes Workout\";\"2026-09-25 11:50 Uhr\";\"53 Min.\"",
+            "\"1. Brustpresse · Maschine · 10 Wdh\"",
+            "#;KG;WDH",
+            "1;75;12",
+            "2;27,5;8",
+        ].joined(separator: "\r\n")
+        let p = AlphaprogImporter.parse(crlf, timeZone: zone)
+        XCTAssertEqual(p.diagnostics.sessionHeaders, 1)
+        XCTAssertEqual(p.diagnostics.exerciseTitles, 1, "the title line must be seen as its own line")
+        XCTAssertEqual(p.diagnostics.setRows, 2)
+        XCTAssertEqual(p.workouts.count, 1)
+        XCTAssertEqual(p.workouts.first?.volumeLoadKg ?? 0, 75 * 12 + 27.5 * 8, accuracy: 1e-9)
+        // And a lone CR, which is the case that accidentally worked before.
+        let cr = crlf.replacingOccurrences(of: "\r\n", with: "\r")
+        XCTAssertEqual(AlphaprogImporter.parse(cr, timeZone: zone), p)
+        // And plain LF, which is what the older fixture is.
+        let lf = crlf.replacingOccurrences(of: "\r\n", with: "\n")
+        XCTAssertEqual(AlphaprogImporter.parse(lf, timeZone: zone), p)
     }
 
     // MARK: - What it parses to

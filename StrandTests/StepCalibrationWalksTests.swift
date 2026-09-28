@@ -84,6 +84,23 @@ final class StepCalibrationWalksTests: XCTestCase {
         XCTAssertEqual(M.ticksPerStepRange, ProfileStore.stepScaleRange)
     }
 
+    /// The divisor the DAY TOTALS divide by (`AnalyticsEngine`, `DayCycleIntelligenceIntegration`) is the
+    /// in-memory `ProfileStore.stepTicksPerStep`, not the stored copy, so an out-of-range assignment used to
+    /// stay live until the next launch re-read it. The bound has to hold on assignment.
+    @MainActor
+    func testStepScaleIsClampedOnAssignmentNotOnlyOnPersist() {
+        XCTAssertEqual(ProfileStore.clampStepScale(500), 30)
+        XCTAssertEqual(ProfileStore.clampStepScale(0.01), 0.5)
+        XCTAssertEqual(ProfileStore.clampStepScale(24), 24)
+        // A non-finite divisor is not clampable by comparison (every test against NaN is false) and would
+        // make the day total NaN, which Int(_:) traps on. It resolves to the 1.0 pass-through default.
+        XCTAssertEqual(ProfileStore.clampStepScale(.nan), 1.0)
+        XCTAssertEqual(ProfileStore.clampStepScale(.infinity), 1.0)
+        // Whatever a calibration walk implies is already inside the range, so the guard can never move it.
+        let implied = M.combinedParameter([walk(.counter, raw: 40_000, counted: 1_000)], kind: .counter)!
+        XCTAssertEqual(ProfileStore.clampStepScale(implied), implied)
+    }
+
     func testCounterIsClampedToTheDivisorRange() {
         // 40 ticks per step is beyond the 30 ceiling; 0.2 below the 0.5 floor.
         XCTAssertEqual(M.combinedParameter([walk(.counter, raw: 40_000, counted: 1_000)], kind: .counter), 30)

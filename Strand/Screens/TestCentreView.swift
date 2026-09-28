@@ -925,6 +925,19 @@ private struct TestModeRow: View {
                         if mode.domain == .display {
                             if isOn { startDisplayMonitor() } else { DisplayPerformanceMonitor.shared.stop() }
                         }
+                        // The Steps traces are emitted by the ANALYTICS pass, not by a live sink, so
+                        // switching the mode on produced nothing until the next sync or the 15-minute
+                        // rescore happened to run — the readout below sat on "no estimate yet" and the
+                        // whole point of the mode (explaining TODAY's steps figure) was unreachable on
+                        // demand. Kick one pass so the `stepsRaw` / `stepsCycle` / `stepsCal` lines for
+                        // today exist by the time the panel is read. Same call the Charge recalibration
+                        // action makes; nothing is emitted when the mode is off, so toggling off is inert.
+                        if mode.domain == .steps, isOn {
+                            Task {
+                                await model.intelligence.analyzeRecent()
+                                await model.repo.refresh()
+                            }
+                        }
                     }
             }
             Text(mode.blurb)

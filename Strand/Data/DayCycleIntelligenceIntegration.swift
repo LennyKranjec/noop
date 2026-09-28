@@ -270,7 +270,14 @@ import WhoopStore
             }
             let segments = PhysiologicalSteps.ownerSegmentsFromCoverage(
                 window, coverage: coverage, fallbackOwner: fallback)
-            guard !segments.isEmpty else { continue }
+            guard !segments.isEmpty else {
+                // Was a SILENT `continue`. Every skip out of this loop makes the day fall back to the
+                // calendar-day total (`applying`), so a steps report has to be able to see which days
+                // the cycle engine declined and why — this branch used to leave no trace at all.
+                trace?("stepsCycle wakeDay=\(day) status=skipped reason=noOwnerSegments "
+                    + "onsetTs=\(window.onset) endTs=\(window.endExclusive) (falls back to the calendar day)")
+                continue
+            }
             let active = window.endExclusive == now
             let identity = segments.enumerated().map { index, segment in
                 "\(segment.owner):\(segment.onset)-\(active && index == segments.count - 1 ? 0 : segment.endExclusive)"
@@ -325,9 +332,21 @@ import WhoopStore
                 cached = CachedCycle(key: key, count: count, pages: pages, samples: samples, evaluated: evaluated)
                 cache.cycles[window.sleepId] = cached
             }
-            guard let result = cached, result.evaluated else { continue }
+            guard let result = cached, result.evaluated else {
+                // Fewer than two counter samples in every segment: there is no delta to sum, so the cycle
+                // has NOTHING to say about this day. Silent before; the day then vanished from
+                // `stepsByWakeDay` and `applying` blanked a calendar-day total that was measured fine.
+                trace?("stepsCycle wakeDay=\(day) status=skipped reason=noCounterDelta "
+                    + "onsetTs=\(window.onset) endTs=\(window.endExclusive) owner=\(identity) "
+                    + "samples=\(cached?.samples ?? 0) (falls back to the calendar day)")
+                continue
+            }
             let scaled = Int((Double(result.count.totalTicks) / max(ticksPerStep, 0.5)).rounded())
-            steps[day] = scaled
+            // Mirror `AnalyticsEngine.analyzeDay`'s `scaled > 0 ? scaled : nil`: a cycle that retained no
+            // tick has measured no steps, and writing a confident `0` over a calendar-day total that DID
+            // measure some is the fabrication §4.1 forbids in the other direction. Leaving the day out of
+            // the map makes `applying` keep the calendar-day figure instead.
+            if scaled > 0 { steps[day] = scaled }
             let status = active ? "active" : "closed"
             trace?("stepsCycle wakeDay=\(day) status=\(status) onsetTs=\(window.onset) "
                 + "endTs=\(window.endExclusive) owner=\(identity) pages=\(result.pages) samples=\(result.samples) "
@@ -337,10 +356,30 @@ import WhoopStore
                 + "rejectedClass=\(result.count.rejectedActivityClassTicks) "
                 + "rejectedImplausible=\(result.count.rejectedImplausibleTicks) "
                 + "gravitySamples=\(result.count.gravitySamplesAvailable) auxSamples=\(result.count.auxSamplesAvailable) "
-                + "ticksPerStep=\(ticksPerStep) scaledSteps=\(scaled)")
+                // `none`, not `0`, when the cycle retained no tick — the same L7 rule `rawCounterTrace`
+                // follows. A literal 0 here would be parsed by `StepsReadout.stepsToday` as today's step
+                // count and shown as a confident zero, while the stored day now keeps its calendar-day
+                // figure instead.
+                + "ticksPerStep=\(ticksPerStep) scaledSteps=\(scaled > 0 ? String(scaled) : "none")")
             } catch {
                 trace?("stepsCycle wakeDay=\(day) status=error error=databaseRead")
                 continue windowLoop
+            }
+        }
+        // Days this pass SCORED but the cycle engine never produced a cycle figure for. The loop above can
+        // only report the windows it walked, and the commonest miss has no window at all: a day with no
+        // detected main sleep gets no boundary (`classifyForCycle` demotes a nap and needs >= 3 h with an
+        // overnight onset), so it is absent from `windows` and nothing in the trace said so. Each of these
+        // now keeps its calendar-day total (`applying`); the line exists so a steps export SAYS which days
+        // the cycle engine covered and which fell back, instead of leaving a dashed tile unexplained.
+        if let trace {
+            // `onsets` is written at the TOP of every window iteration, before any skip, so its keys are
+            // exactly the days that HAD a window — each of which already has its own line above.
+            let windowed = Set(onsets.keys)
+            for day in witnesses.keys.sorted() where !windowed.contains(day) {
+                trace("stepsCycle wakeDay=\(day) status=noCycle "
+                    + "hasBoundary=\(wakeDayById.values.contains(day)) "
+                    + "(no wake-to-wake window for this day; the calendar-day total stands)")
             }
         }
         let recoveredMarkers = recovered.map { SourcedMarker(deviceId: computedId($0.owner),
@@ -352,12 +391,32 @@ import WhoopStore
                 sourceIds: Array(Set(candidates.map { computedId($0.owner) })).sorted()))
     }
 
+    /// Substitute the wake-to-wake cycle figures for the calendar-day ones on every day at or after the
+    /// first cycle boundary this pass resolved.
+    ///
+    /// SUBSTITUTE, never ERASE (the "steps stopped but HR still works" report). `established` is true for
+    /// every day from `firstWakeDay` onwards, but the per-day maps only carry the days the cycle loop
+    /// actually produced a figure for — it `continue`s past a day with no main-sleep boundary, no owner
+    /// segment, or fewer than two counter samples (a night the strap was charging, a night under the 3 h
+    /// main-sleep bar, a nap-only day, today before last night's sleep has been detected). Reading the map
+    /// straight through turned every one of those into `nil`, and `upsertDailyMetrics` writes
+    /// `steps = excluded.steps` unconditionally (MetricsCache.swift), so the measured calendar-day total
+    /// was DELETED from the row. With a WHOOP 5/MG strap counter as the only real source — Apple Health
+    /// steps gone after an iPhone reset re-prompts HealthKit, and `steps_est` unobtainable because its fit
+    /// needs three days the phone also counted — the tile, the lock-screen strip, statistics and the coach
+    /// were all left with nothing and rendered a dash.
+    ///
+    /// A missing map entry means "the cycle engine had nothing to say about this day", not "there were no
+    /// steps", so it falls back to the calendar-day measurement rather than nil. The cycle figure still
+    /// wins whenever it exists, so a day the engine DID resolve is unchanged.
     static func applying(_ result: Result, to daily: DailyMetric) -> DailyMetric {
         let established = result.firstWakeDay.map { daily.day >= $0 } ?? false
-        let steps = established ? result.stepsByWakeDay[daily.day] : daily.steps
-        let strain = established ? result.strainByWakeDay[daily.day] : daily.strain
-        let calories = established ? result.caloriesByWakeDay[daily.day] : daily.activeKcalEst
-        let workouts = established ? result.workoutCountByWakeDay[daily.day] : daily.exerciseCount
+        let steps = established ? (result.stepsByWakeDay[daily.day] ?? daily.steps) : daily.steps
+        let strain = established ? (result.strainByWakeDay[daily.day] ?? daily.strain) : daily.strain
+        let calories = established
+            ? (result.caloriesByWakeDay[daily.day] ?? daily.activeKcalEst) : daily.activeKcalEst
+        let workouts = established
+            ? (result.workoutCountByWakeDay[daily.day] ?? daily.exerciseCount) : daily.exerciseCount
         return DailyMetric(day: daily.day, totalSleepMin: daily.totalSleepMin, efficiency: daily.efficiency,
             deepMin: daily.deepMin, remMin: daily.remMin, lightMin: daily.lightMin,
             disturbances: daily.disturbances, restingHr: daily.restingHr, avgHrv: daily.avgHrv,

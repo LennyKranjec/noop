@@ -54,8 +54,19 @@ final class ProfileStore: ObservableObject {
     /// Step-calibration divisor (#139/#132): counter ticks per real step for the @57 motion
     /// counter. 1.0 = raw pass-through (default — no behavior change). Clamped 0.5–30.0
     /// (WHOOP 5/MG motion-counter overcount can reach ~24×, so the ceiling has to be high).
+    /// Clamped IN MEMORY, not only on the way to defaults. The `didSet` used to clamp what it wrote and
+    /// leave the published property holding the raw assignment, so an out-of-range value (the calibration
+    /// tile's Apply, a Settings edit, a future caller) stayed live for the whole session — and
+    /// `IntelligenceEngine` reads this property, not the stored one, to build `UserProfile`. The day totals
+    /// divide by it (`AnalyticsEngine`, `DayCycleIntelligenceIntegration`), so the unclamped window was the
+    /// one path where a bad divisor could scale a real day toward zero before the next launch re-read and
+    /// clamped it. Re-entrant-safe: the guard makes the corrective assignment a no-op second time round.
     @Published var stepTicksPerStep: Double {
-        didSet { d.set(min(max(stepTicksPerStep, 0.5), 30.0), forKey: K.stepScale) }
+        didSet {
+            let bounded = Self.clampStepScale(stepTicksPerStep)
+            if bounded != stepTicksPerStep { stepTicksPerStep = bounded; return }
+            d.set(bounded, forKey: K.stepScale)
+        }
     }
 
     // ── Steps ESTIMATE calibration (WHOOP 4.0; StepsEstimateEngine) ─────────────────────────────
@@ -388,6 +399,15 @@ final class ProfileStore: ObservableObject {
     /// Allowed range for the step-calibration divisor (#132). 5/MG straps overcount by
     /// up to ~24×, so the old 4.0 ceiling could never reach the truth.
     static let stepScaleRange: ClosedRange<Double> = 0.5...30.0
+
+    /// The step divisor, forced into ``stepScaleRange``. A non-finite value (NaN from a 0/0 ratio, an
+    /// infinity) is NOT clampable — every comparison against NaN is false, so a naive min/max returns NaN
+    /// unchanged — and would make the day total NaN, which `Int(_:)` then traps on. It resolves to the 1.0
+    /// raw-pass-through default instead, the same value a profile with no stored calibration uses.
+    static func clampStepScale(_ value: Double) -> Double {
+        guard value.isFinite else { return 1.0 }
+        return min(max(value, stepScaleRange.lowerBound), stepScaleRange.upperBound)
+    }
 
     /// Variable step for the calibration stepper so high values stay reachable: fine near
     /// the 1.0 default (where most people land), coarse up at the 20s+ a 5/MG needs. A flat

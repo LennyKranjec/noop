@@ -36,6 +36,26 @@ final class ImportTextTests: XCTestCase {
         XCTAssertEqual(decoded.text, "a;b\nc;d\n")
     }
 
+    func testTheGraphemeClusterTrapThisFunctionKeepsFallingInto() {
+        // NOT testing `decode`. Testing the Swift fact that made the first cut of `decode` and of
+        // `AlphaprogImporter.parse` both wrong, so the next person to reach for `contains("\r")` or
+        // `split(separator: "\n")` on file text finds this written down.
+        //
+        // A Swift Character is an extended grapheme cluster, and Unicode joins CR+LF into ONE cluster.
+        let crlf = "a\r\nb"
+        // Every comparison below is spelled `as Character` on purpose: `contains` and `split` each have a
+        // Foundation `StringProtocol` overload as well, and which one a bare "\r" literal picks is the
+        // ambiguity that hid the bug in the first place. CI settled it — the Character overload won.
+        XCTAssertEqual(crlf.count, 3, "a, \\r\\n, b — THREE Characters, not four")
+        XCTAssertFalse(crlf.contains("\r" as Character), "the trap: no Character here equals \\r")
+        XCTAssertFalse(crlf.contains("\n" as Character), "nor \\n")
+        XCTAssertEqual(crlf.split(separator: "\n" as Character).count, 1,
+                       "so splitting on \\n does not split at all")
+        // The spellings that do work, and the ones both files now use.
+        XCTAssertTrue(crlf.utf8.contains(0x0D))
+        XCTAssertEqual(crlf.components(separatedBy: .newlines), ["a", "", "b"])
+    }
+
     func testALoneCarriageReturnIsAlsoALineBreak() {
         // A classic-Mac / some-spreadsheet export. Left as-is, a `split(separator: "\n")` reader sees
         // ONE line holding the whole file — which parses to nothing, honestly and uselessly.

@@ -51,6 +51,65 @@ enum CoachExtraContext {
         return totals
     }
 
+    /// How many exercises the progression section lists before it says how many it left out.
+    ///
+    /// A wearer with two years of training has thirty lifts, and thirty lines of estimates would crowd out
+    /// the sleep, the journal and the day itself in a context the model reads once. Stalled-first ordering
+    /// means the cut falls on the lifts that are fine, and the count of the remainder is stated rather than
+    /// the list quietly ending.
+    private static let coachProgressionLimit = 12
+
+    /// One exercise as a line of context. ENGLISH and unlocalized, like every other line in this file: it
+    /// is written for the model, not shown to the wearer, and the screen has its own localized copy.
+    ///
+    /// Numbers are formatted here rather than through `StrengthProgressionCopy`, whose job is the wearer's
+    /// locale — a German decimal comma inside a model prompt is a number the model may misread.
+    private static func coachLine(for exercise: StrengthProgression.Exercise) -> String {
+        func kg(_ v: Double) -> String {
+            v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)
+        }
+        if let reason = exercise.abstained {
+            switch reason {
+            case .tooFewSessions(let have, let need):
+                return "\(exercise.name): only \(have) of \(need) readable sessions — NO estimate, say so if asked"
+            case .noUsableSets:
+                return "\(exercise.name): no set carried both a weight and a rep count — NO estimate"
+            }
+        }
+        var parts: [String] = []
+        if let current = exercise.currentE1rmKg, let date = exercise.currentDate {
+            parts.append("est. 1RM \(kg(current)) kg on \(Repository.localDayKey(date))")
+        }
+        if let best = exercise.bestEverE1rmKg, let when = exercise.bestEverDate {
+            parts.append("best \(kg(best)) kg (first reached \(Repository.localDayKey(when)))")
+        }
+        if let weight = exercise.topWorkingWeightKg, let reps = exercise.topWorkingReps {
+            parts.append("top working set \(kg(weight)) kg x \(reps)")
+        }
+        for weeks in StrengthProgression.trendWindowsWeeks.sorted() {
+            guard let trend = exercise.trends[weeks] else { continue }
+            parts.append("\(weeks)w trend " + String(format: "%+.1f kg", trend.deltaKg))
+        }
+        if let stall = exercise.stall {
+            let at = stall.stuckAtKg.map { " at \(kg($0)) kg" } ?? ""
+            parts.append("STALLED: \(stall.sessions) sessions\(at) over \(stall.days) days with no new best")
+        }
+        if let suggestion = exercise.suggestion {
+            let step = suggestion.step == .addWeight
+                ? "add weight (\(suggestion.incrementKg.map { kg($0) } ?? "?") kg step)"
+                : "add a rep"
+            parts.append("next: \(kg(suggestion.weightKg)) kg x \(suggestion.reps) — \(step), "
+                         + "range \(suggestion.repRangeLow)-\(suggestion.repRangeHigh)")
+        } else {
+            parts.append("no next-step suggestion this app can defend")
+        }
+        if exercise.excludedBodyweightSets > 0 {
+            parts.append("\(exercise.excludedBodyweightSets) sets excluded (log records weight ADDED to "
+                         + "bodyweight, absolute load unknown)")
+        }
+        return "\(exercise.name): " + parts.joined(separator: "; ")
+    }
+
     static func block(repo: Repository) async -> String {
         var sections: [String] = []
         let today = Repository.localDayKey(Date())
@@ -196,6 +255,31 @@ enum CoachExtraContext {
             body.append(line)
         }
         if !body.isEmpty { sections.append((["LEVEL INPUTS:"] + body).joined(separator: "\n")) }
+
+        // 8b. Per-exercise progression — the SAME numbers the Progression section shows.
+        //
+        // Read through `StrengthProgressionSource`, not recomputed here, for the reason the energy bank is
+        // read rather than recomputed: the wearer asks "how is my bench going" straight after looking at
+        // that card, and a coach quoting a different figure than the screen is the error they notice first.
+        // The abstentions travel too — an exercise with too few sessions is reported AS having too few,
+        // so the model says so instead of estimating from the two it can see.
+        if let store = await repo.storeHandle() {
+            let progression = await StrengthProgressionSource.load(store: store)
+            if !progression.isEmpty {
+                var lines = ["PER-EXERCISE STRENGTH PROGRESSION (estimated one-rep max, Epley, from their "
+                             + "logged sets of 1-\(StrengthProgression.maxReps) reps; stalled lifts first):"]
+                for exercise in progression.prefix(coachProgressionLimit) {
+                    lines.append("  " + coachLine(for: exercise))
+                }
+                if progression.count > coachProgressionLimit {
+                    lines.append("  (\(progression.count - coachProgressionLimit) further exercises not listed)")
+                }
+                lines.append("  A suggestion above is double progression — reps to the top of their own "
+                             + "observed range first, then ONE of their own observed weight increments. "
+                             + "Never propose a bigger jump than the one stated.")
+                sections.append(lines.joined(separator: "\n"))
+            }
+        }
 
         // 9. The bedroom and the lights.
         var home: [String] = []

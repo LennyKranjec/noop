@@ -321,6 +321,23 @@ public struct LiftSetRow: Equatable, Codable, Sendable {
     }
 }
 
+/// One set with the start of the session it belongs to.
+///
+/// A NAMED STRUCT rather than a tuple, because this value crosses the store actor's boundary on every read
+/// of the whole history: a concrete `Sendable` type states that outright instead of leaning on tuple
+/// conformance, and it gives the field a name at the call site (`row.sessionStartTs`, not `row.0`).
+public struct LiftSetWithSession: Equatable, Sendable {
+    /// Unix seconds — the SESSION's start, which is NOT `set.startTs` (that is when the set itself began,
+    /// and no export NOOP reads carries it).
+    public var sessionStartTs: Int
+    public var set: LiftSetRow
+
+    public init(sessionStartTs: Int, set: LiftSetRow) {
+        self.sessionStartTs = sessionStartTs
+        self.set = set
+    }
+}
+
 // MARK: - Store
 
 extension WhoopStore {
@@ -566,6 +583,42 @@ extension WhoopStore {
         }
     }
 
+    /// Replace a session's whole set list in one transaction — the `replaceLiftProgramItems` idiom.
+    ///
+    /// FOR AN IMPORT, where the file is the authority on what the session contained. `upsertLiftSets`
+    /// keys on `id`, so re-importing an export whose session lost a set leaves that set behind forever:
+    /// the new rows overwrite ids 0…n-1 and the orphan at n is never touched. Deleting first makes the
+    /// stored session equal the imported one rather than the union of every version ever imported.
+    ///
+    /// NOT for the live logging path, which must stay set-by-set durable: a delete-then-insert of a
+    /// session in progress would drop every set already logged if the insert half failed.
+    ///
+    /// Scoped by `sessionId`, and an imported session's id is minted under the import's own `deviceId`
+    /// ("lifting"), so this cannot reach a session logged on a strap's device id.
+    @discardableResult
+    public func replaceLiftSets(sessionId: String, sets: [LiftSetRow]) async throws -> Int {
+        try syncWrite { db in
+            try db.execute(sql: "DELETE FROM liftSet WHERE sessionId = ?", arguments: [sessionId])
+            var n = 0
+            for r in sets {
+                try db.execute(sql: """
+                    INSERT INTO liftSet
+                        (id, deviceId, sessionId, ord, exercise, primaryMuscle, secondaryMuscles,
+                         setIndex, weightKg, reps, rpe, isWarmup, startTs, endTs, restSec, note)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, arguments: [
+                        r.id, r.deviceId, r.sessionId, r.ord, r.exercise,
+                        r.primaryMuscle?.rawValue,
+                        LiftMuscle.encodeList(r.secondaryMuscles, excluding: r.primaryMuscle),
+                        r.setIndex, r.weightKg, r.reps, r.rpe, r.isWarmup,
+                        r.startTs, r.endTs, r.restSec, r.note,
+                    ])
+                n += db.changesCount
+            }
+            return n
+        }
+    }
+
     /// Every set in a session, in the order they were performed.
     public func liftSets(sessionId: String) async throws -> [LiftSetRow] {
         try syncRead { db in
@@ -574,6 +627,38 @@ extension WhoopStore {
                 WHERE sessionId = ?
                 ORDER BY ord ASC
                 """, arguments: [sessionId]).map(LiftSetRow.decode)
+        }
+    }
+
+    /// Every set in `[fromTs, toTs]` with the start of the session it belongs to, in one read.
+    ///
+    /// ONE QUERY, not a session list plus a per-session set read. Per-exercise progression needs the whole
+    /// history of every exercise at once — a wearer with a year of training has a hundred sessions, and the
+    /// N+1 shape would be a hundred round trips through the actor on every open of the screen, which is
+    /// the read pattern the Insights freeze (#833) was.
+    ///
+    /// Warm-ups are INCLUDED and flagged; a reader that excludes them says so at the point it does.
+    /// Ordered by session then position, so the caller can group without sorting.
+    public func liftSetsWithSessionStart(
+        deviceId: String,
+        fromTs: Int,
+        toTs: Int
+    ) async throws -> [LiftSetWithSession] {
+        try syncRead { db in
+            try Row.fetchAll(db, sql: """
+                SELECT s.*, sess.startTs AS sessionStartTs
+                FROM liftSet s
+                JOIN liftSession sess ON sess.id = s.sessionId
+                WHERE s.deviceId = ? AND sess.startTs >= ? AND sess.startTs <= ?
+                ORDER BY sess.startTs ASC, s.ord ASC
+                """, arguments: [deviceId, fromTs, toTs])
+                // `s.*` carries liftSet's own `startTs` (when the set began), so the session's start is
+                // ALIASED rather than selected bare — two columns named `startTs` in one row would have
+                // the decoder read whichever SQLite happened to put second.
+                .map { row -> LiftSetWithSession in
+                    let sessionStart: Int = row["sessionStartTs"]
+                    return LiftSetWithSession(sessionStartTs: sessionStart, set: LiftSetRow.decode(row))
+                }
         }
     }
 

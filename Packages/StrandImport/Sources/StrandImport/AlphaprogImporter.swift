@@ -77,12 +77,27 @@ public enum AlphaprogImporter {
         public let reps: Int
         public let holdSeconds: Int
         public let minutes: Double
+        /// The file wrote this load as an ADDITION to bodyweight (`+10`), not as the whole load.
+        ///
+        /// `weightKg` is then the added weight ALONE — ten kilograms, not bodyweight plus ten — which is
+        /// the under-reading the file header already documents and deliberately does not change, because
+        /// changing it would move volume figures already imported and the bodyweight it would need is not
+        /// in the file.
+        ///
+        /// The flag exists because a reader that needs the ABSOLUTE load cannot use that figure at all.
+        /// An estimated 1RM from "10 kg × 11" on a hyperextension is not a smaller number than the truth,
+        /// it is a different lift, and it would sit in a progression list next to real machine loads
+        /// looking like one. `StrengthProgression` excludes these sets and says how many it excluded.
+        /// Volume load is unaffected: `volumeKg` does not read this.
+        public let addedToBodyweight: Bool
 
-        public init(weightKg: Double, reps: Int, holdSeconds: Int = 0, minutes: Double = 0) {
+        public init(weightKg: Double, reps: Int, holdSeconds: Int = 0, minutes: Double = 0,
+                    addedToBodyweight: Bool = false) {
             self.weightKg = weightKg
             self.reps = reps
             self.holdSeconds = holdSeconds
             self.minutes = minutes
+            self.addedToBodyweight = addedToBodyweight
         }
 
         /// Kilograms of volume load. Zero for anything that was not weight × repetitions.
@@ -123,6 +138,27 @@ public enum AlphaprogImporter {
         }
         public var topSetKg: Double? {
             exercises.flatMap(\.sets).map(\.weightKg).max()
+        }
+
+        /// Every performed set, flattened in the order the file printed them, for the shared set list.
+        ///
+        /// A LOADED HOLD AND A TIMED EFFORT CARRY NO REPS, so they land with `reps: nil` rather than with
+        /// the seconds or the minutes in the rep field — the same distinction this parser exists to keep.
+        /// A timed effort has no external load either, so its weight is absent too rather than zero.
+        var setRecords: [LiftingSetRecord] {
+            exercises.flatMap { exercise in
+                exercise.sets.map { set in
+                    LiftingSetRecord(
+                        exercise: exercise.name,
+                        weightKg: set.weightKg > 0 ? set.weightKg : nil,
+                        reps: set.reps > 0 ? set.reps : nil,
+                        // Alphaprog prints no warm-up marker: every row in the grid is a set the wearer
+                        // logged. Guessing which were warm-ups from the weights would invent a
+                        // distinction the file does not make.
+                        isWarmup: false,
+                        addedToBodyweight: set.addedToBodyweight)
+                }
+            }
         }
 
         /// Volume per exercise name, which is what the shared muscle split is taken from.
@@ -208,6 +244,25 @@ public enum AlphaprogImporter {
         static let dotted = Dialect(delimiter: ",", decimalComma: false)
     }
 
+    /// The file's lines, however it terminates them.
+    ///
+    /// NOT `split(separator: "\n")`. A Swift `Character` is an extended grapheme cluster and Unicode
+    /// joins CR+LF into ONE cluster, so in a CRLF document no Character ever equals `"\n"` and
+    /// `split(separator: "\n")` returns the WHOLE FILE as a single element. Alphaprog writes CRLF, so
+    /// this parser read the wearer's real 4 859-line export as one line: `quotedFields` then swept up
+    /// every quoted field in the file, the first three of them happened to look like a valid session
+    /// header, and the result was one header, zero exercises and — because a session with no exercises
+    /// is dropped — zero workouts. "No sessions found", about a file with a hundred sessions in it.
+    ///
+    /// The repo's own test fixture was LF-only, which is why nothing caught it.
+    ///
+    /// `components(separatedBy: .newlines)` is `CharacterSet`-based and therefore SCALAR-level, so it
+    /// splits LF, CRLF (into two pieces, the empty one between them being skipped as a blank line like
+    /// any other) and a lone CR alike. On an LF-only file it returns exactly what `split` returned.
+    static func lines(of text: String) -> [String] {
+        text.components(separatedBy: .newlines)
+    }
+
     /// Sniff the dialect from the file.
     ///
     /// DELIBERATELY BIASED TOWARDS SEMICOLON. The grid header names the delimiter outright (`#;KG;WDH`
@@ -215,9 +270,14 @@ public enum AlphaprogImporter {
     /// almost every file on its own. The count fallback only runs for a file with no grid at all, and
     /// ties go to semicolon — so a file today's parser reads, tomorrow's reads identically.
     static func sniffDialect(_ text: String) -> Dialect {
+        sniffDialect(lines: lines(of: text))
+    }
+
+    static func sniffDialect(lines: [String]) -> Dialect {
         var semis = 0, commas = 0
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+        for line in lines {
             let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if t.isEmpty { continue }
             if t.hasPrefix("#;") { return .german }
             if t.hasPrefix("#,") { return .dotted }
             var inQuotes = false
@@ -263,7 +323,10 @@ public enum AlphaprogImporter {
         // Defaults to reps: every grid in the file but two is weight × repetitions, and a row arriving
         // before any header at all is far likelier to be a stray than an isometric.
         var grid = Grid.reps
-        let dialect = sniffDialect(text)
+        // Split ONCE, and not on "\n" — see `lines(of:)` for why that spelling read a CRLF export as a
+        // single line and reported a hundred sessions as none.
+        let sourceLines = lines(of: text)
+        let dialect = sniffDialect(lines: sourceLines)
         var headerCount = 0, titleCount = 0, rowCount = 0
         var firstLine = ""
 
@@ -288,7 +351,7 @@ public enum AlphaprogImporter {
             haveStart = false
         }
 
-        for raw in text.split(separator: "\n", omittingEmptySubsequences: false) {
+        for raw in sourceLines {
             var line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             if line.hasPrefix("\u{FEFF}") { line.removeFirst() }
             if line.isEmpty { continue }
@@ -323,7 +386,14 @@ public enum AlphaprogImporter {
                    let reps = Int(row.2.trimmingCharacters(in: .whitespaces)),
                    reps > 0 {
                     // A dash in either column is a set that was printed and not done.
-                    sets.append(Set(weightKg: weight, reps: reps))
+                    //
+                    // A LEADING PLUS is recorded, not read away. `Double("+10")` is 10 and the volume load
+                    // keeps reading it that way (see `Set.addedToBodyweight`); the flag is what lets a
+                    // reader that needs the absolute load abstain instead of treating ten added kilograms
+                    // as a ten-kilogram lift.
+                    sets.append(Set(weightKg: weight,
+                                    reps: reps,
+                                    addedToBodyweight: isBodyweightAdded(row.1)))
                 }
             case .seconds:
                 // A loaded hold. The weight is real and the seconds are real; their PRODUCT is not a
@@ -375,7 +445,8 @@ public enum AlphaprogImporter {
                     totalReps: w.totalReps,
                     topSetKg: w.topSetKg,
                     title: w.title,
-                    muscleVolumeKg: LiftingImporter.muscleVolume(byExercise: w.volumeByExercise))
+                    muscleVolumeKg: LiftingImporter.muscleVolume(byExercise: w.volumeByExercise),
+                    sets: w.setRecords)
             }
     }
 
@@ -459,6 +530,15 @@ public enum AlphaprogImporter {
     /// `1.234,5` or `27,5` or `30` — comma decimal, optional thousands dot. A dash is not a number.
     public static func germanNumber(_ raw: String) -> Double? {
         number(raw, decimalComma: true)
+    }
+
+    /// Whether a weight column was written as an ADDITION to bodyweight: `+10`.
+    ///
+    /// Read off the RAW column rather than inferred after parsing, because the plus is gone by then —
+    /// `Double("+10")` and `Double("10")` are the same value, and that is exactly the distinction a
+    /// reader of absolute loads needs back. Both dialects write the plus the same way.
+    static func isBodyweightAdded(_ raw: String) -> Bool {
+        raw.trimmingCharacters(in: .whitespaces).hasPrefix("+")
     }
 
     /// A weight, a rep target or a duration column, in the file's own number convention.

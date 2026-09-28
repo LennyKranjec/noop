@@ -18,6 +18,45 @@ import Foundation
 // and Liftosaur's `lb` unit convert). The parser is tolerant in the house style: a malformed set or
 // record is skipped and counted, never fatal.
 
+/// One set as the export wrote it, carried alongside the session's totals.
+///
+/// WHY THE SETS TRAVEL NOW. Every importer here has had the individual sets in hand and thrown them
+/// away at the end of the parse, because a `LiftingSession` is a summary and there was nowhere to put
+/// them. Per-exercise progression cannot be derived from a summary at all: "is the bench press moving"
+/// is a question about one exercise's working weights over time, and a session's volume load, set count
+/// and top set do not contain it. `liftSession`/`liftSet` (store v46) is where they land.
+///
+/// EVERY FIELD IS OPTIONAL WHERE THE EXPORT CAN OMIT IT. A bodyweight set has no weight and a timed
+/// hold has no reps, and both are real sets that happened — writing 0 for either would say the wearer
+/// lifted nothing or did no repetitions, which is a different claim from "the file does not say".
+public struct LiftingSetRecord: Sendable, Equatable {
+    /// The exercise name exactly as the export wrote it, so a name can be matched across sessions.
+    public var exercise: String
+    /// Kilograms, or nil when the export recorded no external load for this set.
+    public var weightKg: Double?
+    /// Repetitions, or nil when the set was not counted in repetitions (a hold, a timed effort).
+    public var reps: Int?
+    /// Warm-ups are recorded and excluded from working figures, matching `LiftSetRow.isWarmup`.
+    public var isWarmup: Bool
+    /// `weightKg` is weight ADDED to bodyweight, not the whole load (Alphaprog's `+10`).
+    ///
+    /// The absolute load is then unknown, so anything that needs one — an estimated 1RM — must abstain
+    /// rather than treat the addition as the load. See `AlphaprogImporter.Set.addedToBodyweight`.
+    public var addedToBodyweight: Bool
+
+    public init(exercise: String,
+                weightKg: Double?,
+                reps: Int?,
+                isWarmup: Bool = false,
+                addedToBodyweight: Bool = false) {
+        self.exercise = exercise
+        self.weightKg = weightKg
+        self.reps = reps
+        self.isWarmup = isWarmup
+        self.addedToBodyweight = addedToBodyweight
+    }
+}
+
 /// One imported strength session — the shape the app layer maps 1:1 onto a `WorkoutRow`
 /// (sport "Strength Training", source "lifting"). All weights are kilograms.
 public struct LiftingSession: Sendable, Equatable {
@@ -48,6 +87,14 @@ public struct LiftingSession: Sendable, Equatable {
     /// the body view stays dark for work it cannot attribute rather than shading it from a guess.
     public var muscleVolumeKg: [MuscleGroup: Double]
 
+    /// Every set in the session, in the order the export listed them — warm-ups included.
+    ///
+    /// DEFAULTS TO EMPTY, so every existing call site and the Kotlin-parity shape are undisturbed and an
+    /// importer that has no per-set detail stays honest by carrying none. An empty array means "this
+    /// import did not record sets", which is exactly the state of every session imported before sets
+    /// travelled — and why the progression screen says which sessions it can and cannot read.
+    public var sets: [LiftingSetRecord]
+
     public init(
         start: Date,
         end: Date,
@@ -57,7 +104,8 @@ public struct LiftingSession: Sendable, Equatable {
         totalReps: Int,
         topSetKg: Double?,
         title: String?,
-        muscleVolumeKg: [MuscleGroup: Double] = [:]
+        muscleVolumeKg: [MuscleGroup: Double] = [:],
+        sets: [LiftingSetRecord] = []
     ) {
         self.start = start
         self.end = end
@@ -68,6 +116,7 @@ public struct LiftingSession: Sendable, Equatable {
         self.topSetKg = topSetKg
         self.title = title
         self.muscleVolumeKg = muscleVolumeKg
+        self.sets = sets
     }
 
     /// Duration in seconds, or nil when start == end (no real interval to claim).
@@ -291,6 +340,8 @@ public enum LiftingImporter {
         /// exercises rather than per set — an exercise with two movers must count its full volume
         /// toward each, and doing that per set would be the same arithmetic done more times.
         var volumeByExercise: [String: Double] = [:]
+        /// Every set the export listed, in order, warm-ups included. See `LiftingSession.sets`.
+        var records: [LiftingSetRecord] = []
 
         init(start: Date, title: String?, zone: TimeZone) {
             self.start = start
@@ -303,7 +354,19 @@ public enum LiftingImporter {
         /// volume, but a completed bodyweight/duration set still increments the set count for context.
         func add(exercise: String, setType: String, weightKg: Double?, reps: Int?) {
             if !exercise.isEmpty { exercises.insert(exercise.lowercased()) }
-            if setType == "warmup" || setType == "warm_up" || setType == "warm-up" { return }
+            let warmup = setType == "warmup" || setType == "warm_up" || setType == "warm-up"
+            // RECORDED BEFORE THE WARM-UP RETURN, and flagged rather than dropped: the aggregate figures
+            // legitimately exclude warm-ups, but the stored set list is the export's own account of the
+            // session and a set that is missing from it cannot be told from one that was never logged.
+            // A positive weight with no reps is a duration/bodyweight set; both halves stay absent-or-real.
+            if !exercise.isEmpty {
+                records.append(LiftingSetRecord(
+                    exercise: exercise,
+                    weightKg: (weightKg ?? 0) > 0 ? weightKg : nil,
+                    reps: (reps ?? 0) > 0 ? reps : nil,
+                    isWarmup: warmup))
+            }
+            if warmup { return }
             sets += 1
             if let r = reps, r > 0 { self.reps += r }
             if let w = weightKg, w > 0 {
@@ -327,7 +390,8 @@ public enum LiftingImporter {
                 totalReps: reps,
                 topSetKg: top,
                 title: title,
-                muscleVolumeKg: LiftingImporter.muscleVolume(byExercise: volumeByExercise)
+                muscleVolumeKg: LiftingImporter.muscleVolume(byExercise: volumeByExercise),
+                sets: records
             )
         }
     }
@@ -429,6 +493,7 @@ public enum LiftingImporter {
 
         let entries = (record["entries"] as? [Any]) ?? []
         var volumeByExercise: [String: Double] = [:]
+        var records: [LiftingSetRecord] = []
         for case let entry as [String: Any] in entries {
             exercises += 1
             let exerciseName = liftosaurExerciseName(entry)
@@ -442,10 +507,21 @@ public enum LiftingImporter {
                 guard let r = liftosaurInt(set["completedReps"]), r > 0 else { continue }
                 sets += 1
                 reps += r
-                if let w = liftosaurWeightKg(set, entryUnit: entryUnit), w > 0 {
+                let w = liftosaurWeightKg(set, entryUnit: entryUnit)
+                if let w, w > 0 {
                     top = max(top ?? 0, w)
                     volume += w * Double(r)
                     if let exerciseName { volumeByExercise[exerciseName, default: 0] += w * Double(r) }
+                }
+                // Only a NAMED exercise's sets are kept: the whole point of a stored set is matching one
+                // exercise across sessions, and an unnamed entry's sets cannot be matched to anything.
+                // Liftosaur has no warm-up marker — a set it logged is a set that counted — so nothing is
+                // flagged here rather than guessing which were warm-ups from the weights.
+                if let exerciseName {
+                    records.append(LiftingSetRecord(
+                        exercise: exerciseName,
+                        weightKg: (w ?? 0) > 0 ? w : nil,
+                        reps: r))
                 }
             }
         }
@@ -460,7 +536,8 @@ public enum LiftingImporter {
             totalReps: reps,
             topSetKg: top,
             title: (record["programName"] as? String) ?? (record["dayName"] as? String),
-            muscleVolumeKg: muscleVolume(byExercise: volumeByExercise)
+            muscleVolumeKg: muscleVolume(byExercise: volumeByExercise),
+            sets: records
         )
     }
 

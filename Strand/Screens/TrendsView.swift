@@ -284,33 +284,41 @@ struct TrendsView: View {
                         // down that the wearer had to go looking for the thing they came to see.
                         MuscleModelCardView()
                             .staggeredAppear(index: 0)
+                        // PROGRESSION, directly under the muscle model and above the vitals. The two are
+                        // one thought read top to bottom — where the work went, then whether it is making
+                        // the wearer stronger — and separating them with four charts would make the second
+                        // half of that thought something you have to go looking for, which is the mistake
+                        // the muscle card itself was moved up here to fix. Self-hides nothing: it carries
+                        // its own honest empty state for a log with no stored sets.
+                        StrengthProgressionCardView()
+                            .staggeredAppear(index: 1)
                         // Heart, lungs and sleep, directly under the muscle model. No heading of their
                         // own: the figure above already says what this part of the screen is, and a
                         // title here would label a label. The third tile IS the Sleep door.
                         VitalTrioCardView(trend: levelTrend, onOpenSleep: { openSleep = true })
-                            .staggeredAppear(index: 1)
+                            .staggeredAppear(index: 2)
                         // Week-in-review digest (#208) with prev/next week browsing (#710) — self-hides
                         // only when NO week in history has data. Past weeks render in the same format.
                         weeklyDigestNav
-                            .staggeredAppear(index: 2)
+                            .staggeredAppear(index: 3)
                         // The Charge / Effort / Rest trio, presented in NOOP's pip language.
                         weekInReview(charge: recovery, effort: strain, rest: rest)
-                            .staggeredAppear(index: 3)
-                        rangeBar(recovery: recovery)
                             .staggeredAppear(index: 4)
-                        heroRecovery(recovery: recovery)
+                        rangeBar(recovery: recovery)
                             .staggeredAppear(index: 5)
-                        smallMultiples(hrv: hrv, rhr: rhr, strain: strain)
+                        heroRecovery(recovery: recovery)
                             .staggeredAppear(index: 6)
+                        smallMultiples(hrv: hrv, rhr: rhr, strain: strain)
+                            .staggeredAppear(index: 7)
                         // Long-horizon training load (CTL/ATL/TSB). Uses the FULL history, not the
                         // range window — chronic load is inherently a 42-day horizon. Self-hides its
                         // chart behind an honest "needs N more days" state until enough history exists.
                         TrainingLoadCard(days: repo.days)
-                            .staggeredAppear(index: 7)
-                        yearStrip
                             .staggeredAppear(index: 8)
-                        exportReportRow
+                        yearStrip
                             .staggeredAppear(index: 9)
+                        exportReportRow
+                            .staggeredAppear(index: 10)
                     }
                 }
             }

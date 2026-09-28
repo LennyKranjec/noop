@@ -85,6 +85,44 @@ final class StepsEstimateEngineTraceTests: XCTestCase {
         XCTAssertFalse(totalLine.contains("scaledSteps=0"))
     }
 
+    /// The regression this trace exists to explain: a classed 5/MG day whose @63 byte never reads walk(1)
+    /// or run(2). Production `StepsCounter.stepsInWindow` rejects EVERY increment, so `analyzeDay` returns
+    /// nil and the tile shows a dash. The trace used to restate only the `delta < 512` gate, so it reported
+    /// a healthy rawTicks/scaledSteps for exactly this day and pointed the reader away from the cause.
+    func testClassRejectedDayReportsNoneAndNamesTheClassGate() {
+        let stillSamples = [
+            StepSample(ts: noonUtc, counter: 100, activityClass: 0),
+            StepSample(ts: noonUtc + 60, counter: 150, activityClass: 0),
+            StepSample(ts: noonUtc + 120, counter: 220, activityClass: 0),
+        ]
+        let production = AnalyticsEngine.analyzeDay(day: dayUtc, steps: stillSamples, profile: profile).daily.steps
+        XCTAssertNil(production, "an all-still classed window retains no locomotion tick in production")
+
+        let lines = StepsEstimateEngine.rawCounterTrace(
+            daySteps: stillSamples, dayKey: dayUtc, tzOffsetSeconds: 0, ticksPerStep: profile.stepTicksPerStep)
+        let totalLine = lines.first { $0.hasPrefix("stepsRaw total ") }!
+        XCTAssertTrue(totalLine.contains("rawTicks=0"), totalLine)
+        XCTAssertTrue(totalLine.contains("scaledSteps=none"), totalLine)
+        let gateLine = lines.first { $0.hasPrefix("stepsRaw gates ") }!
+        XCTAssertTrue(gateLine.contains("classed=true"), gateLine)
+        XCTAssertTrue(gateLine.contains("locomotionSamples=0"), gateLine)
+        XCTAssertTrue(gateLine.contains("rejectedClassTicks=120"), gateLine)
+    }
+
+    /// The per-second rate cap is the other gate that can empty a day, and it must be reported separately
+    /// from the class gate so the two causes are not confused in an export.
+    func testRateRejectedDeltaIsReportedSeparately() {
+        // 7 ticks in one second exceeds maxTicksPerSecond (4) - production drops it, the trace says why.
+        let samples = [step(0, 100), step(1, 107)]
+        XCTAssertNil(AnalyticsEngine.analyzeDay(day: dayUtc, steps: samples, profile: profile).daily.steps)
+        let lines = StepsEstimateEngine.rawCounterTrace(
+            daySteps: samples, dayKey: dayUtc, tzOffsetSeconds: 0, ticksPerStep: 1.0)
+        let gateLine = lines.first { $0.hasPrefix("stepsRaw gates ") }!
+        XCTAssertTrue(gateLine.contains("rejectedRateTicks=7"), gateLine)
+        XCTAssertTrue(gateLine.contains("rejectedClassTicks=0"), gateLine)
+        XCTAssertTrue(lines.first { $0.hasPrefix("stepsRaw total ") }!.contains("scaledSteps=none"))
+    }
+
     func testFewerThanTwoSamplesReportsNoDelta() {
         let lines = StepsEstimateEngine.rawCounterTrace(
             daySteps: [step(0, 100)], dayKey: dayUtc, tzOffsetSeconds: 0, ticksPerStep: 1.0)

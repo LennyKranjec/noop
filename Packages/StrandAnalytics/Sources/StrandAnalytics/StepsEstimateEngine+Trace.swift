@@ -12,9 +12,11 @@ import WhoopProtocol
 //     "Need N more days" reason), the same status the tile renders.
 //
 //  2. rawCounterTrace(...) - the WHOOP 5/MG raw path. Reports the cumulative step_motion_counter series and
-//     its WRAP-AWARE deltas (cur - prev) & 0xFFFF, the dropped deltas (>= 512, a sync-gap / reboot boundary,
-//     not real steps), and the same total AnalyticsEngine.analyzeDay sums, with the SAME maxStepDelta gate
-//     and the SAME ticks-per-step scaling, so the trace and the daily steps_est value can never diverge.
+//     its WRAP-AWARE deltas (cur - prev) & 0xFFFF, and the same total AnalyticsEngine.analyzeDay sums, by
+//     applying StepsCounter's OWN gates (shouldCountDelta / isPlausibleDelta / maxStepDelta) and the same
+//     ticks-per-step scaling, so the trace and the daily steps value can never diverge. Each rejected tick
+//     is attributed to the gate that dropped it (@63 not walk/run, or over the per-second rate cap),
+//     because those two are the only ways a counter that climbed all day yields no steps at all.
 //
 // No clock, no I/O, no PII (counts and ratios only). A fixture pins the exact lines. The Steps test mode
 // gates each call behind TestCentre.active(.steps) at the call site (IntelligenceEngine); when the mode is
@@ -87,8 +89,14 @@ extension StepsEstimateEngine {
                                        dayKey: String,
                                        tzOffsetSeconds: Int,
                                        ticksPerStep: Double) -> [String] {
-        // The SAME maxStepDelta gate AnalyticsEngine.analyzeDay uses for the daily steps total.
-        let maxStepDelta = 512
+        // The SAME gates the production kernel applies, taken FROM it rather than restated. This trace
+        // used to hard-code `let maxStepDelta = 512` and test `delta >= 1 && delta < maxStepDelta` only,
+        // so it reported a healthy `rawTicks`/`scaledSteps` for a day whose production total was nil,
+        // because `StepsCounter.stepsInWindow` ALSO drops a delta whose sample is not classed walk/run
+        // (`shouldCountDelta`) and one that exceeds 4 ticks per elapsed second (`isPlausibleDelta`). That
+        // made this the one diagnostic that could not answer "why is my steps tile blank", which is the
+        // only reason it exists. Both rejection classes are now counted and named.
+        let maxStepDelta = StepsCounter.maxStepDelta
 
         // The SAME filter + sort: keep only this LOCAL day's samples, time-ordered.
         let sorted = daySteps
@@ -119,22 +127,39 @@ extension StepsEstimateEngine {
             return lines
         }
 
-        // Walk the wrap-aware deltas exactly as the production sum does.
+        // Walk the wrap-aware deltas exactly as the production sum does, in the same gate ORDER
+        // (class first, then plausibility) so each rejected tick is attributed to the gate that
+        // actually dropped it.
+        let classed = StepsCounter.hasActivityClasses(sorted)
         var rawTotal = 0
         var keptDeltas = 0
         var droppedDeltas = 0
+        var rejectedClassTicks = 0
+        var rejectedRateTicks = 0
+        var locomotionSamples = 0
         var minDelta = Int.max
         var maxDelta = Int.min
         for i in 1..<sorted.count {
             let delta = (sorted[i].counter - sorted[i - 1].counter) & 0xFFFF  // wrap-aware u16 increment
-            if delta >= 1 && delta < maxStepDelta {
-                rawTotal += delta
-                keptDeltas += 1
-                minDelta = Swift.min(minDelta, delta)
-                maxDelta = Swift.max(maxDelta, delta)
-            } else if delta >= maxStepDelta {
-                droppedDeltas += 1   // a sync-gap / reboot boundary, not real steps (>= 512)
+            if let cls = sorted[i].activityClass, cls == 1 || cls == 2 { locomotionSamples += 1 }
+            guard StepsCounter.shouldCountDelta(activityClass: sorted[i].activityClass,
+                                                hasActivityClasses: classed) else {
+                rejectedClassTicks += delta
+                continue
             }
+            if delta >= maxStepDelta {
+                droppedDeltas += 1   // a sync-gap / reboot boundary, not real steps (>= 512)
+                continue
+            }
+            guard StepsCounter.isPlausibleDelta(previousTs: sorted[i - 1].ts, currentTs: sorted[i].ts,
+                                                delta: delta) else {
+                if delta >= 1 { rejectedRateTicks += delta }
+                continue
+            }
+            rawTotal += delta
+            keptDeltas += 1
+            minDelta = Swift.min(minDelta, delta)
+            maxDelta = Swift.max(maxDelta, delta)
         }
 
         let firstCounter = sorted.first!.counter
@@ -143,6 +168,12 @@ extension StepsEstimateEngine {
             + "firstCounter=\(firstCounter) lastCounter=\(lastCounter) (cumulative u16 @57)")
         lines.append("stepsRaw deltas kept=\(keptDeltas) dropped=\(droppedDeltas) "
             + "(dropped = delta>=\(maxStepDelta), a sync-gap/reboot boundary)")
+        // The two gates that can empty a day whose counter climbed all day. `classed=true` with
+        // `locomotionSamples=0` is the whole explanation for a blank 5/MG tile: every increment was
+        // attributed to a @63 byte that never read walk(1) or run(2), so nothing was countable.
+        lines.append("stepsRaw gates classed=\(classed) locomotionSamples=\(locomotionSamples) "
+            + "rejectedClassTicks=\(rejectedClassTicks) rejectedRateTicks=\(rejectedRateTicks) "
+            + "(class = @63 not walk/run; rate = over \(StepsCounter.maxTicksPerSecond) ticks per elapsed second)")
         if keptDeltas > 0 {
             lines.append("stepsRaw keptRange min=\(minDelta) max=\(maxDelta) "
                 + "(each = (cur-prev)&0xFFFF, wrap-aware)")

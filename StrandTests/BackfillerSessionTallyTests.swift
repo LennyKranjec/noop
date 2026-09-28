@@ -50,6 +50,47 @@ final class BackfillerSessionTallyTests: XCTestCase {
             "Backfill: session persisted 872 rows (172 with motion, 0 skin-temp) across 1 night(s).")
     }
 
+    // MARK: - @57 step-counter arrival line ("HR syncs but steps stopped")
+
+    /// The signature of the reported bug: a chunk that banked HR and carried NO step counter at all. A
+    /// steps-only log would print nothing here, which is why the line is keyed on the HR count.
+    func testStepsLineNamesAChunkWithHrButNoStepCounter() {
+        let line = Backfiller.chunkStepsLine(hrRecords: 240, steps: [], trim: 99)
+        XCTAssertEqual(line, "Backfill: steps trim=99 records=0 ticks=0 classed=0 locomotion=0 "
+            + "hrRecords=240 - this chunk carried HR but NO @57 step counter")
+    }
+
+    /// A healthy classed chunk reports the wrap-aware tick total from the SAME `StepsCounter` kernel the
+    /// daily total sums, so the number can be compared with the tile directly.
+    func testStepsLineReportsTicksAndClassComposition() {
+        let steps = [
+            StepSample(ts: 1_700_000_000, counter: 100, activityClass: 0),
+            StepSample(ts: 1_700_000_060, counter: 130, activityClass: 1),
+            StepSample(ts: 1_700_000_120, counter: 150, activityClass: 2),
+        ]
+        let line = Backfiller.chunkStepsLine(hrRecords: 180, steps: steps, trim: 7)
+        XCTAssertEqual(line, "Backfill: steps trim=7 records=3 ticks=50 classed=3 locomotion=2 hrRecords=180")
+    }
+
+    /// The other half of the diagnosis: records arrive and the counter climbs, but nothing is classed
+    /// walk/run, so `StepsCounter.stepsInWindow` retains no tick and the day has no strap steps.
+    func testStepsLineShowsZeroTicksWhenNothingIsClassedAsLocomotion() {
+        let steps = (0..<3).map {
+            StepSample(ts: 1_700_000_000 + $0 * 60, counter: 100 + $0 * 40, activityClass: 0)
+        }
+        let line = Backfiller.chunkStepsLine(hrRecords: 180, steps: steps, trim: 3)
+        XCTAssertEqual(line, "Backfill: steps trim=3 records=3 ticks=0 classed=3 locomotion=0 hrRecords=180")
+    }
+
+    /// Silent when there is nothing to say, so a caught-up session does not gain a noise line.
+    func testStepsLineSilentWhenChunkHadNeitherHrNorSteps() {
+        XCTAssertNil(Backfiller.chunkStepsLine(hrRecords: 0, steps: [], trim: 1))
+    }
+
+    func testStepsLineHasNoEmDash() {
+        XCTAssertFalse(Backfiller.chunkStepsLine(hrRecords: 1, steps: [], trim: 1)!.contains("\u{2014}"))
+    }
+
     // MARK: - #67 offload clock-diagnostic line (WHERE rows landed + WHY)
 
     // No nights persisted → no line (nothing to date).

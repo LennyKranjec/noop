@@ -612,6 +612,15 @@ struct DataSourcesView: View {
                     )
                 }
                 try await store.upsertWorkouts(rows, deviceId: LiftingImporter.sourceId)
+                // THE INDIVIDUAL SETS, into the store's own lift log — the tables v46 added for exactly
+                // this and that nothing had ever written to. Per-exercise progression is a question about
+                // one exercise's working weights over time, and the workout row above holds only the
+                // session's totals, so without this the Progression section has nothing to read.
+                //
+                // Best-effort like the muscle rows below it: a session's totals and its muscle split are
+                // the figures the rest of the app depends on, and a failure to store the per-set detail
+                // must not lose the import that produced it.
+                let setsWritten = (try? await ImportedLiftSets.write(result.sessions, store: store)) ?? 0
                 // THE PER-MUSCLE VOLUME, on the generic series seam the muscle view reads. Written
                 // alongside the workouts rather than derived later: the attribution needs the exercise
                 // NAMES, and the stored workout row keeps only the session's totals.
@@ -646,6 +655,11 @@ struct DataSourcesView: View {
                     if lo != hi { msg += " · \(lo)-\(hi)" }
                 }
                 if result.skipped > 0 { msg += " · " + String(localized: "\(result.skipped) skipped") }
+                // Said out loud, because it is what decides whether the Progression section can read this
+                // import at all. Zero is the honest report for a format that carries no per-set detail.
+                if setsWritten > 0 {
+                    msg += " · " + String(localized: "\(setsWritten) with set-by-set detail")
+                }
                 // Said out loud rather than swallowed: an exercise the attribution table cannot place
                 // contributes no volume at all, and the body view simply stays dark for it. The wearer
                 // should know which one, so it is reported rather than silently lost.

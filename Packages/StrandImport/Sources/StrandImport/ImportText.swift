@@ -111,10 +111,18 @@ public enum ImportText {
     /// Strip a surviving BOM and make every line terminator a lone `\n`, so no downstream parser has to
     /// know about CRLF. Alphaprog writes CRLF; classic Mac tools and some spreadsheet exports write a
     /// lone CR, which a `split(separator: "\n")` reader sees as ONE enormous line.
+    ///
+    /// THE GUARD IS ON `utf8`, NOT ON `contains("\r")`, AND THAT IS THE WHOLE POINT. A Swift `Character`
+    /// is an extended grapheme cluster, and Unicode joins CR+LF into ONE cluster — so in `"a\r\nb"` the
+    /// Characters are `a`, `\r\n`, `b`, and the cluster `"\r\n"` is not equal to the cluster `"\r"`.
+    /// `"a\r\nb".contains("\r")` is therefore **false**, and the first cut of this function skipped
+    /// normalisation on exactly the input it exists for: a file whose every CR is half of a CRLF pair.
+    /// A lone CR is its own cluster, so THAT case worked and the bug hid behind a passing test.
+    /// `replacingOccurrences` itself is NSString-backed and scalar-level, so it does find `"\r\n"`.
     private static func finish(_ raw: String, _ name: String) -> Decoded {
         var s = raw
         if s.hasPrefix("\u{FEFF}") { s.removeFirst() }
-        if s.contains("\r") {
+        if s.utf8.contains(0x0D) {
             s = s.replacingOccurrences(of: "\r\n", with: "\n")
                  .replacingOccurrences(of: "\r", with: "\n")
         }

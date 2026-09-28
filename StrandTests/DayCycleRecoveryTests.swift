@@ -29,6 +29,67 @@ final class DayCycleRecoveryTests: XCTestCase {
         XCTAssertEqual(updated.sleepHrOnly, true)
     }
 
+    /// The "my pulse syncs but my steps stopped" regression. `established` covers every day from the first
+    /// resolved cycle onwards, but the per-day maps only carry the days the cycle loop produced a figure
+    /// for — it skips a day with no main-sleep boundary, no owner segment or fewer than two counter samples.
+    /// Reading the maps straight through wrote nil over a measured calendar-day total, and
+    /// `upsertDailyMetrics` persists `steps = excluded.steps`, so the number was deleted from the row.
+    func testApplyingKeepsCalendarDayFiguresForADayTheCycleEngineSkipped() {
+        let daily = DailyMetric(
+            day: "2026-09-05", totalSleepMin: nil, efficiency: nil, deepMin: nil, remMin: nil,
+            lightMin: nil, disturbances: nil, restingHr: nil, avgHrv: nil, recovery: nil,
+            strain: 44, exerciseCount: 1, spo2Pct: nil, skinTempDevC: nil, respRateBpm: nil,
+            steps: 9_120, activeKcalEst: 2_100, skinTempC: nil, sleepHrOnly: true)
+        // A cycle WAS established (an earlier day), but this day is absent from every map.
+        let result = DayCycleIntelligenceIntegration.Result(
+            stepsByWakeDay: ["2026-09-04": 42], strainByWakeDay: [:], caloriesByWakeDay: [:],
+            workoutCountByWakeDay: [:], onsetByWakeDay: [:], firstWakeDay: "2026-09-04",
+            markerUpdate: .preserve)
+
+        let updated = DayCycleIntelligenceIntegration.applying(result, to: daily)
+
+        XCTAssertEqual(updated.steps, 9_120, "a skipped day must keep its measured calendar-day steps")
+        XCTAssertEqual(updated.strain, 44)
+        XCTAssertEqual(updated.activeKcalEst, 2_100)
+        XCTAssertEqual(updated.exerciseCount, 1)
+    }
+
+    /// The substitution itself must still win wherever the cycle engine DID resolve a figure — including a
+    /// cycle figure that is lower than the calendar-day one, which the `??` fallback must not swallow.
+    func testApplyingStillPrefersTheCycleFigureOverTheCalendarDayOne() {
+        let daily = DailyMetric(
+            day: "2026-09-05", totalSleepMin: nil, efficiency: nil, deepMin: nil, remMin: nil,
+            lightMin: nil, disturbances: nil, restingHr: nil, avgHrv: nil, recovery: nil,
+            strain: 44, exerciseCount: 3, spo2Pct: nil, skinTempDevC: nil, respRateBpm: nil,
+            steps: 9_120, activeKcalEst: 2_100, skinTempC: nil, sleepHrOnly: true)
+        let result = DayCycleIntelligenceIntegration.Result(
+            stepsByWakeDay: [daily.day: 7_004], strainByWakeDay: [daily.day: 12],
+            caloriesByWakeDay: [daily.day: 1_500], workoutCountByWakeDay: [daily.day: 0],
+            onsetByWakeDay: [:], firstWakeDay: "2026-09-04", markerUpdate: .preserve)
+
+        let updated = DayCycleIntelligenceIntegration.applying(result, to: daily)
+
+        XCTAssertEqual(updated.steps, 7_004)
+        XCTAssertEqual(updated.strain, 12)
+        XCTAssertEqual(updated.activeKcalEst, 1_500)
+        XCTAssertEqual(updated.exerciseCount, 0)
+    }
+
+    /// Before the first resolved cycle nothing is substituted, as before.
+    func testApplyingLeavesDaysBeforeTheFirstCycleAlone() {
+        let daily = DailyMetric(
+            day: "2026-09-01", totalSleepMin: nil, efficiency: nil, deepMin: nil, remMin: nil,
+            lightMin: nil, disturbances: nil, restingHr: nil, avgHrv: nil, recovery: nil,
+            strain: nil, exerciseCount: nil, spo2Pct: nil, skinTempDevC: nil, respRateBpm: nil,
+            steps: 5_000, activeKcalEst: nil, skinTempC: nil, sleepHrOnly: false)
+        let result = DayCycleIntelligenceIntegration.Result(
+            stepsByWakeDay: ["2026-09-04": 42], strainByWakeDay: [:], caloriesByWakeDay: [:],
+            workoutCountByWakeDay: [:], onsetByWakeDay: [:], firstWakeDay: "2026-09-04",
+            markerUpdate: .preserve)
+
+        XCTAssertEqual(DayCycleIntelligenceIntegration.applying(result, to: daily).steps, 5_000)
+    }
+
     func testBoundaryRecoveryPropagatesSessionReadFailure() async {
         let reader = DayCycleIntelligenceIntegration.BoundaryRecoveryReader(
             sleepSessions: { _, _, _ in throw ReadFailure.injected },
