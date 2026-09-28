@@ -629,7 +629,7 @@ final class HealthKitBridge: ObservableObject {
             // Gated on the hydration toggle, which is opt-in and default OFF: an import must not quietly
             // populate a feature the user has turned off, and skipping it avoids writing a window of rows
             // nothing will read.
-            if waterReadOk, UserDefaults.standard.bool(forKey: HydrationStore.enabledKey) {
+            if waterReadOk, HydrationStore.isEnabled {
                 var waterByDay: [String: Double] = [:]
                 var cursor = cal.startOfDay(for: start)
                 while cursor <= end {

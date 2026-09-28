@@ -1758,6 +1758,17 @@ struct SettingsView: View {
 
     // MARK: - Features (opt-in trackers)
 
+    /// Mirror the hydration opt-in into the App Group and republish the water widget, right now.
+    ///
+    /// The platform guard is here rather than in the modifier chain because `WidgetSnapshot` is an
+    /// iOS/widget-shared source that the macOS app target does not compile — and a `#if` inside a
+    /// modifier chain is a needless thing to be clever about in a file both platforms build.
+    private func publishHydrationToggleToWidget() {
+        #if os(iOS)
+        Task { await WidgetSnapshot.publishWaterEnabledChange(from: model) }
+        #endif
+    }
+
     /// Opt-in, manual-first feature toggles (default OFF). Hydration tracking gates the water-log card on
     /// the Today dashboard and its detail screen — nothing is shown or stored until it's enabled.
     private var featuresCard: some View {
@@ -1775,6 +1786,12 @@ struct SettingsView: View {
                 .toggleStyle(.switch)
                 .tint(StrandPalette.accent)
                 .accessibilityHint("Adds a water-log card to your dashboard")
+                // THE WIDGET FOLLOWS THE TOGGLE IMMEDIATELY. The water widget lives in another process
+                // and can only see what the app writes into the App Group; nothing used to write there
+                // when this flipped, so a wearer who turned tracking on and went to the Home Screen was
+                // told to turn on the setting they had just turned on, until they reopened the app or
+                // logged a drink. This is that write.
+                .onChangeCompat(of: hydrationEnabled) { _ in publishHydrationToggleToWidget() }
 
                 Text("Adds a simple fluid log with a daily goal that adjusts to your effort. Tap to add a sip, cup or bottle and watch a progress ring fill. On \(Platform.deviceNounPhrase) only. Nothing is synced.")
                     .font(StrandFont.caption)

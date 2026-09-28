@@ -280,14 +280,15 @@ struct CSVTable {
         self.rows = parsedRows
     }
 
-    /// Parse from raw `Data` (strips UTF-8 BOM, decodes UTF-8 with a latin-1
-    /// fallback for the rare malformed export).
+    /// Parse from raw `Data`.
+    ///
+    /// Decoding goes through `ImportText.decode` — the SAME helper the Alphaprog path uses — so a file
+    /// cannot decode in one importer and come back empty in another. It covers UTF-8 (BOM or not),
+    /// UTF-16/32 with a BOM, headless UTF-16, and cp1252/latin-1 as a last resort, and normalises CRLF
+    /// and lone CR to LF. `?? ""` here is an undecodable file, which this initializer has no way to
+    /// report; the screen-facing importers call `ImportText.decode` themselves so they can say so.
     init(data: Data) {
-        let clean = BOM.stripUTF8(data)
-        let text = String(data: clean, encoding: .utf8)
-            ?? String(data: clean, encoding: .isoLatin1)
-            ?? ""
-        self.init(text: text)
+        self.init(text: ImportText.decode(data)?.text ?? "")
     }
 
     // MARK: Delimiter detection

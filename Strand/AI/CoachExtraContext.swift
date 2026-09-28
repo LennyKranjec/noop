@@ -98,7 +98,7 @@ enum CoachExtraContext {
 
         // 3. Water. (Food is left out on purpose: water is what they track.)
         var intake: [String] = []
-        if UserDefaults.standard.bool(forKey: HydrationStore.enabledKey) {
+        if HydrationStore.isEnabled {
             var water: [String] = []
             // PERF: the seven days + today in ONE range read per series, instead of two single-day reads
             // per day. Each day's figure is `hydrationTotal`'s exactly: manual + imported, each the day's

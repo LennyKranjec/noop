@@ -12,6 +12,9 @@ import StrandDesign
 struct WaterEntry: TimelineEntry {
     let date: Date
     let snapshot: WidgetSnapshot?
+    /// Whether tracking is on, off, or NOT KNOWN YET — resolved in the provider, where the App Group is
+    /// read once per entry, rather than in the view body, which SwiftUI may evaluate many times.
+    let tracking: WidgetSnapshot.WaterTracking
 }
 
 struct WaterProvider: TimelineProvider {
@@ -21,12 +24,18 @@ struct WaterProvider: TimelineProvider {
         snap.waterDay = WidgetSnapshot.dayKey()
         snap.waterMl = 1250
         snap.waterGoalMl = 2800
-        return WaterEntry(date: Date(), snapshot: snap)
+        return WaterEntry(date: Date(), snapshot: snap, tracking: .on)
+    }
+
+    /// One read of the App Group per entry: the snapshot and the mirrored opt-in.
+    private func entry(at date: Date) -> WaterEntry {
+        let snapshot = WidgetSnapshot.load()
+        return WaterEntry(date: date, snapshot: snapshot,
+                          tracking: WidgetSnapshot.waterTracking(snapshot: snapshot))
     }
 
     func getSnapshot(in context: Context, completion: @escaping (WaterEntry) -> Void) {
-        completion(context.isPreview ? placeholder(in: context)
-                                     : WaterEntry(date: Date(), snapshot: WidgetSnapshot.load()))
+        completion(context.isPreview ? placeholder(in: context) : entry(at: Date()))
     }
 
     func getTimeline(in context: Context, completion: @escaping (Timeline<WaterEntry>) -> Void) {
@@ -35,15 +44,18 @@ struct WaterProvider: TimelineProvider {
         let midnight = Calendar.current.nextDate(after: now, matching: DateComponents(hour: 0, minute: 0),
                                                  matchingPolicy: .nextTime) ?? now.addingTimeInterval(3600)
         let next = min(midnight, now.addingTimeInterval(30 * 60))
-        completion(Timeline(entries: [WaterEntry(date: now, snapshot: WidgetSnapshot.load())],
-                            policy: .after(next)))
+        completion(Timeline(entries: [entry(at: now)], policy: .after(next)))
     }
 }
 
 struct WaterWidgetView: View {
     let entry: WaterEntry
 
-    private var enabled: Bool { entry.snapshot?.waterEnabled ?? false }
+    /// ON, OFF, or NOT KNOWN YET. It used to be `entry.snapshot?.waterEnabled ?? false`, which read a
+    /// fresh install — where nothing has published into the App Group at all — as the wearer having
+    /// turned the setting off, and told them to go and switch on something already on.
+    private var tracking: WidgetSnapshot.WaterTracking { entry.tracking }
+    private var enabled: Bool { tracking == .on }
     private var ml: Int { WaterWidgetStore.shownMl(snapshot: entry.snapshot, now: entry.date) }
     private var goal: Int { max(1, entry.snapshot?.waterGoalMl ?? 2500) }
     private var fraction: Double { min(1, Double(ml) / Double(goal)) }
@@ -87,7 +99,7 @@ struct WaterWidgetView: View {
                     .buttonStyle(.plain)
                 }
             } else {
-                Text("Turn on water tracking in Telos to log from here.")
+                Text(WaterWidgetView.message(for: tracking))
                     .font(.system(size: 12, weight: .medium, design: .rounded))
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -95,6 +107,17 @@ struct WaterWidgetView: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+    }
+
+    /// What the tile says when it cannot show a figure. Two DIFFERENT sentences, because they are two
+    /// different situations and only one of them is the wearer's to fix: `off` is a setting to turn on,
+    /// `unknown` is an app that has not yet written anything here (a fresh install, or one just updated)
+    /// and simply needs opening once. `.on` never reaches this.
+    static func message(for tracking: WidgetSnapshot.WaterTracking) -> String {
+        switch tracking {
+        case .off: return "Turn on water tracking in Telos to log from here."
+        case .on, .unknown: return "Open Telos once to sync today's water."
+        }
     }
 
     private func glassButton(_ symbol: String) -> some View {

@@ -1,0 +1,8 @@
+# These fixtures' BYTES are the test subject, so git must not normalise them.
+#
+# `alphaprog_workouts.csv` is the cautionary tale: the Alphaprog exporter writes CRLF, and somewhere
+# between the wearer's phone and this directory that file became LF-only — so the CRLF the parser has to
+# cope with was never once exercised by a test, on a repo configured with `core.autocrlf=true`.
+# `alphaprog_real_world.csv` keeps its BOM and its CRLF, and `AlphaprogRealWorldTests` asserts both; with
+# eol normalisation left on, a checkout on another machine would quietly rewrite the fixture and fail.
+*.csv -text

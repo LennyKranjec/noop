@@ -73,4 +73,36 @@ final class HydrationEntriesTests: XCTestCase {
         let after = HydrationEntries.updating([a], id: UUID(), amountMl: 999)
         XCTAssertEqual(after.first?.amountMl, 30)
     }
+
+    // MARK: - The single owner of "is water tracking on"
+    //
+    // The toggle, the Today tile, the coach context, the Apple Health water import and the widget publish
+    // all have to agree about one flag in one store. When the widget publish read a DIFFERENT store from
+    // the one the toggle wrote, the water widget would claim tracking was off while the app showed it on —
+    // so this pins the key, the store and the default in one place.
+
+    func testEnabledFlagReadsTheSameStandardStoreTheToggleWrites() {
+        let key = HydrationStore.enabledKey
+        let restore = UserDefaults.standard.object(forKey: key)
+        defer {
+            if let restore { UserDefaults.standard.set(restore, forKey: key) }
+            else { UserDefaults.standard.removeObject(forKey: key) }
+        }
+
+        // `@AppStorage(HydrationStore.enabledKey)` with no custom store writes exactly this.
+        UserDefaults.standard.set(true, forKey: key)
+        XCTAssertTrue(HydrationStore.isEnabled)
+
+        UserDefaults.standard.set(false, forKey: key)
+        XCTAssertFalse(HydrationStore.isEnabled)
+
+        // Default OFF, and an absent value must not read as on.
+        UserDefaults.standard.removeObject(forKey: key)
+        XCTAssertFalse(HydrationStore.isEnabled)
+    }
+
+    func testEnabledKeyStaysByteIdenticalToTheAndroidPref() {
+        // The toggle reads the same on both platforms only while this string does not drift.
+        XCTAssertEqual(HydrationStore.enabledKey, "noop.hydrationTracking")
+    }
 }

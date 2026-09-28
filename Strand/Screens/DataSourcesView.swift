@@ -400,6 +400,40 @@ struct DataSourcesView: View {
         live.append(log: "[\(AppModel.logTimeFormatter.string(from: Date()))] Import \(line)")
     }
 
+    /// The technical half of an import failure message: what was READ, what it DECODED as, and what the
+    /// parser RECOGNISED.
+    ///
+    /// Exists because "No sessions found" was the same sentence for four different faults — a file whose
+    /// bytes never arrived from iCloud, a file that decoded as mojibake, a file in the wrong dialect, and
+    /// a file that simply is not an Alphaprog export — and the only person who can see which is the one
+    /// holding the phone. Appended after " · " like every other detail on this screen, and deliberately
+    /// NOT localized: byte counts, an encoding name and a delimiter are the same in every language, and
+    /// a translated diagnostic is a diagnostic that cannot be searched.
+    ///
+    /// THE FIRST LINE IS QUOTED ONLY WHEN NOTHING WAS RECOGNISED. That is the one case where the line's
+    /// content is the answer ("this is a Hevy export", "this is `ÿþ"`", "this is an HTML error page"),
+    /// and it keeps the wearer's own workout titles out of the log on every other path — the exported
+    /// strap log is otherwise counts-only by rule.
+    private func importFailureDetail(read: ImportFileRead.Outcome,
+                                     encoding: String?,
+                                     diagnostics: AlphaprogImporter.Diagnostics?) -> String {
+        var parts = [read.logDetail]
+        parts.append(encoding ?? "undecodable")
+        if let d = diagnostics {
+            parts.append("delimiter '\(d.delimiter)'")
+            parts.append("\(d.sessionHeaders) session headers")
+            parts.append("\(d.exerciseTitles) exercise titles")
+            parts.append("\(d.setRows) set rows")
+            if d.sessionHeaders == 0, d.exerciseTitles == 0, !d.firstLine.isEmpty {
+                let head = d.firstLine.count > 60
+                    ? String(d.firstLine.prefix(60)) + "…"
+                    : d.firstLine
+                parts.append("first line: \(head)")
+            }
+        }
+        return parts.joined(separator: " · ")
+    }
+
     /// Parse a daily-nutrition CSV and upsert it into the metric-series store under the
     /// dedicated "nutrition-csv" source, then refresh so Explore/Insights see the new keys.
     private func importNutrition(url: URL) {
@@ -410,12 +444,31 @@ struct DataSourcesView: View {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             do {
-                let data = try Data(contentsOf: url)
-                let result = NutritionCsvImporter.parse(data: data)
-                guard result.importedDays > 0 else {
-                    nutritionSummary = String(localized: "No usable rows found. Check the file has a date column (yyyy-MM-dd) and daily totals.")
+                // Coordinated read + shared decode, the same as the lifting path: a nutrition CSV picked
+                // out of iCloud Drive on a freshly restored phone is a placeholder too.
+                let read = try await ImportFileRead.read(url)
+                guard !read.data.isEmpty else {
+                    nutritionSummary = String(localized: "That file is empty or not downloaded yet — open it once in Files, then try again.")
                     nutritionFailed = true
-                    logImport("Nutrition CSV: no usable rows (\(result.skippedRows) skipped)")
+                    logImport("Nutrition CSV: nothing to read (\(read.logDetail))")
+                    nutritionImporting = false
+                    return
+                }
+                guard let decoded = ImportText.decode(read.data) else {
+                    nutritionSummary = String(localized: "Couldn't read that file as text — it isn't UTF-8, UTF-16 or Windows-1252.")
+                        + " · " + importFailureDetail(read: read, encoding: nil, diagnostics: nil)
+                    nutritionFailed = true
+                    logImport("Nutrition CSV: undecodable (\(read.logDetail))")
+                    nutritionImporting = false
+                    return
+                }
+                let result = NutritionCsvImporter.parse(text: decoded.text)
+                guard result.importedDays > 0 else {
+                    let detail = importFailureDetail(read: read, encoding: decoded.encodingName, diagnostics: nil)
+                    nutritionSummary = String(localized: "No usable rows found. Check the file has a date column (yyyy-MM-dd) and daily totals.")
+                        + " · " + detail
+                    nutritionFailed = true
+                    logImport("Nutrition CSV: no usable rows (\(result.skippedRows) skipped) · \(detail)")
                     nutritionImporting = false
                     return
                 }
@@ -459,7 +512,38 @@ struct DataSourcesView: View {
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             do {
-                let data = try Data(contentsOf: url)
+                // READ THE BYTES THE WAY iOS WANTS THEM READ.
+                //
+                // This used to be a bare `Data(contentsOf: url)`, and that is how the Alphaprog import
+                // "suddenly stopped working" after a phone reset: on a freshly restored device every
+                // iCloud Drive file is a PLACEHOLDER again, the read came back with nothing, the decode
+                // turned nothing into "", the parser honestly found no sessions, and the screen told the
+                // wearer to point at an Alphaprog export — which is exactly what they had pointed at.
+                // `ImportFileRead` coordinates the read (which materialises a placeholder) and, when the
+                // item is still not downloaded, asks for the download and waits a bounded few seconds.
+                let read = try await ImportFileRead.read(url)
+                guard !read.data.isEmpty else {
+                    liftingSummary = String(localized: "That file is empty or not downloaded yet — open it once in Files, then try again.")
+                    liftingFailed = true
+                    logImport("Lifting log: nothing to read (\(read.logDetail))")
+                    liftingImporting = false
+                    return
+                }
+                let data = read.data
+                // ONE DECODE, SHARED. A UTF-16 or cp1252 export used to decode in whichever importer
+                // happened to have a fallback and come back empty in the others; `ImportText.decode`
+                // tries UTF-8, the BOM-marked UTF-16/32 forms, headless UTF-16 and finally cp1252 /
+                // latin-1, strips the BOM and normalises CRLF. nil means NOTHING decoded — said out
+                // loud rather than guessed at, because mojibake parses to zero sessions exactly like an
+                // empty file does.
+                guard let decoded = ImportText.decode(data) else {
+                    liftingSummary = String(localized: "Couldn't read that file as text — it isn't UTF-8, UTF-16 or Windows-1252.")
+                        + " · " + importFailureDetail(read: read, encoding: nil, diagnostics: nil)
+                    liftingFailed = true
+                    logImport("Lifting log: undecodable (\(read.logDetail))")
+                    liftingImporting = false
+                    return
+                }
                 // WHICH PARSER, and why it is decided this way.
                 //
                 // The Alphaprog BUTTON parses only as Alphaprog: the wearer said which app the file came
@@ -470,7 +554,7 @@ struct DataSourcesView: View {
                 // Alphaprog exports a .csv exactly as Hevy does, so a name-based sniff would send it to
                 // the wrong parser — and Hevy's reader makes nonsense of a printed workout rather than
                 // failing, which is the worst kind of wrong. A file that yields Alphaprog sessions IS one.
-                let text = String(data: data, encoding: .utf8) ?? ""
+                let text = decoded.text
                 let alphaprog = text.isEmpty ? nil : AlphaprogImporter.parse(text)
                 let useAlphaprog = forceAlphaprog || !(alphaprog?.workouts.isEmpty ?? true)
 
@@ -489,11 +573,19 @@ struct DataSourcesView: View {
                     result = LiftingImporter.parse(data: data)
                 }
                 guard result.sessionCount > 0 else {
-                    liftingSummary = forceAlphaprog
-                        ? String(localized: "No sessions found — point at an Alphaprog CSV export.")
-                        : String(localized: "No workouts found. Point at a Hevy CSV, a Liftosaur JSON or an Alphaprog CSV export.")
+                    // NAMES THE CAUSE. The bare "No sessions found — point at an Alphaprog CSV export."
+                    // was un-diagnosable from a phone: it said the same thing whether the bytes never
+                    // arrived, the text decoded as mojibake, the dialect was wrong or the file really
+                    // was a Hevy export. The counts say which.
+                    let detail = importFailureDetail(read: read,
+                                                     encoding: decoded.encodingName,
+                                                     diagnostics: alphaprog?.diagnostics)
+                    liftingSummary = (forceAlphaprog
+                        ? String(localized: "No sessions found in that file.")
+                        : String(localized: "No workouts found. Point at a Hevy CSV, a Liftosaur JSON or an Alphaprog CSV export."))
+                        + " · " + detail
                     liftingFailed = true
-                    logImport("Lifting log: no workouts found (\(result.skipped) skipped)")
+                    logImport("Lifting log: no workouts found (\(result.skipped) skipped) · \(detail)")
                     liftingImporting = false
                     return
                 }
@@ -595,7 +687,17 @@ struct DataSourcesView: View {
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             do {
                 // Cap the read so a hostile huge file can't OOM us before the parser's own guards.
-                let data = try Data(contentsOf: url, options: [.mappedIfSafe])
+                // Coordinated like the other importers so an iCloud placeholder materialises; the
+                // `.mappedIfSafe` hint is kept, so a large FIT file is still mapped rather than copied.
+                let read = try await ImportFileRead.read(url, options: [.mappedIfSafe])
+                guard !read.data.isEmpty else {
+                    activityFileSummary = String(localized: "That file is empty or not downloaded yet — open it once in Files, then try again.")
+                    activityFileFailed = true
+                    logImport("Workout file: nothing to read (\(read.logDetail))")
+                    activityFileImporting = false
+                    return
+                }
+                let data = read.data
                 if data.count > ActivityFileImporter.maxBytes {
                     activityFileSummary = String(localized: "That file is too large to import.")
                     activityFileFailed = true
@@ -606,8 +708,9 @@ struct DataSourcesView: View {
                 let result = ActivityFileImporter.parse(data: data, filename: url.lastPathComponent)
                 guard let activity = result.activity, let s = activity.durationS, s > 0 else {
                     activityFileSummary = String(localized: "No usable activity found. Point at a .gpx, .tcx or .fit workout file.")
+                        + " · \(read.logDetail)"
                     activityFileFailed = true
-                    logImport("Workout file: no usable activity found")
+                    logImport("Workout file: no usable activity found (\(read.logDetail))")
                     activityFileImporting = false
                     return
                 }
@@ -858,15 +961,26 @@ struct DataSourcesView: View {
                 #else
                 return [.zip, db]
                 #endif
+            // THE THREE CSV TARGETS ALL ACCEPT `.text` AND `.data` AS WELL.
+            //
+            // A `.csv` does not always arrive typed as `public.comma-separated-values-text`. A file
+            // provider (iCloud Drive after a restore, Dropbox, Drive, a Files "Save to…" from a share
+            // sheet) can hand the picker `public.text`, `public.content` or nothing more specific than
+            // `public.data` — and a type the list does not name is GREYED OUT, which looks to the wearer
+            // like "my export isn't there" rather than like a type filter. `.text` covers the abstract
+            // text supertype (`.plainText` and `.utf8PlainText` both conform, but neither IS `.text`),
+            // and `.data` is the same escape hatch the workout-file and wearable targets already use.
+            // Nothing is guessed as a result: each importer still decides by content, and now says what
+            // it saw when it decides "no".
             case .nutrition:
-                return [.commaSeparatedText, .plainText]
+                return [.commaSeparatedText, .plainText, .text, .data]
             case .lifting:
                 // Hevy exports .csv, Liftosaur exports .json — accept both (plus plain text, since some
                 // share sheets type a .csv as text/plain). The importer sniffs the actual format.
-                return [.commaSeparatedText, .json, .plainText]
+                return [.commaSeparatedText, .json, .plainText, .text, .data]
             case .alphaprog:
                 // A semicolon-separated .csv, which some share sheets type as plain text.
-                return [.commaSeparatedText, .plainText]
+                return [.commaSeparatedText, .plainText, .text, .data]
             case .activityFile:
                 // GPX/TCX are XML; FIT is binary. None have a system UTType, so build them by extension
                 // (falling back to .xml/.data) and add .data so an untyped share-sheet file is selectable.

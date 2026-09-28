@@ -187,11 +187,92 @@ public struct WidgetSnapshot: Codable, Equatable {
     }
 
     /// Read the last-published snapshot from the shared suite, if any.
+    ///
+    /// A blob that will not decode STRICTLY is retried without the two nested series rather than
+    /// discarded. Every scalar here is optional so an older build's snapshot decodes, but the series
+    /// carry their OWN point types (`HrPoint`, `StressPoint`), and a non-optional field added to one of
+    /// those would make the whole snapshot undecodable — the widget would then read a full, current
+    /// snapshot as "nothing has ever been published", which is how the water tile came to claim the
+    /// setting was off. Dropping a trace the widget can redraw is a far smaller loss than dropping the
+    /// day's figures with it.
     public static func load() -> WidgetSnapshot? {
         guard let defaults = UserDefaults(suiteName: suiteName),
-              let data = defaults.data(forKey: storageKey),
-              let snap = try? JSONDecoder().decode(WidgetSnapshot.self, from: data) else { return nil }
+              let data = defaults.data(forKey: storageKey) else { return nil }
+        if let snap = try? JSONDecoder().decode(WidgetSnapshot.self, from: data) { return snap }
+        return decodeWithoutSeries(data)
+    }
+
+    /// Decode a snapshot whose nested series are unreadable, keeping everything else.
+    ///
+    /// `internal` rather than private so the test bundle can put a deliberately-broken blob through it
+    /// without an App Group.
+    static func decodeWithoutSeries(_ data: Data) -> WidgetSnapshot? {
+        guard var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        object.removeValue(forKey: "hrSeries")
+        object.removeValue(forKey: "stressSeries")
+        guard let trimmed = try? JSONSerialization.data(withJSONObject: object),
+              let snap = try? JSONDecoder().decode(WidgetSnapshot.self, from: trimmed) else { return nil }
         return snap
+    }
+
+    // MARK: - Is water tracking on? (the App Group mirror)
+
+    /// The App Group mirror of the app's hydration opt-in.
+    ///
+    /// The setting itself lives in the APP's own `UserDefaults.standard` under
+    /// `HydrationStore.enabledKey`, which every in-app view binds with `@AppStorage` and which the
+    /// widget extension — a different process with a different container — cannot read. Until now the
+    /// widget's only view of it was `WidgetSnapshot.waterEnabled`, written by a FULL publish; on a fresh
+    /// install nothing had published yet, so `waterEnabled ?? false` presented "we have never been told"
+    /// as "the wearer turned it off" and the tile told them to go and enable a setting that was already
+    /// on. This key is that one fact, mirrored into the shared suite by the single owner
+    /// (`WidgetSnapshot.publishWaterEnabled`) whenever it is read or changed — so the widget has an
+    /// answer before any snapshot exists, and `nil` here means genuinely "not known yet".
+    public static let waterEnabledKey = "noop.widget.waterEnabled"
+
+    /// What the widget knows about hydration tracking. `unknown` is NOT `off`.
+    public enum WaterTracking: Equatable {
+        case on
+        case off
+        /// Nothing has been published into the App Group yet (fresh install, or the suite is
+        /// unreachable). The tile must ask the wearer to open the app, never claim the setting is off.
+        case unknown
+    }
+
+    /// The mirrored opt-in, or nil when it has never been written.
+    ///
+    /// `object(forKey:)` rather than `bool(forKey:)`: the whole point is to tell an absent value from a
+    /// stored `false`, and `bool` collapses the two.
+    public static func waterEnabledMirror(defaults: UserDefaults?) -> Bool? {
+        defaults?.object(forKey: waterEnabledKey) as? Bool
+    }
+
+    /// Write the mirror. Returns true only when the stored value actually MOVED, so a caller can spend a
+    /// widget reload on a real change and nothing on a re-confirmation.
+    @discardableResult
+    public static func setWaterEnabledMirror(_ on: Bool) -> Bool {
+        guard let defaults = UserDefaults(suiteName: suiteName) else { return false }
+        guard waterEnabledMirror(defaults: defaults) != on else { return false }
+        defaults.set(on, forKey: waterEnabledKey)
+        return true
+    }
+
+    /// Resolve the three states. Pure, so the rendering decision is testable without an App Group.
+    ///
+    /// The mirror wins where it exists: it is written by the single owner on every launch and on every
+    /// change of the setting, so it is never staler than the snapshot's copy. The snapshot's
+    /// `waterEnabled` is the fallback for a snapshot written by a build older than the mirror. Only when
+    /// NEITHER has anything to say is the answer unknown.
+    public static func waterTracking(snapshot: WidgetSnapshot?, mirror: Bool?) -> WaterTracking {
+        if let mirror { return mirror ? .on : .off }
+        if let enabled = snapshot?.waterEnabled { return enabled ? .on : .off }
+        return .unknown
+    }
+
+    /// As above, reading the mirror out of the shared suite.
+    public static func waterTracking(snapshot: WidgetSnapshot?) -> WaterTracking {
+        waterTracking(snapshot: snapshot,
+                      mirror: waterEnabledMirror(defaults: UserDefaults(suiteName: suiteName)))
     }
 
     /// Persist this snapshot into the shared suite, folding the live bpm into the trace on the way.

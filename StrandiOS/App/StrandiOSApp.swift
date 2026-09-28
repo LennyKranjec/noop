@@ -323,6 +323,18 @@ struct StrandiOSApp: App {
                     watch.activate()
                     await watch.pushLatest(from: model)
                 }
+                // THE APP GROUP IS NEVER LEFT EMPTY. A fresh install (or a reinstall after a phone
+                // reset) starts with nothing in the shared suite, and every publish site above is
+                // conditional: the `.active` publish waits behind a Health sync, the `refreshSeq` one
+                // behind a repository refresh, the water one behind a logged drink. So a widget added
+                // before any of those landed read an empty container as "the app has nothing to say" —
+                // and the water tile rendered that as the setting being off. This writes the hydration
+                // opt-in into the group unconditionally and the first full snapshot if none is readable,
+                // with no strap, no sync and no data needed. Its OWN task, so a slow watch activate
+                // cannot hold it up. A no-op on every launch after the first.
+                .task {
+                    await WidgetSnapshot.ensurePublished(from: model)
+                }
         }
         // HealthKit authorization is intentionally NOT requested on launch. The system permission
         // dialog without prior in-app rationale violates Apple HIG / App Review guidance — the user

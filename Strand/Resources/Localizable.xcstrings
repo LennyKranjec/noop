@@ -1,6 +1,18 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "No sessions found in that file.": { "localizations": {
+      "de": { "stringUnit": { "state": "translated", "value": "In dieser Datei wurden keine Einheiten gefunden." } }, "en": { "stringUnit": { "state": "translated", "value": "No sessions found in that file." } }
+    } },
+    "That file is empty or not downloaded yet — open it once in Files, then try again.": { "localizations": {
+      "de": { "stringUnit": { "state": "translated", "value": "Diese Datei ist leer oder noch nicht heruntergeladen – öffne sie einmal in „Dateien“ und versuche es dann erneut." } }, "en": { "stringUnit": { "state": "translated", "value": "That file is empty or not downloaded yet — open it once in Files, then try again." } }
+    } },
+    "Couldn't read that file as text — it isn't UTF-8, UTF-16 or Windows-1252.": { "localizations": {
+      "de": { "stringUnit": { "state": "translated", "value": "Diese Datei konnte nicht als Text gelesen werden – sie ist weder UTF-8 noch UTF-16 oder Windows-1252." } }, "en": { "stringUnit": { "state": "translated", "value": "Couldn't read that file as text — it isn't UTF-8, UTF-16 or Windows-1252." } }
+    } },
+    "No workouts found. Point at a Hevy CSV, a Liftosaur JSON or an Alphaprog CSV export.": { "localizations": {
+      "de": { "stringUnit": { "state": "translated", "value": "Keine Workouts gefunden. Wähle einen Hevy-CSV-, Liftosaur-JSON- oder Alphaprog-CSV-Export." } }, "en": { "stringUnit": { "state": "translated", "value": "No workouts found. Point at a Hevy CSV, a Liftosaur JSON or an Alphaprog CSV export." } }
+    } },
     "Alarm": { "localizations": {
       "de": { "stringUnit": { "state": "translated", "value": "Wecker" } }, "en": { "stringUnit": { "state": "translated", "value": "Alarm" } }, "es": { "stringUnit": { "state": "translated", "value": "Alarma" } }, "fr": { "stringUnit": { "state": "translated", "value": "Alarme" } }, "it": { "stringUnit": { "state": "translated", "value": "Sveglia" } }, "pl": { "stringUnit": { "state": "translated", "value": "Alarm" } }, "pt-PT": { "stringUnit": { "state": "translated", "value": "Alarme" } }, "ru": { "stringUnit": { "state": "translated", "value": "Будильник" } }, "zh-Hans": { "stringUnit": { "state": "translated", "value": "闹钟" } }, "zh-Hant": { "stringUnit": { "state": "translated", "value": "鬧鐘" } }
     } },

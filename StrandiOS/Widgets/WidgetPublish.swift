@@ -303,10 +303,27 @@ extension WidgetSnapshot {
         }
     }
 
+    /// MIRROR "IS WATER TRACKING ON" INTO THE APP GROUP, and hand back the value.
+    ///
+    /// THE ONE WRITER. The setting lives in the app's own `UserDefaults.standard` (`HydrationStore.isEnabled`
+    /// is the one read); the widget extension is a different process and cannot see that store, so the
+    /// flag has to be copied into the shared suite for it. Everything that could change the answer —
+    /// every full publish, every water republish, the Settings toggle, and app launch — comes through
+    /// here, so there is exactly one expression of the copy and no path that can leave the two disagreeing.
+    ///
+    /// Returns the value and whether the mirror MOVED, so a caller can spend a widget reload on a real
+    /// change and nothing on a re-confirmation.
+    @MainActor
+    @discardableResult
+    static func publishWaterEnabled() -> (on: Bool, changed: Bool) {
+        let on = HydrationStore.isEnabled
+        return (on, WidgetSnapshot.setWaterEnabledMirror(on))
+    }
+
     /// THE WATER WIDGET'S FIGURES: whether tracking is on, today's total and the day's goal.
     @MainActor
     private static func fillWater(_ snap: inout WidgetSnapshot, model: AppModel, now: Date) {
-        snap.waterEnabled = UserDefaults.standard.bool(forKey: HydrationStore.enabledKey)
+        snap.waterEnabled = publishWaterEnabled().on
         snap.waterDay = Repository.localDayKey(now)
         snap.waterGoalMl = model.repo.hydrationGoalML(profileSex: model.profile.sex)
     }
@@ -325,6 +342,51 @@ extension WidgetSnapshot {
         // A water write does not bump the day, so `updated` stays — the strip still knows whose figures
         // it is holding.
         saveAndReloadIfChanged(snap, previous: previous)
+    }
+
+    /// THE HYDRATION TOGGLE JUST MOVED. Make the widget agree, now.
+    ///
+    /// Flipping the setting used to change nothing the widget could see: `fillWater` runs only on a full
+    /// publish or after a drink is logged, so a wearer who turned tracking ON and went straight to the
+    /// Home Screen was told to turn on a setting they had just turned on, until they either reopened the
+    /// app or logged a drink. This is the toggle's own publish.
+    ///
+    /// The mirror is written FIRST and on its own, because it is the one thing that cannot fail: it needs
+    /// no snapshot, no database read and no repository. Then the figures, then a reload — and the reload
+    /// is unconditional, because the mirror is not part of the snapshot, so `saveAndReloadIfChanged`'s
+    /// dedup cannot see that this changed. This runs from a Settings screen, so the app is `.active` and
+    /// the reload is foreground-initiated (budget-exempt); no `applicationState` gate applies to this path.
+    @MainActor
+    static func publishWaterEnabledChange(from model: AppModel) async {
+        publishWaterEnabled()
+        await publishWater(from: model)
+        WidgetCenter.shared.reloadTimelines(ofKind: WaterWidgetStore.widgetKind)
+    }
+
+    /// GUARANTEE A COMPLETE SNAPSHOT EXISTS, on every launch.
+    ///
+    /// A fresh install (and this reporter had reset their phone and reinstalled) starts with an EMPTY App
+    /// Group: no snapshot, no mirror. Everything that would have filled it is conditional — the
+    /// `scenePhase` publish sits behind a Health sync, the `refreshSeq` publish behind a repository
+    /// refresh, the water republish behind a logged drink — so the widget's first impression of the app
+    /// was "nothing has ever been published", which it rendered as the setting being off.
+    ///
+    /// So: at launch, unconditionally mirror the setting (one small write, no reads, correct even with no
+    /// strap, no sync and no data at all), and write a full snapshot if there is not already a readable
+    /// one. On a clean install that snapshot carries `waterMl = 0` and the real goal, so the tile shows an
+    /// honest empty glass instead of a message. `load()` is nil BOTH when nothing was ever written and
+    /// when the stored blob will not decode — after an update that changed the shape, say — and a rewrite
+    /// is the right answer to either.
+    @MainActor
+    static func ensurePublished(from model: AppModel) async {
+        let water = publishWaterEnabled()
+        if load() == nil {
+            await publish(from: model)
+        } else if water.changed {
+            // The snapshot is fine and only the mirror moved (the setting was changed while the app was
+            // not running, or this build is the first to write a mirror at all). One targeted reload.
+            WidgetCenter.shared.reloadTimelines(ofKind: WaterWidgetStore.widgetKind)
+        }
     }
 
     /// Publish fields that come directly from the live BLE state without re-reading the Rest metric

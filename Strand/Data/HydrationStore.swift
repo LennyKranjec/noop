@@ -28,6 +28,20 @@ enum HydrationStore {
     /// MUST match the Android `NoopPrefs.KEY_HYDRATION_TRACKING` so the toggle reads the same on both.
     static let enabledKey = "noop.hydrationTracking"
 
+    /// IS WATER TRACKING ON — the one read every non-SwiftUI caller goes through.
+    ///
+    /// The value lives in the APP's `UserDefaults.standard` under `enabledKey`, and that is the source of
+    /// truth: the toggle in Settings and the tiles that hide themselves bind it with `@AppStorage`, which
+    /// needs the key and cannot go through a function. Everything else — the widget publish, the coach
+    /// context, the Apple Health water import — reads it HERE, so there is exactly one expression of
+    /// "on", one store, and no second place to get the suite wrong.
+    ///
+    /// The widget extension is a separate process and cannot see this store at all; it reads the mirror
+    /// `WidgetSnapshot.setWaterEnabledMirror` writes, which is fed from this very property.
+    static var isEnabled: Bool {
+        UserDefaults.standard.bool(forKey: enabledKey)
+    }
+
     /// UserDefaults prefix for the per-day entry list (#798). One JSON array per local day, keyed
     /// `noop.hydrationEntries.<yyyy-MM-dd>`. Local-only, on-device, never synced - the same privacy posture
     /// as the day total. The day total in `metricSeries` stays the canonical figure the rest of the app

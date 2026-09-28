@@ -42,6 +42,17 @@ import Foundation
 // AN UNPERFORMED SET IS NOT A ZERO. "3;-;-" is a row the app printed and the wearer left empty; it
 // contributes no volume and is not counted as a set. Treating it as 0 kg × 0 reps would be the same
 // arithmetic and a different claim — it would say they did a set of nothing.
+//
+// TWO KNOWN UNDER-READINGS, documented rather than silently "improved", because changing either moves
+// already-imported figures and neither is what this change is about:
+//
+//   * "1;+10;11" is a bodyweight exercise with ten kilograms ADDED (dips, pull-ups, hyperextensions).
+//     `Double("+10")` is 10, so it is read as a flat 10 kg and the volume is the added weight only, not
+//     bodyweight + 10. That UNDER-states the load; it never invents one. Reading it as bodyweight + 10
+//     would need a bodyweight the file does not carry, which is the imputation this file refuses.
+//   * "1 Std." — an hour with no minutes — falls through the `H:MM` branch (no colon), and its unit
+//     "std." starts with "s", so the seconds branch reads it as 1 ÷ 60 = 0 minutes. That session's END
+//     is its start; its exercises and volume are unaffected. One session in the wearer's file.
 
 public enum AlphaprogImporter {
 
@@ -125,15 +136,53 @@ public enum AlphaprogImporter {
         }
     }
 
+    /// What the parse SAW, whether or not it produced anything.
+    ///
+    /// Exists because "no sessions found" is the same sentence for a file that is not an Alphaprog
+    /// export, a file that decoded as mojibake, and a file whose bytes never arrived — and the wearer
+    /// reading that sentence on a phone has no other way to tell them apart. Counting what each scanner
+    /// recognised turns the message into a diagnosis: 100 headers and 0 set rows is a delimiter
+    /// problem, 0 headers with a readable first line is the wrong file, 0 headers and a first line of
+    /// `ÿþ"` is an encoding problem.
+    ///
+    /// `setRows` counts rows that had the SHAPE of a grid row (an index and its columns), including the
+    /// `-;-` ones that contribute no set: the question it answers is "did the scanner see the grid",
+    /// not "how much was lifted".
+    public struct Diagnostics: Equatable, Sendable {
+        public let sessionHeaders: Int
+        public let exerciseTitles: Int
+        public let setRows: Int
+        /// The first non-empty line, BOM-stripped and capped, so a wrong-file report can quote it.
+        public let firstLine: String
+        /// The delimiter this file was read with (`;` or `,`).
+        public let delimiter: String
+
+        public init(sessionHeaders: Int = 0,
+                    exerciseTitles: Int = 0,
+                    setRows: Int = 0,
+                    firstLine: String = "",
+                    delimiter: String = ";") {
+            self.sessionHeaders = sessionHeaders
+            self.exerciseTitles = exerciseTitles
+            self.setRows = setRows
+            self.firstLine = firstLine
+            self.delimiter = delimiter
+        }
+    }
+
     /// What a parse produced, including what it could not place.
     public struct Parsed: Equatable, Sendable {
         public let workouts: [Workout]
         /// Exercise names the attribution table has no muscles for, so the wearer can see the gap.
         public let unattributed: [String]
+        /// What the scanners recognised. Defaulted so the Kotlin-parity shape and every existing call
+        /// site that builds an empty `Parsed` are undisturbed.
+        public let diagnostics: Diagnostics
 
-        public init(workouts: [Workout], unattributed: [String]) {
+        public init(workouts: [Workout], unattributed: [String], diagnostics: Diagnostics = Diagnostics()) {
             self.workouts = workouts
             self.unattributed = unattributed
+            self.diagnostics = diagnostics
         }
     }
 
@@ -145,13 +194,52 @@ public enum AlphaprogImporter {
         case reps, seconds, minutes, unknown
     }
 
+    /// Which separator and decimal mark this FILE uses.
+    ///
+    /// The two travel together: an exporter writing `;` writes German decimal commas, and one writing
+    /// `,` cannot (the comma is taken) so it writes dots. Carried as one value so no code path can pair
+    /// a comma delimiter with a comma decimal and read `27,5` as two fields.
+    struct Dialect: Equatable {
+        let delimiter: Character
+        let decimalComma: Bool
+
+        /// What the export in hand actually is, and the default everywhere.
+        static let german = Dialect(delimiter: ";", decimalComma: true)
+        static let dotted = Dialect(delimiter: ",", decimalComma: false)
+    }
+
+    /// Sniff the dialect from the file.
+    ///
+    /// DELIBERATELY BIASED TOWARDS SEMICOLON. The grid header names the delimiter outright (`#;KG;WDH`
+    /// vs `#,KG,WDH`) and appears within the first few lines of any real export, so that check decides
+    /// almost every file on its own. The count fallback only runs for a file with no grid at all, and
+    /// ties go to semicolon — so a file today's parser reads, tomorrow's reads identically.
+    static func sniffDialect(_ text: String) -> Dialect {
+        var semis = 0, commas = 0
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            let t = line.trimmingCharacters(in: .whitespacesAndNewlines)
+            if t.hasPrefix("#;") { return .german }
+            if t.hasPrefix("#,") { return .dotted }
+            var inQuotes = false
+            for ch in t {
+                if ch == "\"" { inQuotes.toggle(); continue }
+                if inQuotes { continue }
+                if ch == ";" { semis += 1 } else if ch == "," { commas += 1 }
+            }
+        }
+        return semis >= commas ? .german : .dotted
+    }
+
     /// The set grid's own header, which carries no data but names the grid.
-    private static func grid(of line: String) -> Grid? {
-        switch line {
-        case "#;KG;WDH": return .reps
-        case "#;KG;SEK": return .seconds
-        case "#;MIN.": return .minutes
-        default: return line.hasPrefix("#;") ? .unknown : nil
+    /// Checked by first character before anything is built, because this runs on every line of the file.
+    private static func grid(of line: String, _ dialect: Dialect) -> Grid? {
+        let d = dialect.delimiter
+        guard line.first == "#", line.dropFirst().first == d else { return nil }
+        switch String(line.dropFirst(2)) {
+        case "KG\(d)WDH": return .reps
+        case "KG\(d)SEK": return .seconds
+        case "MIN.": return .minutes
+        default: return .unknown
         }
     }
 
@@ -175,6 +263,9 @@ public enum AlphaprogImporter {
         // Defaults to reps: every grid in the file but two is weight × repetitions, and a row arriving
         // before any header at all is far likelier to be a stray than an isometric.
         var grid = Grid.reps
+        let dialect = sniffDialect(text)
+        var headerCount = 0, titleCount = 0, rowCount = 0
+        var firstLine = ""
 
         func closeExercise() {
             guard let name = exerciseName else { return }
@@ -201,6 +292,7 @@ public enum AlphaprogImporter {
             var line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             if line.hasPrefix("\u{FEFF}") { line.removeFirst() }
             if line.isEmpty { continue }
+            if firstLine.isEmpty { firstLine = String(line.prefix(200)) }
 
             if let header = parseSessionHeader(line, timeZone: timeZone) {
                 closeWorkout()
@@ -209,22 +301,26 @@ public enum AlphaprogImporter {
                 end = header.start.addingTimeInterval(Double(header.durationMinutes) * 60)
                 haveStart = header.valid
                 grid = .reps
+                headerCount += 1
                 continue
             }
             if let name = parseExerciseTitle(line) {
                 closeExercise()
                 exerciseName = name
+                titleCount += 1
                 continue
             }
-            if let g = self.grid(of: line) {
+            if let g = self.grid(of: line, dialect) {
                 grid = g
                 continue
             }
 
             switch grid {
             case .reps:
-                if let row = parseSetRow(line),
-                   let weight = germanNumber(row.1), let reps = Int(row.2.trimmingCharacters(in: .whitespaces)),
+                guard let row = parseSetRow(line, delimiter: dialect.delimiter) else { break }
+                rowCount += 1
+                if let weight = number(row.1, decimalComma: dialect.decimalComma),
+                   let reps = Int(row.2.trimmingCharacters(in: .whitespaces)),
                    reps > 0 {
                     // A dash in either column is a set that was printed and not done.
                     sets.append(Set(weightKg: weight, reps: reps))
@@ -232,13 +328,16 @@ public enum AlphaprogImporter {
             case .seconds:
                 // A loaded hold. The weight is real and the seconds are real; their PRODUCT is not a
                 // mass, so it is kept out of volume rather than converted into one.
-                if let row = parseSetRow(line),
-                   let weight = germanNumber(row.1),
+                guard let row = parseSetRow(line, delimiter: dialect.delimiter) else { break }
+                rowCount += 1
+                if let weight = number(row.1, decimalComma: dialect.decimalComma),
                    let seconds = Int(row.2.trimmingCharacters(in: .whitespaces)), seconds > 0 {
                     sets.append(Set(weightKg: weight, reps: 0, holdSeconds: seconds))
                 }
             case .minutes:
-                if let row = parseTwoColumnRow(line), let minutes = germanNumber(row.1), minutes > 0 {
+                guard let row = parseTwoColumnRow(line, delimiter: dialect.delimiter) else { break }
+                rowCount += 1
+                if let minutes = number(row.1, decimalComma: dialect.decimalComma), minutes > 0 {
                     sets.append(Set(weightKg: 0, reps: 0, minutes: minutes))
                 }
             case .unknown:
@@ -251,7 +350,15 @@ public enum AlphaprogImporter {
         }
         closeWorkout()
 
-        return Parsed(workouts: workouts.sorted { $0.start < $1.start }, unattributed: unattributed)
+        return Parsed(
+            workouts: workouts.sorted { $0.start < $1.start },
+            unattributed: unattributed,
+            diagnostics: Diagnostics(
+                sessionHeaders: headerCount,
+                exerciseTitles: titleCount,
+                setRows: rowCount,
+                firstLine: firstLine,
+                delimiter: String(dialect.delimiter)))
     }
 
     /// Turn parsed workouts into the shared session shape the rest of the app already stores.
@@ -320,15 +427,15 @@ public enum AlphaprogImporter {
     }
 
     /// `1;30;10` — index, weight, reps.
-    static func parseSetRow(_ line: String) -> (Int, String, String)? {
-        let parts = line.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
+    static func parseSetRow(_ line: String, delimiter: Character = ";") -> (Int, String, String)? {
+        let parts = line.split(separator: delimiter, omittingEmptySubsequences: false).map(String.init)
         guard parts.count == 3, let index = Int(parts[0].trimmingCharacters(in: .whitespaces)) else { return nil }
         return (index, parts[1], parts[2])
     }
 
     /// `1;12,5` — index, minutes. Used by the minutes grid.
-    static func parseTwoColumnRow(_ line: String) -> (Int, String)? {
-        let parts = line.split(separator: ";", omittingEmptySubsequences: false).map(String.init)
+    static func parseTwoColumnRow(_ line: String, delimiter: Character = ";") -> (Int, String)? {
+        let parts = line.split(separator: delimiter, omittingEmptySubsequences: false).map(String.init)
         guard parts.count == 2, let index = Int(parts[0].trimmingCharacters(in: .whitespaces)) else { return nil }
         return (index, parts[1])
     }
@@ -351,8 +458,22 @@ public enum AlphaprogImporter {
 
     /// `1.234,5` or `27,5` or `30` — comma decimal, optional thousands dot. A dash is not a number.
     public static func germanNumber(_ raw: String) -> Double? {
+        number(raw, decimalComma: true)
+    }
+
+    /// A weight, a rep target or a duration column, in the file's own number convention.
+    ///
+    /// `decimalComma: false` is the comma-delimited dialect, where the decimal mark is a dot and a
+    /// thousands separator cannot appear unquoted at all (it would be the delimiter) — so the string is
+    /// taken as written rather than having its dots stripped, which is what would turn `27.5` into 275.
+    ///
+    /// A DASH IS NOT A ZERO in either dialect: `-` is a row the app printed and the wearer left empty.
+    /// `+10` IS accepted and read as 10, which is what `Double` does with a leading plus. See the note
+    /// on bodyweight-added loads in the file header.
+    public static func number(_ raw: String, decimalComma: Bool) -> Double? {
         let t = raw.trimmingCharacters(in: .whitespaces)
         if t.isEmpty || t == "-" || t == "–" { return nil }
+        guard decimalComma else { return Double(t) }
         return Double(t.replacingOccurrences(of: ".", with: "").replacingOccurrences(of: ",", with: "."))
     }
 

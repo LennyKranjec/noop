@@ -931,6 +931,11 @@ struct CoachView: View {
             StrandPalette.surfaceBase.ignoresSafeArea()
 
             transcript
+                // PUTTING THE KEYBOARD AWAY. On a phone the keyboard covers most of the reply, and the
+                // composer's own Send is the only thing that used to dismiss it — so reading an answer
+                // meant sending something first. Dragging the transcript now lowers it, and the keyboard
+                // bar below carries an explicit Done for the case where there is nothing to scroll.
+                .scrollDismissesKeyboard(.interactively)
                 // The room the two overlays take, so the first and last bubble can still be scrolled
                 // clear of them rather than sitting permanently underneath.
                 .safeAreaInset(edge: .top, spacing: 0) {
@@ -1384,6 +1389,22 @@ struct CoachView: View {
                     .strokeBorder(composerFocused ? StrandPalette.focusRing : StrandPalette.hairline, lineWidth: 1))
                 .onSubmit { send(draft) }
                 .accessibilityLabel("Question")
+                // iOS only: macOS has no software keyboard to dismiss, and `.keyboard` placement there
+                // would draw a bar for a keyboard that is never presented.
+                #if os(iOS)
+                .toolbar {
+                    ToolbarItemGroup(placement: .keyboard) {
+                        Spacer(minLength: 0)
+                        Button {
+                            composerFocused = false
+                        } label: {
+                            Label("Done", systemImage: "keyboard.chevron.compact.down")
+                                .labelStyle(.titleAndIcon)
+                        }
+                        .accessibilityLabel("Hide the keyboard")
+                    }
+                }
+                #endif
 
             // K4: on-device voice input (iOS only). macOS compiles this section out entirely.
             #if os(iOS)
