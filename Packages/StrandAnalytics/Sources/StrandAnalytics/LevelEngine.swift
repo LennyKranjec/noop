@@ -24,11 +24,13 @@ import Foundation
 //
 // MEDITATION is the one input not scored against a baseline — it has no biological ceiling. It is the
 // share of the last 28 days on which the wearer meditated at least `meditationMinMinutes`, the newest
-// days weighted most (e^(−days ago / 14)), times 100. A missed day costs a little; nothing resets.
+// days weighted most (e^(−days ago / 14)), times 100. A missed day costs a little; nothing resets. It is
+// ABSENT, not zero, until the wearer has logged one at all: see `LevelInputs.meditationShare`.
 //
 // EVERY INPUT IS MEASURED. A component with no data is EXCLUDED and its weight redistributed over the
 // ones that do; inside a part, a missing sub-metric is redistributed the same way. `coverage` says how
-// much of the weight was real.
+// much of the weight was real — and below `minCoverage` there is no level at all, because redistributing
+// the whole formula onto a tenth of it produces a confident number that measured almost nothing.
 //
 // STEPS ARE A PENALTY, NOT A COMPONENT: the 7-day average against `stepsFloor`, by at most
 // `stepsMaxPenalty`.
@@ -56,8 +58,16 @@ public struct LevelInputs: Equatable, Sendable {
     public var chronicLoad: Double?
     /// Daytime calm, 7-day mean.
     public var daytimeRmssd: Double?
-    /// The weighted share of the last 28 days meditated, 0–1.
-    public var meditationShare: Double
+    /// The weighted share of the last 28 days meditated, 0–1 — or NIL when there is no meditation log
+    /// to read at all.
+    ///
+    /// ABSENT IS NOT ZERO. This used to be a plain `Double` defaulting to 0, which made the meditation
+    /// sub-score the one input that could never be missing: a wearer who had never opened the feature
+    /// was scored as having meditated on none of their last 28 days, `focus` became a measured 0, and on
+    /// a fresh install that single fabricated zero was the WHOLE level — a confident 0.0, frozen for the
+    /// day and then polluting the 3- and 30-day means for a month afterwards. Once a log exists, a day
+    /// without a session is a real zero and the header's "a missed day costs a little" still holds.
+    public var meditationShare: Double?
     /// Average daily steps over the last 7 days. Nil when steps are not being recorded at all.
     public var steps: Int?
 
@@ -72,7 +82,7 @@ public struct LevelInputs: Equatable, Sendable {
         strengthIndex: Double? = nil,
         chronicLoad: Double? = nil,
         daytimeRmssd: Double? = nil,
-        meditationShare: Double = 0,
+        meditationShare: Double? = nil,
         steps: Int? = nil
     ) {
         self.restorativeMin = restorativeMin
@@ -141,7 +151,8 @@ public struct LevelBreakdown: Equatable, Sendable {
     public let stepPenalty: Double
     /// The level itself. Unbounded.
     public let level: Double
-    /// How much of the total weight had data behind it, 0–1.
+    /// How much of the total weight had data behind it, 0–1. Never below `LevelEngine.minCoverage`:
+    /// a thinner day has no level, not a low one.
     public let coverage: Double
 
     public init(components: [LevelComponent], raw: Double, stepPenalty: Double, level: Double, coverage: Double) {
@@ -151,6 +162,14 @@ public struct LevelBreakdown: Equatable, Sendable {
         self.level = level
         self.coverage = coverage
     }
+
+    /// `coverage` as whole per cent — the figure the breakdown puts on screen beside the level, so a
+    /// level built from half the formula cannot read like one built from all of it.
+    public var coveragePercent: Int { Int((Swift.min(Swift.max(coverage, 0), 1) * 100).rounded()) }
+
+    /// Whether some of the formula had no data behind it, so its weight was shared out over the rest.
+    /// Honest arithmetic, but invisible without saying so.
+    public var isPartialCoverage: Bool { coverage < 0.999 }
 
     /// The components most worth improving, best first: ranked by HEADROOM (weight × distance to the
     /// wearer's own 100), stable on ties.
@@ -183,6 +202,19 @@ public enum LevelEngine {
     public static let meditationDecayDays: Double = 14
     /// The minutes a day needs to count as a meditated day.
     public static let meditationMinMinutes: Double = 5
+
+    /// The least of the level's weight that has to have real data behind it before there is a level.
+    ///
+    /// WHY THERE IS A FLOOR AT ALL. Redistributing an absent part's weight over the parts that remain is
+    /// the right arithmetic, but it has no lower limit: with one part of five measured the engine would
+    /// scale that part up to the whole formula and hand back a number indistinguishable from a fully
+    /// measured one. On a fresh install that is exactly what happened — a level of 0.0 at 11 % coverage,
+    /// frozen for the day and then dragged through the 3- and 30-day means for a month.
+    ///
+    /// 0.40 is deliberately below the 0.53 a band-only wearer reaches with sleep and heart alone on their
+    /// first week, and above the 0.35 that any two of the small parts can reach between them. Below it
+    /// `compute` returns nil, the headline reads "–", and the day settles as a gap rather than as a score.
+    public static let minCoverage: Double = 0.40
 
     /// How many of the last N days a rolling mean needs before it is a reading.
     public static let rollingDays = 7
@@ -255,8 +287,10 @@ public enum LevelEngine {
     public static func focusSubScores(_ i: LevelInputs, _ b: [LevelMetric: Baseline]) -> [(LevelDriver, Double?, Double)] {
         [
             (.daytimeCalm, scored(i.daytimeRmssd, .daytimeRmssd, b, higherIsBetter: true), focusShares.calm),
-            // Always present: not meditating is a measured zero, not a missing reading.
-            (.meditation, 100 * min(max(i.meditationShare, 0), 1), focusShares.meditation),
+            // A logged zero is a measured zero; NO LOG AT ALL is not a zero, it is no reading — and it
+            // is redistributed onto daytime calm like every other absent sub-metric. See
+            // `LevelInputs.meditationShare`.
+            (.meditation, i.meditationShare.map { 100 * min(max($0, 0), 1) }, focusShares.meditation),
         ]
     }
 
@@ -286,7 +320,8 @@ public enum LevelEngine {
         let presentWeight = LevelPart.allCases.reduce(0.0) { acc, part in
             acc + ((scores[part] ?? nil) != nil ? part.weight : 0)
         }
-        guard presentWeight > 0 else { return nil }
+        // NOT `> 0`. See `minCoverage`: a level from almost nothing is not a low level, it is no level.
+        guard presentWeight >= minCoverage else { return nil }
 
         let components = LevelPart.allCases.map { part -> LevelComponent in
             let score = scores[part] ?? nil

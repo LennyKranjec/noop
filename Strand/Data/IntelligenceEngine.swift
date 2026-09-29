@@ -245,6 +245,11 @@ final class IntelligenceEngine: ObservableObject {
         /// written as "rhr_primary_session_valid_samples" / "rhr_primary_session_duration_s" in pass 2. nil
         /// in lockstep with `primarySessionRHR`.
         let primarySessionRHRCoverage: PrimarySessionRestingHR.Coverage?
+        /// The share of this day's CLOCK-derived night window that carries heart rate at all (0...1), or nil
+        /// when the window could not be formed. Carried out of the off-actor loop because pass 2 re-derives
+        /// the Charge confidence against its own as-of baseline and needs the same coverage pass 1 scored
+        /// with, and because the tier is persisted from pass 2. Confidence only — no score reads it.
+        let nightCoverage: Double?
     }
 
     /// Exact pre-upgrade R-R-derived cells retained only while an unlabelled WHOOP 5 window is withheld.
@@ -410,6 +415,48 @@ final class IntelligenceEngine: ObservableObject {
         LocalDayWindows(timeZone: timeZone,
                         referenceInstant: Date(timeIntervalSince1970: TimeInterval(now)))
             .trailingWindows(count: count)
+    }
+
+    // MARK: - Night coverage (a CONFIDENCE input, never a score input)
+
+    /// Seconds BEFORE a day's local midnight the coverage window opens, and seconds after it closes:
+    /// 22:00 the previous evening through 09:00, the same span `NightCoverage.lastNightWindow` states and
+    /// the same span the strap log's coverage line reports.
+    ///
+    /// Expressed as offsets from the day's OWN local midnight (`LocalDayWindow.start`, which is DST-correct)
+    /// rather than by stepping 86,400 s, so the anchor never drifts. The offsets themselves are ABSOLUTE
+    /// seconds on purpose: coverage is a ratio of measured seconds to window seconds, and both sides of
+    /// that ratio have to be in the same frame. On a DST morning the window is still exactly 11 h of real
+    /// time, which is what "how much of it did we capture" means.
+    ///
+    /// A fixed, stated window rather than the detected sleep span, for the reason `NightCoverage` gives:
+    /// the detected span is DERIVED from the rows whose completeness is in question, so a night that
+    /// synced two hours would report a two-hour span fully covered.
+    nonisolated static let nightCoverageOpensBeforeMidnight = 2 * 3_600
+    nonisolated static let nightCoverageClosesAfterMidnight = 9 * 3_600
+
+    /// The night-coverage window for a day, with the end clamped to `now` so a window still in progress is
+    /// never reported as having a hole at its end that is simply the future - the one direction a coverage
+    /// figure must not err in. nil when the clamp leaves nothing (the window has not opened yet).
+    nonisolated static func nightCoverageWindow(dayStart: Int, now: Int) -> (start: Int, end: Int)? {
+        let start = dayStart - nightCoverageOpensBeforeMidnight
+        let end = min(dayStart + nightCoverageClosesAfterMidnight, now)
+        guard end > start else { return nil }
+        return (start, end)
+    }
+
+    /// The seconds of `window` carrying at least one HR sample, or nil with no window. DISTINCT seconds, so
+    /// a stream banking several samples on one timestamp cannot report more coverage than it has - the same
+    /// quantity `WhoopStore.hrCoverageSeconds` computes in SQL, taken here from the rows this pass already
+    /// holds rather than paying a second read. Half-open `[start, end)`, so a fully covered window reports
+    /// exactly its own length. RAW seconds, not a fraction: the fraction is formed once, by
+    /// `ScoreConfidence.nightCoverageFraction`, so the engine and the persisted tier cannot disagree.
+    nonisolated static func nightHrCoveredSeconds(hr: [HRSample],
+                                                  window: (start: Int, end: Int)?) -> Int? {
+        guard let window, window.end > window.start else { return nil }
+        var seconds = Set<Int>()
+        for s in hr where s.ts >= window.start && s.ts < window.end { seconds.insert(s.ts) }
+        return seconds.count
     }
 
     /// Counts + a window length only — same privacy class as the sibling `sleep day=` line, no PII. Pure so
@@ -615,7 +662,18 @@ final class IntelligenceEngine: ObservableObject {
 
     /// UserDefaults flag guarding the one-shot #313 full-history Effort rescore (below). Set once the
     /// pass completes so it never re-runs.
-    static let effortRescoreFlagKey = "intelligence.effortRescore.v313.done"
+    ///
+    /// `nonisolated` so the re-arm below (and the restore path that calls it) can reach it off the
+    /// main actor — a `String` is Sendable, so this is the same shape as `rescoreChunkDays`.
+    nonisolated static let effortRescoreFlagKey = "intelligence.effortRescore.v313.done"
+
+    /// The newest day the resumable Effort rescore has finished, "yyyy-MM-dd". Twin of
+    /// `nightlyMetricsRescoreWatermarkKey`; versioned with the flag above.
+    nonisolated static let effortRescoreWatermarkKey = "intelligence.effortRescore.v313.completedThrough"
+
+    /// Whether an Effort-rescore attempt is running, so the launch call and the steady-state loop
+    /// never overlap (the nightly pass's `nightlyRescoreRunning` twin).
+    private var effortRescoreRunning = false
 
     /// One-shot, on-upgrade FULL-history Effort rescore (#313 PART B). The Effort hero gauge + numbers
     /// moved from the old 0–21 axis to NOOP's own 0–100 axis. On-device computed rows since v2.6.1
@@ -629,14 +687,85 @@ final class IntelligenceEngine: ObservableObject {
     /// runs exactly once. IMPORTED rows are never rewritten here (the engine only ever writes under the
     /// "-noop" computed source) , those are handled by re-import. A day already on 0–100 is recomputed
     /// from the same raw HR and lands on 0–100 again: UNCHANGED axis (verified by test).
+    ///
+    /// NEVER CONSUMED AGAINST AN EMPTY STORE. On a reinstall UserDefaults and the database are both
+    /// empty, and the launch cascade fires this ~6 s in — over nothing. It used to mark itself done
+    /// anyway, so the history the user imports or syncs minutes later was never re-axed, and nothing
+    /// re-armed it (`importWhoop` only refreshed, and the flag is not in the `.noopbak` whitelist).
+    /// A store with no raw HR now returns WITHOUT marking, and `rearmOneShotHistoryPasses` clears the
+    /// flag when a restore or a WHOOP archive import lands.
+    ///
+    /// CHUNKED, RESUMABLE AND CANCELLABLE, like the nightly pass. It used to be one unchunked
+    /// 4000-day main-actor call with no cancellation check that only marked its flag at the very end,
+    /// so on a large library it restarted from zero every launch, never finished, and starved the
+    /// resumable nightly pass queued behind it (BLE decode shares the main thread, so it stalled
+    /// syncing too). It now walks `rescorePlan`'s chunks oldest-first against its own watermark, is
+    /// clamped to the first raw HR sample, and honours cancellation.
     func runEffortRescoreIfNeeded(historyDays: Int = 4000) async {
         guard !UserDefaults.standard.bool(forKey: Self.effortRescoreFlagKey) else { return }
-        await analyzeRecent(maxDays: historyDays)
-        // Only mark done if the pass actually completed (wasn't skipped because another tick held the
-        // `computing` lock). `computing` is false here once analyzeRecent's `defer` has run; a skipped
-        // call returns with `note` unset by it. Use the lock state: if a concurrent run was in progress
-        // the flag stays unset so the next launch retries , cheap, and correctness over a one-time cost.
-        if !computing { UserDefaults.standard.set(true, forKey: Self.effortRescoreFlagKey) }
+        guard !effortRescoreRunning else { return }
+        effortRescoreRunning = true
+        defer { effortRescoreRunning = false }
+        guard let store = await repo.storeHandle() else { return }   // no store yet → retry next tick
+        let firstHrTs: Int? = try? await store.hrFirstTs()
+        // Nothing to re-axe: skip WITHOUT marking, so the pass still runs over history that lands later.
+        guard firstHrTs != nil else { return }
+
+        let now = Int(Date().timeIntervalSince1970)
+        let days: [(key: String, asOf: Int)] = Self.localDayScan(now: now, count: historyDays).reversed().map {
+            (key: AnalyticsEngine.dayString(Int($0.start.timeIntervalSince1970), offsetSec: $0.utcOffsetSeconds),
+             asOf: Int($0.nextStart.timeIntervalSince1970) - 1)
+        }
+        let completedThrough = UserDefaults.standard.string(forKey: Self.effortRescoreWatermarkKey)
+        let plan = Self.rescorePlan(oldestFirst: days, firstDataAsOf: firstHrTs,
+                                    completedThrough: completedThrough, chunkDays: Self.rescoreChunkDays)
+        // Same publish policy as the nightly pass: historical chunks don't each reload the dashboard
+        // caches; the walk reloads once when it ends — or stops.
+        var historicalUnpublished = false
+        for chunk in plan.historical {
+            guard !Task.isCancelled, await waitForIdlePass(),
+                  await analyzeRecent(maxDays: chunk.maxDays, force: true, asOf: chunk.asOf) else {
+                if historicalUnpublished { await repo.refresh() }
+                return
+            }
+            historicalUnpublished = true
+            UserDefaults.standard.set(chunk.newestDay, forKey: Self.effortRescoreWatermarkKey)
+        }
+        if historicalUnpublished { await repo.refresh() }
+        if plan.finalDays > 0 {
+            guard !Task.isCancelled, await waitForIdlePass(),
+                  await analyzeRecent(maxDays: plan.finalDays) else { return }
+        }
+        UserDefaults.standard.set(true, forKey: Self.effortRescoreFlagKey)
+        UserDefaults.standard.removeObject(forKey: Self.effortRescoreWatermarkKey)
+    }
+
+    /// Every one-shot full-history flag, plus the two resumable passes' watermarks. Cleared together
+    /// by `rearmOneShotHistoryPasses`.
+    nonisolated static var oneShotHistoryDefaultsKeys: [String] {
+        [effortRescoreFlagKey, effortRescoreWatermarkKey,
+         nightlyMetricsRescoreFlagKey, nightlyMetricsRescoreWatermarkKey,
+         timestampHealFlagKey]
+    }
+
+    /// RE-ARM the one-shot full-history passes because a body of history just LANDED.
+    ///
+    /// The three passes are each guarded by a persisted "done" flag, and every one of them is a no-op
+    /// on an empty database. A reinstall (or any fresh install) therefore runs them over nothing —
+    /// and while each of them now declines to mark itself done over an empty store, a store that was
+    /// merely SMALL when they ran is a second way to consume them: they complete honestly over the
+    /// few days present, and the 4000-day history the user restores or imports minutes later is never
+    /// re-axed, never re-scored under the nightly rework, and never purged of bad-clock rows. The
+    /// level ledger then freezes its baselines off that un-re-scored history.
+    ///
+    /// So both paths that can land a whole history at once — a `.noopbak` restore (`DataBackup`) and
+    /// a WHOOP archive import (`AppModel.importWhoop`) — clear the flags AND the watermarks, and the
+    /// steady-state loop picks the passes up again on its next tick. Clearing a watermark alongside
+    /// its flag is required: a stale watermark would make the re-armed pass skip everything up to it.
+    ///
+    /// `nonisolated` so the restore path (a plain static, off the main actor) can call it.
+    nonisolated static func rearmOneShotHistoryPasses(defaults: UserDefaults = .standard) {
+        for key in oneShotHistoryDefaultsKeys { defaults.removeObject(forKey: key) }
     }
 
     /// One-shot, on-upgrade FULL-history re-score for the nightly-metrics rework (HR-settled sleep onset/wake,
@@ -654,7 +783,9 @@ final class IntelligenceEngine: ObservableObject {
     /// resting HR, pooled physiology on bridged nights, linear-detrend respiration, the in-bed waking-RHR/NEAT
     /// mask. A device that already ran v1 runs the full-history pass once more. KEEP IN STEP with
     /// `LevelLedger.currentEpoch` (2): the ledger rebuilds once per epoch after THIS flag is set.
-    static let nightlyMetricsRescoreFlagKey = "intelligence.nightlyMetricsRescore.v2.done"
+    /// `nonisolated` so `rearmOneShotHistoryPasses` (and the restore path behind it) can reach it off
+    /// the main actor — a `String` is Sendable.
+    nonisolated static let nightlyMetricsRescoreFlagKey = "intelligence.nightlyMetricsRescore.v2.done"
 
     ///
     /// THE FLAG IS SET ONLY WHEN THE FULL-HISTORY PASS ITSELF RAN. It used to be set whenever `computing`
@@ -694,6 +825,11 @@ final class IntelligenceEngine: ObservableObject {
 
         let now = Int(Date().timeIntervalSince1970)
         let firstHrTs: Int? = try? await store.hrFirstTs()
+        // NOTHING TO RE-SCORE: skip WITHOUT marking. On a reinstall the database is empty when the
+        // launch cascade fires this, `rescorePlan` returns an empty plan, and the trailing recent pass
+        // would still complete over nothing and set the flag — burning the one-shot before the user's
+        // history ever arrived, with the level ledger then freezing its baselines off it.
+        guard firstHrTs != nil else { return false }
         let days: [(key: String, asOf: Int)] = Self.localDayScan(now: now, count: historyDays).reversed().map {
             (key: AnalyticsEngine.dayString(Int($0.start.timeIntervalSince1970), offsetSec: $0.utcOffsetSeconds),
              asOf: Int($0.nextStart.timeIntervalSince1970) - 1)
@@ -744,7 +880,7 @@ final class IntelligenceEngine: ObservableObject {
 
     /// The newest day the resumable full-history rescore has finished, "yyyy-MM-dd". Versioned with the
     /// flag: a new rescore version starts from nothing.
-    static let nightlyMetricsRescoreWatermarkKey = "intelligence.nightlyMetricsRescore.v2.completedThrough"
+    nonisolated static let nightlyMetricsRescoreWatermarkKey = "intelligence.nightlyMetricsRescore.v2.completedThrough"
 
     /// Days per historical chunk of the full-history rescore.
     nonisolated static let rescoreChunkDays = 120
@@ -809,7 +945,8 @@ final class IntelligenceEngine: ObservableObject {
 
     /// UserDefaults flag guarding the one-shot #547 implausible-timestamp DB heal (below). Set once the
     /// heal completes so it never re-runs.
-    static let timestampHealFlagKey = "intelligence.timestampHeal.v547.done"
+    /// `nonisolated` so `rearmOneShotHistoryPasses` can reach it off the main actor.
+    nonisolated static let timestampHealFlagKey = "intelligence.timestampHeal.v547.done"
 
     /// #547 RE-POLLUTION re-arm: a one-shot heal isn't enough when a strap with a WANDERING clock keeps
     /// re-sending bad-dated records across syncs. Whenever a sync's ingest gate drops implausible records
@@ -841,6 +978,13 @@ final class IntelligenceEngine: ObservableObject {
         let pending = UserDefaults.standard.bool(forKey: Self.timestampHealPendingKey)
         guard pending || !UserDefaults.standard.bool(forKey: Self.timestampHealFlagKey) else { return }
         guard let store = await repo.storeHandle() else { return }   // no store yet → retry next launch
+        // AN EMPTY STORE CANNOT CONSUME THE ONE-SHOT. A reinstall runs this ~6 s after launch over a
+        // database with nothing in it: the heal deletes nothing, `didChange` is false, and the flag
+        // used to go up regardless — so the bad-clock rows in the history the user restores or syncs
+        // minutes later were never purged. Skip without marking; `rearmOneShotHistoryPasses` and the
+        // steady-state loop bring it back.
+        let healFirstHrTs: Int? = try? await store.hrFirstTs()
+        guard healFirstHrTs != nil else { return }
         let result: WhoopStore.TimestampHealResult
         do {
             result = try await store.healImplausibleTimestamps()
@@ -1689,6 +1833,15 @@ final class IntelligenceEngine: ObservableObject {
                 // the same reason `hrvDiag` is carried on the scan and replayed below. A local buffer
                 // crosses no actor.
                 var strainDiagLines: [String] = []
+                // How much of this night NOOP actually holds, measured against a CLOCK-derived window (see
+                // `nightCoverageWindow`). Confidence only: `analyzeDay` threads it to `ScoreConfidence` for
+                // Rest and Charge so a partly-synced night is marked rather than presented as solid. No
+                // score reads it, and a day whose window cannot be formed passes nil, which fails open.
+                let coverageWindow = Self.nightCoverageWindow(dayStart: dayStart, now: now)
+                let coveredSeconds = Self.nightHrCoveredSeconds(hr: hr, window: coverageWindow)
+                let nightWindowSeconds = coverageWindow.map { $0.end - $0.start }
+                let nightCoverage = ScoreConfidence.nightCoverageFraction(
+                    coveredSeconds: coveredSeconds, windowSeconds: nightWindowSeconds)
                 let res = AnalyticsEngine.analyzeDay(day: day,
                                                      strainDiag: { strainDiagLines.append($0) },
                                                      hr: hr, rr: rr, resp: resp,
@@ -1718,6 +1871,9 @@ final class IntelligenceEngine: ObservableObject {
                                                      // #804 Fix A: the owner's own device-provided hypnogram
                                                      // (empty for WHOOP / non-ring days → default path).
                                                      providedSleep: providedSleep,
+                                                     // Night coverage -> Rest/Charge confidence only.
+                                                     nightCoveredSeconds: coveredSeconds,
+                                                     nightWindowSeconds: nightWindowSeconds,
                                                      traceSink: traceSink,
                                                      hrvTraceSink: hrvTraceSink,
                                                      // Per-window HRV detail ONLY for the most-recent night
@@ -1992,7 +2148,8 @@ final class IntelligenceEngine: ObservableObject {
                                    spo2Candidate: spo2CandidateMean,
                                    hrvOverCounted: hrvOverCounted,
                                    primarySessionRHR: primarySessionRHR,
-                                   primarySessionRHRCoverage: primarySessionRHRCoverage)
+                                   primarySessionRHRCoverage: primarySessionRHRCoverage,
+                                   nightCoverage: nightCoverage)
                 // #1005: cache this freshly-scored scan under its per-day key (only when the day was
                 // cache-eligible this pass, i.e. a registered WHOOP owner with no trace active). Reused
                 // days `continue`d above and never reach here, so the cache only ever holds fresh scans.
@@ -2084,6 +2241,14 @@ final class IntelligenceEngine: ObservableObject {
         var primarySessionRHRByDay: [String: Double] = [:]
         // #1169: its coverage inputs (valid-sample count + primary-session duration), same lifetime as the mean.
         var primarySessionRHRCoverageByDay: [String: PrimarySessionRestingHR.Coverage] = [:]
+        // The share of each day's clock-derived night window that carried HR, carried from pass 1 so pass 2
+        // re-derives the Charge confidence against the SAME coverage the night was scored with, and so the
+        // three per-score tiers can be persisted beside the scores. Absent day = coverage unmeasured.
+        var nightCoverageByDay: [String: Double] = [:]
+        // The per-score confidence tiers actually written for each day, so `restPoints` below persists the
+        // tier beside the score it qualifies (see `ScoreConfidence.SeriesKey`).
+        var scoreConfidenceByDay: [String: (charge: ScoreConfidence, effort: ScoreConfidence,
+                                            rest: ScoreConfidence)] = [:]
         // O7: the day's MEASURED waking resting HR (persisted as `WakingRestingHR.metricKey`) and the value
         // the day's energy/Effort actually used (measured, else sleep + offset — handed to the day-cycle pass).
         var wakingRhrByDay: [String: Double] = [:]
@@ -2102,6 +2267,12 @@ final class IntelligenceEngine: ObservableObject {
             nightlyRhrByDay[res.daily.day] = res.daily.restingHr.map(Double.init)
             nightlyRespByDay[res.daily.day] = res.daily.respRateBpm
             nightlySkinByDay[res.daily.day] = res.nightlySkinTempC
+            if let c = scan.nightCoverage { nightCoverageByDay[res.daily.day] = c }
+            // Effort + Rest are final in pass 1 (neither depends on a baseline); Charge is re-derived below
+            // against this day's as-of baseline, so its tier is overwritten there.
+            scoreConfidenceByDay[res.daily.day] = (charge: res.chargeConfidence,
+                                                   effort: res.effortConfidence,
+                                                   rest: res.restConfidence)
             // #103: carry the SpO₂ candidate @82 nightly mean into pass 2 for metricSeries persistence.
             // nil when the toggle is OFF or the night had no in-band @82 readings.
             if let cand = scan.spo2Candidate {
@@ -2455,7 +2626,15 @@ final class IntelligenceEngine: ObservableObject {
             // Honest per-day Charge confidence (A3): the strap night reads `.solid`/`.building`/`.calibrating`
             // off the HRV baseline state rather than a blanket `.solid`, so a thin/provisional baseline shows
             // EST. not REL. Pure presentation upstream of the UI; the score itself is unchanged.
-            let chargeConf = ScoreConfidence.charge(recovery: recovery, hrvBaseline: dayBaselines.hrv)
+            // …and, since a Charge is read off ONE night's HRV and resting HR, off how much of that night
+            // was ever persisted: a two-hour sync cannot back a SOLID Charge however trusted the baseline
+            // is. An unmeasured day (no entry) passes nil and the guard fails open.
+            let chargeConf = ScoreConfidence.charge(recovery: recovery, hrvBaseline: dayBaselines.hrv,
+                                                    nightCoverage: nightCoverageByDay[daily.day])
+            if var tiers = scoreConfidenceByDay[daily.day] {
+                tiers.charge = chargeConf
+                scoreConfidenceByDay[daily.day] = tiers
+            }
             out.append(Computed(day: daily.day, recovery: recovery, strain: daily.strain,
                                 sleepMin: daily.totalSleepMin, hrv: daily.avgHrv,
                                 rhr: daily.restingHr, source: source, confidence: chargeConf,
@@ -2575,6 +2754,20 @@ final class IntelligenceEngine: ObservableObject {
             // O10b: active energy proper (NEAT + exercise above BMR). `activeKcalEst` stays the TOTAL.
             if let v = activeEnergyByDay[daily.day] {
                 restPoints.append(MetricPoint(day: daily.day, key: "active_energy_kcal_est", value: v))
+            }
+            // The per-score confidence tiers, persisted BESIDE the scores they qualify. They were computed
+            // on every DayResult and read by nothing, so a Charge on a provisional four-night baseline and
+            // one on a year of history rendered identically. Written as ordinals into the existing
+            // metric_series (no schema change; the upsert REPLACEs per (day, key), so a re-score simply
+            // restates the tier — additive and idempotent). Always written, not only when non-solid, so a
+            // day that IMPROVES clears its old lower tier instead of keeping it.
+            if let tiers = scoreConfidenceByDay[daily.day] {
+                restPoints.append(MetricPoint(day: daily.day, key: ScoreConfidence.SeriesKey.charge,
+                                              value: tiers.charge.ordinal))
+                restPoints.append(MetricPoint(day: daily.day, key: ScoreConfidence.SeriesKey.effort,
+                                              value: tiers.effort.ordinal))
+                restPoints.append(MetricPoint(day: daily.day, key: ScoreConfidence.SeriesKey.rest,
+                                              value: tiers.rest.ordinal))
             }
             cachedSleep.append(contentsOf: night.cachedSleep)
             // Persist the detected workouts the pipeline already computes (previously discarded).

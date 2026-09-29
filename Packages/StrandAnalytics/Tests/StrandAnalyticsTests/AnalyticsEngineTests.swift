@@ -392,16 +392,79 @@ final class AnalyticsEngineTests: XCTestCase {
         XCTAssertEqual(over, 100.0, accuracy: 1e-9)
     }
 
-    func testRestCompositeNilConsistencyIsNeutral() {
-        // A single day carries no regularity signal → nil consistency scores the neutral 0.5.
+    /// A day with no regularity signal DROPS the consistency term and renormalises, rather than scoring it
+    /// at a substituted neutral 0.5. The old behaviour handed 10% of the score a made-up value, so a
+    /// perfect first night could only ever reach 95.
+    func testRestCompositeNilConsistencyDropsTheTermAndRenormalises() {
         let withNil = AnalyticsEngine.Rest.composite(
             tstSeconds: 4 * 3600, inBedSeconds: 5 * 3600, efficiency: 0.8,
             restorativeSeconds: 1 * 3600, needHours: 8.0, consistency: nil)
         let withHalf = AnalyticsEngine.Rest.composite(
             tstSeconds: 4 * 3600, inBedSeconds: 5 * 3600, efficiency: 0.8,
             restorativeSeconds: 1 * 3600, needHours: 8.0, consistency: 0.5)
-        XCTAssertEqual(withNil, withHalf, accuracy: 1e-9)
-        XCTAssertEqual(withNil, 56.0, accuracy: 1e-9)
+        // dur 0.5*0.5 + eff 0.2*0.8 + restor 0.2*0.5 = 0.51 over a 0.9 divisor.
+        XCTAssertEqual(withNil, 56.67, accuracy: 0.01)
+        XCTAssertEqual(withHalf, 56.0, accuracy: 1e-9)   // a MEASURED 0.5 still scores, and still divides by 1.0
+        XCTAssertGreaterThan(withNil, withHalf,
+                             "an absent term must not be scored at the bottom of the measured range")
+    }
+
+    /// A first night with nothing to fault reaches 100. It used to cap at 95 because the unknown
+    /// regularity was scored 0.5 — the honesty rule's own case: absent is not "average".
+    func testRestCompositePerfectFirstNightReachesOneHundred() {
+        let r = AnalyticsEngine.Rest.composite(
+            tstSeconds: 8 * 3600, inBedSeconds: 8 * 3600, efficiency: 1.0,
+            restorativeSeconds: 4 * 3600, needHours: 8.0, consistency: nil,
+            deepSeconds: 1.2 * 3600)
+        XCTAssertEqual(r, 100.0, accuracy: 1e-9)
+    }
+
+    /// An UNSTAGED night (no deep/REM split) drops the restorative term instead of scoring it zero and
+    /// halving it again through `deepFactor`. 7.5 h asleep at 0.92 efficiency with no regularity yet:
+    /// 87.84 was the audited "drop and renormalise the restorative term only" figure; dropping the absent
+    /// consistency term as well lands at 93.25. The old behaviour scored the same night 70.28 — a 23-point
+    /// deduction for information the night never carried, which then propagated into Charge.
+    func testRestCompositeUnstagedNightDropsTheRestorativeTerm() {
+        let unstaged = AnalyticsEngine.Rest.composite(
+            tstSeconds: 7.5 * 3600, inBedSeconds: 7.5 * 3600 / 0.92, efficiency: 0.92,
+            restorativeSeconds: nil, needHours: 8.0, consistency: nil, deepSeconds: nil)
+        XCTAssertEqual(unstaged, 93.25, accuracy: 0.01)
+        // Held against the fabricated-zero it replaces: a REAL staged night with genuinely no deep/REM.
+        let fabricatedZero = AnalyticsEngine.Rest.composite(
+            tstSeconds: 7.5 * 3600, inBedSeconds: 7.5 * 3600 / 0.92, efficiency: 0.92,
+            restorativeSeconds: 0, needHours: 8.0, consistency: nil, deepSeconds: 0)
+        XCTAssertEqual(fabricatedZero, 72.53, accuracy: 0.01)
+        XCTAssertGreaterThan(unstaged, fabricatedZero,
+                             "absent stages must not be penalised like measured-zero stages")
+        // Renormalisation only: dropping a term never lets a night score above a perfect one.
+        XCTAssertLessThanOrEqual(unstaged, 100.0)
+    }
+
+    /// The renormalisation divisor, stated once so the composite and its trace cannot disagree.
+    func testRestWeightSumDropsOnlyTheAbsentTerms() {
+        typealias Rest = AnalyticsEngine.Rest
+        XCTAssertEqual(Rest.weightSum(hasRestorative: true, hasConsistency: true), 1.0, accuracy: 1e-9)
+        XCTAssertEqual(Rest.weightSum(hasRestorative: false, hasConsistency: true), 0.8, accuracy: 1e-9)
+        XCTAssertEqual(Rest.weightSum(hasRestorative: true, hasConsistency: false), 0.9, accuracy: 1e-9)
+        XCTAssertEqual(Rest.weightSum(hasRestorative: false, hasConsistency: false), 0.7, accuracy: 1e-9)
+    }
+
+    /// The display / pass-2 path (`composite(daily:)`) must make the SAME distinction: both stages are
+    /// required for a restorative figure, so a night with a total and no split drops the term rather than
+    /// reading `?? 0`. `RestComponents.restorativeMin` already applied exactly this rule, so the charted
+    /// component and the score it explains now agree.
+    func testCompositeFromDailyTreatsMissingStagesAsAbsent() throws {
+        func row(deep: Double?, rem: Double?) -> DailyMetric {
+            DailyMetric(day: "2026-01-02", totalSleepMin: 450, efficiency: 0.92,
+                        deepMin: deep, remMin: rem, lightMin: nil, disturbances: nil,
+                        restingHr: nil, avgHrv: nil, recovery: nil, strain: nil, exerciseCount: nil)
+        }
+        let unstaged = try XCTUnwrap(AnalyticsEngine.Rest.composite(daily: row(deep: nil, rem: nil)))
+        let measuredZero = try XCTUnwrap(AnalyticsEngine.Rest.composite(daily: row(deep: 0, rem: 0)))
+        XCTAssertGreaterThan(unstaged, measuredZero)
+        // A half-staged night (a deep figure with no REM) has no restorative SHARE either.
+        let halfStaged = try XCTUnwrap(AnalyticsEngine.Rest.composite(daily: row(deep: 60, rem: nil)))
+        XCTAssertEqual(halfStaged, unstaged, accuracy: 1e-9)
     }
 
     func testAnalyzeDayPopulatesRestAndConfidence() {
@@ -446,6 +509,83 @@ final class AnalyticsEngineTests: XCTestCase {
         // Unusable baseline → calibrating.
         XCTAssertEqual(ScoreConfidence.charge(recovery: 60, hrvBaseline: calibrating), .calibrating)
         XCTAssertEqual(ScoreConfidence.charge(recovery: 60, hrvBaseline: nil), .calibrating)
+    }
+
+    // MARK: - Night coverage as a confidence input
+
+    /// The night's OWN coverage, which none of the other guards can see: `stageCoverage` measures the
+    /// hypnogram against the DETECTED span, and a night that synced only two hours yields a two-hour
+    /// session whose stages cover it completely. Measured against a clock-derived window instead, that
+    /// night is 18% covered and cannot back a SOLID Rest or Charge.
+    func testNightCoverageFractionIsCoveredOverWindow() throws {
+        XCTAssertEqual(try XCTUnwrap(ScoreConfidence.nightCoverageFraction(
+            coveredSeconds: 2 * 3600, windowSeconds: 11 * 3600)), 2.0 / 11.0, accuracy: 1e-9)
+        // Unknowable inputs stay unknown rather than becoming 0 (which would read as "badly covered").
+        XCTAssertNil(ScoreConfidence.nightCoverageFraction(coveredSeconds: nil, windowSeconds: 3600))
+        XCTAssertNil(ScoreConfidence.nightCoverageFraction(coveredSeconds: 100, windowSeconds: nil))
+        XCTAssertNil(ScoreConfidence.nightCoverageFraction(coveredSeconds: 100, windowSeconds: 0))
+    }
+
+    func testRestConfidenceThinNightCoverageDowngradesAnOtherwiseSolidNight() {
+        let asleep = 2.0 * 3600.0
+        // Every OTHER guard is satisfied: staged, plausible restorative share, timeline covers its span.
+        XCTAssertEqual(
+            ScoreConfidence.rest(hasSession: true, hasStagedSleep: true,
+                                 asleepSeconds: asleep, restorativeSeconds: asleep * 0.45,
+                                 efficiency: 0.92, stageCoverage: 1.0,
+                                 nightCoverage: 2.0 / 11.0),
+            .building, "a night that synced two hours must not be presented as solid")
+    }
+
+    func testRestConfidenceNightCoverageBoundaryAndFailOpen() {
+        let asleep = 7.0 * 3600.0
+        func tier(_ coverage: Double?) -> ScoreConfidence {
+            ScoreConfidence.rest(hasSession: true, hasStagedSleep: true,
+                                 asleepSeconds: asleep, restorativeSeconds: asleep * 0.45,
+                                 efficiency: 0.90, stageCoverage: 1.0, nightCoverage: coverage)
+        }
+        XCTAssertEqual(tier(ScoreConfidence.minNightCoverage), .solid, "exactly at the bar is enough")
+        XCTAssertEqual(tier(ScoreConfidence.minNightCoverage - 0.01), .building)
+        XCTAssertEqual(tier(nil), .solid, "unmeasured coverage must fail OPEN, never downgrade")
+        XCTAssertEqual(tier(1.0), .solid)
+    }
+
+    func testChargeConfidenceThinNightCoverageDowngradesTrustedBaseline() {
+        let trusted = BaselineState(baseline: 50, spread: 5, nValid: 14,
+                                    nightsSinceUpdate: 0, status: .trusted)
+        // A Charge is read off ONE night's HRV + resting HR, so the baseline being trusted is not enough.
+        XCTAssertEqual(ScoreConfidence.charge(recovery: 60, hrvBaseline: trusted,
+                                              nightCoverage: 0.18), .building)
+        XCTAssertEqual(ScoreConfidence.charge(recovery: 60, hrvBaseline: trusted,
+                                              nightCoverage: nil), .solid)
+        XCTAssertEqual(ScoreConfidence.charge(recovery: 60, hrvBaseline: trusted,
+                                              nightCoverage: 0.9), .solid)
+        // A thin night cannot promote a calibrating/absent score either way.
+        XCTAssertEqual(ScoreConfidence.charge(recovery: nil, hrvBaseline: trusted,
+                                              nightCoverage: 1.0), .calibrating)
+    }
+
+    // MARK: - The tiers are persistable (so a UI can read them)
+
+    /// The tiers were computed on every DayResult and consumed by nothing. They are now persisted as
+    /// ordinals beside the scores they qualify; this pins the encoding both directions, including that an
+    /// unreadable value decodes to nil rather than optimistically to `.solid`.
+    func testScoreConfidenceOrdinalRoundTrips() {
+        for tier in [ScoreConfidence.calibrating, .building, .solid] {
+            XCTAssertEqual(ScoreConfidence.from(ordinal: tier.ordinal), tier)
+        }
+        // Ordered, so a reader can compare numerically without decoding.
+        XCTAssertLessThan(ScoreConfidence.calibrating.ordinal, ScoreConfidence.building.ordinal)
+        XCTAssertLessThan(ScoreConfidence.building.ordinal, ScoreConfidence.solid.ordinal)
+        XCTAssertNil(ScoreConfidence.from(ordinal: 3))
+        XCTAssertNil(ScoreConfidence.from(ordinal: -1))
+        XCTAssertNil(ScoreConfidence.from(ordinal: 1.5))
+        // The keys are distinct and stable (they are persisted).
+        XCTAssertEqual(Set([ScoreConfidence.SeriesKey.charge, ScoreConfidence.SeriesKey.effort,
+                            ScoreConfidence.SeriesKey.rest]).count, 3)
+        XCTAssertEqual(ScoreConfidence.SeriesKey.charge, "charge_confidence")
+        XCTAssertEqual(ScoreConfidence.SeriesKey.effort, "effort_confidence")
+        XCTAssertEqual(ScoreConfidence.SeriesKey.rest, "rest_confidence")
     }
 
     func testEffortConfidenceTiers() {

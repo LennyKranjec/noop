@@ -96,15 +96,26 @@ public enum VitalityEngine {
         return anchors[anchors.count - 1].1
     }
 
+    /// Fewest nights before a regularity read is attempted at all. Below it the value is nil, and every
+    /// consumer drops the term rather than substituting one (`AnalyticsEngine.Rest.composite`).
+    public static let sleepConsistencyMinNights: Int = 3
+
     /// Sleep regularity (0–1) from a window of nightly sleep durations (hours): 1 − coefficient of
     /// variation, clamped. A rough but honest on-device proxy for the Sleep Regularity Index when we only
-    /// have durations, not full timing. Fewer than 3 nights → nil (not enough to judge).
+    /// have durations, not full timing. Fewer than `sleepConsistencyMinNights` nights → nil (not enough
+    /// to judge).
+    ///
+    /// The spread uses the SAMPLE divisor (n − 1), not the population one. These nights are a SAMPLE of a
+    /// sleeper's habit, never the whole population of their nights, and dividing by n biases the spread
+    /// DOWNWARD — hardest exactly at the short histories this helper is first allowed to speak on. At the
+    /// n = 3 floor the population divisor understates the standard deviation by ~18%, so a 3-night history
+    /// read back as more regular than it is, and that flattery was then worth 10% of the Rest score.
     public static func sleepConsistency(nightlyHours: [Double]) -> Double? {
         let xs = nightlyHours.filter { $0 > 0 }
-        guard xs.count >= 3 else { return nil }
+        guard xs.count >= sleepConsistencyMinNights else { return nil }
         let mean = xs.reduce(0, +) / Double(xs.count)
         guard mean > 0 else { return nil }
-        let variance = xs.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(xs.count)
+        let variance = xs.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(xs.count - 1)
         let cv = variance.squareRoot() / mean
         return clamp(1 - cv, 0, 1)
     }

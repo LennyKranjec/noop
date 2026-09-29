@@ -947,15 +947,38 @@ final class SleepStagerTests: XCTestCase {
                        "a sub-25 bpm bin cannot win the floor under the #1943 gate")
     }
 
-    // When every bin is thin or implausible, the gate falls back to the lowest of ALL bin means
-    // (ungated), preserving the never-null-on-data behaviour. The floor is the same as before the
-    // gate existed.
-    func testSessionRestingHRAllBinsGatedFallsBackToUngatedMin() {
-        // Two bins, each with one sample: 40 and 50. Neither qualifies (both thin). The fallback
-        // is the min of all bin means = 40, the same value the ungated path produced.
-        let hr: [HRSample] = [HRSample(ts: 0, bpm: 40), HRSample(ts: 300, bpm: 50)]
-        XCTAssertEqual(SleepStager.sessionRestingHR(start: 0, end: 600, hr: hr), 40,
-                       "when no bin qualifies, the floor falls back to the ungated min")
+    // When every bin is thin or implausible, the ungated fallbacks may still speak — but only on a span
+    // that holds at least `rhrMinBinSamples` samples in total. The "never null on data" behaviour this
+    // used to preserve had no floor at all: the only span that returned nil was a completely empty one, so
+    // three surviving beats from a 40-minute nap became a displayed resting HR AND were folded into the
+    // `resting_hr` baseline every later night is scored against. Two beats is not a resting heart rate.
+    func testSessionRestingHRAllBinsGatedFallsBackToUngatedMinWhenCovered() {
+        // Six bins' worth of samples, none of them a qualifying bin (each bin holds one sample), but six
+        // samples in the span clears the coverage floor: the fallback is the min of all bin means = 40.
+        let hr: [HRSample] = (0..<6).map { HRSample(ts: $0 * 300, bpm: $0 == 0 ? 40 : 50) }
+        XCTAssertEqual(SleepStager.sessionRestingHR(start: 0, end: 1800, hr: hr), 40,
+                       "with the span covered, no qualifying bin still falls back to the ungated min")
+    }
+
+    // #ACC2: the coverage floor itself. Three beats in a 40-minute span is not a resting HR, and the old
+    // code returned `Int(mean(of: 3))` for it.
+    func testSessionRestingHRAbstainsOnAThinlyCoveredSpan() {
+        let hr: [HRSample] = [HRSample(ts: 10, bpm: 44), HRSample(ts: 700, bpm: 46),
+                              HRSample(ts: 1500, bpm: 45)]
+        XCTAssertNil(SleepStager.sessionRestingHR(start: 0, end: 2400, hr: hr),
+                     "three beats across 40 minutes is not a resting heart rate")
+    }
+
+    // The coverage floor's boundary: 4 samples spread one-per-bin abstains, 5 reports. A span that DOES
+    // hold a qualifying bin is unaffected either way (tier 1 wins before the floor is consulted).
+    func testSessionRestingHRCoverageFloorBoundary() {
+        let four: [HRSample] = (0..<4).map { HRSample(ts: $0 * 300, bpm: 50) }
+        let five: [HRSample] = (0..<5).map { HRSample(ts: $0 * 300, bpm: 50) }
+        XCTAssertNil(SleepStager.sessionRestingHR(start: 0, end: 1500, hr: four))
+        XCTAssertEqual(SleepStager.sessionRestingHR(start: 0, end: 1500, hr: five), 50)
+        // One properly-gated bin is enough on its own, whatever the rest of the span looks like.
+        let gated: [HRSample] = (0..<5).map { HRSample(ts: $0, bpm: 55) }
+        XCTAssertEqual(SleepStager.sessionRestingHR(start: 0, end: 300, hr: gated), 55)
     }
 
     // A dense, ordinary night (every bin well-populated and plausible) is unchanged by the gate.

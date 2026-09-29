@@ -12,15 +12,21 @@ final class RespRateRsaTests: XCTestCase {
 
     func testRespRateFromRRRecoversKnownBreathingFrequency() {
         // Synthetic RR: mean HR 60 bpm (RR ~1000 ms) with a 0.25 Hz (15 breaths/min)
-        // RSA modulation of +/-40 ms. ~7 minutes of beats so multiple 5-min windows.
+        // RSA modulation of +/-40 ms.
+        //
+        // ~13 minutes of beats. The fixture used to be ~7 min, which the 120 s spectral rework left at
+        // three measurable windows; the night-level estimate now abstains below
+        // `respNonWakeMinWindows` (a single surviving window must not become a night's respiratory
+        // rate), so the fixture states enough of a night to be answerable. The planted frequency and
+        // the expected value are unchanged - this lengthens the evidence, it does not retune anything.
         let breathHz = 0.25  // 15 breaths/min
         let baseRrMs = 1000.0
         let ampMs = 40.0
         let start = 1_700_000_000
         var rows: [RRInterval] = []
         var tSec = 0.0
-        // generate ~420 s of beats
-        while tSec < 420.0 {
+        // generate ~780 s of beats (6 full 120 s windows plus a tail below respSpectralMinSpanS)
+        while tSec < 780.0 {
             let rrMs = baseRrMs + ampMs * sin(2.0 * Double.pi * breathHz * tSec)
             tSec += rrMs / 1000.0
             rows.append(RRInterval(ts: start + Int(tSec), rrMs: Int(rrMs)))
@@ -37,14 +43,16 @@ final class RespRateRsaTests: XCTestCase {
     /// a split / harmonic peak per breath can inflate the rate toward 2x; this pins that the median
     /// across windows stays on the fundamental. Guards the exact factor rather than blindly halving.
     func testRespRateFromRRSlowBreatherIsNotDoubled() {
-        // Mean HR 55 bpm (RR ~1091 ms), 11 breaths/min (0.1833 Hz), +/-45 ms RSA, ~8 min of beats.
+        // Mean HR 55 bpm (RR ~1091 ms), 11 breaths/min (0.1833 Hz), +/-45 ms RSA, ~13 min of beats.
         let breathHz = 11.0 / 60.0
         let baseRrMs = 60000.0 / 55.0
         let ampMs = 45.0
         let start = 1_700_000_000
         var rows: [RRInterval] = []
         var tSec = 0.0
-        while tSec < 480.0 {
+        // ~780 s rather than the original ~480: see the note on the fixture above. Six measurable
+        // 120 s windows clear `respNonWakeMinWindows`; the breathing frequency is untouched.
+        while tSec < 780.0 {
             let rrMs = baseRrMs + ampMs * sin(2.0 * Double.pi * breathHz * tSec)
             tSec += rrMs / 1000.0
             rows.append(RRInterval(ts: start + Int(tSec), rrMs: Int(rrMs)))

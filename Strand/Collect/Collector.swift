@@ -177,6 +177,19 @@ final class Collector {
         return (try? await s.gravitySamples(deviceId: deviceId, from: from, to: to, limit: limit)) ?? []
     }
 
+    /// The distinct capture seconds of HR and R-R over `[from, to]`, for the night-coverage diagnostic.
+    ///
+    /// Reached through the Collector for the same reason `latestHRSampleTs` and `recentGravity` are: the
+    /// Collector owns the concrete store, and the offload hook that wants this figure lives in BLEManager,
+    /// which does not. nil when there is no store yet, which the caller must report as "cannot tell" rather
+    /// than as an empty night - a store that has not bootstrapped is not a strap that banked nothing.
+    func nightCoverage(from: Int, to: Int) async -> (hr: StreamSeconds, rr: StreamSeconds)? {
+        guard let s = concreteStore else { return nil }
+        guard let hr = try? await s.hrCoverageSeconds(deviceId: deviceId, from: from, to: to),
+              let rr = try? await s.rrCoverageSeconds(deviceId: deviceId, from: from, to: to) else { return nil }
+        return (hr, rr)
+    }
+
     /// Apply the raw-retention policy. Returns rows pruned (0 if no concrete store).
     @discardableResult
     func prune() async -> Int {

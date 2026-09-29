@@ -905,6 +905,14 @@ public final class BLEManager: NSObject, ObservableObject {
     private var backfillFrameQueue: [[UInt8]] = []
     /// True while the drain task is running (prevents a second drain task from launching).
     private var backfillDraining = false
+    /// Which LINK the current frame drain belongs to. Bumped by the disconnect teardown so a drain still
+    /// suspended inside `backfiller.ingest` retires instead of racing the next link's drain over the same
+    /// queue. See `drainBackfillFrames(epoch:)` for why a bare Bool cannot express this.
+    private var backfillDrainEpoch = 0
+    /// Unix seconds of the last night-coverage line, so an auto-continue burst does not emit one per pass.
+    private var lastNightCoverageEmitAt: TimeInterval = 0
+    /// Minimum spacing between night-coverage lines. See `emitNightCoverage`.
+    private static let nightCoverageMinIntervalSeconds: TimeInterval = 60
     /// Keep each main-actor drain slice small enough that SwiftUI can process input/paint between slices.
     private static let backfillDrainBatchSize = 12
 
@@ -2606,22 +2614,39 @@ public final class BLEManager: NSObject, ObservableObject {
         backfillFrameQueue.append(frame)
         guard !backfillDraining else { return }
         backfillDraining = true
-        Task { @MainActor in await drainBackfillFrames() }
+        let epoch = backfillDrainEpoch
+        Task { @MainActor in await drainBackfillFrames(epoch: epoch) }
     }
 
-    private func drainBackfillFrames() async {
-        // `backfillDraining` gates `routeBackfillFrame` from starting a second drain, so if it is ever left
-        // set the offload silently stops: every later frame is appended to `backfillFrameQueue` and nothing
-        // ever consumes it, for the rest of the connection. Cleared in `defer` rather than at the bottom so
-        // no future early return can strand it — the same sticky-flag shape that has wedged sync here before.
-        defer { backfillDraining = false }
+    /// Drain queued offload frames into the Backfiller in arrival order, one at a time.
+    ///
+    /// `epoch` is what makes "one at a time" true across a link change. `backfillDraining` alone cannot:
+    /// this loop SUSPENDS inside `backfiller.ingest` (the chunk decode runs detached and the store insert is
+    /// an actor hop), and the disconnect teardown clears `backfillDraining` from the delegate queue during
+    /// exactly that suspension. A reconnect then started a SECOND drain while the first was still parked
+    /// mid-`finishChunk`, so two loops pulled from one queue and two `finishChunk` calls could interleave -
+    /// frames reordered across chunk boundaries, and, far worse, a later chunk's ack able to overtake an
+    /// earlier chunk whose persist had not returned yet. An ack that overtakes its own persist is precisely
+    /// the trim-safety invariant: the strap frees flash on the ack, and the chunk it frees was never stored.
+    ///
+    /// So the loop carries the epoch it started under, checks it at every suspension boundary, and returns
+    /// the moment a newer link owns the queue. The `defer` clears the flag only for its OWN epoch, so a
+    /// retiring loop cannot clear the flag a live one is holding and re-open the same race.
+    private func drainBackfillFrames(epoch: Int) async {
+        // Cleared in `defer` rather than at the bottom so no future early return can strand it — the same
+        // sticky-flag shape that has wedged sync here before: if it is ever left set the offload silently
+        // stops, every later frame is appended to `backfillFrameQueue`, and nothing ever consumes it for the
+        // rest of the connection.
+        defer { if epoch == backfillDrainEpoch { backfillDraining = false } }
         while !backfillFrameQueue.isEmpty {
+            guard epoch == backfillDrainEpoch else { return }   // a newer link owns the queue now
             let count = min(Self.backfillDrainBatchSize, backfillFrameQueue.count)
             let batch = Array(backfillFrameQueue.prefix(count))
             backfillFrameQueue.removeFirst(count)
 
             for f in batch {
                 await backfiller?.ingest(f)
+                guard epoch == backfillDrainEpoch else { return }
                 afterBackfillIngest()
                 if !backfilling {
                     backfillFrameQueue.removeAll(keepingCapacity: true)
@@ -2766,6 +2791,11 @@ public final class BLEManager: NSObject, ObservableObject {
            let dynLine = bf.sessionDynAccel.logLine(threshold: dynAccelStillThresholdG) {
             log(dynLine)
         }
+        // How much of LAST NIGHT we now actually hold. Emitted after every offload session, whatever the
+        // exit reason, because the reasons that leave a night short (an idle-timeout exit, a mid-drain
+        // disconnect, a layout that archived instead of decoding) are exactly the ones that never reported
+        // rows. See `emitNightCoverage`.
+        emitNightCoverage()
         // Connection test mode: the offload OUTCOME the readout's lastOffloadResult id binds. Gated
         // zero-cost (the .connection bool is read before any string is built). Diagnostic only - it reads
         // the same per-session tallies the existing summary above does, changing no offload behaviour. A
@@ -3121,6 +3151,56 @@ public final class BLEManager: NSObject, ObservableObject {
             // requestSync still re-checks connected/bonded/not-backfilling before kicking, and the
             // consecutive-cap above is the runaway guard.
             requestSync(.autoContinue)
+        }
+    }
+
+    /// Emit the night-coverage diagnostic for LAST NIGHT into the strap log (and, in Connection & Sync test
+    /// mode, as a tagged line for the Test Centre readout).
+    ///
+    /// The offload already reports how many ROWS a session persisted, and that number cannot answer the
+    /// question a user actually asks after a bad night: was the night complete? A count has no time in it,
+    /// so "persisted 8,000 rows across 1 night(s)" reads the same whether those rows spread across eight
+    /// hours or across forty minutes, and every screen downstream renders a partially-covered night's score
+    /// exactly as it renders a whole one's. This line is the missing half: the span, the share of it that
+    /// carries heart rate and R-R, the largest continuous blind stretch, and a plain sentence saying what
+    /// that means for anything scored off the night.
+    ///
+    /// Unconditional (not test-mode gated) for the same reason the #150 session summary is: a diagnostic
+    /// that only exists once someone knows to turn it on cannot explain the sync they already had. The read
+    /// is two indexed scans over one night's window, off the main thread on the store actor, and it never
+    /// touches the offload path.
+    ///
+    /// Reports "cannot tell" rather than "empty" when the store has not bootstrapped: an unbuilt store is
+    /// not a strap that banked nothing, and reporting it as an empty night would be a fabricated finding.
+    private func emitNightCoverage() {
+        // One offload can be re-kicked up to 24 times per connection (#364), and coverage cannot change
+        // meaningfully between two back-to-back passes seconds apart. Throttle so a deep backlog drain emits
+        // a line about once a minute - enough to watch the night fill in, few enough not to evict the
+        // offload's own diagnostics from the rolling log.
+        let nowMono = Date().timeIntervalSince1970
+        guard nowMono - lastNightCoverageEmitAt >= BLEManager.nightCoverageMinIntervalSeconds else { return }
+        lastNightCoverageEmitAt = nowMono
+        guard let window = NightCoverage.lastNightWindow(now: Date(), calendar: Calendar.current) else { return }
+        let tz = TimeZone.current
+        Task { @MainActor in
+            guard let collector = self.collector else { return }
+            guard let read = await collector.nightCoverage(from: window.start, to: window.end) else {
+                log("Night coverage: the local store is not open yet, so last night's coverage could not be "
+                    + "measured. This says nothing about the strap.")
+                return
+            }
+            let hr = NightCoverage.stats(read.hr, windowStart: window.start, windowEnd: window.end)
+            let rr = NightCoverage.stats(read.rr, windowStart: window.start, windowEnd: window.end)
+            let line = NightCoverage.line(windowStart: window.start, windowEnd: window.end,
+                                          hr: hr, rr: rr, timeZone: tz)
+            log(line)
+            if TestCentre.active(.connection) {
+                let v = NightCoverage.verdict(hr, windowSeconds: max(0, window.end - window.start))
+                state.append(log: "nightCoverage verdict=\(v.rawValue) "
+                    + "hrSeconds=\(hr.coveredSeconds) rrSeconds=\(rr.coveredSeconds) "
+                    + "windowSeconds=\(max(0, window.end - window.start)) "
+                    + "largestGapSeconds=\(hr.largestGapSeconds)", domain: .connection)
+            }
         }
     }
 
@@ -6082,6 +6162,9 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         backfillTimeout?.cancel()
         backfillTimeout = nil
         backfillFrameQueue.removeAll()
+        // Retire any drain still parked inside an ingest BEFORE clearing the flag, so the next link's drain
+        // cannot run concurrently with it (see `drainBackfillFrames(epoch:)`).
+        backfillDrainEpoch &+= 1
         backfillDraining = false
         uploadTimer?.cancel()
         uploadTimer = nil

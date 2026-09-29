@@ -34,13 +34,23 @@ final class AnalyticsEngineRestTraceContractTests: XCTestCase {
         ), "non-Rest diagnostics must remain available when Rest is absent")
     }
 
+    /// An all-light 30-minute session is UNSTAGED (no deep, no REM) and the day carries no regularity
+    /// signal, so two of the four terms have no input. Both are dropped and the remaining weights
+    /// renormalise (weightSum 0.7): the score reads 33.04 from duration + efficiency alone.
+    ///
+    /// It used to read 28.13, which was duration + efficiency PLUS a restorative term scored 0 and halved
+    /// again by `deepFactor` 0.5, PLUS a consistency term scored at a substituted neutral 0.5 — a deduction
+    /// for missing information and a made-up value for 10% of the score. The trace prints `absent` for both,
+    /// because a trace that printed `restor=0.0` would state a measurement that was never made.
     func testPositiveSleepKeepsExactRestTrace() {
         let result = analyze(stage: "light", efficiency: 1.0)
-        XCTAssertEqual(result.0.restScore, 28.13)
+        XCTAssertEqual(result.0.restScore, 33.04)
         XCTAssertEqual(result.1.filter { $0.hasPrefix("rest ") }, [
-            "rest composite=28.13 dur=0.06*wDur=0.5 eff=1.0*wEff=0.2 "
-                + "restor=0.0*wRestor=0.2 deepFactor=0.5 consist=0.5*wConsist=0.1 "
-                + "group=1 groupInBedMin=30",
+            "rest composite=33.04 dur=0.06*wDur=0.5 eff=1.0*wEff=0.2 "
+                + "restor=absent*wRestor=0.2 deepFactor=absent consist=absent*wConsist=0.1 "
+                + "weightSum=0.7 group=1 groupInBedMin=30",
         ])
+        // The tier, not the score, is where "we could not split the stages" belongs.
+        XCTAssertEqual(result.0.restConfidence, .building)
     }
 }

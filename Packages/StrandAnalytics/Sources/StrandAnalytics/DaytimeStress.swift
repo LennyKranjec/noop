@@ -33,6 +33,10 @@ public enum DaytimeStress {
     // MARK: - Tunables
 
     /// Minimum HR samples in an hour before its mean HR is trusted (~5 min at 1 Hz).
+    ///
+    /// A SAMPLE COUNT, not a duration — clearing it says the mean is trustworthy, NOT that the hour was
+    /// worn. How much of the hour was actually covered is `HourPoint.coveredMinutes`, and that, not the
+    /// bucket length, is what `Result.highStressMinutes` credits.
     public static let minHourHRSamples: Int = 300
     /// Bucket width for the timeline, in seconds (one hour).
     public static let bucketSeconds: Int = 3_600
@@ -231,18 +235,28 @@ public enum DaytimeStress {
         /// separate "you were moving" from "no reading" and keeps active hours out of the calm
         /// reference and the coverage totals. See the motion-gate constants above.
         public let maskedForActivity: Bool
+        /// Minutes of this bucket actually COVERED by heart-rate samples (0…60), counted as the distinct
+        /// local wall-clock minutes holding at least one sample — so it is right at any sample rate and
+        /// for a gappy hour, not just at the strap's 1 Hz.
+        ///
+        /// `minHourHRSamples` is a SAMPLE COUNT, not a duration: 300 samples is five minutes at 1 Hz. An
+        /// hour that clears it used to be credited a full 60 minutes of `highStressMinutes`, which the
+        /// energy bank then spends against — an hour of budget for five minutes of data. This is the
+        /// honest denominator for that tally. 0 for a hand-built point that never came from a stream.
+        public let coveredMinutes: Int
 
         /// True when the hour was scored (had enough HR to place on the curve).
         public var hasData: Bool { level != nil }
 
         public init(hour: Int, startTs: Int, level: Double?, meanHR: Double?, rmssd: Double?,
-                    maskedForActivity: Bool = false) {
+                    maskedForActivity: Bool = false, coveredMinutes: Int = 0) {
             self.hour = hour
             self.startTs = startTs
             self.level = level
             self.meanHR = meanHR
             self.rmssd = rmssd
             self.maskedForActivity = maskedForActivity
+            self.coveredMinutes = coveredMinutes
         }
     }
 
@@ -264,11 +278,13 @@ public enum DaytimeStress {
         /// gravity was supplied or nothing was masked; 0 for `.empty`.
         public let activityMaskedHours: Int
         /// ADDITIVE — total minutes across SCORED waking hours at/above `highBandFloor`, the
-        /// Oura-comparable "time in high stress" figure. Each scored hour is one `bucketSeconds`
-        /// bucket, so this is `(# high-band scored hours) * bucketSeconds / 60`. Compare against
-        /// Oura's `stress_high_s / 60` — NOOP's timeline is hourly-grain vs Oura's ~5-minute
-        /// grain, so treat this as a coarse approximation, not a precise match. 0 for `.empty`
-        /// and for any day with no scored hours.
+        /// Oura-comparable "time in high stress" figure. Each high-band hour contributes the minutes it
+        /// was actually COVERED by heart rate (`HourPoint.coveredMinutes`), NOT a flat 60: an hour that
+        /// only just clears the `minHourHRSamples` sample gate is five minutes of data at 1 Hz, and
+        /// crediting it a full hour let a five-minute reading spend an hour of the energy budget.
+        /// Compare against Oura's `stress_high_s / 60` — NOOP's timeline is hourly-grain vs Oura's
+        /// ~5-minute grain, so treat this as a coarse approximation, not a precise match. 0 for
+        /// `.empty` and for any day with no scored hours.
         public let highStressMinutes: Int
         /// ADDITIVE — true when `.baselineRelative` mode was requested but had no personal RMSSD
         /// baseline to score against (e.g. an imported Oura-era day with no R-R history), so the
@@ -319,10 +335,15 @@ public enum DaytimeStress {
         return xs.reduce(0, +) / Double(xs.count)
     }
 
-    /// Population standard deviation; 0 when there's no spread. (Matches StressMath.std.)
+    /// SAMPLE standard deviation (ddof = 1); 0 when there's no spread. (Matches StressMath.std.)
+    ///
+    /// The `count > 1` guard is the sample estimator's guard — n − 1 is what it pairs with — but the
+    /// divisor used to be `n`, which understates σ by 30 % at n = 2 and so inflates every z built on it
+    /// by 1.41×. Every other spread estimator in this tree (`HRVAnalyzer.sdnnRaw`,
+    /// `Baselines.rollingMeanSD`, `ReadinessEngine.sampleSD`) is ddof = 1; these two were the outliers.
     static func std(_ xs: [Double], mean m: Double?) -> Double {
         guard let m, xs.count > 1 else { return 0 }
-        let v = xs.map { ($0 - m) * ($0 - m) }.reduce(0, +) / Double(xs.count)
+        let v = xs.map { ($0 - m) * ($0 - m) }.reduce(0, +) / Double(xs.count - 1)
         return v.squareRoot()
     }
 
@@ -447,7 +468,9 @@ public enum DaytimeStress {
     ///     `.baselineRelative` (Oura-style, vs a personal rolling baseline). ADDITIVE and
     ///     opt-in: existing callers that don't pass `mode` keep the exact prior behaviour.
     ///
-    /// Returns `.empty` when there isn't a single hour with enough HR to score.
+    /// Returns `.empty` when there isn't a single hour with enough HR to score. In `.dayRelative` mode a
+    /// day with fewer than `liveMinReferenceHours` reference hours returns its hours UNSCORED
+    /// (`level == nil`): there is no typical hour yet to deviate from, so there is nothing honest to say.
     ///   - includeTimeline: also compute `Result.timeline`, the sliding read is OPT-IN because half the callers do not want it.
     ///     The Stress screen reads `hours` and draws its own interactive timeline; making it pay for a
     ///     second pass of bucketing and one RMSSD per extra window, on the screen that already does three
@@ -530,10 +553,19 @@ public enum DaytimeStress {
 
         // 1) Bucket HR + R-R into LOCAL hour-of-day buckets, keyed by the bucket start
         //    (floored to the hour on the local clock).
-        func hrBuckets(_ phase: Int) -> [Int: [Double]] {
+        //    `minutes` rides along with the values: the DISTINCT local minutes each bucket actually holds
+        //    a sample in, which is the hour's real coverage (see `HourPoint.coveredMinutes`). Collected
+        //    in the same pass because it answers a question about the same samples.
+        func hrBuckets(_ phase: Int) -> (values: [Int: [Double]], minutes: [Int: Set<Int>]) {
             var m: [Int: [Double]] = [:]
-            for s in hr { m[bucketOf(s.ts + tzOffsetSeconds, phase: phase), default: []].append(Double(s.bpm)) }
-            return m
+            var mins: [Int: Set<Int>] = [:]
+            for s in hr {
+                let local = s.ts + tzOffsetSeconds
+                let b = bucketOf(local, phase: phase)
+                m[b, default: []].append(Double(s.bpm))
+                mins[b, default: []].insert(floorDiv(local, 60))
+            }
+            return (m, mins)
         }
         func rrBuckets(_ phase: Int) -> [Int: [Double]] {
             var m: [Int: [Double]] = [:]
@@ -546,16 +578,22 @@ public enum DaytimeStress {
         // 2) Per-hour mean HR + RMSSD (RMSSD via the shared HRV cleaner, so ectopic
         //    beats can't fabricate variability). An hour with < minHourHRSamples HR is
         //    left unscored (noData) — never invented.
-        struct HourAgg { let bucket: Int; let meanHR: Double?; let rmssd: Double?; let nHR: Int }
-        func aggregate(_ hrGrid: [Int: [Double]], _ rrGrid: [Int: [Double]]) -> [HourAgg] {
-            let ordered = hrGrid.keys.sorted()
+        struct HourAgg {
+            let bucket: Int; let meanHR: Double?; let rmssd: Double?; let nHR: Int
+            /// Distinct minutes of the bucket that actually carried HR, capped at the bucket length.
+            let coveredMinutes: Int
+        }
+        func aggregate(_ hrGrid: (values: [Int: [Double]], minutes: [Int: Set<Int>]),
+                       _ rrGrid: [Int: [Double]]) -> [HourAgg] {
+            let ordered = hrGrid.values.keys.sorted()
             var out: [HourAgg] = []
             out.reserveCapacity(ordered.count)
             for b in ordered {
-                let hrs = hrGrid[b] ?? []
+                let hrs = hrGrid.values[b] ?? []
                 let mHR = hrs.count >= minHourHRSamples ? mean(hrs) : nil
                 let rrRes = HRVAnalyzer.analyze(rawRR: rrGrid[b] ?? [])
-                out.append(HourAgg(bucket: b, meanHR: mHR, rmssd: rrRes.rmssd, nHR: hrs.count))
+                out.append(HourAgg(bucket: b, meanHR: mHR, rmssd: rrRes.rmssd, nHR: hrs.count,
+                                   coveredMinutes: min(hrGrid.minutes[b]?.count ?? 0, bucketSeconds / 60)))
             }
             return out
         }
@@ -599,6 +637,11 @@ public enum DaytimeStress {
         // `refHR` is kept apart from the scorer because the post-exercise shadow in step 4 reads it too.
         let refHR: Double?
         let hrOnlyFallback: Bool
+        // Whether the reference this mode built is trustworthy enough to score ANY hour against. Only
+        // `.dayRelative` can fail it — its reference is the day's own hours, and with one or two of
+        // them there is no "typical hour" to deviate from (see below). `.baselineRelative`'s reference
+        // is a personal cross-day baseline the caller already gated on `Baselines.usable`.
+        let referenceUsable: Bool
         let scoreHour: (_ meanHR: Double?, _ rmssd: Double?) -> Double
         switch mode {
         case .dayRelative:
@@ -620,10 +663,21 @@ public enum DaytimeStress {
             // A late sleeper's still-asleep morning is the same problem, which is what `wakeWindow`
             // (via `waking`) fixes when the caller knows the real wake/sleep times.
             let referenceAggs = aggs.filter { waking($0.bucket) && !isAmbulatory($0.bucket) }
-            let ref = dayReference(hrMeans: referenceAggs.compactMap { $0.meanHR },
-                                   rmssds: referenceAggs.compactMap { $0.rmssd })
+            let referenceHRs = referenceAggs.compactMap { $0.meanHR }
+            let ref = dayReference(hrMeans: referenceHRs, rmssds: referenceAggs.compactMap { $0.rmssd })
             refHR = ref.hr
             hrOnlyFallback = false
+            // THE SAME MINIMUM THE LIVE READ ALREADY ENFORCES (`liveMinReferenceHours`), applied where it
+            // was always needed. With one or two reference hours the "typical hour" is whatever the
+            // morning happened to be, and worse, the output stops depending on the data at all: with two
+            // values the median sits exactly between them, so every hour's deviation is IQR/2 while the
+            // spread is IQR/1.349 — z ≡ ±1.349 and the levels are pinned at 0.345 / 1.975 for ANY gap
+            // from ~8 to ~22 bpm (below 8 the σ floor binds, above 22 the σ cap does). Twenty minutes of
+            // wear — sitting at 60, then a walk at 90 — scored 2.296 HIGH and banked a full hour of
+            // high-stress minutes for the energy bank to spend. Under the gate the hours are returned
+            // through the ordinary unscored branch with `level == nil` (`.noData`, not masked), which is
+            // the honest answer: present, reported, not scored.
+            referenceUsable = referenceHRs.count >= liveMinReferenceHours
             scoreHour = { h, r in Self.dayRelativeSquash(Self.dayRelativeZ(hr: h, rmssd: r, ref: ref)) }
 
         case .baselineRelative(let hrBaseline, let rmssdBaseline):
@@ -632,6 +686,7 @@ public enum DaytimeStress {
             // Ambulatory hours are still masked out of the SCORE in step 4 (the motion gate),
             // but the reference itself is external, so it needs no ambulatory exclusion here.
             refHR = hrBaseline.baseline
+            referenceUsable = true
             // VALIDATED tuning, not `Baselines.sigma(hrBaseline)`: the correlation study behind
             // `baselineRelativeHighMarginBPM` found a roughly FIXED bpm margin over the personal
             // floor — not one scaled by this person's own day-to-day spread — best matched
@@ -692,12 +747,14 @@ public enum DaytimeStress {
             let shadow = ambulatory(a.bucket - bucketSeconds)
                 && a.meanHR != nil && refHR != nil && a.meanHR! > refHR! + postActivityShadowBPM
             let masked = a.meanHR != nil && (ambulatory(a.bucket) || shadow)
-            // Score only when at least one signal is present AND HR cleared the count gate AND the
-            // hour was not motion-masked (HR is the always-available anchor; RMSSD enriches it).
-            let level: Double? = (a.meanHR != nil && !masked) ? scoreHour(a.meanHR, a.rmssd) : nil
+            // Score only when the mode's reference is trustworthy AND at least one signal is present AND
+            // HR cleared the count gate AND the hour was not motion-masked (HR is the always-available
+            // anchor; RMSSD enriches it).
+            let level: Double? = (referenceUsable && a.meanHR != nil && !masked)
+                ? scoreHour(a.meanHR, a.rmssd) : nil
             points.append(HourPoint(hour: hourOfDay, startTs: wallStart,
                                     level: level, meanHR: a.meanHR, rmssd: a.rmssd,
-                                    maskedForActivity: masked))
+                                    maskedForActivity: masked, coveredMinutes: a.coveredMinutes))
             }
             return points
         }
@@ -739,11 +796,13 @@ public enum DaytimeStress {
         let dayMean = mean(scored.map { $0.1 })
         let peak = scored.max { $0.1 < $1.1 }?.0
 
-        // 6) Oura-comparable "time in high stress": each scored hour at/above `highBandFloor`
-        //    is one full `bucketSeconds` bucket, converted to minutes. Uses the SAME threshold
-        //    `StressBand.high` (StressView) and the sustained-high check above already use, so
-        //    all three stay in lockstep by construction.
-        let highStressMinutes = scored.filter { $0.1 >= highBandFloor }.count * (bucketSeconds / 60)
+        // 6) Oura-comparable "time in high stress": each scored hour at/above `highBandFloor` contributes
+        //    the minutes it was actually COVERED by heart rate, not a flat bucket length — the sample
+        //    gate is a COUNT (300 samples = five minutes at 1 Hz), so a flat 60 spent an hour of the
+        //    energy budget on five minutes of data. Uses the SAME threshold `StressBand.high`
+        //    (StressView) and the sustained-high check above already use, so all three stay in lockstep
+        //    by construction.
+        let highStressMinutes = scored.reduce(0) { $0 + ($1.1 >= highBandFloor ? $1.0.coveredMinutes : 0) }
 
         return Result(hours: points, sustainedHigh: sustained, sustainedRun: run,
                       dayMean: dayMean, peak: peak, activityMaskedHours: activityMaskedHours,
@@ -798,8 +857,12 @@ public enum DaytimeStress {
     /// typical hour — a coffee and a phone call. 6 bpm puts it at ~8 bpm, which still sits inside the
     /// hours' own ceiling (`dayRelativeMaxHRSigma`).
     public static let liveMinHRSigma: Double = 6.0
-    /// E9: scored reference hours a live read needs before it says anything. With one or two hours the
-    /// "typical hour" is whatever the morning happened to be, and the spread is the floor by default.
+    /// E9: reference hours a DAY-RELATIVE read needs before it says anything — the live window's gate
+    /// and, since the accuracy audit, the hourly timeline's too. With one or two hours the "typical
+    /// hour" is whatever the morning happened to be, the spread is the floor by default, and at exactly
+    /// two the score stops depending on the data at all (see the `.dayRelative` branch of
+    /// `analyzeUncached`). Named for `live` because that is where it landed first; it governs both, and
+    /// deliberately ONE constant so the two can never disagree about what "enough of a day" means.
     public static let liveMinReferenceHours = 4
 
     /// Stress RIGHT NOW, on the same 0–3 scale as the day-relative hours: the last few minutes of heart

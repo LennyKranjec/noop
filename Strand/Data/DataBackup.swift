@@ -570,6 +570,20 @@ enum DataBackup {
                     }
                 }
             }
+            // A RESTORE LANDS A WHOLE HISTORY AT ONCE, so re-arm the one-shot full-history passes (the
+            // #313 Effort re-axis, the nightly-metrics v2 rework, the #547 bad-clock purge). Their
+            // "done" flags live in UserDefaults, which a `.noopbak` does NOT carry — they are
+            // deliberately absent from `BackupSettings.whitelist`, and on a reinstall the launch
+            // cascade has usually already consumed all three against the empty database this restore
+            // is about to replace. Without this the restored history is never re-axed, never re-scored
+            // under the current nightly recipe, and never purged of bad-clock rows, and the level
+            // ledger freezes its baselines off it. Watermarks go with the flags: a stale one would
+            // make the re-armed pass skip everything up to it.
+            //
+            // Written to `settingsDefaults` for the same reason the whitelist is (tests inject a
+            // suite-scoped domain; in the app it IS `.standard`), and only here, on the success path —
+            // a failed or rolled-back restore returns above and changes nothing.
+            IntelligenceEngine.rearmOneShotHistoryPasses(defaults: settingsDefaults)
             // #57 debug: record when a restore swapped the DB, so the export can correlate a restore with a
             // later write stall (a restore not followed by a relaunch is the #57 failure).
             UserDefaults.standard.set(Date().timeIntervalSince1970, forKey: "backup.lastRestoreAt")

@@ -35,12 +35,21 @@ final class RespRateGapAwareTests: XCTestCase {
         return rows
     }
 
+    /// The measured non-wake windows of a series, which is what #977 is actually about: the splice skip is a
+    /// PER-WINDOW rule. These assertions used to go through `respRateFromRR`, whose value also depends on
+    /// how many windows a night needs before it may report at all (`respNonWakeMinWindows`) - a separate
+    /// concern that was silently doing half the work of pinning this one. Asserting the window pool directly
+    /// keeps each rule pinned by its own test, and keeps these fixtures as small as the property needs.
+    private func measuredWindows(_ rr: [RRInterval]) -> [Double] {
+        SleepStager.respRateWindows(rr, start: 0, end: 2_000_000, stages: [])?.nonWake ?? []
+    }
+
     /// A contiguous night is untouched. This is the regression guard: the change must alter nothing when
     /// the clock and the beats agree, or it would move every existing user's reported rate.
     func testContiguousNightStillProducesARate() {
-        // 330 beats at ~0.9 s is ~297 s: two full 120 s spectral windows plus a ~57 s tail that is below
-        // `respSpectralMinSpanS` and is not measured.
-        let rr = series(beats: 330)
+        // 800 beats at ~0.9 s is ~720 s: six full 120 s spectral windows, which clears
+        // `respNonWakeMinWindows` so the NIGHT-level estimate is answerable at all.
+        let rr = series(beats: 800)
         let rate = SleepStager.respRateFromRR(rr, start: 0, end: 2_000_000)
         XCTAssertFalse(rate.isNaN, "a clean series must still yield a rate")
         XCTAssertTrue((6.0...24.0).contains(rate), "expected a plausible breathing rate, got \(rate)")
@@ -49,31 +58,66 @@ final class RespRateGapAwareTests: XCTestCase {
     /// The same beat VALUES, with a 40 s wall-clock hole punched in: the only difference is `ts`. The window
     /// holding the splice is skipped. Resized with the nightly-metrics rework (spectral 120 s windows, beat
     /// times rebuilt PER WINDOW): the old fixture was one 5-min window, but at 330 beats the new recipe has
-    /// clean windows either side of the hole and rightly measures them — a splice now costs only its own
+    /// clean windows either side of the hole and rightly measures them - a splice now costs only its own
     /// window. So this uses ~140 beats: ONE measurable window, which holds the splice, and a post-gap tail too
-    /// short to measure. Clean → a rate; spliced → NaN, and nothing but `ts` differs between the two.
+    /// short to measure. Clean -> that window is measured; spliced -> it is not, and nothing but `ts` differs.
     func testASplicedWindowIsNotMeasured() {
         let clean = series(beats: 140)
         let spliced = series(beats: 140, gapAfter: 70)
         XCTAssertEqual(clean.map(\.rrMs), spliced.map(\.rrMs), "the fixture must differ only in ts")
-        XCTAssertFalse(SleepStager.respRateFromRR(clean, start: 0, end: 2_000_000).isNaN,
-                       "the unspliced twin must be measurable, else the NaN below proves nothing")
-        XCTAssertTrue(SleepStager.respRateFromRR(spliced, start: 0, end: 2_000_000).isNaN)
+        XCTAssertEqual(measuredWindows(clean).count, 1,
+                       "the unspliced twin must be measurable, else the emptiness below proves nothing")
+        XCTAssertEqual(measuredWindows(spliced).count, 0, "the window holding the splice must be skipped")
     }
 
-    /// With clean windows on both sides of the hole, the night still reads its true ~15/min: the spliced
+    /// With clean windows on both sides of the hole, those windows still read the true ~15/min: the spliced
     /// window is dropped rather than contributing a fabricated interval.
     func testASpliceCostsOnlyItsOwnWindow() {
-        let spliced = series(beats: 330, gapAfter: 165)
-        let rate = SleepStager.respRateFromRR(spliced, start: 0, end: 2_000_000)
-        XCTAssertEqual(rate, 15.0, accuracy: 1.0)
+        let clean = measuredWindows(series(beats: 800))
+        let spliced = measuredWindows(series(beats: 800, gapAfter: 450))
+        XCTAssertEqual(spliced.count, clean.count - 1, "exactly the spliced window is lost")
+        for w in spliced { XCTAssertEqual(w, 15.0, accuracy: 1.0) }
+        // The gap is placed MID-window on purpose: `spectralRespRate` compares each beat against the
+        // PREVIOUS one, so a jump landing on a window's first beat is invisible to the splice check.
+        // And the night still reports, from the windows that survived.
+        XCTAssertEqual(SleepStager.respRateFromRR(series(beats: 800, gapAfter: 450),
+                                                 start: 0, end: 2_000_000), 15.0, accuracy: 1.0)
     }
 
     /// A one-second discrepancy is `ts` quantisation, not a dropout: `ts` is whole seconds while beats
     /// are sub-second, so a strict "any disagreement is a gap" rule would reject every ordinary night.
     func testSecondLevelJitterIsNotTreatedAsAGap() {
-        let jittered = series(beats: 330, gapAfter: 165, gapS: 1)
-        XCTAssertFalse(SleepStager.respRateFromRR(jittered, start: 0, end: 2_000_000).isNaN)
+        let plain = measuredWindows(series(beats: 330))
+        let jittered = measuredWindows(series(beats: 330, gapAfter: 165, gapS: 1))
+        XCTAssertEqual(jittered.count, plain.count, "1 s of ts quantisation must cost no window")
+        XCTAssertFalse(plain.isEmpty, "the fixture must measure something, else this proves nothing")
+    }
+
+    // MARK: - The night-level pool minimum (its own concern, pinned on its own)
+
+    /// One surviving 120 s window is not a night's respiratory rate. The deep pool has always needed
+    /// `respDeepMinWindows`; the non-wake fallback pool was gated on nothing but emptiness, so a night that
+    /// measured a single window reported that window's number as the night's - and it then fed the resp
+    /// baseline the illness and readiness gates read. Below `respNonWakeMinWindows` the night abstains.
+    func testASingleMeasuredWindowDoesNotBecomeTheNightsRate() {
+        let oneWindow = series(beats: 140)
+        XCTAssertEqual(measuredWindows(oneWindow).count, 1, "fixture must measure exactly one window")
+        XCTAssertTrue(SleepStager.respRateFromRR(oneWindow, start: 0, end: 2_000_000).isNaN,
+                      "one window is thin evidence, not a night's respiratory rate")
+    }
+
+    /// The boundary: exactly `respNonWakeMinWindows` measured non-wake windows reports, one fewer abstains.
+    func testNonWakePoolMinimumBoundary() {
+        // ~133 beats fill one 120 s window at ~0.9 s per beat, so N windows need ~134 * N beats.
+        let perWindow = 134
+        let below = series(beats: perWindow * (SleepStager.respNonWakeMinWindows - 1))
+        let atBar = series(beats: perWindow * SleepStager.respNonWakeMinWindows)
+        XCTAssertEqual(measuredWindows(below).count, SleepStager.respNonWakeMinWindows - 1)
+        XCTAssertEqual(measuredWindows(atBar).count, SleepStager.respNonWakeMinWindows)
+        XCTAssertTrue(SleepStager.respRateFromRR(below, start: 0, end: 2_000_000).isNaN,
+                      "one window short of the bar must abstain")
+        XCTAssertFalse(SleepStager.respRateFromRR(atBar, start: 0, end: 2_000_000).isNaN,
+                       "exactly at the bar must report")
     }
 
     /// The row filter must keep exactly what `HRVAnalyzer.rangeFilter` keeps — the fix filters rows

@@ -24,6 +24,71 @@ public enum ScoreConfidence: String, Equatable, Sendable, Codable {
     case building
     case solid
 
+    // MARK: - Persistence (so a UI can actually read the tier)
+
+    /// The metricSeries keys the per-score tiers are persisted under, beside the score they qualify.
+    /// The tiers were computed on every `DayResult` and read by nothing — they never left the engine, so a
+    /// Charge on a provisional four-night baseline and one on a year of history rendered identically.
+    /// Persisted as an ORDINAL (see `ordinal`) because `metric_series` carries a Double per (day, key):
+    /// no schema change, and an upsert is idempotent per day, so a re-score simply replaces the tier.
+    public enum SeriesKey {
+        public static let charge = "charge_confidence"
+        public static let effort = "effort_confidence"
+        public static let rest = "rest_confidence"
+    }
+
+    /// The persisted encoding: 0 calibrating, 1 building, 2 solid. Ordered, so a reader can compare
+    /// tiers numerically without decoding, and a value outside 0...2 is not a tier (`from(ordinal:)`
+    /// returns nil rather than guessing).
+    public var ordinal: Double {
+        switch self {
+        case .calibrating: return 0
+        case .building: return 1
+        case .solid: return 2
+        }
+    }
+
+    /// Decode a persisted ordinal. nil for anything that is not exactly one of the three — an unreadable
+    /// row means "the tier is unknown", which a UI must render as no badge, never as `.solid`.
+    public static func from(ordinal: Double) -> ScoreConfidence? {
+        switch ordinal {
+        case 0: return .calibrating
+        case 1: return .building
+        case 2: return .solid
+        default: return nil
+        }
+    }
+
+    // MARK: - Night coverage (how much of the night NOOP actually holds)
+
+    /// Least share of the night window that must carry heart rate before a night may back a `.solid`
+    /// Charge or Rest.
+    ///
+    /// `stageCoverage` measures the hypnogram against the DETECTED span, which is derived from the very
+    /// rows whose completeness is in question: a night that synced only two hours yields a two-hour
+    /// session whose stages cover it completely, and it is then scored and rendered exactly like a whole
+    /// night. This is the independent measurement — the covered seconds of a CLOCK-derived night window
+    /// (`NightCoverage` in the app target computes it; this package takes the plain numbers).
+    ///
+    /// Half, matching `NightCoverage.sparseFraction`: below it the majority of the night is absent and any
+    /// duration, efficiency or HRV figure taken from it describes the minority that arrived. Confidence
+    /// only — it never changes a score and never claims the missing time was anything.
+    public static let minNightCoverage: Double = 0.5
+
+    /// Coverage as a fraction of the window, or nil when the window is unknown/empty or the read could not
+    /// be measured — the guards below fail OPEN on nil, so an unmeasurable night keeps its tier rather
+    /// than being downgraded on no evidence.
+    public static func nightCoverageFraction(coveredSeconds: Int?, windowSeconds: Int?) -> Double? {
+        guard let covered = coveredSeconds, let window = windowSeconds, window > 0 else { return nil }
+        return Double(max(0, covered)) / Double(window)
+    }
+
+    /// True when coverage is KNOWN and below the bar. nil (unknown) is not a downgrade.
+    static func coverageIsThin(_ nightCoverage: Double?) -> Bool {
+        guard let c = nightCoverage else { return false }
+        return c < minNightCoverage
+    }
+
     // MARK: - Derivations (one per score; mirror the Android helpers exactly)
 
     /// Charge (recovery) confidence.
@@ -33,6 +98,17 @@ public enum ScoreConfidence: String, Equatable, Sendable, Codable {
     public static func charge(recovery: Double?, hrvBaseline: BaselineState?) -> ScoreConfidence {
         guard recovery != nil, let b = hrvBaseline, b.usable else { return .calibrating }
         return b.trusted ? .solid : .building
+    }
+
+    /// Charge confidence WITH the night-coverage guard. A Charge is read off ONE night's HRV and resting
+    /// HR, so a night NOOP holds only part of cannot earn a `.solid` however trusted the baseline behind it
+    /// is. Downgrades `.solid` to `.building` when coverage is known and below `minNightCoverage`; fails
+    /// open on nil (coverage unknown), and leaves `.calibrating`/`.building` alone.
+    public static func charge(recovery: Double?, hrvBaseline: BaselineState?,
+                              nightCoverage: Double?) -> ScoreConfidence {
+        let base = charge(recovery: recovery, hrvBaseline: hrvBaseline)
+        guard base == .solid else { return base }
+        return coverageIsThin(nightCoverage) ? .building : base
     }
 
     /// Readiness confidence from the HRV/RHR baseline density backing the read (readiness is HRV-led).
@@ -102,15 +178,23 @@ public enum ScoreConfidence: String, Equatable, Sendable, Codable {
     /// `.calibrating`/`.building` from the base call are returned unchanged. Confidence-only — never changes
     /// the Rest score, invents stages, or claims the uncovered time was awake. Engine output only; the UI
     /// surfaces the tier later. (#H9, #345)
+    /// `nightCoverage` is the FOURTH guard and the only one that measures the night rather than the
+    /// session: the share of a clock-derived night window that carries heart rate at all. The other three
+    /// are all computed from the detected span, so a night that synced two hours produces a two-hour
+    /// session they all read as complete. nil = unmeasured, and the guard fails OPEN there.
     public static func rest(hasSession: Bool, hasStagedSleep: Bool,
                             asleepSeconds: Double, restorativeSeconds: Double,
                             efficiency: Double, gravitySparse: Bool = false,
-                            stageCoverage: Double? = nil) -> ScoreConfidence {
+                            stageCoverage: Double? = nil,
+                            nightCoverage: Double? = nil) -> ScoreConfidence {
         let base = rest(hasSession: hasSession, hasStagedSleep: hasStagedSleep)
         if base != .solid { return base }
         if gravitySparse { return .building }   // #345: sparse-motion staging can't earn a SOLID Rest
         if let c = stageCoverage, c < HypnogramCoverage.minCoverage {
             return .building   // the timeline covers only part of the night it claims
+        }
+        if coverageIsThin(nightCoverage) {
+            return .building   // only part of the NIGHT was ever persisted (#NightCoverage)
         }
         if asleepSeconds <= 0 { return base }
         let restorativeShare = restorativeSeconds / asleepSeconds

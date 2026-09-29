@@ -114,9 +114,8 @@ enum LevelWiring {
     }
 
     /// Chronic training load on `key`: Σ load × (1 − e^(−1/τ)) × e^(−days ago / τ). Nil when nothing was
-    /// ever lifted on or before the day.
+    /// lifted inside the 180-day window ending on the day — which is the same span the sum reads.
     static func chronicLoad(_ key: String, _ series: LevelSeries, _ calendar: Calendar) -> Double? {
-        guard series.muscleByDay.keys.contains(where: { $0 <= key }) else { return nil }
         let tau = LevelEngine.chronicLoadDays
         let gain = 1 - exp(-1 / tau)
         // WALKED OVER THE TRAINING DAYS, not over the window. The sum is the same — every day in the
@@ -126,6 +125,12 @@ enum LevelWiring {
               let floor = calendar.date(byAdding: .day, value: -(chronicLookbackDays - 1), to: base)
         else { return nil }
         let floorKey = self.key(from: floor, calendar: calendar)
+        // THE EXISTENCE CHECK IS THE WINDOW'S, not the whole log's. It used to ask whether anything had
+        // ever been lifted on or before the day while the sum below read only the last 180 — so a wearer
+        // whose entire lifting history sat outside the window got a chronic load of exactly 0.0 rather
+        // than no reading, and 0 is a SCORED value: it went in as the worst training load the baseline
+        // has ever seen. `strength()` below already scopes its guard to its own window; this now matches.
+        guard series.muscleByDay.keys.contains(where: { $0 <= key && $0 >= floorKey }) else { return nil }
         var total = 0.0
         for (day, load) in series.muscleByDay where day <= key && day >= floorKey {
             guard let d = date(from: day, calendar: calendar),
@@ -143,7 +148,19 @@ enum LevelWiring {
         return last.value
     }
 
-    static func meditationShare(_ key: String, _ series: LevelSeries, _ calendar: Calendar) -> Double {
+    /// The weighted share of the last 28 days meditated, or NIL when there is no meditation log to read.
+    ///
+    /// THE GUARD IS "HAS THE WEARER EVER LOGGED ONE, ON OR BEFORE THIS DAY", not "is there one inside the
+    /// 28-day window". Both answers are honest about a fresh install — which is the bug: a wearer who has
+    /// never meditated was being scored as having meditated on none of the last 28 days, and that
+    /// fabricated zero WAS the whole of a day-one level. The window-scoped version goes further than it
+    /// should, though: a wearer who meditates and then stops for a month would stop being measured at all,
+    /// and their level would RISE for having quit. Once the feature is in use a lapse is a real zero, and
+    /// the engine's header — "a missed day costs a little; nothing resets" — stays true.
+    ///
+    /// Bounded in practice by how much of the log was read: `LevelBarModel` loads at least 180 days.
+    static func meditationShare(_ key: String, _ series: LevelSeries, _ calendar: Calendar) -> Double? {
+        guard series.meditation.contains(where: { $0.key <= key && $0.value > 0 }) else { return nil }
         let window = keysBack(key, LevelEngine.meditationWindowDays, calendar)
         let flags = window.map { (series.meditation[$0] ?? 0) >= LevelEngine.meditationMinMinutes }
         return LevelEngine.meditationShare(meditated: flags)

@@ -147,7 +147,9 @@ enum StressDayCurve {
         // writer existed with no caller, so the energy bank's stress spend / calm return and the
         // DayDeficits stress input always read nothing. Once per real rescore (the memo hit above returns
         // before this), REPLACING the day's row, so it is idempotent per day. Minutes are the
-        // recalibrated scale's own `highStressMinutes` (scored hours at or above `highBandFloor`, 2.0).
+        // recalibrated scale's own `highStressMinutes`: for each scored hour at or above `highBandFloor`
+        // (2.0), the minutes that hour was actually covered by heart rate — not a flat 60, which used to
+        // let twenty minutes of wear bank a full high-stress hour for the energy bank to spend.
         // A day with no scored hour is unmeasured, not calm, so nothing is written for it.
         if !scored.scored.isEmpty {
             await repo.bankStressMinutes(day: Repository.localDayKey(now), minutes: scored.highStressMinutes)

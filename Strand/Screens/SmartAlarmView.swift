@@ -39,6 +39,25 @@ struct SmartAlarmView: View {
     // FrameRouter). ≥2 = the strap is persistently refusing the alarm (a corrupted clock/alarm register),
     // which the strapRejectedCard surfaces with reset guidance. @AppStorage so it updates live.
     @AppStorage("alarm.rejectStreak") private var alarmRejectStreak = 0
+
+    // #613/#34: whether the last arm ACTUALLY WENT OUT. `BLEManager.armStrapAlarm` already knows the
+    // difference — it logs "armed" against "queued … will send on next connect" off `commandChannelReady`
+    // and persists exactly that in `alarm.lastArmConnected` — but this screen ignored it and told every
+    // user "Armed on the strap itself, so it can buzz … even if NOOP is closed" with nothing at all
+    // checking the link. A 4.0 owner who flipped the alarm on with the strap in a drawer read a flat
+    // assertion that the strap held their alarm; it held nothing. @AppStorage so it tracks the arm live,
+    // the same way `alarmRejectStreak` tracks the FrameRouter's readback.
+    @AppStorage("alarm.lastArmConnected") private var lastArmConnected = false
+    /// When the last arm was attempted (epoch seconds), so "never sent" is distinguishable from "sent
+    /// while the strap was away". 0 = `recordAlarmArm` has never run, which is not the same claim.
+    @AppStorage("alarm.lastArmAt") private var lastArmAt: Double = 0
+
+    /// What the STRAP has, as far as the arm path can tell. Never "armed" on an unverified guess.
+    private enum StrapArmState { case notSentYet, queued, armed }
+    private var strapArmState: StrapArmState {
+        guard lastArmAt > 0 else { return .notSentYet }
+        return lastArmConnected ? .armed : .queued
+    }
     /// Calendar weekday numbers laid out Monday-first (Mon…Sun → 2,3,4,5,6,7,1), matching AutomationsView.
     private static let weekdayOrder = [2, 3, 4, 5, 6, 7, 1]
 
@@ -56,26 +75,16 @@ struct SmartAlarmView: View {
             }
         }
         .alert(String(localized: "Notifications are off"), isPresented: $showNotifDeniedAlert) {
-            Button(String(localized: "Open Settings")) { Self.openNotificationSettings() }
+            Button(String(localized: "Open Settings")) { NotificationPermission.openSettings() }
             Button(String(localized: "Not now"), role: .cancel) {}
         } message: {
             Text("Turn on notifications for NOOP in Settings to get your wind-down reminder.")
         }
     }
 
-    /// Deep-link to the OS notification settings so a user who denied can flip it back on — the system
-    /// permission dialog only appears once, so Settings is the only recovery path.
-    private static func openNotificationSettings() {
-        #if os(iOS)
-        if let url = URL(string: UIApplication.openSettingsURLString) {
-            UIApplication.shared.open(url)
-        }
-        #elseif os(macOS)
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.notifications") {
-            NSWorkspace.shared.open(url)
-        }
-        #endif
-    }
+    // The deep-link to the OS notification settings moved to `NotificationPermission.openSettings()` —
+    // it is the recovery path for every notification-backed switch in the app (the system dialog appears
+    // once per install, so Settings is the ONLY way back), and three screens now need it.
 
     // A small Rest-tinted hero — the wind-down readout as a clean time pairing (wind-down → wake)
     // over a scenic Rest backdrop, so a glance gives the night's shape. It's about winding down to
@@ -230,15 +239,18 @@ struct SmartAlarmView: View {
                             .foregroundStyle(StrandPalette.statusWarning)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else if model.whoop5Detected {
-                        // 5/MG with Experimental ON: the strap IS armed (the rev-4 puffin payload), but a
-                        // strap-driven wake has NEVER been captured on 5/MG - so the "confirmed on 4.0" copy
-                        // must NOT show here (#864 honesty). Keep the 5/MG-unconfirmed caveat.
-                        Text("Armed on the strap itself with the experimental 5/MG command. A strap-driven wake is still unconfirmed on 5/MG on our side (confirmed only on WHOOP 4.0), so keep a backup alarm for anything you truly can't miss.")
+                        // 5/MG with Experimental ON: the rev-4 puffin payload goes out, but a strap-driven
+                        // wake has NEVER been captured on 5/MG - so the "confirmed on 4.0" copy must NOT
+                        // show here (#864 honesty). Keep the 5/MG-unconfirmed caveat. Whether the payload
+                        // reached the strap at all is `armStateRow`'s job, above it.
+                        armStateRow
+                        Text("Sent with the experimental 5/MG command. A strap-driven wake is still unconfirmed on 5/MG on our side (confirmed only on WHOOP 4.0), so keep a backup alarm for anything you truly can't miss.")
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.textTertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     } else {
-                        Text("Armed on the strap itself, so it can buzz at your wake time even if your phone is asleep or NOOP is closed. Sends the exact alarm command the official app sends, confirmed buzzing on a real WHOOP 4.0 (community wire capture + on-device test, #535). Keep a backup alarm for anything you truly can't miss.")
+                        armStateRow
+                        Text("Sends the exact alarm command the official app sends, confirmed buzzing on a real WHOOP 4.0 (community wire capture + on-device test, #535). Keep a backup alarm for anything you truly can't miss.")
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.textTertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
@@ -270,6 +282,38 @@ struct SmartAlarmView: View {
             .onChangeCompat(of: behavior.smartAlarmMinutes) { _ in model.applySmartAlarm() }
             .onChangeCompat(of: behavior.smartAlarmWeekdays) { _ in model.applySmartAlarm() }
         }
+    }
+
+    /// WHETHER THE STRAP ACTUALLY HAS IT. The one line on this screen that is about the link rather than
+    /// the setting, bound to what `armStrapAlarm` recorded when it last ran — not to the toggle.
+    ///
+    /// Three states and no fourth: sent over a live link, sent over a dead one (the write was dropped and
+    /// `applySmartAlarm` re-issues it on the next connect), and never attempted. "Armed" is claimed only
+    /// in the first. One literal `Text` per state rather than one interpolated string, so each stays a
+    /// plain `LocalizedStringKey` the string catalog can pick up.
+    @ViewBuilder private var armStateRow: some View {
+        switch strapArmState {
+        case .armed:
+            armStateNote("checkmark.circle", StrandPalette.statusPositive,
+                         Text("Armed on the strap itself, so it can buzz at your wake time even if your phone is asleep or NOOP is closed."))
+        case .queued:
+            armStateNote("exclamationmark.triangle", StrandPalette.statusWarning,
+                         Text("Saved, but NOT on your strap yet — it wasn't connected when NOOP last sent this. NOOP re-sends automatically the next time your strap connects; until then this alarm can't fire."))
+        case .notSentYet:
+            armStateNote("exclamationmark.triangle", StrandPalette.statusWarning,
+                         Text("NOOP hasn't sent this to your strap yet. It goes out as soon as your strap connects — until then this alarm can't fire."))
+        }
+    }
+
+    private func armStateNote(_ symbol: String, _ tint: Color, _ text: Text) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: symbol).foregroundStyle(tint).accessibilityHidden(true)
+            text
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var windDownCard: some View {

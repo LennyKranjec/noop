@@ -32,6 +32,11 @@ enum DayRitualScheduler {
 
     /// Default ON. The three slots are the app's own rhythm rather than an added feature, and a system
     /// that only ever speaks when spoken to is a search box.
+    ///
+    /// ON IS NOT PERMISSION, and it is not a reason to speak either: `schedule()` additionally requires
+    /// notification authorization the user has already granted somewhere they asked for it, and a day
+    /// that has actually been scored. A default-ON preference that could by itself raise a permission
+    /// dialog and then schedule daily claims about an empty install is what this used to be.
     static var isEnabled: Bool {
         (UserDefaults.standard.object(forKey: enabledKey) as? Bool) ?? true
     }
@@ -59,15 +64,47 @@ enum DayRitualScheduler {
 
     // MARK: - Scheduling
 
+    /// Whether NOOP has ever SCORED a day — a level written to the ledger, not merely a day that turned.
+    ///
+    /// The morning knock says "Last night is scored." On a fresh install with no strap paired, nothing
+    /// has been scored and nothing is going to be, so registering that trigger schedules a daily claim
+    /// about data that does not exist. `LevelLedger.latest` returns a WRITTEN level or nil; a day settled
+    /// as a gap is not an entry, so an install that has only ever recorded empty nights still reads false.
+    /// Read-only — this asks the ledger a question, it does not touch it.
+    static var hasScoredDay: Bool {
+        LevelLedger.shared.latest(onOrBefore: DailyMissionStore.dayKey()) != nil
+    }
+
+    /// The whole gate, as one pure decision — so what `schedule()` refuses on is pinned by a test rather
+    /// than buried inside an async call nothing can drive.
+    ///
+    /// `status` is READ, never requested: `.notDetermined` means nobody has asked yet, and this is not
+    /// the place that asks.
+    static func mayRegister(enabled: Bool, hasScoredDay: Bool, status: UNAuthorizationStatus) -> Bool {
+        enabled && hasScoredDay && NotificationPermission.delivers(status)
+    }
+
     /// Register the three repeating notifications. Safe to call on every launch: the identifiers are
     /// stable, so re-adding replaces rather than stacks.
+    ///
+    /// IT NEVER RAISES THE SYSTEM DIALOG. This used to call `requestAuthorization` cold, from a `.task`
+    /// on the Today screen that runs at launch — BEHIND the onboarding wizard and the un-accepted Terms
+    /// gate. It was the only cold prompt in the app (every other site reads `getNotificationSettings`
+    /// first), it fired before the user had agreed to anything, and it made the wizard's own Notifications
+    /// step decorative: by the time that step asked, iOS had already spent the one dialog it ever shows.
+    /// Permission is now asked for ONLY where a user action asks for it — the wizard's Notifications step,
+    /// and the alarm toggles that need it — and this registers against the answer rather than demanding it.
+    ///
+    /// AND IT REGISTERS NOTHING UNTIL A DAY HAS BEEN SCORED. `knockText(.morning)` says "Last night is
+    /// scored"; on an install with no strap that was a daily notification asserting something that had
+    /// never happened. `schedule()` is called on every Today appearance, so the triggers appear by
+    /// themselves on the first morning there is genuinely something to say.
     static func schedule() async {
         #if canImport(UserNotifications)
-        guard isEnabled else { return }
+        guard mayRegister(enabled: isEnabled,
+                          hasScoredDay: hasScoredDay,
+                          status: await NotificationPermission.status()) else { return }
         let centre = UNUserNotificationCenter.current()
-        guard let granted = try? await centre.requestAuthorization(options: [.alert, .sound, .badge]),
-              granted
-        else { return }
 
         for ritual in DayRitual.allCases {
             let content = UNMutableNotificationContent()

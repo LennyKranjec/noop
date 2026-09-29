@@ -103,35 +103,45 @@ extension AnalyticsEngine.Rest {
     /// main-night GROUP composition (#525/#561): how many detected blocks were bridged into the
     /// scored night and their summed in-bed span. The four term scores mirror `composite`'s own
     /// math; the final `composite=` value is `Rest.composite` verbatim so they cannot diverge.
+    /// An ABSENT sub-score input prints the literal token `absent`, never a number: the composite drops
+    /// that term and renormalises (see `Rest.composite`), so a trace showing `restor=0.0` for an unstaged
+    /// night would state a measurement that was never made. `weightSum=` is the divisor the printed
+    /// `composite=` was actually normalised by, so the line's arithmetic can be reversed from the export.
     public static func subScoreLine(tstSeconds: Double, inBedSeconds: Double, efficiency: Double,
-                                    restorativeSeconds: Double, needHours: Double,
+                                    restorativeSeconds: Double?, needHours: Double,
                                     consistency: Double?, deepSeconds: Double?,
                                     groupFragments: Int, groupInBedSeconds: Double) -> String {
         func clamp01(_ x: Double) -> Double { max(0.0, min(1.0, x)) }
         func r2(_ x: Double) -> Double { (x * 100.0).rounded() / 100.0 }
+        func token(_ x: Double?) -> String { x.map { "\(r2($0))" } ?? "absent" }
 
         let needSeconds = max(needHours, 0.1) * 3600.0
         let durationScore = clamp01(tstSeconds / needSeconds)
         let efficiencyScore = clamp01(efficiency)
-        let deepFactor: Double = {
-            guard let deep = deepSeconds, tstSeconds > 0, deepShareTarget > 0 else { return 1.0 }
+        let deepFactor: Double? = deepSeconds.map { (deep: Double) -> Double in
+            guard tstSeconds > 0, deepShareTarget > 0 else { return 1.0 }
             let adequacy = clamp01((deep / tstSeconds) / deepShareTarget)
             return deepFloorFactor + (1.0 - deepFloorFactor) * adequacy
-        }()
-        let restorativeScore = tstSeconds > 0
-            ? clamp01((restorativeSeconds / tstSeconds) / restorativeTarget) * deepFactor
-            : 0.0
-        let consistencyScore = clamp01(consistency ?? neutralConsistency)
+        }
+        let restorativeScore: Double? = restorativeSeconds.map { (rs: Double) -> Double in
+            tstSeconds > 0
+                ? clamp01((rs / tstSeconds) / restorativeTarget) * (deepFactor ?? 1.0)
+                : 0.0
+        }
+        let consistencyScore: Double? = consistency.map(clamp01)
         let composite = AnalyticsEngine.Rest.composite(
             tstSeconds: tstSeconds, inBedSeconds: inBedSeconds, efficiency: efficiency,
             restorativeSeconds: restorativeSeconds, needHours: needHours,
             consistency: consistency, deepSeconds: deepSeconds)
+        let wSum = AnalyticsEngine.Rest.weightSum(hasRestorative: restorativeSeconds != nil,
+                                                  hasConsistency: consistency != nil)
 
         return "rest composite=\(r2(composite)) "
             + "dur=\(r2(durationScore))*wDur=\(wDuration) "
             + "eff=\(r2(efficiencyScore))*wEff=\(wEfficiency) "
-            + "restor=\(r2(restorativeScore))*wRestor=\(wRestorative) deepFactor=\(r2(deepFactor)) "
-            + "consist=\(r2(consistencyScore))*wConsist=\(wConsistency) "
+            + "restor=\(token(restorativeScore))*wRestor=\(wRestorative) deepFactor=\(token(deepFactor)) "
+            + "consist=\(token(consistencyScore))*wConsist=\(wConsistency) "
+            + "weightSum=\(r2(wSum)) "
             + "group=\(groupFragments) groupInBedMin=\(Int(groupInBedSeconds / 60))"
     }
 }

@@ -124,11 +124,51 @@ final class LevelDayFreezeTests: XCTestCase {
         XCTAssertFalse(LevelLedger.isReady(day: "2026-09-17", byDay: byDay, series: series, calendar: calendar))
     }
 
-    func testTheMeditationShareIsNotResetByOneMissedDay() {
+    func testTheMeditationShareIsNotResetByOneMissedDay() throws {
         var minutes: [String: Double] = [:]
         for d in 1...28 where d != 20 { minutes[String(format: "2026-09-%02d", d)] = 10 }
         let series = LevelSeries(vo2max: [], muscleByDay: [:], meditation: minutes)
-        let share = LevelWiring.meditationShare("2026-09-28", series, calendar)
+        let share = try XCTUnwrap(LevelWiring.meditationShare("2026-09-28", series, calendar))
         XCTAssertGreaterThan(share, 0.9)
+    }
+
+    /// Regression: a wearer who had never logged a meditation was scored as having meditated on none of
+    /// their last 28 days. That is not a zero, it is no reading — and it was the ONLY sub-score a fresh
+    /// install had.
+    func testMeditationIsAbsentUntilTheWearerHasLoggedOneAndAZeroAfterwards() throws {
+        let empty = LevelSeries(vo2max: [], muscleByDay: [:], meditation: [:])
+        XCTAssertNil(LevelWiring.meditationShare("2026-09-28", empty, calendar))
+        // One session, then two months of nothing: the lapse is a MEASURED zero, not an absence — the
+        // level must not rise for having quit.
+        let lapsed = LevelSeries(vo2max: [], muscleByDay: [:], meditation: ["2026-07-01": 20])
+        XCTAssertEqual(try XCTUnwrap(LevelWiring.meditationShare("2026-09-28", lapsed, calendar)), 0,
+                       accuracy: 1e-9)
+        // And a log that only begins later is still absent on the days before it.
+        XCTAssertNil(LevelWiring.meditationShare("2026-06-30", lapsed, calendar))
+    }
+
+    /// Regression: day one. One synced night, nothing else — every rolling metric still short of its
+    /// 3-of-7-day minimum — used to produce a confident level of 0.0 at 11 % coverage, written
+    /// `partial: false` because the night had landed, and then dragged through the 3-day mean for three
+    /// days and the 30-day mean for a month.
+    func testOneSyncedNightOnAFreshInstallSettlesAsAGapNotAsAConfidentZero() throws {
+        let day = "2026-09-16"
+        let row = DailyMetric(day: day, totalSleepMin: 450, efficiency: nil, deepMin: 90, remMin: 100,
+                              lightMin: nil, disturbances: nil, restingHr: 55, avgHrv: 60, recovery: nil,
+                              strain: nil, exerciseCount: nil, steps: 4_000)
+        let series = LevelSeries(vo2max: [], muscleByDay: [:], meditation: [:])
+        let byDay = LevelWiring.byDay([row])
+        let inputs = LevelWiring.dayInputs(byDay: byDay, day: day, series: series, calendar: calendar)
+        XCTAssertNil(inputs.meditationShare, "the input that used to make this a level")
+        XCTAssertNil(LevelEngine.compute(inputs: inputs, baselines: LevelBaselines.table))
+
+        // So the day is written as a gap at its deadline — which is what `.empty` was always for.
+        let settled = LevelLedger.settle(day: day, byDay: byDay, series: series,
+                                         baselines: LevelBaselines.table, calendar: calendar,
+                                         deadlinePassed: true, now: at(16, 14, 0))
+        guard case .empty(let gap)? = settled else {
+            return XCTFail("expected a gap, got \(String(describing: settled))")
+        }
+        XCTAssertEqual(gap, day)
     }
 }

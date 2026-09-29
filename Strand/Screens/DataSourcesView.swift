@@ -12,6 +12,9 @@ struct DataSourcesView: View {
     @EnvironmentObject var live: LiveState
     @State private var showingImporter = false
     @State private var importTarget: ImportTarget = .whoop
+    /// Set when the system file picker never appeared (see `pickerWasNotPresented`), so a tap that
+    /// silently did nothing says why instead of looking like a broken button.
+    @State private var pickerError: String?
     // Nutrition CSV import state — local to this screen (the import is a quick, self-contained
     // metric-series write; it doesn't need AppModel's heavyweight import pipeline).
     @State private var nutritionImporting = false
@@ -133,6 +136,15 @@ struct DataSourcesView: View {
             Button("Remove", role: .destructive) { deleteAppleHealthData() }
         } message: {
             Text("This permanently deletes everything imported from Apple Health: heart rate, HRV, sleep, steps, workouts and more. Your live strap data is untouched. This can't be undone.")
+        }
+        // The file picker UIKit declined to present (see `presentImporter`). A cancel stays silent.
+        .alert("Couldn't open the file picker", isPresented: Binding(
+            get: { pickerError != nil },
+            set: { if !$0 { pickerError = nil } }
+        )) {
+            Button("OK", role: .cancel) { pickerError = nil }
+        } message: {
+            Text(pickerError ?? "")
         }
     }
 
@@ -342,6 +354,21 @@ struct DataSourcesView: View {
     }
     #endif // OURA_CLOUD_IMPORT
 
+    /// Whether the LAST document-picker outcome the app recorded was "UIKit never showed the picker",
+    /// and whether it is recent enough to belong to the tap that just happened.
+    ///
+    /// `DocumentPicker.recordEvent` is shared by every picker in the app (the backup folder pick
+    /// included), so the kind alone is not enough — a `not-presented` left over from an earlier
+    /// Backup & Sync attempt would otherwise be blamed on this import. Both the kind AND the freshness
+    /// have to match. Pure (UserDefaults in, Bool out) so it is unit-testable off a suite-scoped
+    /// domain, and deliberately OUTSIDE the `#if os(iOS)` the picker itself lives behind.
+    static func pickerWasNotPresented(since: Date, defaults: UserDefaults = .standard) -> Bool {
+        guard defaults.string(forKey: "backupPicker.lastEvent") == "not-presented" else { return false }
+        let at = defaults.double(forKey: "backupPicker.lastEventAt")
+        guard at > 0 else { return false }
+        return Date(timeIntervalSince1970: at) >= since
+    }
+
     private func presentImporter(_ target: ImportTarget) {
         importTarget = target
         #if os(iOS)
@@ -350,7 +377,19 @@ struct DataSourcesView: View {
         // hand us a readable local copy — `.fileImporter` instead returns a security-scoped URL that,
         // for an undownloaded iCloud file, can't be read, and the whole import silently did nothing.
         Task {
-            guard let url = await DocumentPicker.importFile(target.allowedContentTypes) else { return } // cancelled
+            // A nil here is BOTH outcomes: the user cancelled, or UIKit declined to present the picker
+            // at all (the target was already presenting / mid-transition — `DocumentPicker.present`
+            // detects that and resumes with nil rather than hanging). The second is not a choice the
+            // user made, and it read as "the button does nothing": no sheet, no message, no log line.
+            // `DocumentPicker` records which of the two happened; read it back and say so.
+            let askedAt = Date()
+            guard let url = await DocumentPicker.importFile(target.allowedContentTypes) else {
+                if Self.pickerWasNotPresented(since: askedAt) {
+                    pickerError = String(localized: "Couldn't open the file picker — another sheet was still on screen. Close it and try again.")
+                    logImport("file picker was not presented")
+                }
+                return
+            }
             handlePickedURL(url, for: target)
         }
         #else
@@ -441,6 +480,14 @@ struct DataSourcesView: View {
         nutritionSummary = nil
         nutritionFailed = false
         Task {
+            // #dataInFlight: these four file importers write to the SAME store the level
+            // ledger's immutable 800-day backfill and the launch cascade's import wait read.
+            // Their `@State` "importing" flags are local to this screen, so `AppModel`'s
+            // `hasActiveImport` — which is what `dataInFlight` consults — could not see them and
+            // a ledger day was free to be scored from a half-written store. The `defer` pairs it
+            // with every exit path, including the early returns inside the `do` below.
+            model.beginAuxImport()
+            defer { model.finishAuxImport() }
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             do {
@@ -509,6 +556,14 @@ struct DataSourcesView: View {
         liftingSummary = nil
         liftingFailed = false
         Task {
+            // #dataInFlight: these four file importers write to the SAME store the level
+            // ledger's immutable 800-day backfill and the launch cascade's import wait read.
+            // Their `@State` "importing" flags are local to this screen, so `AppModel`'s
+            // `hasActiveImport` — which is what `dataInFlight` consults — could not see them and
+            // a ledger day was free to be scored from a half-written store. The `defer` pairs it
+            // with every exit path, including the early returns inside the `do` below.
+            model.beginAuxImport()
+            defer { model.finishAuxImport() }
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             do {
@@ -697,6 +752,14 @@ struct DataSourcesView: View {
         activityFileSummary = nil
         activityFileFailed = false
         Task {
+            // #dataInFlight: these four file importers write to the SAME store the level
+            // ledger's immutable 800-day backfill and the launch cascade's import wait read.
+            // Their `@State` "importing" flags are local to this screen, so `AppModel`'s
+            // `hasActiveImport` — which is what `dataInFlight` consults — could not see them and
+            // a ledger day was free to be scored from a half-written store. The `defer` pairs it
+            // with every exit path, including the early returns inside the `do` below.
+            model.beginAuxImport()
+            defer { model.finishAuxImport() }
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             do {
@@ -836,6 +899,14 @@ struct DataSourcesView: View {
         wearableSummary = nil
         wearableFailed = false
         Task {
+            // #dataInFlight: these four file importers write to the SAME store the level
+            // ledger's immutable 800-day backfill and the launch cascade's import wait read.
+            // Their `@State` "importing" flags are local to this screen, so `AppModel`'s
+            // `hasActiveImport` — which is what `dataInFlight` consults — could not see them and
+            // a ledger day was free to be scored from a half-written store. The `defer` pairs it
+            // with every exit path, including the early returns inside the `do` below.
+            model.beginAuxImport()
+            defer { model.finishAuxImport() }
             let scoped = url.startAccessingSecurityScopedResource()
             defer { if scoped { url.stopAccessingSecurityScopedResource() } }
             do {

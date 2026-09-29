@@ -169,10 +169,33 @@ struct LevelRadarView: View {
     /// counting 0…80 through every digit in between jitters sideways the whole way up and lands somewhere
     /// other than where it started.
     private var levelNumber: some View {
-        Text(level == nil ? "–" : "\(shown)")
-            .font(.system(size: 30, weight: .black, design: .rounded))
-            .monospacedDigit()
-            .foregroundStyle(level == nil ? StrandPalette.textTertiary : StrandPalette.textPrimary)
+        ZStack {
+            Text(level == nil ? "–" : "\(shown)")
+                .font(.system(size: 30, weight: .black, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(level == nil ? StrandPalette.textTertiary : StrandPalette.textPrimary)
+            coverageCaption
+        }
+    }
+
+    /// HOW MUCH OF THE FORMULA THE NUMBER ACTUALLY RESTS ON, said out loud whenever it is not all of it.
+    ///
+    /// `coverage` was computed, persisted and read by NOTHING. The engine shares an absent part's weight
+    /// out over the parts that have data, which is the right arithmetic and completely invisible: a level
+    /// built from sleep and heart alone drew exactly like one built from all five, same glyphs, same
+    /// number, same confidence. `LevelEngine.minCoverage` now refuses the thinnest of them outright; this
+    /// is the rest of the answer, for every level between that floor and a full one.
+    ///
+    /// AN OVERLAY, NOT A ROW UNDER THE NUMBER: the figure is the subject and must not move on the days
+    /// this line is absent. Offset with the plate so it lands in the same place at any size.
+    @ViewBuilder private var coverageCaption: some View {
+        if let breakdown, level != nil, breakdown.isPartialCoverage {
+            Text("\(breakdown.coveragePercent)% measured")
+                .font(.system(size: 9, weight: .semibold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(StrandPalette.textTertiary)
+                .offset(y: diameter * 0.15)
+        }
     }
 
     private func glyphOffset(index: Int) -> CGSize {

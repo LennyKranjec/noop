@@ -34,8 +34,33 @@ enum StressDailyLog {
     /// The day's mean RMSSD over its still, scored waking hours.
     static let daytimeRmssdKey = "daytime_rmssd"
 
+    /// Still, scored hours of R-R a banked `daytime_rmssd` needs before it is written down.
+    ///
+    /// ALIGNED WITH THE SCORING GATE. Daytime RMSSD off the wrist is artefact-dominated — hourly values
+    /// swing ~40→430 ms as posture, motion and talking break the R-R stream — which is why
+    /// `DaytimeStress.daytimeRMSSDScoringEnabled` keeps the quantity out of the live stress score
+    /// entirely, and why `DaytimeStress.foldAggregates` refuses a daytime-RMSSD baseline until
+    /// `Baselines.minNightsSeed` days have carried one. Banking used to have `!values.isEmpty` as its
+    /// only guard, so a single hour of twenty beats was persisted as a day's "daytime calm" and read
+    /// back by the level's focus part as if it were the whole day. Same quantity, same artefacts, so the
+    /// same count of units has to back it. A day that does not clear it writes NO row, which is the
+    /// honest state the series already has a meaning for: unmeasured, not calm.
+    static let minRmssdHours = Baselines.minNightsSeed
+
     /// How far back the streak strip reads. A year of streak plus slack for a stale clock.
     static let lookbackDays = 400
+
+    /// The day's daytime calm — mean RMSSD over its STILL, SCORED waking hours — or nil when too few of
+    /// them carried R-R for the figure to mean anything (`minRmssdHours`). Masked and unscored hours are
+    /// already excluded by `level != nil`.
+    ///
+    /// Pure and separate from the write so the gate is testable without a store, and so there is ONE
+    /// place that decides what a bankable daytime RMSSD is.
+    static func daytimeRmssdMean(hours: [DaytimeStress.HourPoint]) -> Double? {
+        let values = hours.filter { $0.level != nil }.compactMap(\.rmssd)
+        guard values.count >= minRmssdHours else { return nil }
+        return values.reduce(0, +) / Double(values.count)
+    }
 }
 
 // MARK: - Persistence (Repository extension)
@@ -59,11 +84,11 @@ extension Repository {
     ///
     /// The level's focus part reads it (`LevelMetric.daytimeRmssd`). Written whenever the day's curve is
     /// scored, REPLACING the day's value, so the figure the frozen level reads tomorrow is the whole of
-    /// today. Nothing is written when no still hour carried R-R.
+    /// today. Nothing is written until at least `StressDailyLog.minRmssdHours` still, scored hours
+    /// carried R-R — see that constant for why one hour is not a day's calm.
     func bankDaytimeRmssd(hours: [DaytimeStress.HourPoint], day: Date = Date()) async {
-        let values = hours.filter { $0.level != nil }.compactMap(\.rmssd)
-        guard !values.isEmpty, let store = await storeHandle() else { return }
-        let mean = values.reduce(0, +) / Double(values.count)
+        guard let mean = StressDailyLog.daytimeRmssdMean(hours: hours),
+              let store = await storeHandle() else { return }
         _ = try? await store.upsertMetricSeries(
             [MetricPoint(day: Repository.localDayKey(day), key: StressDailyLog.daytimeRmssdKey, value: mean)],
             deviceId: StressDailyLog.source)

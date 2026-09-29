@@ -14,17 +14,28 @@ import StrandAnalytics
 //
 // v3: the level was rebuilt with no ceiling and new inputs (see `LevelEngine`); every older scale was
 // for metrics that no longer exist.
+//
+// v5 — THE RE-FREEZE. Every v4 scale was frozen once a metric had 14 readings, and a reading is a 7-day
+// rolling mean taken one per calendar day, so fourteen of them overlap into about two independent weeks.
+// The 5th/95th percentiles of that sample are what 0 and 100 mean for the wearer, permanently, and two
+// weeks is not enough to place them. `LevelBaselines.minSamples` is now 42; the stored key moves with it
+// so that every v4 scale is DISCARDED and derived again from the history as it stands today. A metric
+// that now has 42 readings re-freezes at once on a better estimate; one that does not falls back to the
+// table and freezes when it has them. `samples` is recorded from here on so a future correction can tell
+// how much history a scale was frozen from without having to throw all of them away again.
 
 enum LevelBaselineStore {
 
-    private static let key = "level.baselines.v4"
-    private static let frozenAtKey = "level.baselinesFrozenAt.v4"
+    private static let key = "level.baselines.v5"
+    private static let frozenAtKey = "level.baselinesFrozenAt.v5"
 
     private struct Stored: Codable {
         let mean: Double
         let sd: Double
         let min: Double
         let max: Double
+        /// How many readings this scale was frozen from. Absent on anything written before v5.
+        var samples: Int? = nil
     }
 
     /// The baselines: every frozen metric as stored, every other one derived from `history` now — and
@@ -49,7 +60,8 @@ enum LevelBaselineStore {
             let b = LevelBaselines.derive(metric, history: h)
             out[metric] = b
             if LevelBaselines.isDerivable(h) {
-                stored[metric.rawValue] = Stored(mean: b.mean, sd: b.sd, min: b.min, max: b.max)
+                stored[metric.rawValue] = Stored(mean: b.mean, sd: b.sd, min: b.min, max: b.max,
+                                                 samples: h.filter(\.isFinite).count)
                 changed = true
             }
         }
@@ -80,7 +92,8 @@ enum LevelBaselineStore {
             let b = LevelBaselines.derive(metric, history: h)
             out[metric] = b
             if LevelBaselines.isDerivable(h) {
-                stored[metric.rawValue] = Stored(mean: b.mean, sd: b.sd, min: b.min, max: b.max)
+                stored[metric.rawValue] = Stored(mean: b.mean, sd: b.sd, min: b.min, max: b.max,
+                                                 samples: h.filter(\.isFinite).count)
             }
         }
         write(stored)

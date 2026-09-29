@@ -417,6 +417,52 @@ final class NightlyMetricsReworkTests: XCTestCase {
         XCTAssertEqual(SleepStager.sessionSleepRestingHR(start: 0, end: 120 * m, hr: hr, stages: stages), 51)
     }
 
+    /// #ACC2: a "deep" block covered by a few seconds of HR is not a slow-wave measurement.
+    ///
+    /// On a night whose blocks hold ~10 samples (a 30 s-cadence stream) `minN` collapses to the absolute
+    /// floor `rhrMinBinSamples`, and a sample COUNT cannot tell five samples spread across a 300-second
+    /// block from five inside one second of it. Two such bursts satisfied `rhrDeepMinBlocks` and became the
+    /// night's resting HR. Here the night is genuinely sparse (one sample every 30 s at 60 bpm) and two of
+    /// its deep blocks additionally carry a 6-second burst at 40 bpm: the bursts must not win.
+    func testDeepBlocksNeedRealCoverageNotJustSamples() throws {
+        let m = 60
+        let stages = [
+            StageSegment(start: 0, end: 20 * m, stage: "light"),
+            StageSegment(start: 20 * m, end: 30 * m, stage: "deep"),
+            StageSegment(start: 30 * m, end: 60 * m, stage: "light"),
+        ]
+        // 30 s cadence at 60 bpm everywhere EXCEPT the deep span, whose two 5-min blocks are covered only
+        // by a 6-second burst each at 40 bpm. Six samples clears `minN` (which has collapsed to 5 on this
+        // cadence) and 40 bpm clears the plausibility bar, so before the span floor both burst blocks
+        // counted as valid, the two of them satisfied `rhrDeepMinBlocks`, and 40 became the night's
+        // resting HR off twelve seconds of heart rate.
+        var hr: [HRSample] = stride(from: 0, to: 60 * m, by: 30)
+            .filter { !((20 * m)..<(30 * m)).contains($0) }
+            .map { HRSample(ts: $0, bpm: 60) }
+        for t in (20 * m)..<(20 * m + 6) { hr.append(HRSample(ts: t, bpm: 40)) }
+        for t in (25 * m)..<(25 * m + 6) { hr.append(HRSample(ts: t, bpm: 40)) }
+        let rhr = try XCTUnwrap(SleepStager.sessionSleepRestingHR(start: 0, end: 60 * m,
+                                                                 hr: hr, stages: stages))
+        XCTAssertEqual(rhr, 60, "a 6-second burst cannot stand for a 5-minute deep block; the value "
+                       + "falls through to the late-night non-wake trough (60 bpm), not 40")
+    }
+
+    /// The same span WITHOUT the bursts still reports: the span floor judges coverage, not cadence, so an
+    /// ordinary sparse-cadence night is unaffected.
+    func testSparseCadenceNightStillReportsItsDeepRestingHR() throws {
+        let m = 60
+        let stages = [
+            StageSegment(start: 0, end: 20 * m, stage: "light"),
+            StageSegment(start: 20 * m, end: 40 * m, stage: "deep"),
+            StageSegment(start: 40 * m, end: 60 * m, stage: "light"),
+        ]
+        let hr: [HRSample] = stride(from: 0, to: 60 * m, by: 30).map {
+            HRSample(ts: $0, bpm: (20 * m..<40 * m).contains($0) ? 52 : 62)
+        }
+        XCTAssertEqual(try XCTUnwrap(SleepStager.sessionSleepRestingHR(start: 0, end: 60 * m,
+                                                                      hr: hr, stages: stages)), 52)
+    }
+
     /// S7: a night bridged from two fragments reads the NIGHT's last deep run. Fragment A (0–120 min) holds a
     /// deep run at 50 bpm; fragment B (150–270 min) one at 56. The night's resting HR is 56 — and when B has no
     /// deep sleep at all it is A's 50 (the night's last deep run lives in A), never a per-fragment pick.

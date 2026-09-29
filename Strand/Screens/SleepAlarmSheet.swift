@@ -189,7 +189,9 @@ private struct SleepAlarmSheetContent: View {
                     if ringer.isRinging {
                         ringer.stop(reason: "Stop button")
                     } else {
-                        ringer.start(reason: "test")
+                        // `startTest`, not `start`: with no reachable strap the test must send nothing and
+                        // SAY so, rather than flipping to "Stop" for thirty seconds over a silent wrist.
+                        ringer.startTest()
                     }
                 } label: {
                     // Two literal Texts rather than one ternary, so each string stays a plain
@@ -199,6 +201,7 @@ private struct SleepAlarmSheetContent: View {
                 .buttonStyle(NoopButtonStyle(ringer.isRinging ? .destructive : .secondary, fullWidth: true))
 
                 deliveryRow
+                phoneFallbackRow
 
                 Text("Your strap buzzes every few seconds. Double-tap the strap to stop it, tap Stop here, or leave it — it stops by itself after about half a minute.")
                     .font(StrandFont.footnote)
@@ -230,6 +233,39 @@ private struct SleepAlarmSheetContent: View {
         }
     }
 
+    /// Whether the last attempt had to buzz the PHONE instead of the wrist. Its own row rather than a
+    /// fourth `deliveryRow` case, because it is a different fact: `lastDelivery` is what happened on the
+    /// BLE link, this is what happened instead. Worded as the weaker thing it is — a phone haptic needs
+    /// NOOP awake, is not a sound, and is not on the wrist.
+    @ViewBuilder
+    private var phoneFallbackRow: some View {
+        if ringer.lastPhoneFallback {
+            deliveryNote("iphone.radiowaves.left.and.right", StrandPalette.textSecondary,
+                         Text("NOOP buzzed your phone instead. That only works while NOOP is awake, and it's a phone on a table rather than a strap on your wrist — treat it as a fallback, not the alarm."))
+        }
+    }
+
+    /// CAN ANYTHING FIRE ONCE NOOP IS SUSPENDED? The repeating backup notification is the only part of
+    /// this alarm that lives outside our process, so whether it is registered is the difference between
+    /// "the alarm degrades" and "there is no alarm" — and until now nothing in the app said which.
+    ///
+    /// Only rendered once the ringer has an answer: nil is "we have not resolved it", which must not be
+    /// drawn as either a tick or a warning. On macOS there is no backstop and no answer, so this is
+    /// absent there, which is correct.
+    @ViewBuilder
+    private var backupRow: some View {
+        switch ringer.backupState {
+        case .none, .some(.off):
+            EmptyView()
+        case .some(.scheduled):
+            deliveryNote("bell.badge", StrandPalette.textSecondary,
+                         Text("A backup notification is set for your wake time. It's the only part that still fires if NOOP is closed — but a sideloaded app can't sound a guaranteed wake, so silent mode or a Sleep Focus that doesn't allow NOOP will mute it. Add NOOP to your Sleep Focus's allowed notifications if you rely on it."))
+        case .some(.denied):
+            deliveryNote("exclamationmark.triangle", StrandPalette.statusWarning,
+                         Text("Notifications are off for NOOP, so there is no backup at all: if NOOP isn't awake at your wake time, nothing will happen. Turn notifications on for NOOP in Settings, and keep your phone's Clock alarm."))
+        }
+    }
+
     private func deliveryNote(_ symbol: String, _ tint: Color, _ text: Text) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: symbol).foregroundStyle(tint).accessibilityHidden(true)
@@ -254,10 +290,14 @@ private struct SleepAlarmSheetContent: View {
                     Text("NOOP sends this buzz, not the strap")
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
-                    Text("Your strap has to be connected and NOOP still running — it usually is, because the strap keeps it awake in the background. If you force-quit NOOP you only get the backup notification, and a sideloaded app can't sound a guaranteed wake, so Focus or silent mode can mute that too. Keep your phone's Clock alarm for anything you truly can't miss.")
+                    // THE THREE PATHS, WEAKEST LAST, and what is left when each one is gone. The old copy
+                    // named the backup notification without ever saying whether it was actually set, and
+                    // said nothing at all about the case the fallback now covers: NOOP awake, strap away.
+                    Text("Best case, your strap is connected and NOOP is running, and your wrist buzzes. If the strap is away but NOOP is awake, your phone buzzes instead. If NOOP has been force-quit or suspended, only the backup notification is left — and a sideloaded app can't sound a guaranteed wake, so silent mode or a Sleep Focus that doesn't allow NOOP will mute that too. If notifications are off as well, nothing will wake you. Keep your phone's Clock alarm for anything you truly can't miss.")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    backupRow
                     Text("Your strap can also hold an alarm in its own clock (More → Alarms), which buzzes once with NOOP closed. On a WHOOP 5/MG that one is still unconfirmed and needs the Experimental toggle, so it isn't armed for you here.")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)

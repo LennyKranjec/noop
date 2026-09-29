@@ -27,13 +27,19 @@ final class AnalyticsEngineSleepNeedFloorTests: XCTestCase {
         ).restScore)
     }
 
+    /// The session is 30 s of LIGHT sleep, so it is unstaged (no deep, no REM) and the day carries no
+    /// regularity signal: `Rest.composite` drops both of those terms and renormalises over the remaining
+    /// 0.70 of weight. That is what moved these literals from 29.17/29.13 — the projection is still
+    /// duration + efficiency, it is simply no longer diluted by a zeroed restorative term and a
+    /// substituted neutral consistency. The BOUNDARY this test exists for is unchanged: every need at or
+    /// below the 0.1 h floor lands on one value, and 0.101 h is the first to differ.
     func testSleepNeedUsesPointOneHourFloorAtAndAcrossBoundary() throws {
         let cases: [(need: Double, expectedRest: Double)] = [
-            (-1.0, 29.17),
-            (0.0, 29.17),
-            (0.099, 29.17),
-            (0.1, 29.17),
-            (0.101, 29.13),
+            (-1.0, 34.52),
+            (0.0, 34.52),
+            (0.099, 34.52),
+            (0.1, 34.52),
+            (0.101, 34.46),
         ]
 
         let actual = try cases.map { try rest(sleepNeedHours: $0.need) }

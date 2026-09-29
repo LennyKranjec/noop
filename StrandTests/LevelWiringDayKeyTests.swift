@@ -64,4 +64,19 @@ final class LevelWiringDayKeyTests: XCTestCase {
         // Nothing lifted on or before the day is no load at all, not zero load.
         XCTAssertNil(LevelWiring.chronicLoad("2025-12-31", series, calendar))
     }
+
+    /// Regression: the existence guard asked whether anything had EVER been lifted on or before the day,
+    /// while the sum below it read only the last 180. A wearer whose whole lifting log sat outside the
+    /// window therefore got a chronic load of exactly 0.0 — and 0 is a scored value, the worst training
+    /// load the baseline has ever seen, not an absent one. `strength()` already scoped its guard to its
+    /// own window; this now matches.
+    func testALiftingLogEntirelyOutsideTheWindowIsNoLoadAtAllNotZeroLoad() {
+        let series = LevelSeries(vo2max: [], muscleByDay: ["2026-01-01": 900], meditation: [:])
+        // 180 days back from 2026-09-16 is 2026-03-21: the January session is outside it.
+        XCTAssertNil(LevelWiring.chronicLoad("2026-09-16", series, calendar))
+        // Inside the window the same session still reads, and reads as more than nothing.
+        let inside = LevelWiring.chronicLoad("2026-06-01", series, calendar)
+        XCTAssertNotNil(inside)
+        XCTAssertGreaterThan(inside ?? 0, 0)
+    }
 }

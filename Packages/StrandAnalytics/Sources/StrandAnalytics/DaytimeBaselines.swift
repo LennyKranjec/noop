@@ -14,7 +14,10 @@ import WhoopProtocol
 // The per-day aggregate is defined in terms of EXACTLY the hourly means the scorer references: it reuses
 // `DaytimeStress`'s own `floorDiv` / `bucketSeconds` / `isWakingHour` / `minHourHRSamples` /
 // `HRVAnalyzer` so "the value we fold into the baseline" and "the value we later z-score against that
-// baseline" are the same quantity, never two drifting definitions.
+// baseline" are the same quantity, never two drifting definitions. That includes WHICH HOURS COUNT AS
+// WAKING: the fold takes each day's `wakeWindow` and passes it to the scorer's own
+// `isWakingHour(_:tzOffsetSeconds:wakeWindow:)`, rather than hard-wiring the fixed 06:00–22:00 test the
+// scorer stopped using the moment a caller knew the wearer's real wake and sleep times.
 
 public extension DaytimeStress {
 
@@ -50,8 +53,14 @@ public extension DaytimeStress {
         public let hr: [HRSample]
         public let rr: [RRInterval]
         public let tzOffsetSeconds: Int
-        public init(hr: [HRSample], rr: [RRInterval], tzOffsetSeconds: Int) {
+        /// THAT day's real waking span as WALL-CLOCK Unix seconds (wake … sleep onset), exactly as
+        /// `analyze(wakeWindow:)` takes it. nil falls back to the fixed 06:00–22:00 window, which is
+        /// what a day with no known sleep timing gets — see `dayDaytimeAggregate`.
+        public let wakeWindow: ClosedRange<Int>?
+        public init(hr: [HRSample], rr: [RRInterval], tzOffsetSeconds: Int,
+                    wakeWindow: ClosedRange<Int>? = nil) {
             self.hr = hr; self.rr = rr; self.tzOffsetSeconds = tzOffsetSeconds
+            self.wakeWindow = wakeWindow
         }
     }
 
@@ -65,8 +74,17 @@ public extension DaytimeStress {
     ///     fabricate variability); `nil` when no waking hour had enough clean R-R (e.g. an HR-only day).
     /// Either field is `nil` independently. Bucketing keys off the HR buckets (like the scorer), so an
     /// hour with R-R but no HR contributes neither.
+    ///
+    /// `wakeWindow` is THAT day's real waking span in wall-clock seconds, and it goes through the SAME
+    /// `isWakingHour(_:tzOffsetSeconds:wakeWindow:)` the scorer calls, so "the hours we fold" and "the
+    /// hours we later z-score against the fold" stay ONE definition rather than two drifting ones. The
+    /// fold used to be hard-wired to the fixed 06:00–22:00 test while the scorer already honoured the
+    /// wearer's real window: for a late sleeper the folded P10 then included still-asleep hours, pulling
+    /// the personal calm floor DOWN and so biasing every baseline-relative hour UP. nil keeps the fixed
+    /// window for a day whose sleep times are unknown — the same fallback `analyze` makes.
     static func dayDaytimeAggregate(hr: [HRSample], rr: [RRInterval],
-                                    tzOffsetSeconds: Int) -> (hr: Double?, rmssd: Double?) {
+                                    tzOffsetSeconds: Int,
+                                    wakeWindow: ClosedRange<Int>? = nil) -> (hr: Double?, rmssd: Double?) {
         guard !hr.isEmpty else { return (nil, nil) }
 
         // Bucket HR + R-R into LOCAL hour-of-day buckets, byte-for-byte the scorer's step 1.
@@ -87,7 +105,8 @@ public extension DaytimeStress {
         // filter. Keyed off HR buckets so an R-R-only hour is ignored exactly as the scorer ignores it.
         var wakingMeanHRs: [Double] = []
         var wakingRMSSDs: [Double] = []
-        for (bucket, hrs) in hrByBucket where isWakingHour(bucket) {
+        for (bucket, hrs) in hrByBucket
+        where isWakingHour(bucket, tzOffsetSeconds: tzOffsetSeconds, wakeWindow: wakeWindow) {
             if hrs.count >= minHourHRSamples, let m = mean(hrs) { wakingMeanHRs.append(m) }
             if let rmssd = HRVAnalyzer.analyze(rawRR: rrByBucket[bucket] ?? []).rmssd {
                 wakingRMSSDs.append(rmssd)
@@ -119,7 +138,8 @@ public extension DaytimeStress {
     /// baseline — the whole-baseline grain of the per-hour graceful-nil already in `rawScore`.
     static func foldDaytimeBaselines(days: [DaytimeDayStreams]) -> (hr: BaselineState, rmssd: BaselineState?) {
         foldAggregates(days.map {
-            dayDaytimeAggregate(hr: $0.hr, rr: $0.rr, tzOffsetSeconds: $0.tzOffsetSeconds)
+            dayDaytimeAggregate(hr: $0.hr, rr: $0.rr, tzOffsetSeconds: $0.tzOffsetSeconds,
+                                wakeWindow: $0.wakeWindow)
         })
     }
 
@@ -155,7 +175,8 @@ public extension DaytimeStress {
     /// window that is all sparse/imported days, keeps EXACTLY today's pre-existing day-relative behaviour.
     static func scoringMode(history days: [DaytimeDayStreams]) -> ScoringMode {
         scoringModeFromAggregates(days.map {
-            dayDaytimeAggregate(hr: $0.hr, rr: $0.rr, tzOffsetSeconds: $0.tzOffsetSeconds)
+            dayDaytimeAggregate(hr: $0.hr, rr: $0.rr, tzOffsetSeconds: $0.tzOffsetSeconds,
+                                wakeWindow: $0.wakeWindow)
         })
     }
 

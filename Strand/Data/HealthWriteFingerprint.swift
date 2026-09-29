@@ -77,8 +77,50 @@ enum HealthWriteFingerprintStore {
         defaults.string(forKey: key(kind)) == fp.hex
     }
 
+    /// Whether this pass may SKIP its delete + save, given what Health was just observed to hold.
+    ///
+    /// A matching fingerprint only ever meant "the last pass wrote exactly these samples" — never
+    /// "Health still has them". The two came apart the moment the user deleted NOOP's data from inside
+    /// the Health app: `clearAll()` fires only on re-authorization and after the #1503 sweep, so
+    /// nothing noticed, every later pass skipped on the strength of the stale fingerprint, and the
+    /// export never came back. Callers now probe Health for one of our samples in the window first:
+    ///
+    /// - `healthHasSamples == false` — Health holds NONE of ours. The fingerprint is a lie: drop it
+    ///   (so the next pass rewrites in full even if this one fails) and write.
+    /// - `healthHasSamples == nil` — the probe could not run (unauthorized, query failed). Nothing was
+    ///   learned, so fall back to the stored fingerprint exactly as before rather than forcing a
+    ///   rewrite on every pass.
+    /// - `healthHasSamples == true` — Health holds ours and the content is unchanged: skip.
+    ///
+    /// Deliberately NOT a count or a content check: an existence probe is one `limit: 1` query, and
+    /// any richer verification would cost more than the write it is avoiding.
+    static func canSkip(_ kind: Kind, _ fp: HealthWriteFingerprint, healthHasSamples: Bool?,
+                        defaults: UserDefaults = .standard) -> Bool {
+        guard matches(kind, fp, defaults: defaults) else { return false }
+        guard healthHasSamples != false else {
+            clear(kind, defaults: defaults)
+            return false
+        }
+        return true
+    }
+
     static func store(_ kind: Kind, _ fp: HealthWriteFingerprint, defaults: UserDefaults = .standard) {
         defaults.set(fp.hex, forKey: key(kind))
+    }
+
+    /// Store a kind's fingerprint ONLY when the pass genuinely reconciled Health — that is, when the
+    /// delete that precedes the save is known to have succeeded.
+    ///
+    /// The vitals and sleep paths delete with `_ = try? await store.deleteObjects(...)`, save, and then
+    /// stored the fingerprint unconditionally. A delete that FAILED left the previous samples in place,
+    /// the save added a second copy, and the fingerprint then told every later pass there was nothing
+    /// to do — so the duplicates were permanent. `writeWorkouts` already had this right via its
+    /// `reconciled` flag; this is the same rule, named once. `false` leaves the kind with NO stored
+    /// fingerprint (it is cleared before the delete), so the next pass rewrites in full.
+    static func storeIfReconciled(_ kind: Kind, _ fp: HealthWriteFingerprint, reconciled: Bool,
+                                  defaults: UserDefaults = .standard) {
+        guard reconciled else { return }
+        store(kind, fp, defaults: defaults)
     }
 
     static func clear(_ kind: Kind, defaults: UserDefaults = .standard) {

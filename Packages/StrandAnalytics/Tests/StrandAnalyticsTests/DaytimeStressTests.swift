@@ -71,8 +71,10 @@ final class DaytimeStressTests: XCTestCase {
         // Overlapping windows would count the same minute twice, so the minute total stays on the
         // non-overlapping hours. This is the assertion that fails first if someone later points
         // `highStressMinutes` at the denser series.
-        let highHours = res.hours.filter { ($0.level ?? 0) >= DaytimeStress.highBandFloor }.count
-        XCTAssertEqual(res.highStressMinutes, highHours * 60)
+        let highMinutes = res.hours
+            .filter { ($0.level ?? 0) >= DaytimeStress.highBandFloor }
+            .reduce(0) { $0 + $1.coveredMinutes }
+        XCTAssertEqual(res.highStressMinutes, highMinutes)
         XCTAssertEqual(res.activityMaskedHours, res.hours.filter(\.maskedForActivity).count)
     }
 
@@ -285,7 +287,9 @@ final class DaytimeStressTests: XCTestCase {
         let calmest = r.scored.first { $0.meanHR == 62 }!.level!
         XCTAssertLessThan(calmest, 0.7)
         XCTAssertEqual(r.peak?.meanHR, 80)
-        XCTAssertEqual(r.highStressMinutes, 60, "only the one genuinely elevated hour is HIGH")
+        // ONE high hour, credited the minutes it was actually worn: `hourHR` fills an hour with
+        // `minHourHRSamples` 1 Hz samples, which is five minutes of coverage, not sixty.
+        XCTAssertEqual(r.highStressMinutes, 5, "only the one genuinely elevated hour is HIGH")
     }
 
     func testDayRelativeSquashMapping() {
@@ -435,6 +439,94 @@ final class DaytimeStressTests: XCTestCase {
         let early = DaytimeStress.analyze(hr: (6...8).flatMap { hourHR($0, bpm: 70) }, rr: [])
         XCTAssertLessThan(early.scored.count, DaytimeStress.liveMinReferenceHours)
         XCTAssertNil(DaytimeStress.live(hr: window(90), rr: [], dayHours: early.hours))
+    }
+
+    // MARK: - Accuracy audit: the day-relative reference has a minimum, and minutes are real minutes
+
+    func testTwoScoredHoursAreNotScoredAtAll() {
+        // THE AUDIT'S CONCRETE CASE. Strap worn 10:50–11:10: sitting at 60, then a walk at 90. Two
+        // reference hours used to produce hour 11 = 2.296 HIGH, and `StressDayCurve` banked a full hour
+        // of high-stress minutes for `EnergyBank` / `DayDeficits` to spend against. The `live` read
+        // already refused to speak on fewer than `liveMinReferenceHours` hours; the hourly read did not.
+        let hr = hourHR(10, bpm: 60) + hourHR(11, bpm: 90)
+        let r = DaytimeStress.analyze(hr: hr, rr: [])
+        XCTAssertEqual(r.hours.count, 2, "the hours are still reported…")
+        XCTAssertTrue(r.scored.isEmpty, "…but two hours are no reference to deviate from")
+        XCTAssertFalse(r.hours.contains { $0.maskedForActivity },
+                       "unscored for want of a reference is .noData, not 'you were moving'")
+        XCTAssertEqual(r.highStressMinutes, 0, "nothing scored, nothing to bank")
+        XCTAssertNil(r.dayMean)
+        XCTAssertNil(r.peak)
+        XCTAssertFalse(r.sustainedHigh)
+    }
+
+    func testTwoHourReferenceIsDataIndependent() {
+        // WHY the gate is not merely conservative: with two values the median sits exactly between
+        // them, so each hour's deviation is IQR/2 while the spread is IQR/1.349 — z ≡ ±1.349 and the
+        // levels are pinned at 0.345 / 1.975 for ANY gap the σ clamp does not bind on (~8…~22 bpm).
+        // The number carried no information about the wearer. Scored through the reference directly,
+        // because the gate above now (correctly) stops `analyze` from ever reaching this.
+        for gap in [9.0, 14.0, 21.0] {
+            let ref = DaytimeStress.dayReference(hrMeans: [60, 60 + gap], rmssds: [])
+            let hi = DaytimeStress.dayRelativeSquash(
+                DaytimeStress.dayRelativeZ(hr: 60 + gap, rmssd: nil, ref: ref))
+            let lo = DaytimeStress.dayRelativeSquash(
+                DaytimeStress.dayRelativeZ(hr: 60, rmssd: nil, ref: ref))
+            XCTAssertEqual(hi, 1.97503, accuracy: 1e-4, "a \(gap) bpm gap scored like every other gap")
+            XCTAssertEqual(lo, 0.34455, accuracy: 1e-4)
+        }
+    }
+
+    func testFourReferenceHoursIsEnoughToScore() {
+        // The gate is a minimum, not a new silence: at exactly `liveMinReferenceHours` the day scores
+        // again, so this pins the boundary from both sides rather than only the refusing one.
+        var three: [HRSample] = []
+        for h in 8...10 { three += hourHR(h, bpm: 60 + h) }
+        XCTAssertTrue(DaytimeStress.analyze(hr: three, rr: []).scored.isEmpty)
+        let four = three + hourHR(11, bpm: 71)
+        XCTAssertEqual(DaytimeStress.analyze(hr: four, rr: []).scored.count,
+                       DaytimeStress.liveMinReferenceHours)
+    }
+
+    func testBaselineRelativeModeIsNotGatedOnTheDaysOwnHourCount() {
+        // The personal cross-day baseline IS the reference there, and the caller already gated it on
+        // `Baselines.usable`. A two-hour day must still score against it — the day-relative minimum
+        // must not leak into the other mode.
+        let hrBaseline = Baselines.foldHistory(Array(repeating: 65.0, count: 20), cfg: Baselines.daytimeHRCfg)
+        let hr = hourHR(9, bpm: 80) + hourHR(14, bpm: 80)
+        let r = DaytimeStress.analyze(hr: hr, rr: [], mode: .baselineRelative(hr: hrBaseline, rmssd: nil))
+        XCTAssertEqual(r.scored.count, 2)
+    }
+
+    func testHighStressMinutesCreditOnlyTheMinutesActuallyCovered() {
+        // `minHourHRSamples` is a SAMPLE COUNT: 300 samples is five minutes at 1 Hz. Two days with
+        // byte-identical scored levels, one worn the whole hour and one worn five minutes of each —
+        // crediting a flat 60 made them indistinguishable, so five minutes of data spent an hour of
+        // the energy budget.
+        func day(n: Int) -> DaytimeStress.Result {
+            var hr: [HRSample] = []
+            for h in 8...15 { hr += hourHR(h, bpm: 60, n: n) }
+            hr += hourHR(16, bpm: 130, n: n)          // the one HIGH hour
+            return DaytimeStress.analyze(hr: hr, rr: [])
+        }
+        let thin = day(n: DaytimeStress.minHourHRSamples)          // five minutes an hour
+        let full = day(n: DaytimeStress.bucketSeconds)             // the whole hour
+        XCTAssertEqual(thin.scored.map(\.level), full.scored.map(\.level), "same levels, by construction")
+        XCTAssertEqual(full.hours.first { $0.hour == 16 }?.coveredMinutes, 60)
+        XCTAssertEqual(thin.hours.first { $0.hour == 16 }?.coveredMinutes, 5)
+        XCTAssertEqual(full.highStressMinutes, 60)
+        XCTAssertEqual(thin.highStressMinutes, 5,
+                       "a five-minute hour must not bank an hour of high-stress time")
+    }
+
+    func testStdUsesTheSampleDivisorItsGuardImplies() {
+        // ddof = 1, matching the `count > 1` guard and every other spread estimator in the tree
+        // (`HRVAnalyzer.sdnnRaw`, `Baselines.rollingMeanSD`, `ReadinessEngine.sampleSD`). The
+        // population divisor understated σ by 30 % at n = 2 and inflated every z built on it by 1.41×.
+        XCTAssertEqual(DaytimeStress.std([58, 62], mean: 60), 2.828427, accuracy: 1e-6)
+        XCTAssertEqual(DaytimeStress.std([58, 59, 62], mean: 59.0 + 2.0 / 3.0), 2.081666, accuracy: 1e-5)
+        XCTAssertEqual(DaytimeStress.std([60], mean: 60), 0, accuracy: 1e-12)
+        XCTAssertEqual(DaytimeStress.std([], mean: nil), 0, accuracy: 1e-12)
     }
 
     /// R-R for one hour with a controllable beat-to-beat jitter (drives RMSSD).
@@ -632,7 +724,8 @@ final class DaytimeStressTests: XCTestCase {
         XCTAssertFalse(r.sustainedHigh, "the trailing hour is calm, so sustained-high must not fire")
         let expectedHighHours = r.scored.filter { $0.level! >= DaytimeStress.highBandFloor }.count
         XCTAssertGreaterThan(expectedHighHours, 0, "the isolated morning spike should read as high band")
-        XCTAssertEqual(r.highStressMinutes, expectedHighHours * (DaytimeStress.bucketSeconds / 60))
+        // Per high hour, the minutes it actually carried heart rate (the fixture covers five of each).
+        XCTAssertEqual(r.highStressMinutes, expectedHighHours * 5)
         XCTAssertFalse(r.hrOnlyFallback, "day-relative mode never sets the baseline-relative fallback flag")
     }
 
@@ -706,7 +799,8 @@ final class DaytimeStressTests: XCTestCase {
 
         XCTAssertGreaterThan(r.highStressMinutes, 0)
         XCTAssertEqual(r.highStressMinutes,
-                      r.scored.filter { $0.level! >= DaytimeStress.highBandFloor }.count * (DaytimeStress.bucketSeconds / 60))
+                      r.scored.filter { $0.level! >= DaytimeStress.highBandFloor }
+                        .reduce(0) { $0 + $1.coveredMinutes })
         for p in r.scored { XCTAssertGreaterThanOrEqual(p.level!, DaytimeStress.highBandFloor) }
     }
 

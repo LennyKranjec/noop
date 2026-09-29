@@ -2295,6 +2295,16 @@ public enum SleepStager {
     /// estimate falls back to every non-wake window.
     static let respDeepMinWindows: Int = 5
 
+    /// Fewest measured NON-WAKE windows before the fallback pool may stand for the night's respiratory
+    /// rate. The deep pool has always been gated at `respDeepMinWindows`; the fallback pool was gated at
+    /// nothing but `isEmpty`, so ONE surviving 120 s window — six minutes of light sleep in which the
+    /// spectral estimator happened to find a prominent peak — became the night's reported respiratory
+    /// rate, and then fed the resp baseline the illness and readiness gates read. Held at the same bar as
+    /// the deep pool (~10 minutes of measured breathing): the pool is broader, not better, and a whole
+    /// night supplies well over a hundred of these windows, so this only ever abstains on a night that
+    /// genuinely measured almost nothing.
+    static let respNonWakeMinWindows: Int = 5
+
     /// #977: wall-clock seconds a beat-to-beat step may exceed its own RR before the series is treated
     /// as SPLICED there. `ts` is whole seconds, so a 1 s discrepancy is quantisation, not a gap; the
     /// blocks that prompted this were 30-45 s. PROVISIONAL, like `coveragePlausibleCeiling` - wide
@@ -2319,11 +2329,19 @@ public enum SleepStager {
             nonWake.append(contentsOf: other.nonWake)
         }
         /// The night's rate: the median over the DEEP windows when there are at least `respDeepMinWindows`
-        /// of them, else over every non-wake window; NaN when nothing was measured or the median falls
-        /// outside `respPlausibleRangeBpm`.
+        /// of them, else over every non-wake window when there are at least `respNonWakeMinWindows` of
+        /// those; NaN when NEITHER pool clears its minimum, or the median falls outside
+        /// `respPlausibleRangeBpm`. Both pools carry a minimum: a thin fallback pool is thin evidence, not
+        /// a licence to report the one window that survived.
         var rate: Double {
-            let pool = deep.count >= SleepStager.respDeepMinWindows ? deep : nonWake
-            if pool.isEmpty { return .nan }
+            let pool: [Double]
+            if deep.count >= SleepStager.respDeepMinWindows {
+                pool = deep
+            } else if nonWake.count >= SleepStager.respNonWakeMinWindows {
+                pool = nonWake
+            } else {
+                return .nan
+            }
             let m = HRVAnalyzer.median(pool)
             return SleepStager.respPlausibleRangeBpm.contains(m) ? m : .nan
         }
@@ -3197,7 +3215,16 @@ public enum SleepStager {
         // edge of a wear gap, or a dropout-driven sub-physiological dip, cannot become the night's
         // resting HR — that number is displayed, stored on the daily row, and fed to the baseline
         // later nights are scored against. If no bin qualifies, fall back to the lowest of ALL bin
-        // means (ungated), then the all-sample mean — preserving the never-null-on-data behaviour.
+        // means (ungated), then the all-sample mean.
+        //
+        // COVERAGE FLOOR under every tier. The two fallbacks used to be ungated entirely, so the only
+        // span that returned nil was a completely empty one: a 40-minute nap that kept three surviving HR
+        // samples yielded `Int(mean(of: 3))` as the night's resting HR — displayed, written to the daily
+        // row, and folded into the `resting_hr` baseline every later night is scored against. Three beats
+        // are not a resting heart rate; the honest answer is that this span does not have one. So NO tier
+        // may speak unless the span either produced one properly-gated bin or holds at least
+        // `rhrMinBinSamples` samples in total. (Where a gated bin exists, tier 1 wins anyway; the floor
+        // is what stands between the ungated tiers and a 3-sample span.)
         var gatedMeans: [Double] = []
         var allMeans: [Double] = []
         var t = start
@@ -3216,6 +3243,9 @@ public enum SleepStager {
             t += windowS
         } while t < end
         if let m = gatedMeans.min() { return Int(m.rounded()) }
+        // No bin qualified. The ungated tiers below may only speak on a span that at least holds
+        // `rhrMinBinSamples` samples; below that there is no resting HR here to report.
+        guard seg.count >= rhrMinBinSamples else { return nil }
         if let m = allMeans.min() { return Int(m.rounded()) }
         let all = Double(seg.reduce(0) { $0 + $1.bpm }) / Double(seg.count)
         return Int(all.rounded())
@@ -3237,17 +3267,36 @@ public enum SleepStager {
     /// A block whose mean is below this is a dropout artefact, not a heart rate.
     public static let rhrSleepMinPlausibleBpm: Double = 30
 
+    /// The HR block width (seconds) `sleepRHRBlocks` partitions a sleep span into. Named so the span floor
+    /// below and the partition it judges read the same number.
+    public static let rhrSleepBlockWindowS: Int = 5 * 60
+
+    /// Least fraction of a 5-min block its samples must SPAN before the block's mean may stand for those
+    /// five minutes.
+    ///
+    /// A sample COUNT alone cannot see coverage. `minN` scales down to half the night's typical block
+    /// count so a 30 s-cadence ring is judged against its own cadence, and on a night whose blocks hold
+    /// ~10 samples that collapses to the absolute floor — at which point five samples inside one second
+    /// of a 300-second block are indistinguishable from five spread across it, and two such blocks satisfy
+    /// `rhrDeepMinBlocks` and become the night's resting HR. Requiring the samples to span half the block
+    /// is a real fraction OF THE BLOCK and is cadence-independent: a 1 Hz block spans ~299 s and a 30 s
+    /// ring block ~270 s, both far above the bar, while a burst at a block's edge is excluded whatever its
+    /// count.
+    public static let rhrSleepBlockMinSpanFraction: Double = 0.5
+
     /// Fewest VALID blocks a deep pool (the last deep run, then all deep blocks) needs before it stands for the
     /// night's resting HR (S6). One 5-min block is a single noisy sample of a slow-wave period — the same reason
     /// `hrvDeepMinWindows` asks the HRV pools for two — so a one-block run falls through to the next rule.
     public static let rhrDeepMinBlocks: Int = 2
 
     /// One 5-min HR block of a session: its centre ts, the stage at that centre ("?" outside every segment),
-    /// the sample count and the mean bpm.
+    /// the sample count, the seconds its samples actually SPAN (first to last — the coverage a count cannot
+    /// express, see `rhrSleepBlockMinSpanFraction`) and the mean bpm.
     struct RHRBlock {
         let center: Int
         let stage: String
         let n: Int
+        let spanS: Int
         let mean: Double
     }
 
@@ -3256,7 +3305,7 @@ public enum SleepStager {
     static func sleepRHRBlocks(start: Int, end: Int, hr: [HRSample], stages: [StageSegment]) -> [RHRBlock] {
         let seg = hr.filter { $0.ts >= start && $0.ts <= end }
         guard !seg.isEmpty else { return [] }
-        let windowS = 5 * 60
+        let windowS = rhrSleepBlockWindowS
         var blocks: [RHRBlock] = []
         var t = start
         repeat {
@@ -3265,7 +3314,10 @@ public enum SleepStager {
             if !win.isEmpty {
                 let center = t + windowS / 2
                 let stage = stages.first { center >= $0.start && center < $0.end }?.stage ?? "?"
-                blocks.append(RHRBlock(center: center, stage: stage, n: win.count,
+                // `seg` is prefiltered but not assumed sorted, so take the real extremes.
+                let tsList = win.map { $0.ts }
+                let spanS = (tsList.max() ?? t) - (tsList.min() ?? t)
+                blocks.append(RHRBlock(center: center, stage: stage, n: win.count, spanS: spanS,
                                        mean: Double(win.reduce(0) { $0 + $1.bpm }) / Double(win.count)))
             }
             t += windowS
@@ -3275,13 +3327,15 @@ public enum SleepStager {
 
     /// The session's sleeping resting HR (bpm), or nil with no HR in `[start, end]`. Over 5-min blocks (the
     /// same closed-final-block partition as `sessionRestingHR`), each tagged with the stage at its CENTRE and
-    /// kept only when it clears the sample-count and plausibility bars above; wake blocks never count:
+    /// kept only when it clears the sample-count, SPAN-COVERAGE (`rhrSleepBlockMinSpanFraction`) and
+    /// plausibility bars above; wake blocks never count:
     ///   1. mean of the LAST contiguous deep run's blocks (WHOOP's last slow-wave period), when that run holds
     ///      at least `rhrDeepMinBlocks` valid blocks;
     ///   2. else the mean of ALL deep blocks (same minimum);
     ///   3. else the mean of the lowest quartile of non-wake block means in the LAST THIRD of the sleep span
     ///      (first → last non-wake segment) — the late-night trough deep sleep would have sat in;
-    ///   4. else the legacy floor (`sessionRestingHR`), so a night with HR never loses its resting HR.
+    ///   4. else the legacy floor (`sessionRestingHR`), which itself abstains on a span too thinly covered
+    ///      to have a resting HR at all — so this returns nil rather than a number off a handful of beats.
     /// `stages` empty (no hypnogram) skips 1–2 and treats every block as non-wake in 3. Pure. A one-fragment
     /// `nightSleepRestingHR`.
     static func sessionSleepRestingHR(start: Int, end: Int, hr: [HRSample], stages: [StageSegment]) -> Int? {
@@ -3301,8 +3355,14 @@ public enum SleepStager {
         guard !blocks.isEmpty else { return nil }
         let typical = HRVAnalyzer.median(blocks.map { Double($0.n) })
         let minN = max(rhrMinBinSamples, min(rhrSleepBlockMinSamples, Int(typical / 2)))
+        // Coverage floor beside the count floor. `minN` collapses to `rhrMinBinSamples` on any night whose
+        // typical block holds ~10 samples, and a count cannot tell five samples spread across the block
+        // from five inside one second of it — so a 5-minute "deep" block covered by 5 seconds of HR used to
+        // count as valid, and two of those satisfy `rhrDeepMinBlocks` and become the night's resting HR.
+        // The span bar is a real fraction OF THE BLOCK and holds at any cadence.
+        let minSpanS = Int((Double(rhrSleepBlockWindowS) * rhrSleepBlockMinSpanFraction).rounded())
         func valid(_ b: RHRBlock) -> Bool {
-            b.n >= minN && b.mean >= rhrSleepMinPlausibleBpm
+            b.n >= minN && b.spanS >= minSpanS && b.mean >= rhrSleepMinPlausibleBpm
         }
         func meanOf(_ xs: [Double]) -> Int? {
             xs.isEmpty ? nil : Int((xs.reduce(0, +) / Double(xs.count)).rounded())

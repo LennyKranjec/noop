@@ -194,27 +194,47 @@ extension WhoopStore {
     }
 
     /// Upsert Apple-Health daily aggregates. Natural key (deviceId, day). Returns rows changed.
+    ///
+    /// `coalesceNulls` decides what a NIL column means on a row that already exists.
+    ///
+    /// - `false` (the default, and what every file/export importer wants): a full replace. The caller
+    ///   parsed a complete dump, so a nil genuinely means "this export has no value here" and must
+    ///   clear a stale one.
+    /// - `true`: nil leaves the stored value alone (`COALESCE(excluded.x, x)`). This is for the LIVE
+    ///   HealthKit reader, where nil is ambiguous and mostly means the opposite. HealthKit never
+    ///   reveals read authorization and returns an EMPTY result rather than an error, so a declined,
+    ///   partially-granted or transiently-failing read is indistinguishable from a day with no
+    ///   samples — and a full replace turned that into NULL over the user's stored steps, calories,
+    ///   VO₂max and weight. Coalescing cannot fabricate: it only ever declines to erase.
+    ///
+    /// The cost of `true` is that a value DELETED in Health is not cleared here by the next sync. That
+    /// is the right side of the trade — the same policy the vitals/hydration paths already take — and
+    /// the "Remove imported data" action is the honest way to clear the source outright.
     @discardableResult
-    public func upsertAppleDaily(_ rows: [AppleDaily], deviceId: String) async throws -> Int {
-        try syncWrite { db in
+    public func upsertAppleDaily(_ rows: [AppleDaily], deviceId: String,
+                                 coalesceNulls: Bool = false) async throws -> Int {
+        // Built once, outside the row loop: the two forms differ only in this fragment.
+        func set(_ column: String) -> String {
+            coalesceNulls ? "\(column) = COALESCE(excluded.\(column), \(column))"
+                          : "\(column) = excluded.\(column)"
+        }
+        let updates = ["steps", "activeKcal", "basalKcal", "vo2max",
+                       "avgHr", "maxHr", "walkingHr", "weightKg"]
+            .map(set).joined(separator: ",\n                        ")
+        let sql = """
+            INSERT INTO appleDaily
+                (deviceId, day, steps, activeKcal, basalKcal, vo2max,
+                 avgHr, maxHr, walkingHr, weightKg)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(deviceId, day) DO UPDATE SET
+                \(updates)
+            """
+        return try syncWrite { db in
             var n = 0
             for r in rows {
-                try db.execute(sql: """
-                    INSERT INTO appleDaily
-                        (deviceId, day, steps, activeKcal, basalKcal, vo2max,
-                         avgHr, maxHr, walkingHr, weightKg)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(deviceId, day) DO UPDATE SET
-                        steps = excluded.steps,
-                        activeKcal = excluded.activeKcal,
-                        basalKcal = excluded.basalKcal,
-                        vo2max = excluded.vo2max,
-                        avgHr = excluded.avgHr,
-                        maxHr = excluded.maxHr,
-                        walkingHr = excluded.walkingHr,
-                        weightKg = excluded.weightKg
-                    """, arguments: [deviceId, r.day, r.steps, r.activeKcal, r.basalKcal, r.vo2max,
-                                     r.avgHr, r.maxHr, r.walkingHr, r.weightKg])
+                try db.execute(sql: sql,
+                               arguments: [deviceId, r.day, r.steps, r.activeKcal, r.basalKcal, r.vo2max,
+                                           r.avgHr, r.maxHr, r.walkingHr, r.weightKg])
                 n += db.changesCount
             }
             return n

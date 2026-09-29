@@ -489,6 +489,17 @@ public enum AnalyticsEngine {
                                   // measured night. Trace-only: never alters the DayResult. nil/default keeps
                                   // pure-function callers/tests byte-identical (still emits `measured`).
                                   sleepProvenance: SleepProvenance = .measured,
+                                  // How much of THIS day's night window NOOP actually holds: the distinct
+                                  // seconds carrying heart rate, and the length of the clock-derived window
+                                  // they are measured against (`NightCoverage` in the app target). Feeds
+                                  // `ScoreConfidence` for Rest and Charge ONLY — it never changes a score,
+                                  // and it is deliberately NOT derived from the detected sleep span, which
+                                  // comes from the very rows whose completeness is in question (a night that
+                                  // synced two hours yields a fully-covered two-hour session). nil (the
+                                  // default, every pure-function caller/test) = coverage unmeasured, and
+                                  // both guards fail OPEN on that.
+                                  nightCoveredSeconds: Int? = nil,
+                                  nightWindowSeconds: Int? = nil,
                                   // Sleep & Rest test-mode trace sink (zero-cost default nil = byte-identical).
                                   // When non-nil, the gate trace from detectSleep and the Rest sub-score line
                                   // are forwarded line-by-line. Side-effect-only; never alters the DayResult.
@@ -660,14 +671,22 @@ public enum AnalyticsEngine {
         //   + consistency 0.10. nil when there is no asleep time. The Charge "Rest
         //   quality" term reads it ÷100 (replacing raw efficiency).
         let hasStagedSleep = (deepS + remS) > 0
+        // Absent stages are passed as ABSENT, not as zero. An unstaged night used to be scored
+        // `restorativeSeconds: 0` with `deepSeconds: 0`, which zeroed the restorative sub-score AND
+        // halved it again through `deepFactor` — a ~17-point Rest deduction for missing information,
+        // which then propagated into Charge (its "Rest quality" term is Rest/100). `ScoreConfidence.rest`
+        // already marks such a night `.building`; that flag is the honest signal. `composite` drops the
+        // term and renormalises the remaining weights.
+        let restorativeSecondsScored: Double? = hasStagedSleep ? deepS + remS : nil
+        let deepSecondsScored: Double? = hasStagedSleep ? deepS : nil
         let restScore: Double? = tstS <= 0 ? nil : Rest.composite(
             tstSeconds: tstS,
             inBedSeconds: inBedS,
             efficiency: efficiency,
-            restorativeSeconds: deepS + remS,
+            restorativeSeconds: restorativeSecondsScored,
             needHours: sleepNeedHours,
             consistency: sleepConsistency,
-            deepSeconds: deepS)
+            deepSeconds: deepSecondsScored)
         // #345: gravity-sparse computed ONCE — reused by the sleep-motion trace below AND the Rest
         // confidence guard, so the two can never diverge and isGravitySparse runs only once per day.
         let gravitySparse = SleepStager.isGravitySparse(gravity, hr: hr)
@@ -679,8 +698,8 @@ public enum AnalyticsEngine {
             if restScore != nil {
                 traceSink(Rest.subScoreLine(
                     tstSeconds: tstS, inBedSeconds: inBedS, efficiency: efficiency,
-                    restorativeSeconds: deepS + remS, needHours: sleepNeedHours,
-                    consistency: sleepConsistency, deepSeconds: deepS,
+                    restorativeSeconds: restorativeSecondsScored, needHours: sleepNeedHours,
+                    consistency: sleepConsistency, deepSeconds: deepSecondsScored,
                     groupFragments: mainGroup.count, groupInBedSeconds: inBedS))
             }
             // #319: the motion-coverage + staging context behind the Rest number, so a high score on a poor
@@ -1179,7 +1198,12 @@ public enum AnalyticsEngine {
         }
 
         // ── Per-score confidence tiers ────────────────────────────────────────
-        let chargeConfidence = ScoreConfidence.charge(recovery: recovery, hrvBaseline: baselines.hrv)
+        // How much of the NIGHT arrived, measured against a clock-derived window by the caller. nil keeps
+        // every pure-function caller byte-identical and both guards below fail open.
+        let nightCoverage = ScoreConfidence.nightCoverageFraction(coveredSeconds: nightCoveredSeconds,
+                                                                  windowSeconds: nightWindowSeconds)
+        let chargeConfidence = ScoreConfidence.charge(recovery: recovery, hrvBaseline: baselines.hrv,
+                                                      nightCoverage: nightCoverage)
         let effortConfidence = ScoreConfidence.effort(strain: strain, hrSampleCount: hr.count)
         // Rest confidence with H9: downgrade a high-efficiency night whose deep+REM share is implausibly low
         // to low-confidence (likely staging miss) — honest, no faked stages. tstS/efficiency are the
@@ -1190,7 +1214,8 @@ public enum AnalyticsEngine {
                                                   hasStagedSleep: hasStagedSleep,
                                                   asleepSeconds: tstS, restorativeSeconds: deepS + remS,
                                                   efficiency: efficiency, gravitySparse: gravitySparse,
-                                                  stageCoverage: stageCoverage)
+                                                  stageCoverage: stageCoverage,
+                                                  nightCoverage: nightCoverage)
 
         return DayResult(daily: daily, sleepSessions: matched, cachedSleep: cachedSleep,
                          workouts: workouts, recovery: recovery, strain: strain,
@@ -1217,7 +1242,8 @@ public enum AnalyticsEngine {
     ///   - restorative share (0.20): (deep + REM) ÷ asleep, clamped to a 0.50 target
     ///     (≈50% deep+REM is "full marks"; healthy adults sit ~40–50%).
     ///   - consistency (0.10): sleep/wake regularity in [0,1]; a single day carries no
-    ///     regularity signal, so the caller supplies it from history — nil → neutral 0.5.
+    ///     regularity signal, so the caller supplies it from history — nil → the term is DROPPED and
+    ///     the remaining weights renormalise (it used to be scored at a substituted neutral 0.5).
     /// All sub-scores clamp to [0,1]; the weighted sum scales to [0,100]. Kept
     /// dependency-free + constant-explicit so the Kotlin mirror is byte-identical.
     ///
@@ -1227,8 +1253,12 @@ public enum AnalyticsEngine {
     /// a gentle deep-adequacy factor: full credit once deep ≥ `deepShareTarget` (~13% of asleep is the
     /// healthy floor), ramping to `deepFloorFactor` (0.5 — never zeroed) as deep → 0. So a near-zero-deep
     /// night loses up to half the 0.20 restorative term (~10 pts) — honest, not tanking, no fabricated
-    /// stages. Deep unknown (`deepSeconds == nil`, e.g. an imported night with only a pooled total) →
-    /// factor 1.0, identical to the prior pooled behaviour.
+    /// stages. Deep unknown (`deepSeconds == nil`) → factor 1.0.
+    ///
+    /// Since the absent-input fix, an UNSTAGED night (no deep/REM split at all) does not reach this factor:
+    /// it passes nil for the restorative total too, and `composite` drops that whole term and renormalises
+    /// instead of scoring 0 and then halving it. The factor-1.0 path is for a caller that has a restorative
+    /// total but no deep split of it.
     public enum Rest {
         /// Default personal sleep need (hours) before the caller refines it.
         public static let defaultNeedHours: Double = 8.0
@@ -1240,7 +1270,11 @@ public enum AnalyticsEngine {
         /// The most the restorative term is scaled down by when deep is ~absent — half, never zero,
         /// so a low-deep night reads honestly without the whole night tanking.
         public static let deepFloorFactor: Double = 0.5
-        /// Neutral consistency when the caller supplies no regularity signal.
+        /// NO LONGER APPLIED by `composite`, and deliberately kept rather than deleted: it is the value
+        /// that used to be substituted when the caller supplied no regularity signal, and it is what a
+        /// reader comparing against an older persisted `sleep_performance` row (or the Kotlin mirror
+        /// before it follows) needs in order to reproduce that row. An absent consistency now drops the
+        /// term and renormalises — see `composite`. Nothing in this file reads this constant.
         public static let neutralConsistency: Double = 0.5
 
         public static let wDuration: Double = 0.50
@@ -1289,12 +1323,28 @@ public enum AnalyticsEngine {
         }
 
         /// Build the composite. `tstSeconds` = total sleep time, `restorativeSeconds` = deep+REM
-        /// seconds, `deepSeconds` = deep-stage seconds (nil → no deep-adequacy adjustment, pooled
-        /// behaviour). Returns a value in [0,100].
+        /// seconds (nil = UNSTAGED night, the restorative term is DROPPED and the remaining weights
+        /// renormalise — never a fabricated zero), `deepSeconds` = deep-stage seconds (nil → no
+        /// deep-adequacy adjustment). Returns a value in [0,100].
+        ///
+        /// ABSENT-INPUT RENORMALISATION (the honesty rule). A term whose input the night does not carry
+        /// is not scored zero and not scored at a substituted "neutral" value: it is removed from the sum
+        /// AND from the divisor, so the night is graded on what was actually measured. Two inputs can be
+        /// absent:
+        ///   - `restorativeSeconds == nil` — an unstaged night (motion too sparse to split deep/REM, or an
+        ///     imported total with no breakdown). Scoring it 0 with `deepFactor` 0.5 cost such a night up
+        ///     to 20 Rest points for missing INFORMATION, and then propagated into Charge, whose "Rest
+        ///     quality" term is Rest/100. `ScoreConfidence.rest` already reports the night as `.building`;
+        ///     that is the honest signal, not a deduction.
+        ///   - `consistency == nil` — fewer than the regularity helper's minimum nights. The old neutral
+        ///     0.5 handed 10% of the score a made-up value, so a perfect first night could only reach 95.
+        /// A term with a REAL zero (`restorativeSeconds: 0` on a genuinely staged night with no deep/REM,
+        /// `consistency: 0` for a measured-irregular sleeper) still scores zero and still counts in the
+        /// divisor. Absent and zero are different answers.
         public static func composite(tstSeconds: Double,
                                      inBedSeconds: Double,
                                      efficiency: Double,
-                                     restorativeSeconds: Double,
+                                     restorativeSeconds: Double?,
                                      needHours: Double,
                                      consistency: Double?,
                                      deepSeconds: Double? = nil) -> Double {
@@ -1304,23 +1354,41 @@ public enum AnalyticsEngine {
             let durationScore = clamp01(tstSeconds / needSeconds)
             let efficiencyScore = clamp01(efficiency)
             // Deep-adequacy factor in [deepFloorFactor, 1]: 1.0 once deep ≥ target share, ramping
-            // down to the floor as deep → 0. nil deep (unknown split) ⇒ 1.0 (no adjustment).
+            // down to the floor as deep → 0. nil deep (unknown split) ⇒ 1.0 (no adjustment) — the
+            // documented path an unstaged night now actually takes, since it passes nil for both.
             let deepFactor: Double = {
                 guard let deep = deepSeconds, tstSeconds > 0, deepShareTarget > 0 else { return 1.0 }
                 let adequacy = clamp01((deep / tstSeconds) / deepShareTarget)
                 return deepFloorFactor + (1.0 - deepFloorFactor) * adequacy
             }()
-            let restorativeScore = tstSeconds > 0
-                ? clamp01((restorativeSeconds / tstSeconds) / restorativeTarget) * deepFactor
-                : 0.0
-            let consistencyScore = clamp01(consistency ?? neutralConsistency)
+            let restorativeScore: Double? = restorativeSeconds.map { (rs: Double) -> Double in
+                tstSeconds > 0 ? clamp01((rs / tstSeconds) / restorativeTarget) * deepFactor : 0.0
+            }
+            let consistencyScore: Double? = consistency.map(clamp01)
 
-            let weighted = wDuration * durationScore
-                + wEfficiency * efficiencyScore
-                + wRestorative * restorativeScore
-                + wConsistency * consistencyScore
-            // weighted is in [0,1] (weights sum to 1). Scale to [0,100] and round to 2dp.
-            return (weighted * 10000.0).rounded() / 100.0
+            // Present terms only, in both the numerator and the divisor.
+            var weighted = wDuration * durationScore + wEfficiency * efficiencyScore
+            var weightSum = wDuration + wEfficiency
+            if let r = restorativeScore {
+                weighted += wRestorative * r
+                weightSum += wRestorative
+            }
+            if let c = consistencyScore {
+                weighted += wConsistency * c
+                weightSum += wConsistency
+            }
+            // Duration + efficiency always run, so weightSum ≥ 0.70 and the divide is safe.
+            let normalised = weightSum > 0 ? weighted / weightSum : 0.0
+            // `normalised` is in [0,1]. Scale to [0,100] and round to 2dp.
+            return (normalised * 10000.0).rounded() / 100.0
+        }
+
+        /// The weights actually scored, given which inputs the night carries. The divisor
+        /// `composite` renormalises by; exposed so the trace can state it. Pure.
+        public static func weightSum(hasRestorative: Bool, hasConsistency: Bool) -> Double {
+            wDuration + wEfficiency
+                + (hasRestorative ? wRestorative : 0)
+                + (hasConsistency ? wConsistency : 0)
         }
 
         /// Rest composite [0,100] derived from a persisted `DailyMetric` (the pass-2 / display path —
@@ -1331,8 +1399,16 @@ public enum AnalyticsEngine {
                                      consistency: Double? = nil) -> Double? {
             guard let tstMin = d.totalSleepMin, tstMin > 0, let eff = d.efficiency else { return nil }
             let tstSec = tstMin * 60.0
-            let deepSec = (d.deepMin ?? 0) * 60.0
-            let restorativeSec = (d.deepMin ?? 0) * 60.0 + (d.remMin ?? 0) * 60.0
+            // The `?? 0` that used to stand here turned an ABSENT stage split into a measured zero on the
+            // display/pass-2 path, exactly as the engine path did (see `composite`'s renormalisation note):
+            // an unstaged night scored 0 restorative AND took the 0.5 deepFactor. Both stages are required
+            // for a restorative figure — the same rule `RestComponents.restorativeMin` already applies, so
+            // the charted component and the score it explains cannot disagree.
+            let deepSec: Double? = d.deepMin.map { (m: Double) -> Double in m * 60.0 }
+            let restorativeSec: Double? = {
+                guard let deep = d.deepMin, let rem = d.remMin else { return nil }
+                return (deep + rem) * 60.0
+            }()
             return composite(tstSeconds: tstSec, inBedSeconds: tstSec / max(eff, 0.01),
                              efficiency: eff, restorativeSeconds: restorativeSec,
                              needHours: needHours, consistency: consistency,

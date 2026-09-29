@@ -882,3 +882,90 @@ extension WhoopStore {
         }
     }
 }
+
+/// The SECONDS a stream actually covered in a window, plus how many underlying rows produced them.
+///
+/// Two different questions, and a night that answers one well can answer the other badly:
+///   * `samples` is the row count. It is what "we synced 14,000 R-R intervals" means, and it says
+///     nothing about WHEN they landed - a burst of beats inside twenty minutes counts the same as an
+///     even spread over eight hours.
+///   * `seconds` is the DISTINCT second-of-capture list, ascending. It is the only thing that can answer
+///     "which parts of the night do we actually hold", which is the question sleep staging and every
+///     nightly metric silently assume the answer to.
+///
+/// Returned raw (rather than pre-reduced to a fraction) so the arithmetic that judges it stays pure and
+/// testable outside the store - see `NightCoverage`. A night window is at most ~130k entries at 1 Hz,
+/// which is the same order as the row read the sleep engine already performs for that window.
+public struct StreamSeconds: Sendable, Equatable {
+    /// Distinct capture seconds, ASCENDING and de-duplicated. Empty when nothing was persisted.
+    public let seconds: [Int]
+    /// Underlying rows. Equals `seconds.count` for the 1-row-per-second streams (HR), and is larger for
+    /// R-R, where one second legitimately carries several beats.
+    public let samples: Int
+    /// True when the read hit `limit` and so cannot describe the whole window. A coverage figure taken
+    /// from a truncated read would UNDERSTATE the gap at the end of the night, which is exactly the
+    /// direction that turns a diagnostic into a lie, so callers must say "unknown" rather than report it.
+    public let truncated: Bool
+
+    public init(seconds: [Int], samples: Int, truncated: Bool) {
+        self.seconds = seconds
+        self.samples = samples
+        self.truncated = truncated
+    }
+}
+
+extension WhoopStore {
+
+    /// Default cap for the coverage reads. 36 h of 1 Hz seconds with headroom: a night window cannot
+    /// reach it, so `truncated` only ever fires if a caller asks for a much wider span.
+    public static let coverageSecondsCap = 200_000
+
+    /// Distinct seconds of HEART RATE in `[from, to]`, over the SAME union `hrSamples` reads.
+    ///
+    /// The union (not `hrSample` alone) because a WHOOP 4.0 v25 night and a WHOOP 5 v26 night store no
+    /// per-second measured HR at all - their heart rate is PPG-derived and lands in `ppgHrSample` - so a
+    /// coverage figure taken off one table would report a fully-synced night of that firmware as empty.
+    /// `UNION` (not `UNION ALL`) de-duplicates a second present in both, which is what makes the result a
+    /// second list rather than a row list; `samples` is counted separately so the two facts stay apart.
+    public func hrCoverageSeconds(deviceId: String, from: Int, to: Int,
+                                  limit: Int = WhoopStore.coverageSecondsCap) async throws -> StreamSeconds {
+        try syncRead { db in
+            let seconds = try Int.fetchAll(db, sql: """
+                SELECT ts FROM (
+                    SELECT ts FROM hrSample WHERE deviceId = ? AND ts >= ? AND ts <= ?
+                    UNION
+                    SELECT ts FROM ppgHrSample WHERE deviceId = ? AND ts >= ? AND ts <= ?
+                )
+                ORDER BY ts ASC LIMIT ?
+                """, arguments: [deviceId, from, to, deviceId, from, to, limit])
+            // Rows, not seconds: for HR the two agree by the (deviceId, ts) key, and saying so costs one
+            // indexed count rather than assuming a primary key this read does not enforce.
+            let rows = try Int.fetchOne(db, sql: """
+                SELECT (SELECT COUNT(*) FROM hrSample WHERE deviceId = ? AND ts >= ? AND ts <= ?)
+                     + (SELECT COUNT(*) FROM ppgHrSample WHERE deviceId = ? AND ts >= ? AND ts <= ?)
+                """, arguments: [deviceId, from, to, deviceId, from, to]) ?? 0
+            return StreamSeconds(seconds: seconds, samples: rows, truncated: seconds.count >= limit)
+        }
+    }
+
+    /// Distinct seconds carrying at least one R-R interval in `[from, to]`, plus the interval count.
+    ///
+    /// R-R is the stream the nightly HRV reads, and it is the one where row count and coverage diverge
+    /// hardest: a resting night emits roughly one beat per second, but the strap banks them in per-record
+    /// bursts, so "14,000 intervals" is compatible both with an evenly covered night and with a handful of
+    /// densely packed minutes. Only the second list separates them.
+    public func rrCoverageSeconds(deviceId: String, from: Int, to: Int,
+                                  limit: Int = WhoopStore.coverageSecondsCap) async throws -> StreamSeconds {
+        try syncRead { db in
+            let seconds = try Int.fetchAll(db, sql: """
+                SELECT DISTINCT ts FROM rrInterval
+                WHERE deviceId = ? AND ts >= ? AND ts <= ?
+                ORDER BY ts ASC LIMIT ?
+                """, arguments: [deviceId, from, to, limit])
+            let rows = try Int.fetchOne(db, sql: """
+                SELECT COUNT(*) FROM rrInterval WHERE deviceId = ? AND ts >= ? AND ts <= ?
+                """, arguments: [deviceId, from, to]) ?? 0
+            return StreamSeconds(seconds: seconds, samples: rows, truncated: seconds.count >= limit)
+        }
+    }
+}

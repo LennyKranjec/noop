@@ -66,8 +66,26 @@ final class VitalityEngineTests: XCTestCase {
 
     func testSleepConsistency() {
         XCTAssertEqual(VitalityEngine.sleepConsistency(nightlyHours: [7, 7, 7, 7])!, 1.0, accuracy: 1e-9)
-        XCTAssertEqual(VitalityEngine.sleepConsistency(nightlyHours: [6, 8, 6, 8])!, 0.857, accuracy: 0.005)
+        // SAMPLE divisor (n-1): sd 1.1547 over mean 7 → cv 0.16496 → 0.835. It read 0.857 under the
+        // population divisor, which understates the spread of a handful of nights.
+        XCTAssertEqual(VitalityEngine.sleepConsistency(nightlyHours: [6, 8, 6, 8])!, 0.835, accuracy: 0.005)
         XCTAssertNil(VitalityEngine.sleepConsistency(nightlyHours: [7, 7]))   // < 3 nights
+    }
+
+    /// These nights are a SAMPLE of a sleeper's habit, never the whole population of their nights, so the
+    /// spread uses the n-1 divisor. Dividing by n biases the spread downward — hardest at the 3-night floor
+    /// this helper is first allowed to speak on, where it understates the standard deviation by ~18%, and
+    /// that flattery was then worth 10% of the Rest score.
+    func testSleepConsistencyUsesTheSampleDivisorAtTheThreeNightFloor() throws {
+        let three = try XCTUnwrap(VitalityEngine.sleepConsistency(nightlyHours: [7, 8, 9]))
+        XCTAssertEqual(three, 0.875, accuracy: 1e-6)          // sample: sd 1.0 / mean 8
+        let populationWouldRead = 1 - (2.0 / 3.0).squareRoot() / 8.0
+        XCTAssertLessThan(three, populationWouldRead,
+                          "the population divisor read this 3-night history as more regular than it is")
+        // The abstain floor is stated once and is what every consumer drops the term on.
+        XCTAssertEqual(VitalityEngine.sleepConsistencyMinNights, 3)
+        XCTAssertNil(VitalityEngine.sleepConsistency(
+            nightlyHours: Array(repeating: 7.0, count: VitalityEngine.sleepConsistencyMinNights - 1)))
     }
 
     /// Contributions carry the right sign: a low resting HR is protective (negative), a high one ages you.

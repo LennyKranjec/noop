@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import UserNotifications
 import StrandDesign
 
 /// Notifications — choose which Mac apps tap your wrist, and how.
@@ -8,6 +9,17 @@ struct NotificationSettingsView: View {
     @EnvironmentObject var model: AppModel
     @EnvironmentObject var live: LiveState
     @StateObject private var store = NotificationSettingsStore()
+
+    /// WHAT THE OS WILL DELIVER. This screen had no `authorizationStatus` reference anywhere, so its
+    /// master switch could sit ON — restored from a backup, or granted once and revoked in System
+    /// Settings since — against an OS that will deliver nothing, with the switch as the only evidence.
+    /// `notif.masterEnabled` is not a local preference either: it is the same key `AppModel.postWristAlert`
+    /// and the `SedentaryDetector` gate their LOCAL NOTIFICATIONS on, so a denied OS silences those too.
+    ///
+    /// nil = not read back yet, which is drawn as nothing rather than as either answer. Reading never
+    /// prompts; the one path that can prompt is the button below, and only while nobody has decided.
+    @State private var notifStatus: UNAuthorizationStatus?
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ScreenScaffold(title: "Notifications",
@@ -33,6 +45,54 @@ struct NotificationSettingsView: View {
                 behaviourCard
                     .staggeredAppear(index: store.activeCategories.count + 1)
             }
+        }
+        // Read on appearance and on every return to the front — which is how the user comes back from
+        // System Settings. Free, and never prompts.
+        .task { notifStatus = await NotificationPermission.status() }
+        .onChangeCompat(of: scenePhase) { phase in
+            guard phase == .active else { return }
+            Task { notifStatus = await NotificationPermission.status() }
+        }
+    }
+
+    /// The OS's answer, shown only when it is both KNOWN and bad, and only while the master switch claims
+    /// these alerts are on. The two bad cases recover differently: `.notDetermined` can still be asked,
+    /// `.denied` can only be sent to System Settings — and an "Allow" button that silently does nothing
+    /// against a denied status is exactly the dead end this is here to stop.
+    @ViewBuilder private var permissionNote: some View {
+        if let notifStatus, store.masterEnabled, !NotificationPermission.delivers(notifStatus) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(StrandPalette.statusWarning)
+                    .font(.system(size: 13))
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 8) {
+                    if notifStatus == .notDetermined {
+                        Text("Wrist alerts are on, but NOOP has never been granted notification permission on this Mac — so the alerts it posts won't be delivered.")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Allow notifications") {
+                            // The one path here that may raise the system dialog, and only from this tap.
+                            // Re-reads afterwards, so a dismissed dialog leaves the warning up.
+                            Task { self.notifStatus = await NotificationPermission.requestFromUserAction() }
+                        }
+                        .buttonStyle(NoopButtonStyle(.secondary))
+                    } else {
+                        Text("Wrist alerts are on, but notifications are turned off for NOOP in System Settings, so nothing NOOP posts will be delivered. macOS only asks once, so this is the only way back on.")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Open System Settings") { NotificationPermission.openSettings() }
+                            .buttonStyle(NoopButtonStyle(.secondary))
+                    }
+                }
+            }
+            .padding(NoopMetrics.space3)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(NoopPanelSurface(tint: StrandPalette.statusWarning, cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .stroke(StrandPalette.statusWarning.opacity(0.22), lineWidth: 1))
         }
     }
 
@@ -67,6 +127,7 @@ struct NotificationSettingsView: View {
                     .accessibilityHint(live.bonded ? "Fires a test buzz on your strap" : "Connect your strap to enable")
                 }
 
+                permissionNote
                 deliveryNote
             }
         }

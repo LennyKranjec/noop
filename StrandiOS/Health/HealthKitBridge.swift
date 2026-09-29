@@ -45,10 +45,11 @@ final class HealthKitBridge: ObservableObject {
     /// practice several observers wake within moments of each other every hour. Each wake used to run a
     /// FULL sync: ~15 HealthKit aggregate queries plus a write-back, no matter which type woke it.
     ///
-    /// Scoping the queries to the woken type is NOT an option: the rows are upserted with
-    /// `ON CONFLICT DO UPDATE SET x = excluded.x` on every column, a full replace, so a sync that skipped
-    /// a query would write NULL over that day's stored value and wipe it. Coalescing is safe instead
-    /// because it changes nothing about what a sync reads — it only declines to repeat one.
+    /// Scoping the queries to the woken type is still not worth it, though the reason has narrowed: the
+    /// read-side upserts now COALESCE (`upsertAppleDaily(coalesceNulls:)`, and the `dailyMetric` fold in
+    /// `sync`), so a skipped query no longer writes NULL over that day's stored value — but a partial
+    /// sync would still leave the other types stale for the hour. Coalescing whole passes is the better
+    /// trade because it changes nothing about what a sync reads — it only declines to repeat one.
     ///
     /// Skipping is lossless: `sync` re-reads AGGREGATES for a window, so a sync that already covered this
     /// wake's days has ingested its samples. The anchor exists only to name the window (see
@@ -60,6 +61,38 @@ final class HealthKitBridge: ObservableObject {
     /// The most recent failure surfaced by `sync` / `writeBack`. Cleared on a successful run. UI binds
     /// here so an Apple Health auth revoke, quota hit, or invalid sample is visible instead of silent.
     @Published private(set) var lastError: String?
+
+    /// How many values the last COMPLETED two-way sync READ out of Apple Health (one per day per
+    /// metric key, sleep and body composition included). Nil until the first completed sync.
+    ///
+    /// This exists because HealthKit gives the app NO way to ask whether it may read: a declined
+    /// category, a partially-granted grant and a genuinely empty window all come back as an empty
+    /// result. So "did anything at all come back" is the only honest evidence the app has, and it is
+    /// the difference between "Connected" and "connected, and reading nothing".
+    @Published private(set) var lastSyncReadValues: Int?
+
+    /// Whether every read QUERY of the last completed sync returned without an error (as opposed to
+    /// returning nothing). False means at least one query genuinely failed — which, unlike an empty
+    /// result, is never allowed to reach the store as a value.
+    @Published private(set) var lastSyncAllReadsSucceeded = true
+
+    /// An honest, user-facing read-side status, or nil when reads look fine.
+    ///
+    /// Deliberately NOT folded into `lastError`: nothing failed, the sync succeeded, and the write-back
+    /// may well be working. What is wrong is that the app is authorized to WRITE and is reading
+    /// nothing — the state a reinstall leaves behind (`refreshAuthIfPreviouslyGranted` infers
+    /// `.authorized` from write status alone, which says nothing about reads), and the state a user
+    /// who granted writes but declined reads has always been in.
+    var readAccessWarning: String? {
+        guard auth == .authorized, let read = lastSyncReadValues else { return nil }
+        if read == 0 {
+            return String(localized: "Apple Health is connected for writing, but the last sync read nothing back. Check Settings → Health → Data Access & Devices → NOOP and turn on the categories you want NOOP to read.")
+        }
+        if !lastSyncAllReadsSucceeded {
+            return String(localized: "Some Apple Health reads failed on the last sync. Those values were left as they were rather than cleared; the next sync retries them.")
+        }
+        return nil
+    }
 
     private let store = HKHealthStore()
     private let repo: Repository
@@ -490,50 +523,50 @@ final class HealthKitBridge: ObservableObject {
         func agg(_ day: String) -> DayAgg { byDay[day] ?? DayAgg() }
 
         // Quantity aggregates per day.
-        await collect(.restingHeartRate, unit: HKUnit.count().unitDivided(by: .minute()), start: start, end: end, op: .discreteAverage) { day, v in
+        let restingHrReadOk = await collect(.restingHeartRate, unit: HKUnit.count().unitDivided(by: .minute()), start: start, end: end, op: .discreteAverage) { day, v in
             var a = agg(day); a.restingHr = v; byDay[day] = a
         }
-        await collect(.heartRate, unit: HKUnit.count().unitDivided(by: .minute()), start: start, end: end, op: .discreteAverage) { day, v in
+        let avgHrReadOk = await collect(.heartRate, unit: HKUnit.count().unitDivided(by: .minute()), start: start, end: end, op: .discreteAverage) { day, v in
             var a = agg(day); a.avgHr = v; byDay[day] = a
         }
-        await collect(.heartRate, unit: HKUnit.count().unitDivided(by: .minute()), start: start, end: end, op: .discreteMax) { day, v in
+        let maxHrReadOk = await collect(.heartRate, unit: HKUnit.count().unitDivided(by: .minute()), start: start, end: end, op: .discreteMax) { day, v in
             var a = agg(day); a.maxHr = v; byDay[day] = a
         }
-        await collect(.heartRateVariabilitySDNN, unit: .secondUnit(with: .milli), start: start, end: end, op: .discreteAverage) { day, v in
+        let hrvReadOk = await collect(.heartRateVariabilitySDNN, unit: .secondUnit(with: .milli), start: start, end: end, op: .discreteAverage) { day, v in
             var a = agg(day); a.hrv = v; byDay[day] = a
         }
-        await collect(.oxygenSaturation, unit: .percent(), start: start, end: end, op: .discreteAverage) { day, v in
+        let spo2ReadOk = await collect(.oxygenSaturation, unit: .percent(), start: start, end: end, op: .discreteAverage) { day, v in
             var a = agg(day); a.spo2 = v * 100; byDay[day] = a   // 0…1 → percent
         }
-        await collect(.respiratoryRate, unit: HKUnit.count().unitDivided(by: .minute()), start: start, end: end, op: .discreteAverage) { day, v in
+        let respReadOk = await collect(.respiratoryRate, unit: HKUnit.count().unitDivided(by: .minute()), start: start, end: end, op: .discreteAverage) { day, v in
             var a = agg(day); a.respRate = v; byDay[day] = a
         }
-        await collect(.stepCount, unit: .count(), start: start, end: end, op: .cumulativeSum) { day, v in
+        let stepsReadOk = await collect(.stepCount, unit: .count(), start: start, end: end, op: .cumulativeSum) { day, v in
             var a = agg(day); a.steps = v; byDay[day] = a
         }
-        await collect(.activeEnergyBurned, unit: .kilocalorie(), start: start, end: end, op: .cumulativeSum) { day, v in
+        let activeKcalReadOk = await collect(.activeEnergyBurned, unit: .kilocalorie(), start: start, end: end, op: .cumulativeSum) { day, v in
             var a = agg(day); a.activeKcal = v; byDay[day] = a
         }
-        await collect(.basalEnergyBurned, unit: .kilocalorie(), start: start, end: end, op: .cumulativeSum) { day, v in
+        let basalKcalReadOk = await collect(.basalEnergyBurned, unit: .kilocalorie(), start: start, end: end, op: .cumulativeSum) { day, v in
             var a = agg(day); a.basalKcal = v; byDay[day] = a
         }
-        await collect(.vo2Max, unit: HKUnit(from: "ml/kg*min"), start: start, end: end, op: .discreteAverage) { day, v in
+        let vo2maxReadOk = await collect(.vo2Max, unit: HKUnit(from: "ml/kg*min"), start: start, end: end, op: .discreteAverage) { day, v in
             var a = agg(day); a.vo2max = v; byDay[day] = a
         }
 
         // Body composition — READ-ONLY import under the apple-health source (#20). Weight, lean mass
         // and BMI are point-in-time readings, so take the latest-of-day; body-fat reads fine as a
         // daily average. Body-fat HealthKit gives a 0…1 fraction, scaled to percent like spo2 above.
-        await collect(.bodyMass, unit: .gramUnit(with: .kilo), start: start, end: end, op: .discreteMostRecent) { day, v in
+        let weightReadOk = await collect(.bodyMass, unit: .gramUnit(with: .kilo), start: start, end: end, op: .discreteMostRecent) { day, v in
             var a = agg(day); a.weightKg = v; byDay[day] = a
         }
-        await collect(.bodyFatPercentage, unit: .percent(), start: start, end: end, op: .discreteAverage) { day, v in
+        let bodyFatReadOk = await collect(.bodyFatPercentage, unit: .percent(), start: start, end: end, op: .discreteAverage) { day, v in
             var a = agg(day); a.bodyFatPct = v * 100; byDay[day] = a   // 0…1 → percent
         }
-        await collect(.leanBodyMass, unit: .gramUnit(with: .kilo), start: start, end: end, op: .discreteMostRecent) { day, v in
+        let leanMassReadOk = await collect(.leanBodyMass, unit: .gramUnit(with: .kilo), start: start, end: end, op: .discreteMostRecent) { day, v in
             var a = agg(day); a.leanMassKg = v; byDay[day] = a
         }
-        await collect(.bodyMassIndex, unit: .count(), start: start, end: end, op: .discreteMostRecent) { day, v in
+        let bmiReadOk = await collect(.bodyMassIndex, unit: .count(), start: start, end: end, op: .discreteMostRecent) { day, v in
             var a = agg(day); a.bmi = v; byDay[day] = a
         }
 
@@ -556,20 +589,57 @@ final class HealthKitBridge: ObservableObject {
             byDay[day] = a
         }
 
+        // WHICH READS ACTUALLY WORKED. HealthKit never reveals READ authorization and answers a
+        // declined or partially-granted read with an EMPTY result rather than an error, so `false`
+        // here is a query that outright failed and an empty `true` is still indistinguishable from a
+        // genuinely sample-less window. NEITHER may be written into the store as a value: the rows
+        // below used to be upserted with `x = excluded.x` on every column, so one failing read nulled
+        // that day's stored steps / resting HR / HRV / calories / VO₂max / weight. Water already got
+        // this right (`waterReadOk` above) and so did the hourly step backfill; this is the rest of it.
+        let allReadsOk = restingHrReadOk && avgHrReadOk && maxHrReadOk && hrvReadOk && spo2ReadOk
+            && respReadOk && stepsReadOk && activeKcalReadOk && basalKcalReadOk && vo2maxReadOk
+            && weightReadOk && bodyFatReadOk && leanMassReadOk && bmiReadOk && waterReadOk
+
         // Build + upsert the store rows under the apple-health source.
+        //
+        // `coalesceNulls: true` — a nil column leaves the stored value alone instead of erasing it.
+        // See `WhoopStore.upsertAppleDaily`: the live reader is exactly the caller for which a nil is
+        // ambiguous, unlike the file importers (which parse a complete dump and default to replace).
         let appleRows = byDay.map { (day, a) in
             AppleDaily(day: day, steps: a.steps.map { Int($0) },
                        activeKcal: a.activeKcal, basalKcal: a.basalKcal, vo2max: a.vo2max,
                        avgHr: a.avgHr.map { Int($0.rounded()) }, maxHr: a.maxHr.map { Int($0.rounded()) },
                        walkingHr: nil, weightKg: a.weightKg)
         }
-        let dmRows = byDay.map { (day, a) in
-            DailyMetric(day: day, totalSleepMin: a.asleepMin, efficiency: nil,
-                        deepMin: a.deepMin, remMin: a.remMin, lightMin: a.coreMin, disturbances: nil,
-                        restingHr: a.restingHr.map { Int($0.rounded()) }, avgHrv: a.hrv,
-                        recovery: nil, strain: nil, exerciseCount: nil,
-                        spo2Pct: a.spo2, skinTempDevC: nil, respRateBpm: a.respRate,
-                        avgSdnn: a.hrv)   // Apple's HRV IS SDNN — mirror it into the SDNN field too
+        // `dailyMetric` has no coalescing upsert to reach for — `upsertDailyMetrics` is shared with the
+        // computed-score persistence path, where a full replace is the correct and required semantic —
+        // so the same protection is applied HERE, by folding this pass's values over the row already
+        // stored for that day under the apple-health source. A field this sync could not read keeps
+        // whatever the last sync that COULD read it stored. Never the other way round: a value read
+        // this pass always wins, so a real change still lands.
+        let storedByDay: [String: DailyMetric] = Dictionary(
+            uniqueKeysWithValues: ((try? await store.dailyMetrics(
+                deviceId: appleDeviceId,
+                from: HealthKitBridge.dayString(cal.startOfDay(for: start)),
+                to: HealthKitBridge.dayString(end))) ?? []).map { ($0.day, $0) })
+        let dmRows = byDay.map { (day, a) -> DailyMetric in
+            let prev = storedByDay[day]
+            let hrv = a.hrv ?? prev?.avgHrv
+            return DailyMetric(day: day, totalSleepMin: a.asleepMin ?? prev?.totalSleepMin,
+                        efficiency: prev?.efficiency,
+                        deepMin: a.deepMin ?? prev?.deepMin, remMin: a.remMin ?? prev?.remMin,
+                        lightMin: a.coreMin ?? prev?.lightMin, disturbances: prev?.disturbances,
+                        restingHr: a.restingHr.map { Int($0.rounded()) } ?? prev?.restingHr,
+                        avgHrv: hrv,
+                        recovery: prev?.recovery, strain: prev?.strain,
+                        exerciseCount: prev?.exerciseCount,
+                        spo2Pct: a.spo2 ?? prev?.spo2Pct, skinTempDevC: prev?.skinTempDevC,
+                        respRateBpm: a.respRate ?? prev?.respRateBpm,
+                        steps: prev?.steps, activeKcalEst: prev?.activeKcalEst,
+                        spo2Red: prev?.spo2Red, spo2Ir: prev?.spo2Ir,
+                        // Apple's HRV IS SDNN — mirror it into the SDNN field too.
+                        avgSdnn: hrv ?? prev?.avgSdnn,
+                        skinTempC: prev?.skinTempC, sleepHrOnly: prev?.sleepHrOnly)
         }
         // Flatten to the generic metricSeries the shared Apple Health screen, the Today apple-health
         // sparklines, and the Metric Explorer read from — repo.series(key:source:"apple-health")
@@ -616,7 +686,7 @@ final class HealthKitBridge: ObservableObject {
         // lastSync — a false "success", and the next delta sync skipped the window. (Reimplemented
         // from @vulnix0x4's PR #375.)
         do {
-            try await store.upsertAppleDaily(appleRows, deviceId: appleDeviceId)
+            try await store.upsertAppleDaily(appleRows, deviceId: appleDeviceId, coalesceNulls: true)
             try await store.upsertDailyMetrics(dmRows, deviceId: appleDeviceId)
             try await store.upsertMetricSeries(points, deviceId: appleDeviceId)
             if !workoutRows.isEmpty { try await store.upsertWorkouts(workoutRows, deviceId: appleDeviceId) }
@@ -680,6 +750,14 @@ final class HealthKitBridge: ObservableObject {
                 }
             }
             try await writeBack(whoopStore: store)
+            // WHAT THIS SYNC ACTUALLY READ (#7). `points` is the flattened per-day/per-key result of
+            // every quantity, body-composition and sleep read above, so its count IS the number of
+            // values this pass got back from HealthKit. Recorded even when it is zero — especially
+            // then: an authorized bridge that reads nothing is what a declined (or, after a reinstall,
+            // never-requested) READ grant looks like, and the app used to render that as a green
+            // "Connected" pill over empty tiles. `readAccessWarning` turns it into a sentence.
+            lastSyncReadValues = points.count
+            lastSyncAllReadsSucceeded = allReadsOk
             lastSync = Date()
             // Record the window alongside the time: an observer wake may only stand down for a sync that
             // actually covered ITS days (see `observerCoalesceWindow`). Set on the success path only.
@@ -818,6 +896,47 @@ final class HealthKitBridge: ObservableObject {
     /// written for another device, so the first pass after one rewrites everything, as before.
     private func writeFingerprint(_ kind: String) -> HealthWriteFingerprint {
         HealthWriteFingerprint(seed: ["noop-hk-write", "v1", kind, noopDeviceId, repo.deviceId])
+    }
+
+    /// Does Health still hold at least ONE sample of `type` written by us in `[from, to]`?
+    ///
+    /// The cheap existence probe behind `HealthWriteFingerprintStore.canSkip`. A stored fingerprint
+    /// only ever proved what the last pass WROTE, never what Health still HAS — so a user who deleted
+    /// NOOP's data from inside the Health app got it back only on re-authorization or after the #1503
+    /// sweep, because `clearAll()` is the only thing that ever invalidated one. One `limit: 1` query,
+    /// source-scoped exactly like the delete predicates, and it runs only when the fingerprint already
+    /// matched (i.e. on the passes that were about to do nothing anyway).
+    ///
+    /// Returns nil when nothing was learned — an unauthorized type, or a query error — so the caller
+    /// falls back to the stored fingerprint rather than rewriting on every pass.
+    private func healthHoldsOurSamples(of type: HKSampleType, from: Date, to: Date) async -> Bool? {
+        guard store.authorizationStatus(for: type) == .sharingAuthorized else { return nil }
+        let pred = NSCompoundPredicate(andPredicateWithSubpredicates: [
+            HKQuery.predicateForObjects(from: HKSource.default()),
+            HKQuery.predicateForSamples(withStart: from, end: to, options: []),
+        ])
+        return await withCheckedContinuation { (cont: CheckedContinuation<Bool?, Never>) in
+            let q = HKSampleQuery(sampleType: type, predicate: pred, limit: 1,
+                                  sortDescriptors: nil) { _, samples, error in
+                guard error == nil, let samples else { cont.resume(returning: nil); return }
+                cont.resume(returning: !samples.isEmpty)
+            }
+            store.execute(q)
+        }
+    }
+
+    /// Forget every Apple Health write fingerprint and the heart-rate cursor, so the NEXT write-back
+    /// rewrites all of NOOP's data into Health in full.
+    ///
+    /// The explicit "re-export to Health" escape hatch. The existence probe above catches the common
+    /// case (Health holds none of ours), but a PARTIAL deletion inside the Health app — one night, one
+    /// metric — leaves the probe satisfied and the fingerprint trusted. Rather than make every pass
+    /// verify content it just wrote, this gives the user a button. Safe to press at any time: the
+    /// write-back is delete-then-write per key, so a full rewrite converges on exactly the same
+    /// samples, it just costs one unnecessary pass.
+    func requestFullHealthRewrite() {
+        HealthWriteFingerprintStore.clearAll()
+        UserDefaults.standard.removeObject(forKey: hrWriteCursorKey)
     }
 
     /// UserDefaults key for the #1503 stranded-records sweep completion set. Stores the set of
@@ -975,25 +1094,44 @@ final class HealthKitBridge: ObservableObject {
             HealthWriteFingerprintStore.clear(.vitals)
             return
         }
-        // Unchanged since the last successful write: Health already holds exactly these samples.
-        if HealthWriteFingerprintStore.matches(.vitals, fingerprint) { return }
+        let grouped = Dictionary(grouping: candidates, by: { $0.type })
+        // Unchanged since the last successful write AND Health is observed to still hold our samples.
+        // The fingerprint alone was not enough: it says what we wrote, not what is still there, so a
+        // user who deleted NOOP's data inside the Health app never got it back (see `canSkip`). The
+        // probe runs on one representative type — they are written and deleted together, so an empty
+        // one means the batch is gone — and only on a pass that was about to skip anyway.
+        let probeSpan = candidates.map(\.sample.startDate)
+        if HealthWriteFingerprintStore.matches(.vitals, fingerprint),
+           let probeType = grouped.keys.sorted(by: { $0.identifier < $1.identifier }).first,
+           let from = probeSpan.min(), let to = probeSpan.max() {
+            let held = await healthHoldsOurSamples(of: probeType, from: from, to: to.addingTimeInterval(1))
+            if HealthWriteFingerprintStore.canSkip(.vitals, fingerprint, healthHasSamples: held) { return }
+        }
         HealthWriteFingerprintStore.clear(.vitals)
 
         // Delete any of OUR prior samples that carry the same metadata keys, then write the fresh
         // batch. Scoped to HKSource.default() so we never touch a sample written by another app
-        // that happens to use the same external UUID. Delete failures are non-fatal (e.g., nothing
-        // to delete on first run) — only the save throws.
+        // that happens to use the same external UUID. A delete FAILURE is not fatal to the save —
+        // there is routinely nothing to delete on a first run — but it IS fatal to the fingerprint:
+        // the old samples are still there, the save adds a second copy, and storing the fingerprint
+        // would tell every later pass there is nothing to reconcile, making the duplicates permanent.
+        // `writeWorkouts` has always gated on its `reconciled` flag; this is the same rule.
         let bySource = HKQuery.predicateForObjects(from: HKSource.default())
-        let grouped = Dictionary(grouping: candidates, by: { $0.type })
+        var reconciled = true
         for (type, items) in grouped {
             let keys = Array(Set(items.map { $0.key }))
             let byKey = HKQuery.predicateForObjects(withMetadataKey: HKMetadataKeyExternalUUID,
                                                     allowedValues: keys)
             let pred = NSCompoundPredicate(andPredicateWithSubpredicates: [bySource, byKey])
-            _ = try? await self.store.deleteObjects(of: type, predicate: pred)
+            do { _ = try await self.store.deleteObjects(of: type, predicate: pred) }
+            catch {
+                // `noDataAvailable` (HealthKit's "the predicate matched nothing") is a SUCCESSFUL
+                // reconciliation: there was nothing of ours to remove. Anything else is a real failure.
+                if (error as? HKError)?.code != .errorNoData { reconciled = false }
+            }
         }
         try await self.store.save(candidates.map { $0.sample })
-        HealthWriteFingerprintStore.store(.vitals, fingerprint)
+        HealthWriteFingerprintStore.storeIfReconciled(.vitals, fingerprint, reconciled: reconciled)
     }
 
     /// Write each BRIDGED NIGHT (#364) as one `.inBed` sample plus one category sample per stage
@@ -1068,16 +1206,27 @@ final class HealthKitBridge: ObservableObject {
             return
         }
         for key in keys { fingerprint.add(key) }
-        // Unchanged since the last successful write: Health already holds exactly these samples.
-        if HealthWriteFingerprintStore.matches(.sleep, fingerprint) { return }
+        // Unchanged since the last successful write AND Health is observed to still hold our samples —
+        // the fingerprint on its own said nothing about the second half, so a night the user deleted
+        // inside the Health app was never rewritten. See `HealthWriteFingerprintStore.canSkip`.
+        if HealthWriteFingerprintStore.matches(.sleep, fingerprint),
+           let from = samples.map(\.startDate).min(), let to = samples.map(\.endDate).max() {
+            let held = await healthHoldsOurSamples(of: type, from: from, to: to)
+            if HealthWriteFingerprintStore.canSkip(.sleep, fingerprint, healthHasSamples: held) { return }
+        }
         HealthWriteFingerprintStore.clear(.sleep)
         let pred = NSCompoundPredicate(andPredicateWithSubpredicates: [
             HKQuery.predicateForObjects(from: HKSource.default()),
             HKQuery.predicateForObjects(withMetadataKey: HKMetadataKeyExternalUUID, allowedValues: keys),
         ])
-        _ = try? await store.deleteObjects(of: type, predicate: pred)
+        // A FAILED delete must not be recorded as a completed write: the old night is still in Health,
+        // the save below adds a second copy, and a stored fingerprint would make that pair permanent.
+        // `errorNoData` — nothing matched the predicate — IS a successful reconciliation.
+        var reconciled = true
+        do { _ = try await store.deleteObjects(of: type, predicate: pred) }
+        catch { if (error as? HKError)?.code != .errorNoData { reconciled = false } }
         try await store.save(samples)
-        HealthWriteFingerprintStore.store(.sleep, fingerprint)
+        HealthWriteFingerprintStore.storeIfReconciled(.sleep, fingerprint, reconciled: reconciled)
     }
 
     /// UserDefaults key for the HR write cursor (the newest bucket ts we've written). Per-strap so a
@@ -1341,7 +1490,17 @@ final class HealthKitBridge: ObservableObject {
                 fingerprint.add(meters)
             }
         }
-        if canReconcile, HealthWriteFingerprintStore.matches(.workouts, fingerprint) { return }
+        // Skipping also requires Health to still HOLD the workouts the fingerprint describes — one the
+        // user deleted inside the Health app left the fingerprint matching and was never rewritten.
+        // With no rows there is nothing to probe FOR, so the fingerprint is all there is to go on and
+        // the behaviour is exactly as before (`nil` = nothing learned).
+        if canReconcile, HealthWriteFingerprintStore.matches(.workouts, fingerprint) {
+            let held: Bool? = rows.isEmpty ? nil
+                : await healthHoldsOurSamples(of: HKObjectType.workoutType(),
+                                              from: Date(timeIntervalSince1970: TimeInterval(fromTs)),
+                                              to: Date(timeIntervalSince1970: TimeInterval(toTs)))
+            if HealthWriteFingerprintStore.canSkip(.workouts, fingerprint, healthHasSamples: held) { return }
+        }
         HealthWriteFingerprintStore.clear(.workouts)
 
         var reconciled = false
@@ -1358,7 +1517,11 @@ final class HealthKitBridge: ObservableObject {
             HKQuery.predicateForObjects(withMetadataKey: HKMetadataKeyExternalUUID,
                                         allowedValues: rows.map(key)),
         ])
-        _ = try? await store.deleteObjects(of: .workoutType(), predicate: pred)
+        // Same rule as the vitals/sleep paths: a delete that failed leaves the old copies in place, so
+        // the rewrite below duplicates them and the fingerprint must not be stored. `errorNoData` (the
+        // predicate matched nothing — the normal first-write case) is a success.
+        do { _ = try await store.deleteObjects(of: .workoutType(), predicate: pred) }
+        catch { if (error as? HKError)?.code != .errorNoData { reconciled = false } }
 
         for row in rows {
             let start = Date(timeIntervalSince1970: TimeInterval(row.startTs))

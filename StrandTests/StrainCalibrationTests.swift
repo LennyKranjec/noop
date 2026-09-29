@@ -69,9 +69,9 @@ final class StrainCalibrationTests: XCTestCase {
         // Persisted: a fresh decode of the stored JSON is the same calibration.
         let data = UserDefaults.standard.data(forKey: StrainCalibration.storageKey)
         XCTAssertEqual(data.flatMap { try? JSONDecoder().decode(EffortStrainCalibration.self, from: $0) }, cal)
-        // E4: and tagged with the recipe it was fitted against.
+        // E4: and tagged with the recipe IDENTITY it was fitted against (shape + Effort method).
         XCTAssertEqual(UserDefaults.standard.integer(forKey: StrainCalibration.recipeKey),
-                       StrainCalibration.strainRecipeVersion)
+                       StrainCalibration.strainRecipeIdentity)
     }
 
     // MARK: - E4: one recipe per fit
@@ -80,8 +80,10 @@ final class StrainCalibrationTests: XCTestCase {
     func testOlderRecipeCalibrationIsIgnored() throws {
         let data = try JSONEncoder().encode(EffortStrainCalibration(a: 1.35, b: 0.58, pairs: 30))
         XCTAssertNil(StrainCalibration.decodeIfCurrent(data, recipe: 0), "untagged = pre-E4")
-        XCTAssertNil(StrainCalibration.decodeIfCurrent(data, recipe: StrainCalibration.strainRecipeVersion - 1))
-        XCTAssertNotNil(StrainCalibration.decodeIfCurrent(data, recipe: StrainCalibration.strainRecipeVersion))
+        XCTAssertNil(StrainCalibration.decodeIfCurrent(data, recipe: StrainCalibration.strainRecipeIdentity - 10))
+        XCTAssertNotNil(StrainCalibration.decodeIfCurrent(data, recipe: StrainCalibration.strainRecipeIdentity))
+        // A bare recipe number from before the identity encoding matches nothing.
+        XCTAssertNil(StrainCalibration.decodeIfCurrent(data, recipe: StrainCalibration.strainRecipeVersion))
     }
 
     /// Never before the rescore; at once when it completes (even if a fit already ran today); then daily.

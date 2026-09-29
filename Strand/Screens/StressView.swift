@@ -214,6 +214,14 @@ struct StressView: View {
         // each day's samples be released at the end of its own iteration.
         var aggregates: [(hr: Double?, rmssd: Double?)] = []
         aggregates.reserveCapacity(Self.baselineHistoryDays)
+        // ONE definition of "waking", not two. The fold used to be hard-wired to `DaytimeStress`'s fixed
+        // 06:00–22:00 test while today's read already scores the wearer's REAL window, so for a late
+        // sleeper the folded P10 floor was computed over hours they were still asleep — a floor pulled
+        // down by sleep, which biases every baseline-relative hour scored against it upward. One read of
+        // the same sleep timings the regularity streak uses, then each day's own window goes into that
+        // day's aggregate. Days whose sleep times are unknown pass nil and keep the fixed window, which
+        // is exactly what `analyze` does for them.
+        let timings = await repo.sleepTimingsByDay(days: Self.baselineHistoryDays + 2)
         // Oldest → newest so the EWMA fold replays the history in order.
         for back in stride(from: Self.baselineHistoryDays, through: 1, by: -1) {
             guard let dayStart = cal.date(byAdding: .day, value: -back, to: startOfToday),
@@ -225,10 +233,36 @@ struct StressView: View {
             guard !dayHR.isEmpty else { continue }   // unworn day — no floor to learn, skip the R-R read
             let dayRR = await repo.rrIntervals(from: from, to: to, limit: 200_000)
             aggregates.append(
-                DaytimeStress.dayDaytimeAggregate(hr: dayHR, rr: dayRR, tzOffsetSeconds: dayTz)
+                DaytimeStress.dayDaytimeAggregate(
+                    hr: dayHR, rr: dayRR, tzOffsetSeconds: dayTz,
+                    wakeWindow: Self.wakeWindow(dayStart: dayStart, timings: timings, calendar: cal))
             )
         }
         return DaytimeStress.scoringModeFromAggregates(aggregates)
+    }
+
+    /// The wearer's real waking span for the local day starting at `dayStart`, as the WALL-CLOCK Unix
+    /// seconds `DaytimeStress` takes: this morning's wake time → tonight's sleep onset. nil when either
+    /// end is unknown, so that day keeps the fixed 06:00–22:00 window rather than half a real one.
+    ///
+    /// `sleepTimingsByDay` keys a night by the local day it ENDED on, so this day's WAKE comes from its
+    /// own entry and this evening's ONSET from TOMORROW's. An onset minute earlier than the wake minute
+    /// is a bedtime past midnight and belongs to tomorrow's clock, which is the only wrap case.
+    ///
+    /// Built with `Calendar`, never `dayStart + minutes * 60`: a DST day is not 86 400 s long, and
+    /// minute-of-day arithmetic across one of them lands an hour out.
+    static func wakeWindow(dayStart: Date, timings: [String: SleepTiming],
+                           calendar: Calendar) -> ClosedRange<Int>? {
+        guard let nextStart = calendar.date(byAdding: .day, value: 1, to: dayStart),
+              let wakeMin = timings[Repository.localDayKey(dayStart)]?.wakeMinute,
+              let onsetMin = timings[Repository.localDayKey(nextStart)]?.onsetMinute else { return nil }
+        let onsetBase = onsetMin < wakeMin ? nextStart : dayStart
+        guard let wake = calendar.date(bySettingHour: wakeMin / 60, minute: wakeMin % 60,
+                                       second: 0, of: dayStart),
+              let onset = calendar.date(bySettingHour: onsetMin / 60, minute: onsetMin % 60,
+                                        second: 0, of: onsetBase),
+              onset > wake else { return nil }
+        return Int(wake.timeIntervalSince1970)...Int(onset.timeIntervalSince1970)
     }
 
     /// Recompute the cached `StressModel` only when (repo.days, storedSeries)
@@ -701,7 +735,15 @@ struct StressView: View {
     // MARK: Empty state
 
     private var emptyState: some View {
-        ComingSoon(what: "No stress history yet. Import your WHOOP export in Data Sources to see it.")
+        // Two different "no score" states, and saying the wrong one is its own small dishonesty: a user
+        // three nights in has plenty of history and nothing to import — the baseline just isn't there
+        // yet. `StressModel` now returns nil in that case (it used to hand back the curve's midpoint as
+        // a confident MEDIUM), so this path has to tell the two apart.
+        let hasVitals = repo.days.contains { $0.restingHr != nil || $0.avgHrv != nil }
+        let message: LocalizedStringKey = hasVitals
+            ? "Calibrating — your stress score needs a few more nights of resting HR and HRV to compare today against."
+            : "No stress history yet. Import your WHOOP export in Data Sources to see it."
+        return ComingSoon(what: message)
     }
 }
 
@@ -888,7 +930,20 @@ struct StressModel {
         let hrvT = today.avgHrv
 
         // Resolve today's score: prefer a stored value, else derive.
-        let derivedAvailable = (rhrT != nil && meanRHR != nil) || (hrvT != nil && meanHRV != nil)
+        //
+        // DERIVING NEEDS A REAL BASELINE, not merely a non-nil mean. `rawScore` divides by `sdRHR` /
+        // `sdHRV` and DROPS a term whose spread is ~0, and `std` returns 0 for n <= 1 — so one baseline
+        // night dropped BOTH terms and `squash(0)` handed back exactly 1.5, the curve's midpoint,
+        // presented as a confident "1.5 MEDIUM" under a "+4 vs 30-day baseline" header built from two
+        // nights. Three nights (58, 59, 62) put z at ~5 and saturated the other end to HIGH with the copy
+        // "Resting heart rate is running high versus your norm". Both are the midpoint and the ceiling of
+        // an empty curve, not a reading. So a term counts only when it has at least
+        // `Baselines.minNightsSeed` baseline nights AND a non-degenerate spread — the same "enough
+        // nights to trust a baseline" bar every other rolling baseline in the app uses — and with no
+        // term left this returns nil so the calibrating/empty path shows instead of a number.
+        let rhrBaseUsable = meanRHR != nil && rhrBase.count >= Baselines.minNightsSeed && sdRHR > 0.0001
+        let hrvBaseUsable = meanHRV != nil && hrvBase.count >= Baselines.minNightsSeed && sdHRV > 0.0001
+        let derivedAvailable = (rhrT != nil && rhrBaseUsable) || (hrvT != nil && hrvBaseUsable)
         let storedToday = storedByDay[today.day]
         guard storedToday != nil || derivedAvailable else { return nil }
 
@@ -898,14 +953,19 @@ struct StressModel {
                 hrvToday: hrvT, meanHRV: meanHRV, sdHRV: sdHRV))
             : nil
 
-        let s = storedToday ?? derivedToday ?? 1.5
+        // No `?? 1.5`: the guard above already proves one of the two is non-nil, and a literal midpoint
+        // fallback is exactly the fabricated score this is here to prevent.
+        guard let s = storedToday ?? derivedToday else { return nil }
         self.usingStored = storedToday != nil
         self.score = s
         self.band = StressBand(score: s)
         self.rhrToday = today.restingHr
         self.hrvToday = hrvT
-        self.rhrDelta = (rhrT != nil && meanRHR != nil) ? (rhrT! - meanRHR!) : nil
-        self.hrvDelta = (hrvT != nil && meanHRV != nil) ? (hrvT! - meanHRV!) : nil
+        // "+4 vs 30-day baseline" needs a 30-day baseline. Gated on the SAME usability as the score, so
+        // a two-night mean can no longer be labelled a baseline in the marker tiles or quoted back in
+        // `explanation` ("running high versus your norm") — a nil delta renders as no delta at all.
+        self.rhrDelta = (rhrT != nil && rhrBaseUsable) ? (rhrT! - meanRHR!) : nil
+        self.hrvDelta = (hrvT != nil && hrvBaseUsable) ? (hrvT! - meanHRV!) : nil
 
         self.explanation = StressMath.explanation(
             band: self.band,
@@ -925,7 +985,9 @@ struct StressModel {
             }
             let dRHR = d.restingHr.map(Double.init)
             let dHRV = d.avgHrv
-            guard (dRHR != nil && meanRHR != nil) || (dHRV != nil && meanHRV != nil) else { continue }
+            // The SAME baseline-usability bar the headline score uses: without it a day with no real
+            // baseline charted `squash(0)` = 1.5 for every point, a flat fabricated midpoint line.
+            guard (dRHR != nil && rhrBaseUsable) || (dHRV != nil && hrvBaseUsable) else { continue }
             let r = StressMath.rawScore(
                 rhrToday: dRHR, meanRHR: meanRHR, sdRHR: sdRHR,
                 hrvToday: dHRV, meanHRV: meanHRV, sdHRV: sdHRV
@@ -956,10 +1018,16 @@ enum StressMath {
         return xs.reduce(0, +) / Double(xs.count)
     }
 
-    /// Population standard deviation; 0 when there's no spread.
+    /// SAMPLE standard deviation (ddof = 1); 0 when there's no spread.
+    ///
+    /// The `count > 1` guard is the sample estimator's guard — n − 1 is what it pairs with — but the
+    /// divisor used to be `n`. At n = 2 that understates σ by 30 % and so inflates every z built on it
+    /// by 1.41×, which is how three baseline nights of 58/59/62 bpm reached the top of the 0–3 curve.
+    /// Every other spread estimator in the tree (`HRVAnalyzer.sdnnRaw`, `Baselines.rollingMeanSD`,
+    /// `ReadinessEngine.sampleSD`) is ddof = 1; this and its twin `DaytimeStress.std` were the outliers.
     static func std(_ xs: [Double], mean m: Double?) -> Double {
         guard let m, xs.count > 1 else { return 0 }
-        let v = xs.map { ($0 - m) * ($0 - m) }.reduce(0, +) / Double(xs.count)
+        let v = xs.map { ($0 - m) * ($0 - m) }.reduce(0, +) / Double(xs.count - 1)
         return v.squareRoot()
     }
 

@@ -235,8 +235,28 @@ final class AppModel: ObservableObject {
     /// A decoded Health Shortcut import waiting for explicit user confirmation before it writes rows.
     @Published var pendingShortcutHealthImport: ShortcutHealthImport.PendingImport?
 
-    /// True while any data-source import is writing to the local store.
-    var hasActiveImport: Bool { activeImportSource != nil }
+    /// Imports that write to the local store WITHOUT owning a `DataSourceImportKind` card: the
+    /// nutrition CSV, the lifting log, a single GPX/TCX/FIT workout file and an Oura/Fitbit/Garmin
+    /// export, all driven from `DataSourcesView`.
+    ///
+    /// Their "importing" state used to live only in that view's `@State`, so `dataInFlight` — the
+    /// guard that stops the level ledger's immutable 800-day backfill, and the launch cascade's
+    /// import wait, from reading a store mid-write — did not know about them at all. A COUNTER, not a
+    /// flag: `DataSourcesView` disables the other buttons while one runs, but nothing structurally
+    /// prevents two (a file picker can be re-entered from elsewhere), and a counter can't be cleared
+    /// by whichever finishes first. See `beginAuxImport` / `finishAuxImport`.
+    @Published private var auxImports = AuxImportGate()
+
+    /// True while any data-source import is writing to the local store — the typed source cards AND
+    /// the four `DataSourcesView`-driven file importers.
+    var hasActiveImport: Bool { activeImportSource != nil || auxImports.isActive }
+
+    /// Mark one of the `DataSourcesView` file importers as writing to the store. MUST be paired with
+    /// exactly one `finishAuxImport()` on every exit path (the callers use `defer`).
+    func beginAuxImport() { auxImports.begin() }
+
+    /// Release one `beginAuxImport()`.
+    func finishAuxImport() { auxImports.finish() }
 
     /// Returns true only for the source currently importing.
     func isImporting(_ source: DataSourceImportKind) -> Bool {
@@ -567,17 +587,21 @@ final class AppModel: ObservableObject {
             // BEFORE the Effort rescore + analyzeRecent loop so both operate on a cleaned DB. Persisted
             // flag → no-op on every subsequent launch; idempotent on a clean DB.
             await self.intelligence.runTimestampHealIfNeeded()
-            // One-shot on-upgrade Effort rescore (#313): recompute strain from source across the FULL
-            // history once, so any deep-history rows an older build left on the 0–21 axis regenerate on
-            // the 0–100 axis. Guarded by a persisted flag, so this is a no-op on every subsequent launch.
-            await self.intelligence.runEffortRescoreIfNeeded()
             // One-shot on-upgrade re-score of the FULL history under the nightly-metrics rework (sleep onset,
             // resting HR, HRV, respiration). Persisted flag → no-op on every later launch.
             // The level ledger writes nothing until this has run, so the moment it does the level is
             // reloaded — otherwise the first days wait for an unrelated refresh to be written.
+            //
+            // FIRST OF THE TWO RESCORES, deliberately. The Effort pass below used to run ahead of it as
+            // one unchunked 4000-day call, so on a large library it restarted from zero every launch and
+            // this one — which is resumable and keeps a watermark — never got its turn.
             if await self.intelligence.runNightlyMetricsRescoreIfNeeded() {
                 await LevelBarModel.shared.reload(repo: self.repo)
             }
+            // One-shot on-upgrade Effort rescore (#313): recompute strain from source across the FULL
+            // history once, so any deep-history rows an older build left on the 0–21 axis regenerate on
+            // the 0–100 axis. Guarded by a persisted flag, so this is a no-op on every subsequent launch.
+            await self.intelligence.runEffortRescoreIfNeeded()
             while !Task.isCancelled {
                 // THE ONE-SHOT RESCORE IS RETRIED HERE until it has run. A launch attempt that found a pass it
                 // could not wait out, or was suspended part-way, used to wait for the next launch; the pass
@@ -586,6 +610,14 @@ final class AppModel: ObservableObject {
                 if !UserDefaults.standard.bool(forKey: IntelligenceEngine.nightlyMetricsRescoreFlagKey),
                    await self.intelligence.runNightlyMetricsRescoreIfNeeded() {
                     await LevelBarModel.shared.reload(repo: self.repo)
+                }
+                // AND THE EFFORT RESCORE IS RETRIED HERE TOO. It is resumable now, and — more to the
+                // point — a restore or a WHOOP archive import RE-ARMS it mid-session
+                // (`IntelligenceEngine.rearmOneShotHistoryPasses`). Running it only in the launch
+                // cascade meant a history that landed after launch waited for the next cold start to be
+                // re-axed. A no-op once the flag is set; an attempt already running is not doubled.
+                if !UserDefaults.standard.bool(forKey: IntelligenceEngine.effortRescoreFlagKey) {
+                    await self.intelligence.runEffortRescoreIfNeeded()
                 }
                 // #547 RE-POLLUTION: a sync since the last tick may have armed a re-heal (its ingest gate
                 // dropped bad-clock records). `runTimestampHealIfNeeded` honours the pending flag even after
@@ -1882,9 +1914,6 @@ final class AppModel: ObservableObject {
                                                      log: ((String) -> Void)? = nil) {
         #if os(iOS)
         let center = UNUserNotificationCenter.current()
-        // Always clear BOTH the single and the per-day ids so switching modes (or editing the weekday set)
-        // never leaves an orphaned trigger or double-fires.
-        center.removePendingNotificationRequests(withIdentifiers: smartAlarmBackupIds)
         // #34: the backup follows THE ALARM, not the wrist-alerts master. This is only reached from
         // applySmartAlarm() with the alarm enabled, so the alarm being on IS the correct gate — a user who
         // sets a smart alarm but never turned on the separate wrist HR/strain alerts must still get a backup
@@ -1900,10 +1929,19 @@ final class AppModel: ObservableObject {
         // Build + add the repeating trigger(s). Factored so the already-authorized and the just-granted
         // paths schedule identically.
         func addRequests() {
+            // Always clear BOTH the single and the per-day ids so switching modes (or editing the weekday
+            // set) never leaves an orphaned trigger or double-fires. Swept HERE, not at the top: the add
+            // happens inside the async authorization callback, and a sweep before that suspension point
+            // left the backup deleted until the next foreground — and wiped it outright on a denied status.
+            center.removePendingNotificationRequests(withIdentifiers: smartAlarmBackupIds)
             let content = UNMutableNotificationContent()
             content.title = String(localized: "Smart alarm")
             content.body = String(localized: "Backup wake: your smart alarm time is here.")
             content.sound = .default
+            // A wake alarm fires while Sleep Focus is on, which suppresses `.active` notifications
+            // entirely. Inert without the time-sensitive entitlement, which this sideloaded build does not
+            // carry — so the UI never promises it, and this costs nothing where it is honoured.
+            content.interruptionLevel = .timeSensitive
             if weekdays.isEmpty {
                 // Every day. When overrides exist, fan out to per-weekday triggers (each at its own time)
                 // so an override on a day the weekday set doesn't restrict still fires at the right time.
@@ -2705,6 +2743,13 @@ final class AppModel: ObservableObject {
                 let summary = try await WhoopImporter.importExport(url: local.url, into: store,
                                                                    deviceId: deviceId, trace: importTraceSink())
                 try? await store.checkpointWAL()   // reclaim the WAL a bulk import grew (#590)
+                // A WHOOP archive is a WHOLE HISTORY landing at once, which is exactly the case the
+                // one-shot full-history passes (the #313 Effort re-axis, the nightly-metrics v2 rework,
+                // the #547 bad-clock purge) exist for — and on a fresh install they have usually already
+                // been consumed against the few days that were here before this import. Re-arm them so
+                // the steady-state loop carries them over the imported history instead of leaving it on
+                // the old axis / the old nightly recipe for good.
+                if summary.recordCount > 0 { IntelligenceEngine.rearmOneShotHistoryPasses() }
                 await repo.refresh()
                 let span: String
                 if let a = summary.earliest, let b = summary.latest {
@@ -2961,4 +3006,26 @@ final class AppModel: ObservableObject {
         }
         activeImportSource = nil
     }
+}
+
+/// The re-entrancy counter behind `AppModel.beginAuxImport` / `finishAuxImport`.
+///
+/// Split out of `AppModel` so its balance rules can be unit-tested without standing up the whole
+/// model (which owns BLE, the store and the launch cascade). A COUNTER rather than a flag: the four
+/// `DataSourcesView` file importers are independent tasks, and if two ever overlap, the first to
+/// finish must not clear the gate out from under the second — the exact shape of the sticky/cleared-
+/// too-early flag bugs this codebase keeps producing.
+struct AuxImportGate: Equatable {
+    /// How many importers currently hold the gate.
+    private(set) var count = 0
+
+    /// True while at least one holds it — what `hasActiveImport` folds in.
+    var isActive: Bool { count > 0 }
+
+    mutating func begin() { count += 1 }
+
+    /// Release one hold. FLOORED AT ZERO: an unbalanced extra release must not take the count
+    /// negative, because a negative count would need two extra `begin`s before `isActive` read true
+    /// again — silently disabling the very guard this exists to provide.
+    mutating func finish() { count = Swift.max(0, count - 1) }
 }

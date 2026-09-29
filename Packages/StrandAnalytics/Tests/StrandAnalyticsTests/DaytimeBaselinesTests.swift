@@ -179,6 +179,50 @@ final class DaytimeBaselinesTests: XCTestCase {
         XCTAssertNil(rmssd)
     }
 
+    // MARK: - One definition of "waking", shared with the scorer
+
+    func testDayAggregateFoldsTheWearersRealWakingWindowNotTheFixedOne() {
+        // A LATE SLEEPER: asleep at 50 bpm until 10:00, awake 10:00–22:00 in the high 60s/70s. The
+        // folded aggregate is the CALM FLOOR OF THE WAKING DAY (P10) and the scorer measures every
+        // waking hour against it — but the fold was hard-wired to the fixed 06:00–22:00 test while
+        // `analyze` already honoured the caller's real window. So the floor was computed over hours the
+        // wearer was still asleep, came back at SLEEP heart rate, and biased every baseline-relative
+        // hour upward. Two drifting definitions, which this file's own contract forbids.
+        let asleep = dayHR(0, hours: Array(6...9), bpms: Array(repeating: 50, count: 4))
+        let awake = dayHR(0, hours: Array(10...21),
+                          bpms: [66, 70, 68, 72, 74, 69, 71, 73, 67, 75, 70, 78])
+        let hr = asleep + awake
+        let window = (10 * 3_600)...(22 * 3_600)
+
+        let fixed = DaytimeStress.dayDaytimeAggregate(hr: hr, rr: [], tzOffsetSeconds: 0)
+        let real = DaytimeStress.dayDaytimeAggregate(hr: hr, rr: [], tzOffsetSeconds: 0, wakeWindow: window)
+        XCTAssertEqual(fixed.hr!, 50, accuracy: 0.5,
+                       "precondition: the fixed window folds the still-asleep hours as the calm floor")
+        XCTAssertEqual(real.hr!, 67.1, accuracy: 0.2,
+                       "the real window must fold the P10 of the WAKING hours only")
+
+        // And it is the SCORER's own waking test, reached through one function, so the hours that feed
+        // the baseline are exactly the hours later scored against it.
+        let scored = DaytimeStress.analyze(hr: hr, rr: [], wakeWindow: window)
+        XCTAssertFalse(scored.hours.contains { $0.hour < 10 })
+        XCTAssertTrue(scored.hours.contains { $0.hour == 10 })
+    }
+
+    func testTheFoldEntryPointsCarryEachDaysWakeWindow() {
+        // The window has to survive `DaytimeDayStreams` → `foldDaytimeBaselines`, not only the direct
+        // aggregate call — that hand-off is where a threaded parameter usually gets dropped.
+        let hr = dayHR(0, hours: Array(6...9), bpms: Array(repeating: 50, count: 4))
+            + dayHR(0, hours: Array(10...21), bpms: [66, 70, 68, 72, 74, 69, 71, 73, 67, 75, 70, 78])
+        let window = (10 * 3_600)...(22 * 3_600)
+        let fixed = DaytimeStress.foldDaytimeBaselines(
+            days: [DaytimeStress.DaytimeDayStreams(hr: hr, rr: [], tzOffsetSeconds: 0)])
+        let real = DaytimeStress.foldDaytimeBaselines(
+            days: [DaytimeStress.DaytimeDayStreams(hr: hr, rr: [], tzOffsetSeconds: 0,
+                                                   wakeWindow: window)])
+        XCTAssertGreaterThan(real.hr.baseline, fixed.hr.baseline + 10,
+                             "the fold entry point dropped the day's wake window")
+    }
+
     // MARK: - Fold → score round trip (the whole point)
 
     func testFoldedBaselineScoresElevationAgainstThePersonalFloorNotTheDaysOwnHours() {

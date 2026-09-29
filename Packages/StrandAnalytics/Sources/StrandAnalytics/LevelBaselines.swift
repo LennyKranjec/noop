@@ -36,8 +36,24 @@ public struct Baseline: Equatable, Sendable {
         self.max = max
     }
 
-    /// Guards a degenerate spread: a wearer whose readings never move would otherwise divide by zero.
-    public var safeSd: Double { sd > 1e-6 ? sd : 1 }
+    /// Guards a degenerate spread.
+    ///
+    /// SCALE-RELATIVE, NOT A LITERAL 1.0 — the same fix, for the same reason, as `MuscleBaseline.safeSd`.
+    /// These metrics do not share a unit: `strengthIndex` lives around 1.0 and `chronicLoad` around
+    /// 3,000. A hard-coded SD of 1 made the fallback span 1.645 on both, so a DOUBLED one-rep max scored
+    /// 80 and could never reach 100, while a chronic load ten kilograms above the mean scored 354 — and
+    /// `score` is documented unbounded, so nothing clipped it. Half the mean says "half a typical reading
+    /// is one SD", which is coarse but true to whatever scale the metric is on.
+    ///
+    /// Reached through `score`'s degenerate-span branch, which fires whenever `max == mean` — normal for
+    /// a metric that barely moved over the freeze window, and the ordinary case for a flat
+    /// `strengthIndex`.
+    public var safeSd: Double {
+        if sd > 1e-6 { return sd }
+        let magnitude = Swift.abs(mean)
+        if magnitude > 1e-6 { return magnitude * 0.5 }
+        return 1
+    }
 
     /// The score of `value`: 50 at the mean, 100 at the wearer's 95th-percentile day in the good
     /// direction, linear either side, and UNBOUNDED both ways.
@@ -79,9 +95,17 @@ public enum LevelBaselines {
 
     /// How many readings a metric needs before its own history is used instead of the table.
     ///
-    /// Two weeks. Below that a mean is dominated by whichever fortnight happened to be sampled — and
-    /// since the result is FROZEN, a bad estimate here would be permanent.
-    public static let minSamples = 14
+    /// SIX WEEKS, AND THE OVERLAP IS WHY. Every reading here is a 7-day rolling mean, one per calendar
+    /// day (`LevelWiring.baselineHistory`), so consecutive readings share six of their seven days: a run
+    /// of `n` of them is worth roughly `n / 7` INDEPENDENT weeks, not `n` independent samples. At the old
+    /// 14 that was two independent weeks, and the 5th/95th percentiles taken from it — the two numbers
+    /// that define what 0 and 100 MEAN for this wearer — were estimated from a fortnight and then frozen
+    /// for good. 42 gives six independent weeks, which is the least that makes a percentile of a rolling
+    /// mean worth freezing.
+    ///
+    /// A metric below this is scored against `table` and NOT written down (see `LevelBaselineStore`), so
+    /// raising the bar delays freezing rather than freezing something worse.
+    public static let minSamples = 42
 
     public static let rangeLowPct: Double = 5
     public static let rangeHighPct: Double = 95

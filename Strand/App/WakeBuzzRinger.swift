@@ -44,6 +44,22 @@ final class WakeBuzzRinger: ObservableObject {
     /// reports `.noStrap` and then `.sent`, so the UI can stop claiming failure the moment a volley lands.
     /// The whole-ring tally goes to the strap log at stop (`WakeBuzzAlarm.deliveryLogLine`).
     @Published private(set) var lastDelivery: WakeBuzzAlarm.Delivery?
+    /// Whether the CURRENT (or last) attempt fell back to buzzing the PHONE because nothing could reach
+    /// the strap. False before the first ring of the session — false is "we have not needed it", never
+    /// "the strap worked".
+    ///
+    /// It is a separate fact from `lastDelivery` on purpose: the phone buzz is not a substitute for the
+    /// strap buzz and must never be reported as one. It is a weaker thing — it needs NOOP awake, it is
+    /// on the bedside table rather than the wrist, and it cannot be felt through a pillow — so the sheet
+    /// states it as the fallback it is.
+    @Published private(set) var lastPhoneFallback = false
+    /// Whether the suspension-proof backstop is actually registered with the OS. nil = not resolved yet
+    /// (no `reschedule` has run, or the answer has not come back), which is NOT "it is fine".
+    ///
+    /// This is the only path that can fire while NOOP is suspended or force-quit, so whether it exists
+    /// decides what the alarm is worth on a phone whose strap is away — and a denied notification
+    /// permission used to leave that with no surface anywhere in the app.
+    @Published private(set) var backupState: WakeBuzzAlarm.BackupState?
 
     /// One buzz volley on the strap. Wired by `AppModel` to `BLEManager.buzzStrapOnce()` — the one
     /// on-device-confirmed "vibrate now" sequence (#921), rather than a second hand-composed write.
@@ -59,6 +75,22 @@ final class WakeBuzzRinger: ObservableObject {
     /// Best-effort "cut the motor now" (STOP_HAPTICS). A no-op on a 5/MG, whose send allowlist does not
     /// carry cmd 122 — stopping there simply means we send no further volleys and the last one ends.
     var cancelBuzz: (() -> Void)?
+    /// THE PHONE-SIDE FALLBACK, for a wake minute the strap cannot hear.
+    ///
+    /// `buzz` was the only wake path this object had: a phone whose strap was flat, out of range or
+    /// simply off the wrist got NOTHING from the ring, and the repeating backstop notification was the
+    /// whole of the alarm. So a ring that cannot reach the strap now also buzzes the PHONE, once, and
+    /// says in the sheet that it did.
+    ///
+    /// nil = use the app's own `summon` haptic (the one reserved for "the system wants attention"),
+    /// which is a no-op on macOS and in the Simulator. Injectable so the tests can observe the fallback
+    /// without a Taptic Engine.
+    ///
+    /// HONEST ABOUT ITS CEILING: a haptic needs NOOP awake and running. It cannot fire from a suspended
+    /// or force-quit app, it is not a sound, and a phone across the room is not a wrist. It narrows the
+    /// silent case; it does not close it, and the sheet says so rather than letting it read as a second
+    /// alarm.
+    var phoneFallback: (() -> Void)?
     /// Strap-log sink, so a "it didn't buzz" report can be settled from the shared log like the
     /// firmware alarm's armed / reports / fired lines already can.
     var log: ((String) -> Void)?
@@ -172,16 +204,26 @@ final class WakeBuzzRinger: ObservableObject {
     /// The grace check lives HERE rather than at each caller, because there are two delivery paths — the
     /// fire timer and `reschedule`'s catch-up scan — and only the scan used to apply it. A `Timer` armed
     /// for an absolute instant cannot fire while iOS has the app suspended, so it fires the moment the run
-    /// loop spins up again: a 07:00 alarm on a phone first woken at 10:00 buzzed at 10:00. The stamp is
-    /// written either way, so a dropped instant is CONSUMED and cannot be retried by a later pass.
-    private func fireIfNotAlreadyRung(for scheduled: Date, now: Date = Date()) {
+    /// loop spins up again: a 07:00 alarm on a phone first woken at 10:00 buzzed at 10:00.
+    ///
+    /// THE STAMP IS WRITTEN ONLY ONCE THE GUARD HAS PASSED. It used to be written first, which meant a
+    /// skip CONSUMED the instant: a main-thread stall or a late run-loop spin longer than the 30 s grace
+    /// burned the morning, and no later `reschedule()` — foreground, day rollover, settings edit — could
+    /// retry it. Stamping on the skip path bought nothing, because `shouldRing` is MONOTONE in `now`: an
+    /// instant already past the grace window stays past it, so an unstamped skip cannot ring later either.
+    /// What it can do is stay available to a pass whose `now` is still inside the window, which is exactly
+    /// the case the grace window exists for.
+    ///
+    /// Internal rather than private only so the tests can drive one delivery without a run loop — the same
+    /// reason `deliverVolley` is. Nothing in the app calls it outside `reschedule` and `fireScheduled`.
+    func fireIfNotAlreadyRung(for scheduled: Date, now: Date = Date()) {
         let epoch = Int(scheduled.timeIntervalSince1970)
         guard defaults.integer(forKey: WakeBuzzAlarm.Key.lastFired) != epoch else { return }
-        defaults.set(epoch, forKey: WakeBuzzAlarm.Key.lastFired)
         guard WakeBuzzAlarm.shouldRing(scheduled: scheduled, now: now) else {
             log?("Wake buzz: skipped — the wake time passed \(Int(now.timeIntervalSince(scheduled)))s ago while NOOP was suspended, too late to buzz")
             return
         }
+        defaults.set(epoch, forKey: WakeBuzzAlarm.Key.lastFired)
         start(reason: "wake time", now: now)
     }
 
@@ -209,6 +251,7 @@ final class WakeBuzzRinger: ObservableObject {
         // show a stale verdict in the sheet and suppress this ring's first log line (the per-transition
         // guards below compare against it), so the second failed morning would leave no trace at all.
         lastDelivery = nil
+        lastPhoneFallback = false
         log?("Wake buzz: ringing (\(reason)) — double-tap the strap, hit Stop, or it stops itself after \(Int(WakeBuzzAlarm.autoStopSeconds))s")
         let first = deliverVolley()   // first volley immediately, so the wrist feels it at the chosen minute
         let cadence = Timer(timeInterval: WakeBuzzAlarm.buzzIntervalSeconds, repeats: true) { [weak self] _ in
@@ -222,6 +265,65 @@ final class WakeBuzzRinger: ObservableObject {
         RunLoop.main.add(autoStop, forMode: .common)
         autoStopTimer = autoStop
         return first
+    }
+
+    /// The sheet's TEST, which is a different question from the alarm's.
+    ///
+    /// `start` deliberately RUNS a ring whose first volley could not be delivered, because the real 07:00
+    /// window is worth retrying into — a link that comes up two seconds later still buzzes the wrist. A
+    /// test is not that. It is a user standing there watching their wrist, and answering it with thirty
+    /// seconds of "Stop" over a strap that cannot hear a thing is precisely the false success this whole
+    /// type exists to stop: the button changed, the ring "ran", and nothing happened.
+    ///
+    /// So the test REFUSES to pretend. With no reachable strap it sends nothing, reports what is wrong,
+    /// buzzes the phone so the fallback is something the user has actually felt, and leaves the button
+    /// saying "Test" — because there is no ring to stop.
+    @discardableResult
+    func startTest() -> WakeBuzzAlarm.Delivery {
+        lastPhoneFallback = false
+        guard buzz != nil else {
+            lastDelivery = .noSink
+            log?("Wake buzz: test sent NOTHING — no buzz sink is wired in this build (app bug, not your strap)")
+            firePhoneFallback(reason: .noSink)
+            return .noSink
+        }
+        guard strapReady?() ?? true else {
+            lastDelivery = .noStrap
+            log?("Wake buzz: test sent NOTHING — the strap isn't connected, so the write would be dropped")
+            firePhoneFallback(reason: .noStrap)
+            return .noStrap
+        }
+        return start(reason: "test")
+    }
+
+    /// Buzz the phone, at most once per attempt, and record that we had to.
+    ///
+    /// Logged as the fallback it is. `reason` is the volley outcome that forced it, so the strap log
+    /// distinguishes "your strap was away" from "this build cannot buzz at all".
+    ///
+    /// NOTHING IS RECORDED WHEN NOTHING CAN FIRE. `lastPhoneFallback` drives a line in the sheet saying
+    /// the phone buzzed, so it may be set only where a buzz was actually asked for. Two cases where it
+    /// cannot be: macOS, where `SystemHaptics` is an unconditional no-op (there is no haptic engine), and
+    /// a wearer who has turned the app-wide haptics off — that is their explicit choice, and it costs them
+    /// this fallback, which is better than a sheet telling them their phone buzzed when it did not.
+    ///
+    /// What it DOES claim, like `.sent` on the strap side, is that the cue was fired — not that the
+    /// hardware rendered it. Whether a Taptic Engine actually moved is a fact only a hand has.
+    private func firePhoneFallback(reason: WakeBuzzAlarm.Delivery) {
+        guard !lastPhoneFallback else { return }
+        if let phoneFallback {
+            phoneFallback()
+        } else {
+            #if os(iOS)
+            // The one cue reserved for "the system wants attention".
+            guard SystemHaptics.enabled else { return }
+            SystemHaptics.play(.summon)
+            #else
+            return
+            #endif
+        }
+        lastPhoneFallback = true
+        log?(WakeBuzzAlarm.phoneFallbackLogLine(reason: reason))
     }
 
     /// Write ONE buzz volley, and report what it did.
@@ -242,6 +344,8 @@ final class WakeBuzzRinger: ObservableObject {
             }
             lastDelivery = .noSink
             volleysDropped += 1
+            // Nothing can reach the wrist — buzz the phone instead, once for this ring.
+            firePhoneFallback(reason: .noSink)
             return .noSink
         }
         guard strapReady?() ?? true else {
@@ -251,6 +355,7 @@ final class WakeBuzzRinger: ObservableObject {
                 log?("Wake buzz: volley NOT sent — the strap isn't connected, so the write would be dropped; still trying for the rest of the window")
             }
             lastDelivery = .noStrap
+            firePhoneFallback(reason: .noStrap)
             return .noStrap
         }
         buzz()
@@ -323,11 +428,25 @@ final class WakeBuzzRinger: ObservableObject {
 
     /// A repeating daily notification at the wake time. It "lives in the notification centre, not our
     /// process" (the WindDownNudge / smart-alarm-backup idiom), so it survives relaunch and still
-    /// arrives when the app was killed and no timer could run. NOT a guaranteed wake: a sideloaded
-    /// build has no critical-alert entitlement, so Focus / silent mode can still mute it.
+    /// arrives when the app was killed and no timer could run.
+    ///
+    /// NOTHING IS REMOVED FIRST. It used to `removePendingNotificationRequests` synchronously at the top
+    /// while the matching `add` happened inside the ASYNC `getNotificationSettings` callback — so every
+    /// foreground deleted the only suspension-proof path this alarm has and re-added it a moment later,
+    /// and a suspend inside that window left the alarm deleted until the next foreground. The pre-emptive
+    /// remove bought nothing either way: the identifier is constant and `add` REPLACES a pending request
+    /// with the same identifier in place. The only remove left is `cancelBackupNotification`, on the path
+    /// where the alarm is actually switched off.
+    ///
+    /// `.timeSensitive`, NOT `.active`. A wake alarm fires exactly while Sleep Focus is on, and `.active`
+    /// — the default, which this had — is the one level Focus suppresses. See `WakeBuzzAlarm.BackupState`
+    /// for what this does and does not buy on a sideloaded build.
+    ///
+    /// NOT a guaranteed wake, at any interruption level: a sideloaded build has no critical-alert
+    /// entitlement, so silent mode and a Focus that does not allow NOOP through can still mute it. The
+    /// sheet says so; `backupState` says whether it is even registered.
     private func scheduleBackupNotification(minutes: Int) {
         let center = UNUserNotificationCenter.current()
-        center.removePendingNotificationRequests(withIdentifiers: [WakeBuzzAlarm.notificationId])
         var comps = DateComponents()
         comps.hour = minutes / 60
         comps.minute = minutes % 60
@@ -336,6 +455,13 @@ final class WakeBuzzRinger: ObservableObject {
         content.body = String(localized: "Your wake time is here. Double-tap your strap to stop the buzzing.")
         content.sound = .default
         content.categoryIdentifier = WakeBuzzAlarm.notificationCategoryId
+        // Time Sensitive is the one level Sleep Focus lets through without the user allow-listing the app
+        // by hand. It needs the `com.apple.developer.usernotifications.time-sensitive` capability in the
+        // signed entitlements; WITHOUT it iOS silently downgrades this back to `.active` — it does not
+        // fail, and nothing in the app can observe the downgrade. So this is set because it is correct
+        // and free, and the UI copy does NOT promise it works: it tells the user the one thing that does
+        // work on any build, which is allowing NOOP through their Sleep Focus.
+        content.interruptionLevel = .timeSensitive
         let request = UNNotificationRequest(
             identifier: WakeBuzzAlarm.notificationId,
             content: content,
@@ -343,16 +469,31 @@ final class WakeBuzzRinger: ObservableObject {
         )
         center.getNotificationSettings { settings in
             switch settings.authorizationStatus {
-            case .authorized:
+            case .authorized, .provisional, .ephemeral:
                 center.add(request)
+                Task { @MainActor [weak self] in self?.backupState = .scheduled }
             case .notDetermined:
                 // The user just turned the alarm on and may never have been asked — ask now, so the
-                // FIRST morning is covered rather than some later re-arm.
+                // FIRST morning is covered rather than some later re-arm. This is an explicit user
+                // action (they flipped the alarm on), which is the only thing that may cold-prompt.
                 center.requestAuthorization(options: [.alert, .sound]) { granted, _ in
                     if granted { center.add(request) }
+                    Task { @MainActor [weak self] in
+                        self?.backupState = granted ? .scheduled : .denied
+                        if !granted {
+                            self?.log?("Wake buzz: backup notification NOT scheduled — notification permission was declined")
+                        }
+                    }
                 }
             default:
-                break   // Denied: the in-app buzz still works; the UI copy says the backstop needs it.
+                // Denied: the in-app buzz still works while NOOP is awake, and NOTHING works once it is
+                // suspended. That is a material fact about the alarm, so it is published and logged
+                // rather than swallowed.
+                Task { @MainActor [weak self] in
+                    guard let self, self.backupState != .denied else { return }
+                    self.backupState = .denied
+                    self.log?("Wake buzz: backup notification NOT scheduled — notifications are off for NOOP, so nothing can wake you while NOOP is suspended")
+                }
             }
         }
     }
@@ -360,6 +501,7 @@ final class WakeBuzzRinger: ObservableObject {
     private func cancelBackupNotification() {
         UNUserNotificationCenter.current()
             .removePendingNotificationRequests(withIdentifiers: [WakeBuzzAlarm.notificationId])
+        backupState = .off
     }
     #else
     // macOS keeps just the in-app buzz — same shape as the firmware alarm's backup helpers, which are

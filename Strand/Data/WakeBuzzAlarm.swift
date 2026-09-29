@@ -135,6 +135,40 @@ enum WakeBuzzAlarm {
         case noSink
     }
 
+    /// Whether the BACKSTOP — the repeating local notification at the wake time — is registered with the
+    /// OS. It is the only part of this alarm that can fire while NOOP is suspended or force-quit, so
+    /// whether it exists is the difference between "the alarm degrades" and "there is no alarm".
+    ///
+    /// Note what even `.scheduled` does NOT promise. A sideloaded build has no critical-alert
+    /// entitlement, and the Time Sensitive interruption level the content asks for needs the
+    /// `com.apple.developer.usernotifications.time-sensitive` capability in the signed entitlements —
+    /// which this project does not carry, so iOS downgrades it back to `.active` and a Sleep Focus that
+    /// has not been told to allow NOOP will suppress it. `.scheduled` means REGISTERED, not GUARANTEED,
+    /// and the copy that shows it says which of the two it is.
+    enum BackupState: Equatable {
+        /// Registered with the notification centre. Survives relaunch and a force-quit.
+        case scheduled
+        /// Notifications are off for NOOP, so the backstop cannot be registered at all.
+        case denied
+        /// The alarm is switched off, so there is nothing to back up.
+        case off
+    }
+
+    /// The strap-log line for a ring that had to buzz the PHONE because the strap could not be reached.
+    /// Pure, so what the log claims is pinned by a test rather than assembled at the call site.
+    static func phoneFallbackLogLine(reason: Delivery) -> String {
+        switch reason {
+        case .sent:
+            // Not reachable from the ringer (the fallback only fires on a failed volley); stated rather
+            // than defaulted to something that would read as a failure.
+            return "Wake buzz: phone buzzed alongside the strap"
+        case .noStrap:
+            return "Wake buzz: buzzed the PHONE instead — the strap isn't connected. A phone haptic needs NOOP awake and isn't a wrist, so it is a fallback, not the alarm"
+        case .noSink:
+            return "Wake buzz: buzzed the PHONE instead — NOOP has no strap buzz wired in this build (app bug, not your strap)"
+        }
+    }
+
     /// The strap-log line for one ring's delivery tally. Kept here, pure, so what the log claims is
     /// pinned by a test rather than assembled inline at a call site.
     ///

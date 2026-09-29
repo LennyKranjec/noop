@@ -1,5 +1,8 @@
 import SwiftUI
 import StrandDesign
+#if canImport(UserNotifications)
+import UserNotifications
+#endif
 
 /// Automations — turn the strap's physical inputs (double-tap, wrist on/off) and live biometrics
 /// into actions (Shortcuts, and Mac-only screen lock) and haptic coaching. All on-device.
@@ -47,6 +50,27 @@ struct AutomationsView: View {
     @AppStorage(HapticPrefs.liveSession) private var liveSessionHaptic = true
     @AppStorage(HapticPrefs.workout) private var workoutHaptic = true
 
+    // MARK: - What the OS will actually deliver
+    //
+    // Three switches on this screen (illness watch, battery alerts, strain target) are notification-only:
+    // turn one on and the ONLY thing that ever happens is a local notification. Each of them asked for
+    // permission the same way — a bare `requestAuthorization()` inside its own `onChange` — which fails
+    // silently in both directions. `requestAuthorization` shows no dialog once the status is decided, so
+    // a user who denied (or whose PREVIOUS sideload of this bundle id denied, which outlives the
+    // reinstall) got a switch that turned on and did nothing. And a switch restored ON by a backup or a
+    // reinstall never runs `onChange` at all, so it never even asked. Nothing on this screen — or any
+    // other — showed the OS status, so the switch was the only evidence and it was wrong.
+
+    /// What the OS says right now. nil = not read yet, and an unread status is never drawn as either
+    /// answer. Re-read when the app comes back to the front, which is how a user returns from Settings.
+    @State private var notifStatus: UNAuthorizationStatus?
+    @Environment(\.scenePhase) private var scenePhase
+
+    /// Whether anything on this screen actually needs a notification to be delivered.
+    private var wantsNotifications: Bool {
+        behavior.illnessWatch || behavior.batteryAlerts || behavior.strainTargetNudge
+    }
+
     var body: some View {
         ScreenScaffold(title: "Automations",
                        subtitle: "Make the strap do things: tap to act, walk away to lock, train by feel.",
@@ -54,6 +78,7 @@ struct AutomationsView: View {
                        // path (byte-identical layout) genuinely builds the off-screen cards on demand
                        // instead of constructing all eight/nine + their toggle subtrees up-front.
                        lazy: true) {
+            notificationPermissionCard
             #if os(iOS)
             wristAlertsCard
             #endif
@@ -65,11 +90,77 @@ struct AutomationsView: View {
             // the wind-down reminder. It's moved to the dedicated Alarms screen (SmartAlarmView) so every
             // wake/wind-down control lives in one place. Automations is just inputs-to-actions now.
             inactivityCard
-            illnessCard
-            healthInsightsCard
-            batteryCard
-            strainTargetCard
+            // GROUPED ONLY TO STAY UNDER `ViewBuilder`'s TEN CHILDREN. Adding the permission card above
+            // took the iOS column to eleven, which `buildBlock` has no overload for. `Group` is a
+            // transparent container — the four cards stay direct, individually-built children of the
+            // scaffold's LazyVStack, so the laziness the note above relies on is unchanged.
+            Group {
+                illnessCard
+                healthInsightsCard
+                batteryCard
+                strainTargetCard
+            }
         }
+        // Read on appearance and on every return to the front. Reading is free and never prompts, which
+        // is the whole point: this is how a restored-ON switch, or one whose permission was revoked in
+        // Settings months ago, finally gets contradicted on screen.
+        .task { notifStatus = await NotificationPermission.status() }
+        .onChangeCompat(of: scenePhase) { phase in
+            guard phase == .active else { return }
+            Task { notifStatus = await NotificationPermission.status() }
+        }
+    }
+
+    /// WHAT THE OS WILL DELIVER, when that disagrees with the switches above it.
+    ///
+    /// Shown only when it is BOTH known and bad: a status that has not come back yet draws nothing (an
+    /// unread answer is not a denial), and a screen with none of the notification switches on has nothing
+    /// to warn about. The two bad cases get different copy and different recovery, because they are
+    /// genuinely different — `.notDetermined` can still be asked, `.denied` can only be sent to Settings,
+    /// and offering an "Allow" button that silently does nothing is the failure being fixed.
+    @ViewBuilder private var notificationPermissionCard: some View {
+        if let notifStatus, wantsNotifications, !NotificationPermission.delivers(notifStatus) {
+            Section2(icon: "bell.slash",
+                     title: String(localized: "These alerts can't reach you"),
+                     blurb: String(localized: "The switches below are on, but NOOP is not allowed to send you notifications — so nothing they would tell you will arrive.")) {
+                VStack(alignment: .leading, spacing: 12) {
+                    if notifStatus == .notDetermined {
+                        Text("NOOP has never asked for notification permission on this \(Platform.deviceNoun) — or it was asked and dismissed. Ask now and these alerts start working.")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button {
+                            // The ONE place on this screen that may raise the system dialog: a button the
+                            // user pressed. Re-reads the status afterwards, so a dismissed dialog leaves
+                            // this card up rather than quietly reading as success.
+                            Task { self.notifStatus = await NotificationPermission.requestFromUserAction() }
+                        } label: {
+                            Text("Allow notifications")
+                        }
+                        .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
+                    } else {
+                        Text("Notifications are turned off for NOOP in your \(Platform.deviceNoun) settings. The system only asks once, so this is the only way back on.")
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button {
+                            NotificationPermission.openSettings()
+                        } label: {
+                            Text("Open Settings")
+                        }
+                        .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
+                    }
+                }
+            }
+        }
+    }
+
+    /// Turning one of the notification-backed switches ON asks for permission — once, only when the OS
+    /// has not already decided, and always followed by a re-read so the card above can contradict a
+    /// switch the OS will not honour. Replaces three copies of a bare `requestAuthorization()` whose
+    /// result nothing looked at.
+    private func askForNotificationsIfNeeded() {
+        Task { notifStatus = await NotificationPermission.requestFromUserAction() }
     }
 
     // MARK: - Wrist alerts master (iOS only — PR #572)
@@ -338,7 +429,9 @@ struct AutomationsView: View {
                       isOn: $behavior.illnessWatch)
                 .onChangeCompat(of: behavior.illnessWatch) { _ in
                     model.reevaluateIllness()
-                    if behavior.illnessWatch { IllnessNotifier.requestAuthorization() }
+                    // Status-checked and result-checked (see askForNotificationsIfNeeded); the bare
+                    // IllnessNotifier.requestAuthorization() this replaces never looked at either.
+                    if behavior.illnessWatch { askForNotificationsIfNeeded() }
                 }
         }
     }
@@ -410,7 +503,7 @@ struct AutomationsView: View {
                       help: String(localized: "A reminder to recharge before bed when the strap drops to 15%, and a heads-up when it reaches 100%, each at most once per charge cycle."),
                       isOn: $behavior.batteryAlerts)
                 .onChangeCompat(of: behavior.batteryAlerts) { on in
-                    if on { BatteryNotifier.requestAuthorization() }
+                    if on { askForNotificationsIfNeeded() }
                 }
             if behavior.batteryAlerts {
                 ToggleRow(label: String(localized: "Predictive runtime warning"),
@@ -431,7 +524,7 @@ struct AutomationsView: View {
                       isOn: $behavior.strainTargetNudge)
                 .onChangeCompat(of: behavior.strainTargetNudge) { on in
                     if on {
-                        StrainTargetNotifier.requestAuthorization()
+                        askForNotificationsIfNeeded()
                         // The repo.$days sink only fires on data changes, so if today's target is
                         // already reached, evaluate now rather than waiting for the next refresh
                         // (the reevaluateIllness idiom).

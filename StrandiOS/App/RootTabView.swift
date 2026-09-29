@@ -21,6 +21,32 @@ struct RootTabView: View {
     /// that state; keeping it explicit here prevents this shell's window-level sheet from covering a gate.
     let homeScreenQuickActionsEnabled: Bool
 
+    // THE SAME GATES, FOR THE SHELL'S OWN FULL-SCREEN COVER. `homeScreenQuickActionsEnabled` above is the
+    // precedent: an entry point that can put something over the tabs must know whether a mandatory
+    // first-run gate is still up. The morning flow did not, and `LevelDayFreeze.morningDue` is true by
+    // DEFAULT — it is "past 04:00 and `level.briefDay.v1` is not today", and an absent UserDefaults key
+    // satisfies that — so a brand-new install opened at any time after 04:00 presented the morning flow
+    // full-screen OVER the onboarding wizard and the un-accepted Terms gate, on a phone with no strap,
+    // no night and nothing to brief. `backgroundCovered` only knew about this file's own sheets.
+    //
+    // Read here rather than threaded as a parameter so the fix needs no change in `StrandiOSApp`: these
+    // are the SAME two `@AppStorage` keys `iOSRootView` gates on, and `@AppStorage` re-renders this shell
+    // when either changes — which is what the `.onChange(of: launchGatesCleared)` retry further down
+    // hangs on, since this view's `onAppear` has long since fired underneath the gates.
+    @AppStorage("noop.onboarded") private var onboarded = false
+    @AppStorage("noop.acceptedTermsVersion") private var acceptedTermsVersion = ""
+
+    /// Whether the mandatory first-run gates are done and the tabs are the frontmost thing.
+    ///
+    /// Mirrors `iOSRootView`'s own DEBUG `--demo-seed` bypass, so a seeded screenshot build keeps
+    /// rendering exactly what it rendered before — the gates it skips are skipped here too.
+    private var launchGatesCleared: Bool {
+        #if DEBUG
+        if CommandLine.arguments.contains("--demo-seed") { return true }
+        #endif
+        return onboarded && acceptedTermsVersion == Terms.currentVersion
+    }
+
     @EnvironmentObject private var repo: Repository
     /// Cross-screen navigation requests (e.g. Live → "Manage devices"). Devices isn't a tab — it lives
     /// behind the More list — so a request presents it as a sheet, matching the quick-action screens.
@@ -236,9 +262,12 @@ struct RootTabView: View {
         showStressScreen = true
     }
 
-    /// Whether one of the shell's own sheets is up over the tabs.
+    /// Whether something is already over the tabs — one of this shell's own sheets, or a mandatory
+    /// first-run gate that is drawn OUTSIDE this file (the onboarding wizard and the Terms gate, both
+    /// stacked over this view in `iOSRootView`). Both of the shell's full-screen presenters read it.
     private var backgroundCovered: Bool {
-        quickAction != nil || showDevices || routedPillar != nil || showLevelTimeline
+        !launchGatesCleared
+            || quickAction != nil || showDevices || routedPillar != nil || showLevelTimeline
     }
 
     private func reselectTab(_ tag: Int) {
@@ -402,6 +431,13 @@ struct RootTabView: View {
             }
         }
         .onAppear { presentMorningIfDue() }
+        // THE RETRY, once the gates come down. This shell is alive UNDER the wizard and the Terms gate,
+        // so its `onAppear` has already fired by the time a first-run user finishes them — without this
+        // the morning flow would simply be skipped until the next foreground, which is the opposite
+        // mistake from the one being fixed.
+        .onChange(of: launchGatesCleared) { _, cleared in
+            if cleared { presentMorningIfDue() }
+        }
         // THE STRESS ALARM, full screen, when the live reading turns high — on opening, on a refresh, or
         // mid-session. The same diagnostic look as a failed quest, with a way out that helps and one that
         // does not.

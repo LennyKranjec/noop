@@ -16,8 +16,14 @@ final class StressModelCarryTests: XCTestCase {
     }
 
     // 31 days that all carry RHR + HRV: a full 30-day baseline plus one more scorable day.
+    //
+    // VARIED, not flat. A zero-spread baseline makes `rawScore` drop both z terms and `squash(0)`
+    // return exactly the curve's midpoint, which `StressModel` now (correctly) refuses to present as a
+    // reading — see `StressBaselineHonestyTests`. These tests are about the CARRY, so their baseline
+    // has to be one a score can honestly be derived from.
     private var baseline: [DailyMetric] {
-        (1...30).map { day(String(format: "2026-06-%02d", $0), rhr: 55, hrv: 60) }
+        (1...30).map { day(String(format: "2026-06-%02d", $0),
+                           rhr: 54 + $0 % 3, hrv: 58 + Double($0 % 5)) }
             + [day("2026-07-01", rhr: 55, hrv: 60)]
     }
 

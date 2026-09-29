@@ -71,7 +71,16 @@ final class LevelLedger: @unchecked Sendable {
     /// was written from nights scored the old way, so it is emptied once — in the same save that stamps the
     /// new epoch, so the two cannot disagree after a crash — and the baselines are frozen again from the
     /// re-scored history. BUMP IT whenever a recipe change must reach the days already written.
-    static let currentEpoch = 2
+    ///
+    /// 3 = the coverage floor and the honest meditation reading (`LevelEngine.minCoverage`,
+    /// `LevelInputs.meditationShare`), plus the re-frozen baselines (`LevelBaselines.minSamples`). Days
+    /// written under epoch 2 include the fresh-install zeros this fixes — a confident 0.0 built from 11 %
+    /// of the formula, written NON-partial because the night had landed, and then dragged through the
+    /// 3-day mean for three days and the 30-day mean for a month. They cannot be corrected in place
+    /// (every entry is immutable), so the ledger is emptied once and walked again: the days that were
+    /// scored from almost nothing now settle as `.empty` instead, and every other day is re-scored
+    /// against the re-frozen scale.
+    static let currentEpoch = 3
 
     private struct Stored: Codable {
         var entries: [String: FrozenLevel]
@@ -588,7 +597,9 @@ final class LevelLedger: @unchecked Sendable {
         i.strengthIndex = FrozenLevel.finite(i.strengthIndex)
         i.chronicLoad = FrozenLevel.finite(i.chronicLoad)
         i.daytimeRmssd = FrozenLevel.finite(i.daytimeRmssd)
-        i.meditationShare = FrozenLevel.finite(i.meditationShare) ?? 0
+        // NOT `?? 0`. A share that came out not-a-number is no reading, and the whole point of making
+        // this optional was that a fabricated zero here scores as "meditated on none of 28 days".
+        i.meditationShare = FrozenLevel.finite(i.meditationShare)
         return i
     }
 
