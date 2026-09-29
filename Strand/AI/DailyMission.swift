@@ -86,30 +86,10 @@ enum DailyMissionWriter {
     /// which is gone with the currency — and removing it is a small mercy for a small local model,
     /// which now has one job in its output instead of a format to get right first.
     static func systemPrompt(grounding: String, defaults: UserDefaults = .standard) -> String {
-        var s = ""
-        s += "You are the user's coach: motivating, dryly sarcastic, aimed at the excuse and never "
-        s += "at the person. You are writing TODAY'S MISSION — one single concrete thing to do "
-        s += "today, chosen from their numbers and their goals. Not a list, not a plan for the "
-        s += "week. It must be doable today and it must suit the state their data is in: do not "
-        s += "prescribe a hard session on a wrecked night. Keep their stress in mind too: when stress is "
-        s += "high, HRV is below baseline or a hard session is already done today, a calming mission "
-        s += "(meditation, breathwork, NSDR / yoga nidra, restorative yoga, an earlier night) often beats "
-        s += "more training.\n\n"
+        var s = rules + "\n\n"
         s += "Answer with the mission itself, two or three sentences, then ONE final line stating "
         s += "the goal the app will check automatically — no heading, no preamble, no score.\n\n"
-        // THE GOAL LINE. The quest closes itself when the data meets it, so the mission has to be
-        // something the data can see: a named metric and a number, in a fixed shape a parser does not
-        // have to interpret.
-        s += "The goal line is exactly one of:\n"
-        s += "GOAL: STEPS <number>\n"
-        s += "GOAL: WORKOUT_MIN <minutes of training>\n"
-        s += "GOAL: MEDITATION_MIN <minutes>\n"
-        s += "GOAL: WATER_ML <millilitres>\n"
-        s += "GOAL: STRAIN <WHOOP day strain, 0-21>\n"
-        s += "GOAL: SLEEP_H <hours tonight>\n"
-        s += "GOAL: BEDTIME_BY <HH:MM>\n"
-        s += "GOAL: JOURNAL\n"
-        s += "The mission must be about that one thing, and its number must match the sentence.\n\n"
+        s += goalLines + "\n\n"
         s += "Example:\n"
         s += "Bed by 22:30. Yes, that early. Your HRV has been filing complaints for three days "
         s += "and no amount of Zone 2 is going to out-train a 5-hour night.\n"
@@ -118,6 +98,38 @@ enum DailyMissionWriter {
         if let routines = CoachRoutines.promptSection(defaults) { s += "\n\n" + routines }
         return s
     }
+
+    /// WHAT THE MISSION IS. Pulled out unchanged so the State tile's ONE merged request
+    /// (`StatePlanWriter`) asks for the same mission this prompt does, rather than a second copy of the
+    /// instruction that can drift from it.
+    static let rules: String = {
+        var s = ""
+        s += "You are the user's coach: motivating, dryly sarcastic, aimed at the excuse and never "
+        s += "at the person. You are writing TODAY'S MISSION — one single concrete thing to do "
+        s += "today, chosen from their numbers and their goals. Not a list, not a plan for the "
+        s += "week. It must be doable today and it must suit the state their data is in: do not "
+        s += "prescribe a hard session on a wrecked night. Keep their stress in mind too: when stress is "
+        s += "high, HRV is below baseline or a hard session is already done today, a calming mission "
+        s += "(meditation, breathwork, NSDR / yoga nidra, restorative yoga, an earlier night) often beats "
+        s += "more training."
+        return s
+    }()
+
+    /// THE GOAL LINE. The quest closes itself when the data meets it, so the mission has to be something
+    /// the data can see: a named metric and a number, in a fixed shape a parser does not have to interpret.
+    static let goalLines: String = {
+        var s = "The goal line is exactly one of:\n"
+        s += "GOAL: STEPS <number>\n"
+        s += "GOAL: WORKOUT_MIN <minutes of training>\n"
+        s += "GOAL: MEDITATION_MIN <minutes>\n"
+        s += "GOAL: WATER_ML <millilitres>\n"
+        s += "GOAL: STRAIN <WHOOP day strain, 0-21>\n"
+        s += "GOAL: SLEEP_H <hours tonight>\n"
+        s += "GOAL: BEDTIME_BY <HH:MM>\n"
+        s += "GOAL: JOURNAL\n"
+        s += "The mission must be about that one thing, and its number must match the sentence."
+        return s
+    }()
 
     /// What the model is asked, once the framing above is in place.
     static let question = "Write today's mission."

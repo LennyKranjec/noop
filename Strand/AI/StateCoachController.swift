@@ -189,11 +189,18 @@ final class StateCoachController: ObservableObject {
         if coach.isConfigured, coach.dataConsent {
             let snap = await snapshot(repo: repo, profile: profile, now: now)
             let f = completed(figures, snap)
-            let grounding = await stateGrounding(coach: coach, figures: f, snap: snap)
-            switch await coach.generateOneShotResult(
-                systemPrompt: CustomWorkoutWriter.systemPrompt(grounding: grounding, request: text,
-                                                              startMinute: startMinute),
-                question: CustomWorkoutWriter.question) {
+            let framing = CustomWorkoutWriter.systemPrompt(grounding: "", request: text,
+                                                          startMinute: startMinute)
+            switch await coach.generateOneShotResult(budget: .customWorkout, build: { budget in
+                (systemPrompt: CustomWorkoutWriter.systemPrompt(
+                    grounding: await self.stateGrounding(coach: coach, repo: repo, figures: f,
+                                                         snap: snap, budget: budget,
+                                                         framing: framing,
+                                                         question: CustomWorkoutWriter.question,
+                                                         now: now),
+                    request: text, startMinute: startMinute),
+                 question: CustomWorkoutWriter.question)
+            }) {
             case .success(let text): answer = text
             case .failure(let e): failure = e
             }
@@ -312,18 +319,66 @@ final class StateCoachController: ObservableObject {
                                           today: snap.today, recent: snap.recent, now: now, choices: choices)
     }
 
-    /// The coach's grounding for the State tile: the full context, today's training state and the day's
-    /// schedule (wake, focus, wind-down, bedtime) the stress objective is planned on.
-    private func stateGrounding(coach: AICoachEngine, figures f: StateTrainingFigures,
-                                snap: TrainingSnapshot) async -> String {
-        let now = Date()
+    /// How many of the previous fortnight's sessions the tile lists. SIX, not twenty: the tile's prompt asks
+    /// whether a hard session is recent and what the last two weeks looked like in outline, and the block
+    /// states the most recent hard session separately whatever it lists.
+    private static let recentWorkoutsListed = 6
+
+    /// The State tile's OWN grounding, assembled to a token budget.
+    ///
+    /// IT NO LONGER REUSES THE CHAT'S. `buildFullContext()` measured about 5,200 estimated tokens — the
+    /// level formula, fourteen days of every metric, the dream journal, the quest history, the strength
+    /// progression, the bedroom — and the tile then sent it TWICE in parallel against an 8,000-tokens-per-
+    /// MINUTE allowance. One of the two was refused with a 413 stating "Limit 8000, Requested 8646".
+    ///
+    /// WHAT THE TILE ACTUALLY NEEDS is what its prompt names: today's training state, the day's schedule,
+    /// which day each figure belongs to, a short history, stress today, and the routines the times have to
+    /// fit inside. That is what this builds — about 1,600 estimated tokens — and the budget then decides
+    /// whether even that fits, shortening or dropping cheapest-value-first and saying so.
+    ///
+    /// `framing` and `question` are the request's own ASKING — its system prompt with no grounding in it, and
+    /// the question. They are reserved out of the budget before the grounding is assembled, because none of
+    /// that can be trimmed and the provider meters the whole request. Each caller passes ITS OWN: the merged
+    /// plan writer's instruction is a different size from the custom-workout writer's, and reserving one for
+    /// the other is the same class of mistake as budgeting the grounding alone.
+    private func stateGrounding(coach: AICoachEngine, repo: Repository,
+                                figures f: StateTrainingFigures,
+                                snap: TrainingSnapshot, budget: Int,
+                                framing: String, question: String,
+                                now: Date = Date()) async -> String {
         let schedule = RoomClimatePlan.schedule(now: now)
-        let full = await coach.buildFullContext()
-        return full + "\n\n"
-            + StateTrainingContext.block(figures: f, zones: snap.zones, today: snap.today,
-                                         recent: snap.recent, now: now,
-                                         bedtimeMinute: schedule.bedtimeMinute)
-            + "\n\n" + StateDayPlanContext.block(now: now, schedule: schedule)
+        let day = DailyMissionStore.dayKey(now)
+        func training(_ limit: Int) -> String {
+            StateTrainingContext.block(figures: f, zones: snap.zones, today: snap.today,
+                                       recent: snap.recent, now: now,
+                                       bedtimeMinute: schedule.bedtimeMinute, recentLimit: limit)
+        }
+        let curve = await StressDayCurve.today(repo: repo, now: now)
+        let hourly = (curve?.result.hours ?? []).compactMap { h -> (hour: Int, level: Double)? in
+            h.level.map { (hour: h.hour, level: $0) }
+        }
+        let blocks = StateGrounding.blocks(
+            dayFrame: CoachDayFrame.compactBlock(now: now),
+            training: training(Self.recentWorkoutsListed),
+            trainingShort: training(0),
+            schedule: StateDayPlanContext.block(now: now, schedule: schedule),
+            history: coach.shortHistoryBlock(),
+            stress: StateGrounding.stressBlock(day: day,
+                                               now: LiveStressMonitor.shared.current,
+                                               hourly: hourly,
+                                               stressIndex: await coach.stressIndexToday(now: now)),
+            routines: CoachRoutines.promptSection(),
+            memory: CoachMemory.shared.promptSection(),
+            closing: CoachDayFrame.closingRule)
+        // Measured rather than guessed: a budget that under-reserves the asking overruns by exactly its own
+        // error, which is how a request sized for 8,000 came to ask for 8,646.
+        let reserved = coach.reservedTokens(framing: framing, question: question, now: now)
+        let fit = CoachContextBudget.fit(blocks, budget: budget, reserved: reserved)
+        if !fit.isComplete {
+            CoachLog.ai("state grounding trimmed to \(budget): shortened \(fit.shortened.count), "
+                        + "dropped \(fit.dropped.count)")
+        }
+        return fit.text
     }
 
     /// The coach's list held to the selection: disallowed sessions dropped, nil when nothing is left.
@@ -444,8 +499,9 @@ final class StateCoachController: ObservableObject {
             CoachLog.ai("state tile regenerating: \(cause.rawValue)")
             // The MISSION is rewritten together with the suggestions: it is the same day and the same
             // grounding, and a mission from this morning standing over freshly-regenerated suggestions is
-            // the stale text the wearer complained about.
-            await generate(day: day, fingerprint: fp, figures: f, snap: s, inputs: current, coach: coach)
+            // the stale text the wearer complained about. ONE request now carries both.
+            await generate(day: day, fingerprint: fp, figures: f, snap: s, inputs: current,
+                           repo: repo, coach: coach)
         }
     }
 
@@ -486,9 +542,15 @@ final class StateCoachController: ObservableObject {
 
     /// Ask the coach for the plan AND for today's mission, and apply whatever comes back. A superseded
     /// generation drops its answer instead of overwriting a newer list.
+    ///
+    /// ONE REQUEST, NOT TWO. This used to fire the workout suggestions and the mission in parallel over the
+    /// same grounding word for word — paying for it twice, and colliding with itself against a per-MINUTE
+    /// token limit even when each half fitted. `StatePlanWriter` asks for both in one JSON object; the two
+    /// halves are still parsed and still fail independently, so a reply that gets the list right and forgets
+    /// the mission is used for the list exactly as before.
     private func generate(day: String, fingerprint fp: String, figures f: StateTrainingFigures,
                           snap: TrainingSnapshot, inputs: StateRegenerationInputs,
-                          coach: AICoachEngine) async {
+                          repo: Repository, coach: AICoachEngine) async {
         isGenerating = true
         generationToken += 1
         let token = generationToken
@@ -504,26 +566,26 @@ final class StateCoachController: ObservableObject {
                     self.generation = nil
                 }
             }
-            let grounding = await self.stateGrounding(coach: coach, figures: f, snap: snap)
-            let missionGrounding = grounding + "\n\n"
-                + StateDayPlanContext.missionObjective(choices: choicesNow)
-            async let planResult = coach.generateOneShotResult(
-                systemPrompt: WorkoutSuggestionWriter.systemPrompt(grounding: grounding, choices: choicesNow),
-                question: WorkoutSuggestionWriter.question)
-            async let missionResult = coach.generateOneShotResult(
-                systemPrompt: DailyMissionWriter.systemPrompt(grounding: missionGrounding),
-                question: DailyMissionWriter.question)
-            let plan = await planResult
-            let mission = await missionResult
+            let result = await coach.generateOneShotResult(budget: .stateTile) { budget in
+                (systemPrompt: StatePlanWriter.systemPrompt(
+                    grounding: await self.stateGrounding(
+                        coach: coach, repo: repo, figures: f, snap: snap, budget: budget,
+                        framing: StatePlanWriter.systemPrompt(grounding: "", choices: choicesNow),
+                        question: StatePlanWriter.question),
+                    choices: choicesNow),
+                 question: StatePlanWriter.question)
+            }
             guard self.generationToken == token, !self.isRefreshing else { return }
 
-            if case .success(let text) = mission, let written = DailyMissionWriter.parse(text, dayKey: day) {
+            let merged = result.map(StatePlanWriter.parse)
+            if case .success(let answer) = merged, let text = answer.missionText,
+               let written = DailyMissionWriter.parse(text, dayKey: day) {
                 DailyMissionStore.write(written)
                 self.missionRewrittenAt = Date()
             }
-            switch plan {
+            switch merged {
             case .success(let answer):
-                guard let parsed = WorkoutSuggestionParser.parsePlan(answer) else {
+                guard let parsed = answer.plan else {
                     self.report(.decode)
                     return
                 }
@@ -659,8 +721,6 @@ final class StateCoachController: ObservableObject {
             return false
         }
 
-        let grounding = await stateGrounding(coach: coach, figures: f, snap: snap)
-        let missionGrounding = grounding + "\n\n" + StateDayPlanContext.missionObjective(choices: choicesNow)
         // A manual refresh supersedes an automatic generation still out.
         generationToken += 1
         generation?.cancel()
@@ -669,18 +729,22 @@ final class StateCoachController: ObservableObject {
         coalesceTask?.cancel()
         coalesceTask = nil
         lastAutoAttempt = Date()
-        // Both in parallel: they share the grounding and neither depends on the other.
-        async let missionAnswer = coach.generateOneShotResult(
-            systemPrompt: DailyMissionWriter.systemPrompt(grounding: missionGrounding),
-            question: DailyMissionWriter.question)
-        async let workoutAnswer = coach.generateOneShotResult(
-            systemPrompt: WorkoutSuggestionWriter.systemPrompt(grounding: grounding, choices: choicesNow),
-            question: WorkoutSuggestionWriter.question)
-        let mResult = await missionAnswer
-        let wResult = await workoutAnswer
+        // ONE REQUEST for both, budgeted, with one automatic retry at half the budget on a 413 or a 429.
+        // This was two requests in parallel over one grounding sent twice — see `generate`.
+        let result = await coach.generateOneShotResult(budget: .stateTile) { budget in
+            (systemPrompt: StatePlanWriter.systemPrompt(
+                grounding: await self.stateGrounding(
+                    coach: coach, repo: repo, figures: f, snap: snap, budget: budget,
+                    framing: StatePlanWriter.systemPrompt(grounding: "", choices: choicesNow),
+                    question: StatePlanWriter.question),
+                choices: choicesNow),
+             question: StatePlanWriter.question)
+        }
+        let merged = result.map(StatePlanWriter.parse)
 
         var missionUpdated = false
-        if case .success(let text) = mResult, let mission = DailyMissionWriter.parse(text, dayKey: day) {
+        if case .success(let answer) = merged, let text = answer.missionText,
+           let mission = DailyMissionWriter.parse(text, dayKey: day) {
             DailyMissionStore.write(mission)
             missionRewrittenAt = Date()
             missionUpdated = true
@@ -692,7 +756,7 @@ final class StateCoachController: ObservableObject {
             setGenerated([])
             source = .fallback
             workoutsUpdated = true
-        } else if case .success(let answer) = wResult, let parsed = WorkoutSuggestionParser.parsePlan(answer),
+        } else if case .success(let answer) = merged, let parsed = answer.plan,
                   parsed.workouts.isEmpty || !choices.filter(parsed.workouts).isEmpty {
             plan = parsed
             let items = choices.filter(parsed.workouts)
@@ -710,10 +774,11 @@ final class StateCoachController: ObservableObject {
         markCompleted(from: snap.today)
         setLeftToday(plan?.leftToday, figures: f)
 
-        // THE REASON, NOT "COULDN'T REACH THE COACH". Whichever request failed, the wearer is told what
-        // actually happened: the key was rejected, the provider rate-limited, the reply was unreadable, the
-        // local server URL is wrong, the key belongs to another provider. A cancellation says nothing.
-        if let failure = StateCoachFailure.firstReportable([wResult, mResult]) {
+        // THE REASON, NOT "COULDN'T REACH THE COACH". The wearer is told what actually happened: the key was
+        // rejected, the provider rate-limited or refused the request for its size (with the numbers), the
+        // reply was unreadable, the local server URL is wrong, the key belongs to another provider. A
+        // cancellation says nothing. One request now, so one result to read.
+        if let failure = StateCoachFailure.firstReportable([result]) {
             report(failure)
         } else if !workoutsUpdated {
             notice = String(localized: "The coach's workout suggestions didn't come through. Showing the last good ones.")

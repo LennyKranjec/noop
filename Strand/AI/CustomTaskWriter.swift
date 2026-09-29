@@ -22,6 +22,7 @@ enum CustomTaskWriter {
         let answer = await coach.generateOneShot(
             systemPrompt: systemPrompt(onStrip: QuestStore.shared.active),
             question: "The wearer asks: \(trimmed)",
+            budget: .naming,
             requiresDataConsent: false)
         return CustomTaskParser.resolve(
             // Not truncated: a reasoning model writes its JSON LAST, and every field is capped by the
@@ -53,7 +54,10 @@ enum CustomTaskWriter {
         if !open.isEmpty {
             s += "\n\nAlready on today's list:\n" + open.joined(separator: "\n")
         }
-        let constraints = AICoachEngine.sessionConstraints(defaults)
+        // THE MEMORY FILE IS CAPPED HERE, not assembled to a budget. This prompt has no grounding to trim, so
+        // the one part that can grow — 40 notes at 280 characters is 11,000 of them, most of a small
+        // per-minute token allowance — is held to the newest handful, with the remainder counted.
+        let constraints = AICoachEngine.sessionConstraints(memoryEntries: 8, defaults)
         if !constraints.isEmpty { s += "\n\n" + constraints }
         return s
     }

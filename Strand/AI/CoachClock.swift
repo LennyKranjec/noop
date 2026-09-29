@@ -141,6 +141,39 @@ enum CoachDayFrame {
     which parts cannot be known yet.
     """
 
+    /// The same rules, condensed, for a request that is only ever about TODAY.
+    ///
+    /// WHY A SECOND FORM AND NOT A SHORTER FIRST ONE. `validityRules` and `futureRule` together are about
+    /// 1,400 characters, and the chat earns every one of them: it is asked about last Tuesday and about
+    /// tomorrow, and both answers went wrong without them. The State tile is asked exactly one question —
+    /// what is still due today — so the future-day essay is spend with no return, and on an 8,000-tokens-
+    /// per-minute allowance that spend is the difference between an answer and a 413.
+    ///
+    /// EVERY RULE IS STILL HERE, shortened, not dropped: what each kind of figure is a property of, that
+    /// today is incomplete, and that a dash is "not measured" rather than zero. Nothing the tile could get
+    /// wrong has lost its rule.
+    static func compactBlock(now: Date = Date(), timeZone: TimeZone = .current) -> String {
+        let today = key(now, timeZone: timeZone)
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = timeZone
+        let yesterdayDate = cal.date(byAdding: .day, value: -1, to: now) ?? now.addingTimeInterval(-86_400)
+        var s = "THE DAYS. TODAY is \(today), a \(weekday(now, timeZone: timeZone)); "
+        s += "YESTERDAY was \(key(yesterdayDate, timeZone: timeZone)). Today is still INCOMPLETE — every "
+        s += "figure for it is \"so far\".\n"
+        s += compactValidityRules
+        return s
+    }
+
+    /// The per-kind validity rules in one paragraph. Same rules as `validityRules`, same meanings.
+    static let compactValidityRules = """
+    WHAT EACH FIGURE IS A PROPERTY OF: charge/recovery = ONE MORNING, the morning of its date, and it \
+    expires with that day; effort/strain = cumulative for its named day, "so far" for today; sleep hours, \
+    stages, efficiency, night HRV and night resting HR = the NIGHT THAT ENDED on the morning of its date; \
+    steps, water, meditation minutes and stress = totals for the named day, "so far" for today; the level \
+    and its parts = frozen on the morning of its date, so what they do today shows up in TOMORROW's level. \
+    A dash (—) means NOT MEASURED: never zero, never "bad". Name the date of any figure you cite.
+    """
+
     /// The block prepended to the data context.
     ///
     /// Named days rather than the words "today" and "yesterday" alone: the rows are labelled with dates, so

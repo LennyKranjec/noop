@@ -98,7 +98,8 @@ enum QuestGenerator {
     private static func write(coach: AICoachEngine, reason: String, directive: String) async -> QuestNaming.Written? {
         let answer = await coach.generateOneShot(
             systemPrompt: systemPrompt(),
-            question: "Situation: \(reason)\nDirective: \(directive)\nName it.")
+            question: "Situation: \(reason)\nDirective: \(directive)\nName it.",
+            budget: .naming)
         guard let answer else { return nil }
         return QuestNaming.parse(String(answer.prefix(maxAnswerChars)))
     }

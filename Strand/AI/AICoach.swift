@@ -156,7 +156,11 @@ enum AICoachError: LocalizedError {
     case dataAccessOff
     case emptyQuestion
     case badKey
-    case rateLimited
+    /// The provider refused the request for size or for rate. CARRIES ITS MESSAGE: a per-minute token
+    /// limit states the numbers ("Limit 8000, Requested 8646") and those numbers are the only thing that
+    /// tells the wearer — or the next request — what this account actually allows. Throwing them away is
+    /// what made every 429 read as "wait a moment and try again" when the real fix was a smaller request.
+    case rateLimited(String)
     case server(Int, String)
     case network(String)
     case decode
@@ -208,6 +212,39 @@ enum AICoachError: LocalizedError {
         }
     }
 
+    /// Whether the provider refused this request for its SIZE or its RATE — the two failures a smaller
+    /// request can actually fix, and the only two worth retrying automatically.
+    ///
+    /// 413 and 429 are one category here on purpose. Groq reports an over-large request as a 413 ("Request
+    /// too large … on tokens per minute (TPM): Limit 8000, Requested 8646") and a too-frequent one as a 429,
+    /// and from the app's side the remedy is the same: ask for less. 408 and the 5xx family are transient in
+    /// a different way — a smaller request does not help them — so they are deliberately not here.
+    var isTooLargeOrRateLimited: Bool {
+        switch self {
+        case .rateLimited: return true
+        case .server(let code, _): return code == 413 || code == 429
+        default: return false
+        }
+    }
+
+    /// The failure to report after the one automatic retry ALSO failed.
+    ///
+    /// The provider's own sentence is kept verbatim, because it carries the numbers — the limit and what was
+    /// requested — and those are the only things that say what to do next. The retry is stated in front of
+    /// it: telling the wearer one attempt failed when two did, at two different sizes, is the same dishonesty
+    /// as reporting a rate limit as "couldn't reach the coach".
+    static func retryExhausted(_ error: AICoachError, first: Int, second: Int) -> AICoachError {
+        let prefix = "Asked for \(first) tokens, was refused, retried at \(second) and was refused again."
+        switch error {
+        case .rateLimited(let detail):
+            return .rateLimited(detail.isEmpty ? prefix : prefix + " " + detail)
+        case .server(let code, let detail):
+            return .server(code, detail.isEmpty ? prefix : prefix + " " + detail)
+        default:
+            return error
+        }
+    }
+
     /// Map a thrown error to a case. `URLSession` reports a cancelled or timed-out request as a
     /// `URLError`, and Swift concurrency as a `CancellationError`; both used to arrive here wrapped in
     /// `.network(localizedDescription)`, which is how "the screen went away mid-request" ended up being
@@ -246,8 +283,9 @@ enum AICoachError: LocalizedError {
             return "Type a question for the coach."
         case .badKey:
             return "That API key was rejected. Check the key and the provider you selected."
-        case .rateLimited:
-            return "The provider is rate-limiting requests right now. Wait a moment and try again."
+        case .rateLimited(let detail):
+            let extra = detail.isEmpty ? "" : " - \(detail)"
+            return "The provider is rate-limiting requests right now\(extra). Wait a moment and try again."
         case .server(let code, let detail):
             let extra = detail.isEmpty ? "" : " - \(detail)"
             return "The provider returned an error (\(code))\(extra)."
@@ -446,6 +484,16 @@ final class AICoachEngine: ObservableObject {
             now: now, weather: WeatherService.lastKnown, forecast: WeatherService.lastKnownForecast)
     }
 
+    /// The tokens a request carries BESIDE its grounding: the framing prose, the clock-and-weather block
+    /// every request's system prompt gains, and the question.
+    ///
+    /// This is the number every budgeted caller has to subtract before it decides how much grounding fits.
+    /// It is computed from the real strings rather than estimated, because the framing is the one part that
+    /// cannot be trimmed — a budget that under-reserves it overruns by exactly the amount it guessed wrong.
+    func reservedTokens(framing: String, question: String, now: Date = Date()) -> Int {
+        CoachTokens.estimate(requestSystemPrompt(framing, now: now)) + CoachTokens.estimate(question)
+    }
+
     /// True while a background weather refresh is in flight, so a burst of requests (a ritual and its
     /// quest, back to back) asks the sky once.
     private static var weatherRefreshInFlight = false
@@ -510,25 +558,29 @@ final class AICoachEngine: ObservableObject {
     /// vary by tokenizer. Returns nil when the engine isn't configured (no context to estimate).
     func estimatedTokens(forDraft draft: String) -> Int? {
         guard isConfigured else { return nil }
-        // Estimate the context size: system prompt + data context (rough — we don't build the
-        // full context here to avoid a DB read on every keystroke). Use the last known context
-        // size or a reasonable default.
-        let systemPromptTokens = systemPrompt.count / 4
-        // The data context is typically ~2000-4000 chars depending on the user's data.
-        // Use a conservative estimate of 3000 chars (750 tokens) when consent is on.
-        let contextTokens = dataConsent ? 750 : 50
-        // The dream journal is a WHOLE BLOCK the flat figure above does not cover, and it is the one part
-        // of the context whose size the wearer controls by typing. Counted at its ceiling
-        // (`CoachDreamContext.maxPromptChars`) and only when data access is on and there is at least one
-        // entry — the same two conditions under which any of it is sent.
-        let dreamTokens = dataConsent && !DreamJournalStore.shared.entries.isEmpty
-            ? CoachDreamContext.maxPromptChars / 4
-            : 0
-        // History tokens: sum of all message texts in the windowed history.
-        let historyTokens = windowedMessages().reduce(0) { $0 + $1.text.count / 4 }
-        let draftTokens = draft.count / 4
-        return systemPromptTokens + contextTokens + dreamTokens + historyTokens + draftTokens
+        // THE WHOLE REQUEST, not one part of it, and CAPPED BY THE BUDGET the chat is actually held to.
+        // The old sum guessed a flat 750 tokens for "the data context" — measured, it is five to six
+        // THOUSAND — and the figure under the composer therefore said a request was small right up to the
+        // 413 that said it was not. The context is now assembled to `CoachRequestBudget.chat`, so the
+        // honest estimate is the reserve plus whatever the budget lets the grounding be.
+        let reserved = reservedTokens(framing: systemPrompt, question: draft)
+            + windowedMessages().reduce(0) { $0 + CoachTokens.estimate($1.text) }
+        guard dataConsent else { return reserved + CoachTokens.estimate(Self.sessionConstraints()) }
+        // THE GROUNDING IS NOT REBUILT HERE. This runs on every keystroke, and assembling the context means
+        // several store reads and `CoachExtraContext`'s whole pass — the reason the old version guessed a
+        // flat 750 tokens rather than measuring. So the LAST assembled context's real size is used
+        // (`lastContextTokens`), and until one has been assembled the budget's own remainder stands in,
+        // which is what the next request will be trimmed to anyway.
+        let budget = CoachRequestBudget.chat.resolved(model: model)
+        let grounding = lastContextTokens ?? max(0, budget - reserved)
+        return min(max(reserved, budget), reserved + grounding)
     }
+
+    /// The estimated tokens of the last context `buildFullContext(budget:reserved:)` assembled.
+    ///
+    /// Kept so the composer's figure can be the real one without rebuilding the context per keystroke. Nil
+    /// until the first grounded request of the session.
+    private(set) var lastContextTokens: Int?
 
     /// Used in place of the metrics context when the user has NOT granted data access.
     private let noConsentNote = """
@@ -975,8 +1027,15 @@ final class AICoachEngine: ObservableObject {
         // they are what the wearer told the coach about their day and what it wrote down itself — so
         // withholding them without data access would only make the plans collide with the day they
         // are for. With consent they are already part of `buildFullContext`.
+        // THE BUDGET COUNTS THE WHOLE REQUEST, not just this block: the system prompt with its clock and
+        // weather, every turn of the running history, and the question the wearer just typed all go on the
+        // wire beside it, and the provider meters the sum. Reserving them here is what stops a long
+        // conversation quietly adding a thousand tokens per turn until a request is refused.
+        let reserved = reservedTokens(framing: systemPrompt, question: trimmed)
+            + windowedMessages().reduce(0) { $0 + CoachTokens.estimate($1.text) }
         let context = dataConsent
-            ? await buildFullContext()
+            ? await buildFullContext(budget: CoachRequestBudget.chat.resolved(model: model),
+                                     reserved: reserved).text
             : noConsentNote + "\n\n" + Self.sessionConstraints()
         // K13: if the conversation overflows the sliding window, summarize the dropped middle so
         // the model retains context continuity. Best-effort; failure degrades to the old gap.
@@ -1079,7 +1138,7 @@ final class AICoachEngine: ObservableObject {
         sending = true
         defer { sending = false; persistMessages() }
 
-        let context = await buildFullContext()
+        let context = await briefContext()
         let wire: [(role: ChatMessage.Role, content: String)] =
             [(.user, context + "\n\n---\n\n" + Self.briefInstruction)]
 
@@ -1158,6 +1217,17 @@ final class AICoachEngine: ObservableObject {
     (3) one specific thing to improve my charge. Be punchy and motivating.
     """
 
+    /// The brief's grounding, to the brief's own budget.
+    ///
+    /// Its own seam because BOTH brief paths — the one that streams into the transcript and the headless
+    /// one the scheduled notification uses — have to be the same size. They were two calls to
+    /// `buildFullContext()` and one of them would have been the next thing to overrun.
+    func briefContext() async -> String {
+        let reserved = reservedTokens(framing: systemPrompt, question: Self.briefInstruction)
+        return await buildFullContext(budget: CoachRequestBudget.brief.resolved(model: model),
+                                      reserved: reserved).text
+    }
+
     /// K5: Generate today's coaching brief WITHOUT touching the visible chat transcript. Used by the
     /// scheduled morning-brief notification (`CoachBriefScheduler`), which can run with no Coach screen
     /// open and must never append to (or duplicate into) `messages`. Non-streaming (a background/BGTask
@@ -1165,7 +1235,7 @@ final class AICoachEngine: ObservableObject {
     /// failure, or when the reply is empty — the caller treats nil as "brief unavailable"; never throws.
     func generateBrief() async -> String? {
         guard isConfigured, dataConsent, let key = resolvedKey else { return nil }
-        let context = await buildFullContext()
+        let context = await briefContext()
         let wire: [(role: ChatMessage.Role, content: String)] =
             [(.user, context + "\n\n---\n\n" + Self.briefInstruction)]
         guard let reply = try? await callProvider(key: key, messages: wire) else { return nil }
@@ -1192,9 +1262,21 @@ final class AICoachEngine: ObservableObject {
     /// `requiresDataConsent: false` is for a caller that sends NO data block — only the wearer's own
     /// words and the non-biometric session constraints, exactly what the chat sends without consent
     /// (the custom-task writer). Every grounded caller keeps the default.
+    ///
+    /// `budget` is a CEILING THAT IS CHECKED, not one the prompt is trimmed to. It is for the writers whose
+    /// prompts are already bounded by construction — the level note (five parts), the muscle note (one row
+    /// per muscle group), a quest's name, a custom task — where there is no grounding to shorten and the
+    /// useful thing is to NOTICE when one has grown past its share of a per-minute allowance. Overrunning is
+    /// logged with both numbers and the request still goes out: a note the wearer has been shown before is
+    /// worth more than a refusal, and the log is what turns "it stopped working" into a size to fix.
+    ///
+    /// A caller with grounding it CAN trim uses `generateOneShotResult(budget:build:)` instead, which
+    /// assembles to the budget and retries once at half of it.
     func generateOneShot(systemPrompt: String, question: String,
+                         budget: CoachRequestBudget? = nil,
                          requiresDataConsent: Bool = true) async -> String? {
         try? await generateOneShotResult(systemPrompt: systemPrompt, question: question,
+                                         budget: budget,
                                          requiresDataConsent: requiresDataConsent).get()
     }
 
@@ -1210,6 +1292,7 @@ final class AICoachEngine: ObservableObject {
     /// Still never throws out of the actor: it returns a `Result`, so a caller that only wants the text
     /// keeps the `String?` shape above and a caller that has to TELL the wearer something gets the case.
     func generateOneShotResult(systemPrompt: String, question: String,
+                               budget: CoachRequestBudget? = nil,
                                requiresDataConsent: Bool = true) async -> Result<String, AICoachError> {
         guard isConfigured else { return .failure(.noKey) }
         guard dataConsent || !requiresDataConsent else { return .failure(.dataAccessOff) }
@@ -1218,6 +1301,15 @@ final class AICoachEngine: ObservableObject {
             key = try resolveKey()
         } catch {
             return .failure(AICoachError.from(error))
+        }
+        // THE SIZE IS MEASURED WHETHER OR NOT IT CAN BE TRIMMED. Nothing used to count a one-shot request at
+        // all, which is why a tile refresh grew to 8,646 tokens without a single line of the app noticing.
+        if let budget {
+            let ceiling = budget.resolved(model: model)
+            let size = reservedTokens(framing: systemPrompt, question: question)
+            if size > ceiling {
+                CoachLog.ai("one-shot over budget: \(size) tokens vs \(ceiling) (\(budget.rawValue))")
+            }
         }
         backgroundWork += 1
         defer { backgroundWork -= 1 }
@@ -1245,6 +1337,45 @@ final class AICoachEngine: ObservableObject {
         }
     }
 
+    /// A one-shot generation with an explicit TOKEN BUDGET, and one automatic retry at half of it.
+    ///
+    /// WHY THE CALLER HANDS OVER A CLOSURE instead of two finished strings. A 413 says "this request was too
+    /// big"; the only useful response is to build a SMALLER one, and a finished string cannot be made
+    /// smaller without guessing where to cut. So the caller says how to build the request AT A GIVEN BUDGET,
+    /// this asks for it at the resolved budget, and on a refusal for size or rate asks for it again at half.
+    ///
+    /// ONE RETRY, NOT A LOOP. Two attempts at 3,800 and 1,900 tokens cost less than one at 8,646 did, and a
+    /// third would be a request with no grounding left in it — at which point the honest thing is to report
+    /// the failure with its numbers, which is what happens (`AICoachError.retryExhausted`).
+    ///
+    /// THE BUDGET IS FOR THE WHOLE REQUEST. `build` receives the ceiling and is responsible for fitting the
+    /// system prompt, the grounding AND the question inside it — see `CoachContextBudget.fit`, whose
+    /// `reserved` argument exists for exactly that. A budget spent on the grounding alone is the mistake
+    /// that produced the 413.
+    func generateOneShotResult(
+        budget: CoachRequestBudget,
+        requiresDataConsent: Bool = true,
+        build: (Int) async -> (systemPrompt: String, question: String)
+    ) async -> Result<String, AICoachError> {
+        let first = budget.resolved(model: model)
+        let built = await build(first)
+        let attempt = await generateOneShotResult(systemPrompt: built.systemPrompt,
+                                                 question: built.question,
+                                                 requiresDataConsent: requiresDataConsent)
+        guard case .failure(let error) = attempt, error.isTooLargeOrRateLimited else { return attempt }
+        let second = CoachRequestBudget.halved(first)
+        // A halved budget that is not actually smaller buys nothing, and re-sending the identical request
+        // would be one more refusal for the same reason. Report the first failure instead.
+        guard second < first else { return attempt }
+        CoachLog.ai("one-shot refused at \(first) tokens (\(error.logReason)); retrying at \(second)")
+        let retryBuilt = await build(second)
+        let retry = await generateOneShotResult(systemPrompt: retryBuilt.systemPrompt,
+                                                question: retryBuilt.question,
+                                                requiresDataConsent: requiresDataConsent)
+        guard case .failure(let again) = retry else { return retry }
+        return .failure(AICoachError.retryExhausted(again, first: first, second: second))
+    }
+
     /// Today's mission, generating it if today has none. Nil when it cannot be written.
     ///
     /// READ-THEN-GENERATE, keyed on the local day: the mission is one per day, so a screen that appears
@@ -1258,13 +1389,24 @@ final class AICoachEngine: ObservableObject {
         // mission keeps stress low too (down-regulation after hard sessions, morning meditation, a calm
         // wind-down) and respects the wearer's allowed workouts.
         let now = Date()
-        let grounding = await buildFullContext()
-            + "\n\n" + StateDayPlanContext.block(now: now, schedule: RoomClimatePlan.schedule(now: now))
-            + "\n\n" + StateDayPlanContext.missionObjective(choices: StateWorkoutChoicesStore.read())
-        let answer = await generateOneShot(
-            systemPrompt: DailyMissionWriter.systemPrompt(grounding: grounding),
-            question: DailyMissionWriter.question)
-        guard let answer,
+        let schedule = RoomClimatePlan.schedule(now: now)
+        let choices = StateWorkoutChoicesStore.read()
+        // BUDGETED, with one retry at half. The mission used to send the whole chat context and hope; on an
+        // 8,000-tokens-per-minute key that was most of a minute's allowance for three sentences.
+        let result = await generateOneShotResult(budget: .mission) { budget in
+            // The schedule and the objective are part of the ASKING, not of the grounding that can be
+            // trimmed — the mission has to name a clock time inside the day, and the level and stress aims
+            // are what the mission is for. They are reserved with the framing.
+            let tail = StateDayPlanContext.block(now: now, schedule: schedule) + "\n\n"
+                + StateDayPlanContext.missionObjective(choices: choices)
+            let reserved = self.reservedTokens(framing: DailyMissionWriter.systemPrompt(grounding: ""),
+                                               question: DailyMissionWriter.question, now: now)
+                + CoachTokens.estimate(tail)
+            let fit = await self.buildFullContext(budget: budget, reserved: reserved)
+            return (systemPrompt: DailyMissionWriter.systemPrompt(grounding: fit.text + "\n\n" + tail),
+                    question: DailyMissionWriter.question)
+        }
+        guard case .success(let answer) = result,
               let mission = DailyMissionWriter.parse(answer, dayKey: DailyMissionStore.dayKey())
         else { return nil }
         DailyMissionStore.write(mission)
@@ -1273,10 +1415,13 @@ final class AICoachEngine: ObservableObject {
 
     /// The routines and the memory file — the part of the context that is not biometric data, and so is
     /// sent on every session whether or not data access is on.
-    static func sessionConstraints(_ d: UserDefaults = .standard) -> String {
+    /// `memoryEntries` caps how many memory notes are listed. Nil is every note, which is what the chat
+    /// sends — its context is assembled to a budget that can shorten or drop the block whole. A lean
+    /// one-shot writer that appends this raw passes a cap; see `CoachMemory.promptSection(maxEntries:)`.
+    static func sessionConstraints(memoryEntries: Int? = nil, _ d: UserDefaults = .standard) -> String {
         var parts: [String] = []
         if let routines = CoachRoutines.promptSection(d) { parts.append(routines) }
-        parts.append(CoachMemory.shared.promptSection())
+        parts.append(CoachMemory.shared.promptSection(maxEntries: memoryEntries))
         return parts.joined(separator: "\n\n")
     }
 
@@ -1322,50 +1467,158 @@ final class AICoachEngine: ObservableObject {
 
     /// Full data context = the metrics summary + recent workouts (+ an OPT-IN on-device-signals summary
     /// when the second consent is on). Used when the user has granted data access.
+    ///
+    /// NOW ASSEMBLED TO A BUDGET. It used to append every block it could find and hand the result over,
+    /// which is how one State-tile refresh came to ask a provider for 8,646 tokens against an 8,000-per-
+    /// minute allowance and be refused. `budget` is the ceiling for the WHOLE request and `reserved` is
+    /// everything else that request will carry — the system prompt, the clock block, the question — because
+    /// that is what the provider meters. Blocks that will not fit are shortened or dropped cheapest-value-
+    /// first and the fact is stated in the context itself (`CoachContextBudget`).
+    ///
+    /// The no-argument form keeps the chat's own budget, so every existing caller is unchanged.
     func buildFullContext() async -> String {
-        // THE SCORES THE COACH SPEAKS IN, first. NOOP's own Charge / Effort / Rest on 0–100 are the
-        // primary figures — the ones the level, the quests and every screen are built on. WHOOP's own
-        // recovery, strain and sleep score follow as a secondary reference, clearly labelled with their
-        // own names and scales, so the model never quotes a WHOOP strain of 14 as an effort out of 100.
+        await buildFullContext(budget: CoachRequestBudget.chat.resolved(model: model), reserved: 0).text
+    }
+
+    func buildFullContext(budget: Int, reserved: Int) async -> CoachContextFit {
+        let fit = CoachContextBudget.fit(await contextBlocks(), budget: budget, reserved: reserved)
+        lastContextTokens = CoachTokens.estimate(fit.text)
+        if !fit.isComplete {
+            CoachLog.ai("context trimmed to \(budget) (reserved \(reserved)): shortened "
+                        + "\(fit.shortened.joined(separator: ", ")); dropped \(fit.dropped.joined(separator: ", "))")
+        }
+        return fit
+    }
+
+    /// The chat's context, as blocks with what each is worth.
+    ///
+    /// DECLARATION ORDER IS READING ORDER and is unchanged from the single string this replaces — the day
+    /// frame first, then the figures contiguous, then the constraints, then the closing rule. The VALUES are
+    /// new, and they are the chat's: a question can be about anything, so the dated figures outrank the
+    /// prose, and the prose the wearer typed himself (routines, memory) outranks the app's own extras.
+    func contextBlocks() async -> [CoachContextBlock] {
+        var out: [CoachContextBlock] = []
         // WHICH DAY EACH FIGURE BELONGS TO, FIRST — before any number. Everything below is dated, and
         // nothing used to say what those dates meant, so a question about tomorrow was answered with
-        // today's charge. See `CoachDayFrame`.
-        var ctx = CoachDayFrame.block() + "\n\n"
-        ctx += await threeScoresBlock()
-        ctx += "\n\n" + CoachLevelContext.promptSection()
-        // THE ROUTINES AND THE MEMORY MOVED TO THE END (below). They used to sit HERE, between the level and
+        // today's charge. See `CoachDayFrame`. Its short form is the same rules in one paragraph.
+        out.append(CoachContextBlock(name: "the day-validity rules", value: 95,
+                                     full: CoachDayFrame.block(),
+                                     short: CoachDayFrame.compactBlock()))
+        // THE SCORES THE COACH SPEAKS IN. NOOP's own Charge / Effort / Rest on 0–100 are the primary
+        // figures — the ones the level, the quests and every screen are built on. WHOOP's own recovery,
+        // strain and sleep score follow as a secondary reference, clearly labelled with their own names and
+        // scales, so the model never quotes a WHOOP strain of 14 as an effort out of 100.
+        out.append(CoachContextBlock(name: "the three daily scores", value: 90,
+                                     full: await threeScoresBlock()))
+        // The whole level formula. High value in the chat, which is asked how the level works; the FIRST
+        // thing the State tile drops, because its own prompt carries the gaps it needs.
+        out.append(CoachContextBlock(name: "the level and its formula", value: 45,
+                                     full: CoachLevelContext.promptSection()))
+        // THE ROUTINES AND THE MEMORY ARE AT THE END (below). They used to sit HERE, between the level and
         // the biometric table — several paragraphs of non-data prose splitting the figures into two halves,
         // which is exactly the crowding-out that makes a small model answer from the prose and not from the
-        // numbers. The data is now contiguous and the constraints follow it.
-        ctx += "\n\n" + buildContext()
-        ctx += "\n\n" + (await recentWorkoutsBlock())
+        // numbers. The data is contiguous and the constraints follow it.
+        out.append(CoachContextBlock(name: "the recent-days table", value: 85,
+                                     full: buildContext(), short: shortHistoryBlock()))
+        out.append(CoachContextBlock(name: "recent workouts", value: 70,
+                                     full: await recentWorkoutsBlock(),
+                                     short: await recentWorkoutsBlock(limit: 4)))
         // Derived stress: a single Baevsky Stress Index summary line over today's R-R, computed the same
-        // way StressView does. Gated here under `dataConsent` (the caller only reaches buildFullContext()
-        // with consent on), so it rides the SAME consent + text-only channel as the HRV/RHR summary, a
-        // derived number, never raw R-R egress. Omitted when there aren't enough clean beats yet.
-        if let line = await stressIndexLine() { ctx += "\n\n" + line }
-        // THE QUEST ON SCREEN, when the coach was opened from one. First after the metrics, because
-        // everything below is background and this is the subject.
-        // EVERYTHING ELSE THE APP HOLDS about the day and the week — dreams, journal, water, energy,
-        // streaks, stress now and by the hour, quests, meditation, the level's gaps, VO₂max, strength,
-        // the bedroom and the lights. See `CoachExtraContext`.
-        let extra = await CoachExtraContext.block(repo: repo)
-        if !extra.isEmpty { ctx += "\n\n" + extra }
-        if let activeQuest { ctx += "\n\n" + activeQuest.promptBlock }
-        if let activeWorkoutDossier { ctx += "\n\n" + activeWorkoutDossier }
+        // way StressView does. Gated here under `dataConsent` (the caller only reaches this with consent
+        // on), so it rides the SAME consent + text-only channel as the HRV/RHR summary, a derived number,
+        // never raw R-R egress. Omitted when there aren't enough clean beats yet.
+        if let line = await stressIndexLine() {
+            out.append(CoachContextBlock(name: "today's stress index", value: 65, full: line))
+        }
+        // EVERYTHING ELSE THE APP HOLDS about the day and the week — journal, water, energy, streaks, stress
+        // now and by the hour, quests, meditation, the level's gaps, VO₂max, strength, the bedroom and the
+        // lights. See `CoachExtraContext`.
+        //
+        // THE DREAM JOURNAL IS ITS OWN BLOCK, and a cheaper one. It is the largest single piece of that
+        // section and the only part of the whole context whose size the wearer controls by typing, so the
+        // budget has to be able to take it back WITHOUT losing the water, the streaks and the level inputs
+        // with it. Declared after, so it keeps the position it was deliberately given: last, behind every
+        // figure, because several paragraphs of half-awake prose in front of the numbers is what makes a
+        // small model answer from the story.
+        let extra = await CoachExtraContext.block(repo: repo, includeDreams: false)
+        if !extra.isEmpty {
+            out.append(CoachContextBlock(name: "the day's other figures", value: 40, full: extra))
+        }
+        let dreams = CoachDreamContext.block(entries: DreamJournalStore.shared.entries)
+        if !dreams.isEmpty {
+            out.append(CoachContextBlock(name: "the dream journal", value: 25, full: dreams))
+        }
+        // THE QUEST ON SCREEN, when the coach was opened from one. The highest value there is: it is the
+        // SUBJECT of the conversation, and a context that dropped it would answer about something else.
+        if let activeQuest {
+            out.append(CoachContextBlock(name: "the quest on screen", value: 100,
+                                         full: activeQuest.promptBlock))
+        }
+        if let activeWorkoutDossier {
+            out.append(CoachContextBlock(name: "the workout being reviewed", value: 100,
+                                         full: activeWorkoutDossier))
+        }
         // THE SKY RIDES THE SYSTEM PROMPT, not this block: the weather now and today's forecast go out
         // with every request (`requestSystemPrompt`), consent or not, so adding them here sends them twice.
         if includeOnDeviceSignals {
             let block = await onDeviceSignalsBlock()
-            if !block.isEmpty { ctx += "\n\n" + block }
+            if !block.isEmpty {
+                out.append(CoachContextBlock(name: "on-device signals and lab book", value: 35, full: block))
+            }
         }
         // AFTER the figures, not in the middle of them: what the wearer told the coach about their week and
         // what it wrote down itself are constraints on the answer, not data to reason from.
-        ctx += "\n\n" + Self.sessionConstraints()
+        let constraints = Self.sessionConstraints()
+        if !constraints.isEmpty {
+            out.append(CoachContextBlock(name: "their routines and the memory file", value: 55,
+                                         full: constraints))
+        }
         // The last thing the model reads before the question. Short on purpose — it is a reminder of the
         // frame at the top, placed where recency makes it stick.
-        ctx += "\n\n" + CoachDayFrame.closingRule
-        return ctx
+        out.append(CoachContextBlock(name: "the dating rule", value: 80, full: CoachDayFrame.closingRule))
+        return out
+    }
+
+    /// The SHORT history: the last few days' three scores and the 30-day averages, without the fourteen-row
+    /// per-metric table.
+    ///
+    /// WHAT IT IS FOR. `buildContext()` emits fourteen rows of eleven fields each — about 680 estimated
+    /// tokens — which the chat earns and the State tile does not: the tile asks what is due in the next few
+    /// hours, and "how has the week gone" is answered by five lines. This is that answer, and it is also
+    /// `buildContext()`'s own short form when a chat request will not take the full table.
+    ///
+    /// ABSTAINS THE SAME WAY the table does: a dash is "not measured", said in the header, and a day with
+    /// nothing in it still gets its row rather than being skipped.
+    func shortHistoryBlock(days: Int = 5) -> String {
+        let all = repo.days
+        guard !all.isEmpty else {
+            return "RECENT DAYS: no wearable data has been recorded yet. Say so rather than estimating."
+        }
+        let todayKey = CoachDayFrame.key(Date())
+        var lines = ["RECENT DAYS (newest first) — charge(0-100), effort(0-100), rest/sleep(h), HRV(ms), "
+                     + "RHR(bpm). A dash means NOT MEASURED, not zero. The date is the day the charge's "
+                     + "MORNING fell on; the sleep and HRV figures are for the night that ENDED that morning:"]
+        for d in Array(all.suffix(max(1, days))).reversed() {
+            var parts = [d.day + ":"]
+            parts.append("charge " + (d.recovery.map { "\(Int($0.rounded()))" } ?? "—"))
+            parts.append("effort " + (d.strain.map { String(format: "%.1f", $0) } ?? "—"))
+            parts.append("rest " + (d.totalSleepMin.map { String(format: "%.1fh", $0 / 60) } ?? "—"))
+            parts.append("HRV " + (d.avgHrv.map { "\(Int($0.rounded()))ms" } ?? "—"))
+            parts.append("RHR " + (d.restingHr.map { "\($0)bpm" } ?? "—"))
+            let tag = d.day == todayKey ? "  TODAY, incomplete — " : "  "
+            lines.append(tag + parts.joined(separator: ", "))
+        }
+        if !all.suffix(max(1, days)).contains(where: { $0.day == todayKey }) {
+            lines.append("  (No row for today (\(todayKey)) yet — the newest row above is an EARLIER day.)")
+        }
+        let last30 = Array(all.suffix(30))
+        lines.append("30-day averages: charge \(avgInt(last30.compactMap { $0.recovery }))"
+                     + ", effort \(avgOne(last30.compactMap { $0.strain }))"
+                     + ", sleep \(avgSleepHours(last30))h"
+                     + ", HRV \(avgInt(last30.compactMap { $0.avgHrv })) ms"
+                     + ", RHR \(avgInt(last30.compactMap { $0.restingHr.map(Double.init) })) bpm"
+                     + ", steps \(avgInt(last30.compactMap { $0.steps.map(Double.init) }))/day")
+        return lines.joined(separator: "\n")
     }
 
     /// One derived stress line for the coach context: the Baevsky Stress Index for TODAY, read via the
@@ -1376,17 +1629,27 @@ final class AICoachEngine: ObservableObject {
     /// 5-minute window has enough beats, so the line is simply absent, never a fabricated value.
     /// Summary-only: the raw R-R never leaves the device.
     func stressIndexLine() async -> String? {
-        let cal = Calendar.current
-        let from = Int(cal.startOfDay(for: Date()).timeIntervalSince1970)
-        let to = Int(Date().timeIntervalSince1970)
-        let rr = await repo.rrIntervals(from: from, to: to, limit: 200_000)
-        guard let si = StressIndex.medianWindowStressIndex(rr: rr) else { return nil }
+        guard let si = await stressIndexToday() else { return nil }
         return Self.stressIndexSummary(si: si)
+    }
+
+    /// The figure behind that line. Split out so the State tile's own grounding can put the SAME number in
+    /// its own stress block instead of carrying a second copy of the read — one source per concern.
+    func stressIndexToday(now: Date = Date()) async -> Double? {
+        let cal = Calendar.current
+        let from = Int(cal.startOfDay(for: now).timeIntervalSince1970)
+        let to = Int(now.timeIntervalSince1970)
+        let rr = await repo.rrIntervals(from: from, to: to, limit: 200_000)
+        return StressIndex.medianWindowStressIndex(rr: rr)
     }
 
     /// Pure formatter for the derived stress line, kept separate so it is unit-testable without a store.
     /// One summary number, labelled, with a plain-English note that it's an autonomic-balance proxy.
-    static func stressIndexSummary(si: Double) -> String {
+    ///
+    /// `nonisolated` because it touches nothing on the engine: the State tile's own grounding
+    /// (`StateGrounding.stressBlock`) is pure and off the main actor, and it must use THIS sentence rather
+    /// than a second copy of it.
+    nonisolated static func stressIndexSummary(si: Double) -> String {
         "Stress (SI): \(Int(si.rounded())) (Baevsky Stress Index, median of 5-minute windows today; higher means more sympathetic / under load; an autonomic-balance proxy, not a clinical figure)."
     }
 

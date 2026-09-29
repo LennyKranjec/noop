@@ -350,10 +350,19 @@ func performRequest(
     case 429:
         // READ BEFORE THROWING. A daily-limit rejection is the one place the provider states the day's
         // real token usage over its API — see `AITokenBudget.absorbProviderError`.
-        AITokenBudget.absorbProviderError(providerErrorMessage(from: data))
-        throw AICoachError.rateLimited
+        let message = providerErrorMessage(from: data)
+        AITokenBudget.absorbProviderError(message)
+        // AND THE PER-MINUTE TOKEN CEILING, which the same sentence shape states and which is what the
+        // NEXT request has to be sized against — see `AIProviderTokenLimit`.
+        AIProviderTokenLimit.absorb(message)
+        throw AICoachError.rateLimited(message)
     default:
-        throw AICoachError.server(http.statusCode, providerErrorMessage(from: data))
+        let message = providerErrorMessage(from: data)
+        // A 413 IS A SIZE STATEMENT. Groq refuses an over-large request with "Limit 8000, Requested 8646"
+        // and a 413 rather than a 429, so the figure that would let the app size the next request correctly
+        // arrives on the path that used to read nothing at all.
+        if http.statusCode == 413 { AIProviderTokenLimit.absorb(message) }
+        throw AICoachError.server(http.statusCode, message)
     }
 }
 
@@ -432,12 +441,16 @@ func performStreamingRequest(
         // the non-streaming path does.
         var body = ""
         for try await line in bytes.0.lines { body += line }
-        AITokenBudget.absorbProviderError(providerErrorMessage(from: Data(body.utf8)))
-        throw AICoachError.rateLimited
+        let message = providerErrorMessage(from: Data(body.utf8))
+        AITokenBudget.absorbProviderError(message)
+        AIProviderTokenLimit.absorb(message)
+        throw AICoachError.rateLimited(message)
     default:
         // For non-200, the body is a (non-streaming) error JSON — collect it and surface the message.
         var body = ""
         for try await line in bytes.0.lines { body += line }
-        throw AICoachError.server(http.statusCode, providerErrorMessage(from: Data(body.utf8)))
+        let message = providerErrorMessage(from: Data(body.utf8))
+        if http.statusCode == 413 { AIProviderTokenLimit.absorb(message) }
+        throw AICoachError.server(http.statusCode, message)
     }
 }

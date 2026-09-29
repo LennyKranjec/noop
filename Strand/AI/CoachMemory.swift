@@ -78,14 +78,28 @@ final class CoachMemory: ObservableObject {
     }
 
     /// The block that goes into every session's context: the file's contents and how to change it.
-    func promptSection() -> String {
+    ///
+    /// `maxEntries` caps how many notes are LISTED, newest kept. Nil lists them all, which is what the chat
+    /// does — its context is assembled to a budget that can shorten or drop this whole block. A lean one-shot
+    /// writer that appends this raw (the custom-task writer) passes a cap instead, because 40 notes at 280
+    /// characters is 11,000 characters of prose and that is most of a small per-minute token allowance spent
+    /// on a request that needed two lines of it.
+    ///
+    /// THE REMAINDER IS COUNTED, never silently absent: "you have no note about that" said over notes that
+    /// were trimmed for size is the same fabrication as inventing one.
+    func promptSection(maxEntries: Int? = nil) -> String {
         var s = "YOUR MEMORY FILE — notes you wrote in earlier sessions. Read it before answering.\n"
         if items.isEmpty {
             s += "(empty)\n"
         } else {
             let f = DateFormatter()
             f.dateFormat = "yyyy-MM-dd"
-            for item in items { s += "- [\(item.id)] (\(f.string(from: item.createdAt))) \(item.text)\n" }
+            let listed = maxEntries.map { Array(items.suffix(max(0, $0))) } ?? items
+            for item in listed { s += "- [\(item.id)] (\(f.string(from: item.createdAt))) \(item.text)\n" }
+            if listed.count < items.count {
+                s += "(\(items.count - listed.count) older notes exist but are not listed here — say so if "
+                s += "something seems missing, never that there is no note.)\n"
+            }
         }
         s += "To save something worth keeping — an agreed plan, an injury, a preference, what worked or "
         s += "did not — write a line exactly like [[REMEMBER: the note]]. To delete an entry that is done "

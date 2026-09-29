@@ -1110,12 +1110,18 @@ enum StateTrainingContext {
     /// The block appended to the coach's full context for the State refresh: today's training state in
     /// the terms the suggestions are asked in. Weather, weekday and time already ride the system prompt
     /// (`AICoachEngine.requestSystemPrompt`), so they are not repeated here.
+    ///
+    /// `recentLimit` is how many of the previous fortnight's sessions are listed. TWENTY for the chat,
+    /// which has room; SIX for the State tile, which is on a per-minute token allowance and whose prompt
+    /// asks only whether a hard session is recent. ZERO lists none and says so, which is the block's own
+    /// short form when the budget will not take the rows.
     static func block(figures: StateTrainingFigures,
                       zones: [HRZoneBPMRange],
                       today: [StateWorkoutFact],
                       recent: [StateWorkoutFact],
                       now: Date = Date(),
                       bedtimeMinute: Int? = nil,
+                      recentLimit: Int = 20,
                       calendar: Calendar = .current) -> String {
         func n(_ v: Double?, _ fmt: String = "%.0f") -> String { v.map { String(format: fmt, $0) } ?? "—" }
         let todayKey = dayKey(now, calendar)
@@ -1174,11 +1180,22 @@ enum StateTrainingContext {
         }
         if recent.isEmpty {
             s.append("Workouts in the previous 14 days: none recorded.")
+        } else if recentLimit <= 0 {
+            // THE COUNT IS STILL STATED. A block that simply stopped listing them would read as "they
+            // trained nothing in a fortnight", which is the fabrication rule in its most expensive form.
+            s.append("Workouts in the previous 14 days: \(recent.count) recorded, not listed here to save space.")
         } else {
-            s.append("Workouts in the previous 14 days (newest first):")
-            for w in recent.prefix(20) { s.append(line(w, withDate: true, calendar)) }
-            let hard = recent.filter(\.isHard)
-            if let last = hard.first {
+            let listed = recent.prefix(recentLimit)
+            s.append(recent.count > listed.count
+                ? "Workouts in the previous 14 days (newest first; \(listed.count) of \(recent.count) listed):"
+                : "Workouts in the previous 14 days (newest first):")
+            for w in listed { s.append(line(w, withDate: true, calendar)) }
+        }
+        if !recent.isEmpty {
+            // OUT OF THE `else`, and read from the WHOLE fortnight rather than the listed rows: "never
+            // repeat a hard session the day after one" is a rule in the prompt, and a shortened list that
+            // dropped the hard session is a list that quietly repeals it.
+            if let last = recent.first(where: \.isHard) {
                 s.append("Most recent hard session (>=10 min in Z4-5 or effort >= 60): \(dayKey(last.start, calendar)).")
             }
         }
@@ -1190,6 +1207,22 @@ enum StateTrainingContext {
 enum WorkoutSuggestionWriter {
 
     static func systemPrompt(grounding: String, choices: StateWorkoutChoices = .all) -> String {
+        var s = rules + "\n\n"
+        s += levelObjective + "\n\n"
+        s += StateDayPlanContext.stressObjective + "\n\n"
+        s += allowedSection(choices) + "\n\n"
+        s += jsonHeader + "\n"
+        s += jsonShape
+        s += "\n"
+        s += fieldSpec + "\n\n"
+        s += grounding
+        return s
+    }
+
+    /// WHAT THE COACH IS ASKED TO DO. Pulled out of `systemPrompt` unchanged — byte for byte — so the ONE
+    /// merged request the State tile now sends (`StatePlanWriter`) asks for exactly the same thing rather
+    /// than a second, drifting copy of it. One source per concern; a paraphrase here would be the bug.
+    static let rules: String = {
         var s = "You are the user's training coach. Answer ONE question: WHAT IS STILL DUE TODAY, given what "
         s += "they have already done today and the condition they are in now.\n\n"
         s += "DECIDE, do not list options. Read the sessions already completed today, the day's Effort so far "
@@ -1205,14 +1238,18 @@ enum WorkoutSuggestionWriter {
         s += "the day after one.\n"
         s += "- A session already completed today is DONE. Do not suggest it again.\n"
         s += "- Everything you suggest has to fit in the waking time that is actually left.\n"
-        s += "- Prefer sports the user actually does.\n\n"
-        s += levelObjective + "\n\n"
-        s += StateDayPlanContext.stressObjective + "\n\n"
-        s += allowedSection(choices) + "\n\n"
-        s += "Answer with JSON ONLY, no prose and no code fence, exactly in this shape:\n"
-        s += #"{"left_today":"one or two sentences: what is still due today, or that nothing is","workouts":[{"sport":"Running","minutes":40,"zone":2,"effort":12,"window":"17:00-18:00","why":"one short sentence"},{"sport":"NSDR","minutes":20,"zone":1,"effort":1,"window":"18:30-19:00","why":"one short sentence"}]}"#
-        s += "\n"
-        s += "left_today: REQUIRED. One or two sentences in the user's language answering \"what is still due "
+        s += "- Prefer sports the user actually does."
+        return s
+    }()
+
+    static let jsonHeader = "Answer with JSON ONLY, no prose and no code fence, exactly in this shape:"
+
+    static let jsonShape =
+        #"{"left_today":"one or two sentences: what is still due today, or that nothing is","workouts":[{"sport":"Running","minutes":40,"zone":2,"effort":12,"window":"17:00-18:00","why":"one short sentence"},{"sport":"NSDR","minutes":20,"zone":1,"effort":1,"window":"18:30-19:00","why":"one short sentence"}]}"#
+
+    /// What each field means. Shared with the merged request for the same reason `rules` is.
+    static let fieldSpec: String = {
+        var s = "left_today: REQUIRED. One or two sentences in the user's language answering \"what is still due "
         s += "today?\". When the target is met and nothing is outstanding, say exactly that — that they are "
         s += "done — and name the one thing that still moves their LEVEL today instead. When the day is nearly "
         s += "over, point at tonight (bedtime, wind-down) rather than at training. \"workouts\" may be an empty "
@@ -1222,10 +1259,9 @@ enum WorkoutSuggestionWriter {
         s += "effort: estimated Effort points (0-100 scale) the session adds today. "
         s += "window: a clock-time window HH:MM-HH:MM that starts LATER than the time now (never in the past) "
         s += "and fits the day's schedule below. "
-        s += "why: one short sentence in the user's language.\n\n"
-        s += grounding
+        s += "why: one short sentence in the user's language."
         return s
-    }
+    }()
 
     /// What the advice is FOR. Stated in the tile's own prompt as well as in the full context, because the
     /// tile asks a short question about the next few hours and the level is the reason one answer beats
@@ -1298,17 +1334,29 @@ enum StateDayPlanContext {
     static func missionObjective(choices: StateWorkoutChoices) -> String {
         var s = WorkoutSuggestionWriter.levelObjective + "\n\n"
         s += stressObjective + "\n"
-        s += "For TODAY'S MISSION this means: when stress is elevated, HRV is below baseline or a hard session "
+        s += missionStressNote
+        s += missionChoicesNote(choices)
+        return s
+    }
+
+    /// What the stress objective means for a MISSION specifically. Its own constant so the one merged
+    /// request the State tile sends (`StatePlanWriter`) can state it without restating the whole
+    /// objective, which it already carries for the workout half.
+    static let missionStressNote: String = {
+        var s = "For TODAY'S MISSION this means: when stress is elevated, HRV is below baseline or a hard session "
         s += "is done or planned today, a down-regulation mission (meditation, breathwork, NSDR / yoga nidra "
         s += "or restorative yoga — GOAL: MEDITATION_MIN) or an earlier bedtime is often the right one thing. "
         s += "Name a clock time for it that fits the schedule below."
-        if !choices.isUnrestricted {
-            let keys = choices.allowedKeys
-            s += keys.isEmpty
-                ? " The user has deselected every workout: do not make the mission a workout."
-                : " If the mission is a workout, pick it only from: " + keys.joined(separator: ", ") + "."
-        }
         return s
+    }()
+
+    /// The mission's own restriction from the wearer's workout selection. Empty when nothing is deselected.
+    static func missionChoicesNote(_ choices: StateWorkoutChoices) -> String {
+        guard !choices.isUnrestricted else { return "" }
+        let keys = choices.allowedKeys
+        return keys.isEmpty
+            ? " The user has deselected every workout: do not make the mission a workout."
+            : " If the mission is a workout, pick it only from: " + keys.joined(separator: ", ") + "."
     }
 
     private static func clock(_ minute: Int) -> String {
@@ -1579,8 +1627,13 @@ enum StateCoachFailure {
             return String(localized: "Your stored key was saved for \(owner), so it isn't sent to the provider you selected. Paste a key for this provider in System.")
         case .badKey:
             return String(localized: "The provider rejected your API key. Check it in System.")
-        case .rateLimited:
-            return String(localized: "Your provider is rate-limiting right now. Kept the previous state; try again in a minute.")
+        case .rateLimited(let detail):
+            // THE NUMBERS TRAVEL. A per-minute token limit states them ("Limit 8000, Requested 8646") and
+            // they are the only thing that tells the wearer whether to wait a minute or use a smaller model —
+            // "try again in a minute" over a request that is permanently too big is advice that never works.
+            return detail.isEmpty
+                ? String(localized: "Your provider is rate-limiting right now. Kept the previous state; try again in a minute.")
+                : String(localized: "Your provider is rate-limiting right now (\(detail)). Kept the previous state.")
         case .timedOut:
             return String(localized: "The provider took too long to answer. Kept the previous state.")
         case .network(let detail):

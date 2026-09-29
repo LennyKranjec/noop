@@ -33,7 +33,7 @@ final class CoachFailureReasonTests: XCTestCase {
     /// An `AICoachError` that has already been classified travels through unchanged rather than being
     /// re-wrapped as a network problem.
     func testAnAlreadyClassifiedErrorIsNotReclassified() {
-        XCTAssertEqual(AICoachError.from(AICoachError.rateLimited).logReason, "rate-limited")
+        XCTAssertEqual(AICoachError.from(AICoachError.rateLimited("")).logReason, "rate-limited")
         XCTAssertEqual(AICoachError.from(AICoachError.server(503, "busy")).logReason, "provider-error-503")
     }
 
@@ -46,7 +46,7 @@ final class CoachFailureReasonTests: XCTestCase {
     // MARK: - Worth retrying, or something to go and change
 
     func testTransientCausesAreRetryableAndTheRestAreNot() {
-        for e in [AICoachError.rateLimited, .network("offline"), .decode, .timedOut, .cancelled,
+        for e in [AICoachError.rateLimited(""), .network("offline"), .decode, .timedOut, .cancelled,
                   .server(500, ""), .server(503, "busy")] {
             XCTAssertTrue(e.isTransient, "\(e.logReason) should be retryable")
             XCTAssertTrue(StateCoachFailure.canRetry(e), e.logReason)
@@ -69,7 +69,7 @@ final class CoachFailureReasonTests: XCTestCase {
     /// connection problem claims to be one. This is the assertion that fails if a future edit collapses them
     /// back into one message.
     func testEveryCauseGetsItsOwnSentence() {
-        let causes: [AICoachError] = [.noKey, .keyForOtherProvider("OpenAI"), .badKey, .rateLimited,
+        let causes: [AICoachError] = [.noKey, .keyForOtherProvider("OpenAI"), .badKey, .rateLimited(""),
                                       .timedOut, .network("offline"), .server(500, "upstream"), .decode,
                                       .emptyReply("no content from the provider"),
                                       .badCustomURL("that server URL isn't valid")]
@@ -84,8 +84,8 @@ final class CoachFailureReasonTests: XCTestCase {
     func testTheNoteNamesWhatToDoRatherThanBlamingTheConnection() {
         XCTAssertTrue(StateCoachFailure.notice(.badKey).contains("rejected"))
         XCTAssertFalse(StateCoachFailure.notice(.badKey).lowercased().contains("connection"))
-        XCTAssertTrue(StateCoachFailure.notice(.rateLimited).contains("rate-limiting"))
-        XCTAssertFalse(StateCoachFailure.notice(.rateLimited).lowercased().contains("not set up"))
+        XCTAssertTrue(StateCoachFailure.notice(.rateLimited("")).contains("rate-limiting"))
+        XCTAssertFalse(StateCoachFailure.notice(.rateLimited("")).lowercased().contains("not set up"))
         XCTAssertTrue(StateCoachFailure.notice(.keyForOtherProvider("Groq")).contains("Groq"))
     }
 

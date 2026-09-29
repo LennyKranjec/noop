@@ -110,7 +110,15 @@ enum CoachExtraContext {
         return "\(exercise.name): " + parts.joined(separator: "; ")
     }
 
-    static func block(repo: Repository) async -> String {
+    /// `includeDreams: false` leaves the dream journal out, so the caller can carry it as its OWN block.
+    ///
+    /// WHY THE SEAM. The dream journal is the largest single piece of this block and the only one whose size
+    /// the wearer controls by typing — up to `CoachDreamContext.maxPromptChars`. A context assembled to a
+    /// token budget has to be able to drop it WITHOUT dropping the water, the streaks and the level inputs
+    /// with it, and re-running this whole function a second time to get a version without it would mean a
+    /// second pass over the hydration reads, the quests and the strength progression. See
+    /// `AICoachEngine.contextBlocks()`.
+    static func block(repo: Repository, includeDreams: Bool = true) async -> String {
         var sections: [String] = []
         let today = Repository.localDayKey(Date())
         func dayKey(_ back: Int) -> String {
@@ -318,8 +326,10 @@ enum CoachExtraContext {
         //
         // RIDES THE SAME CONSENT AS EVERYTHING ELSE IN THIS FILE: this block is only reached from
         // `buildFullContext()`, so with data access off no dream text is sent at all.
-        let dreams = CoachDreamContext.block(entries: DreamJournalStore.shared.entries)
-        if !dreams.isEmpty { sections.append(dreams) }
+        if includeDreams {
+            let dreams = CoachDreamContext.block(entries: DreamJournalStore.shared.entries)
+            if !dreams.isEmpty { sections.append(dreams) }
+        }
 
         return sections.joined(separator: "\n\n")
     }
