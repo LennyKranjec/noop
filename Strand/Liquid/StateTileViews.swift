@@ -202,6 +202,11 @@ struct StateMissionNote: View {
 /// zone locked); the info button opens the reasoning with an "Ask coach".
 struct StateWorkoutsSection: View {
     let figures: StateTrainingFigures
+    /// Called when the controller has rewritten today's mission by itself, so the strip above re-reads it.
+    /// A closure rather than a shared @Published the whole Today view observes: this section already
+    /// observes the controller, and putting that observation on the page would re-render Today on every
+    /// streamed publish.
+    var onMissionRewritten: () -> Void = {}
     @ObservedObject private var controller = StateCoachController.shared
     @EnvironmentObject private var repo: Repository
     @EnvironmentObject private var profile: ProfileStore
@@ -243,6 +248,15 @@ struct StateWorkoutsSection: View {
                 }
                 addButton
             }
+            // WHAT IS STILL DUE, above the rows. The rows are instructions; this is the answer to the
+            // question the wearer actually asks, and it is the only place the tile can say "nothing —
+            // you are done", which no list of rows can say.
+            if let left = controller.leftToday, !left.isEmpty {
+                Text(left)
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             if controller.suggestions.isEmpty {
                 Text(emptyText)
                     .font(StrandFont.footnote)
@@ -251,17 +265,41 @@ struct StateWorkoutsSection: View {
             } else {
                 ForEach(controller.suggestions) { s in row(s) }
             }
-            if let notice = controller.notice {
-                Text(notice)
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.statusWarning)
-                    .fixedSize(horizontal: false, vertical: true)
+            if let notice = controller.notice, !notice.isEmpty {
+                // The reason AND a way out. A note that only states a failure and cannot be acted on is
+                // where the wearer got stuck: "not reachable", no retry, nothing to tap.
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(notice)
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.statusWarning)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if controller.noticeRetryable {
+                        Spacer(minLength: 0)
+                        Button {
+                            SystemHaptics.play(.tap)
+                            let r = repo
+                            let p = profile
+                            let c = coach
+                            let f = figures
+                            Task { @MainActor in
+                                await StateCoachController.shared.retry(figures: f, repo: r, profile: p, coach: c)
+                            }
+                        } label: {
+                            Text("Try again")
+                                .font(StrandFont.caption.weight(.semibold))
+                                .foregroundStyle(StrandPalette.accent)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(controller.isRefreshing || controller.isGenerating)
+                    }
+                }
             }
             choicesButton
         }
         .task(id: loadKey) {
             await controller.load(figures: figures, repo: repo, profile: profile, coach: coach)
         }
+        .onChangeCompat(of: controller.missionRewrittenAt) { _ in onMissionRewritten() }
         .sheet(isPresented: $addingWorkout) {
             // Snapshotted out of the environment here, so the closure the sheet calls back on does not
             // reach into a view that may be gone by the time the coach answers.
@@ -353,8 +391,15 @@ struct StateWorkoutsSection: View {
             } label: {
                 HStack(alignment: .center, spacing: 10) {
                     ZStack {
-                        Circle().fill(StrandPalette.effortColor.opacity(0.16))
-                        if s.isRecovery {
+                        Circle().fill(StrandPalette.effortColor.opacity(s.done ? 0.08 : 0.16))
+                        if s.done {
+                            // TICKED OFF, not removed. A suggestion the wearer has just done and that then
+                            // silently disappears reads as the tile forgetting; a check mark reads as an
+                            // acknowledgement, and it is also the honest record of the day.
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 14, weight: .bold))
+                                .foregroundStyle(StrandPalette.effortColor.opacity(0.7))
+                        } else if s.isRecovery {
                             Image(systemName: "leaf.fill")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(StrandPalette.effortColor)
@@ -369,8 +414,10 @@ struct StateWorkoutsSection: View {
                         HStack(spacing: 6) {
                             Text("\(StateWorkoutChoiceTitle.title(for: s)) · \(s.minutes) min")
                                 .font(StrandFont.subhead.weight(.semibold))
-                                .foregroundStyle(StrandPalette.textPrimary)
+                                .foregroundStyle(s.done ? StrandPalette.textTertiary : StrandPalette.textPrimary)
+                                .strikethrough(s.done, color: StrandPalette.textTertiary)
                             if s.byUser { byYouTag }
+                            if s.done { doneTag }
                         }
                         let detail = detailLine(s)
                         if !detail.isEmpty {
@@ -440,6 +487,17 @@ struct StateWorkoutsSection: View {
         return s.byUser
             ? String(localized: "Delete \(title)")
             : String(localized: "Remove \(title) from today's suggestions")
+    }
+
+    /// The marker on a suggestion today's sessions have already closed.
+    private var doneTag: some View {
+        Text("done")
+            .font(StrandFont.caption)
+            .foregroundStyle(StrandPalette.effortColor)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 1)
+            .background(Capsule().fill(StrandPalette.effortColor.opacity(0.14)))
+            .accessibilityLabel(Text("Already done today"))
     }
 
     /// The marker on a workout the wearer asked for themselves.

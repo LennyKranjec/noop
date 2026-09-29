@@ -29,7 +29,7 @@ enum LevelCoachNote {
     /// Two sentences at the head of a panel. Longer and it competes with the chart under it.
     static let maxChars = 240
 
-    static let question = "Comment on how my metrics are carrying my level right now."
+    static let question = "Which of my parts is carrying this level and which is costing it most?"
 
     /// The stored line, but only when it was written for exactly this level on this day.
     static func stored(fingerprint: String, _ d: UserDefaults = .standard) -> String? {
@@ -64,13 +64,21 @@ enum LevelCoachNote {
     /// POINTS OF LEVEL it currently contributes, and the points still on the table. Those last two are
     /// what "weighting" means — sleep at 0.30 and lungs at 0.07 are not comparable as scores, and a
     /// model shown only the scores would praise a lungs figure that is worth almost nothing.
-    static func systemPrompt(_ breakdown: LevelBreakdown) -> String {
+    static func systemPrompt(_ breakdown: LevelBreakdown,
+                             day: String = DailyMissionStore.dayKey()) -> String {
         var s = ""
         s += "You are THE SYSTEM, reading this human's level. Cold, precise, dryly funny; your contempt "
         s += "is for the EXCUSE and never for the person.\n"
-        s += "Their LEVEL is \(Int(breakdown.level.rounded())) out of 100. It is a weighted blend of five "
-        s += "parts. For each, below: its own score out of 100, the POINTS OF LEVEL it currently "
-        s += "contributes, and the points it would add if it were perfect.\n"
+        // THE DAY, AND THE RIGHT SCALE. "Out of 100" was wrong — the level is unbounded, 100 means every
+        // part at the wearer's OWN 95th percentile, and beating that scores above 100. A note that calls it
+        // a percentage is a different answer from the one the level screen gives for the same number.
+        s += "Their LEVEL on \(day) is \(Int(breakdown.level.rounded())). There is NO upper limit: 100 means "
+        s += "every part at this wearer's own 95th-percentile day, and beating that scores above 100. The "
+        s += "level is FROZEN for the morning of \(day) — it is not a live figure, and what they do today "
+        s += "shows up in tomorrow's.\n"
+        s += "It is a weighted blend of five parts. For each, below: its own score (50 = their average day, "
+        s += "100 = their own 95th percentile), the POINTS OF LEVEL it currently contributes, and the points "
+        s += "left between it and that 100.\n"
         s += "Write ONE or TWO sentences, under 220 characters. Name the one or two parts CARRYING the "
         s += "level and the one costing it most, in that order, in the shape \"strong X and Y, "
         s += "but Z...\". Judge by POINTS, never by the bare score — a part with a small weight "
@@ -80,13 +88,14 @@ enum LevelCoachNote {
         for c in breakdown.components.sorted(by: { $0.contribution > $1.contribution }) {
             let name = label(c.part)
             if let score = c.score {
-                s += "- \(name): scores \(Int(score.rounded()))/100, "
+                s += "- \(name): scores \(Int(score.rounded())), "
                 s += String(format: "contributes %.1f points, %.1f points still available\n",
                             c.contribution, c.headroom)
             } else {
                 // Said out loud: an unmeasured part is not a weak one, and a model left to infer would
                 // call it weak. Its weight was redistributed over the parts that did score.
-                s += "- \(name): not measured (excluded, its weight went to the others)\n"
+                s += "- \(name): NOT MEASURED — not weak, unmeasured. Never call it low. Its weight went "
+                s += "to the others.\n"
             }
         }
         if breakdown.stepPenalty < 1 {

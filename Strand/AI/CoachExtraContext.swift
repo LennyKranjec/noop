@@ -176,27 +176,32 @@ enum CoachExtraContext {
 
         // 4. The energy bank and the streaks, as Today shows them.
         var day: [String] = []
+        // EVERY LINE IN THIS SECTION CARRIES ITS DAY. These four were the undated ones: an energy bank, a
+        // streak and a stress curve stated without a date read as timeless facts, and the model then
+        // offered them as an answer about tomorrow.
         if let e = CoachDaySnapshot.energy {
-            day.append(String(format: "  Energy bank: %.0f of %.0f left (spent %.0f on strain, %.0f on stress; %.0f back from calm)",
-                              e.balance, e.opening, e.strainSpend, e.stressSpend, e.restReturn))
+            day.append(String(format: "  Energy bank for %@ (today, so far): %.0f of %.0f left (spent %.0f on strain, %.0f on stress; %.0f back from calm). It resets at midnight and does not carry to another day.",
+                              today, e.balance, e.opening, e.strainSpend, e.stressSpend, e.restReturn))
         }
         let running = CoachDaySnapshot.streaks.filter { $0.days > 0 }
         if !running.isEmpty {
-            day.append("  Streaks: " + running.map {
+            day.append("  Streaks as of \(today): " + running.map {
                 "\($0.kind) \($0.days) days\($0.todaySecured ? " (today secured)" : " (today still open)")"
             }.joined(separator: ", "))
         }
 
         // 5. Stress now, and through the day.
         if let live = LiveStressMonitor.shared.current {
-            day.append(String(format: "  Stress now (last 10 min, at rest, 0-3): %.1f", live))
+            day.append(String(format: "  Stress right now (the last 10 minutes of %@, at rest, 0-3): %.1f", today, live))
         }
         if let curve = await StressDayCurve.today(repo: repo) {
             let scored = curve.result.hours.compactMap { h -> String? in
                 guard let level = h.level else { return nil }
                 return String(format: "%02d:00 %.1f", h.hour, level)
             }
-            if !scored.isEmpty { day.append("  Stress by hour today (0-3): " + scored.joined(separator: ", ")) }
+            if !scored.isEmpty {
+                day.append("  Stress by hour on \(today) (0-3, local clock): " + scored.joined(separator: ", "))
+            }
         }
 
         // 6. Meditation minutes, last seven days.
@@ -254,7 +259,11 @@ enum CoachExtraContext {
             }
             body.append(line)
         }
-        if !body.isEmpty { sections.append((["LEVEL INPUTS:"] + body).joined(separator: "\n")) }
+        if !body.isEmpty {
+            sections.append((["LEVEL INPUTS (each figure is dated; the level itself is frozen on the morning "
+                              + "of its date and today's activity shows up in TOMORROW's level):"] + body)
+                .joined(separator: "\n"))
+        }
 
         // 8b. Per-exercise progression — the SAME numbers the Progression section shows.
         //
@@ -284,6 +293,8 @@ enum CoachExtraContext {
         // 9. The bedroom and the lights.
         var home: [String] = []
         if let r = BedroomClimate.shared.latest {
+            home.append("  (Everything under HOME is the state RIGHT NOW on \(today); none of it is a "
+                        + "forecast for another day.)")
             // Judged for the window the day is in: focus (20–22.5 °C) by day, sleep (16–19.5 °C) from
             // the wind-down on. The same verdict the Today tile shows.
             let ctx = RoomClimatePlan.context(for: r)

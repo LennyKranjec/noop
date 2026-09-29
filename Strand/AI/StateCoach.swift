@@ -134,6 +134,11 @@ struct WorkoutSuggestion: Codable, Equatable, Identifiable {
     /// the rest of the day, marked "by you", and the allowed-workouts selection does not apply to it —
     /// an explicitly requested session is always allowed.
     var byUser: Bool = false
+    /// A session today already satisfies this row (`StateSuggestionCompletion`). Kept on the row rather
+    /// than filtered out of the list: a suggestion the wearer has just DONE, silently removed, reads as
+    /// the tile forgetting about it — ticked off, it reads as an acknowledgement. It is never counted as
+    /// something still due.
+    var done: Bool = false
 
     var id: String { "\(sport)|\(minutes)|\(zone)|\(window ?? "")|\(label ?? "")" }
 
@@ -158,7 +163,7 @@ struct WorkoutSuggestion: Codable, Equatable, Identifiable {
 extension WorkoutSuggestion {
 
     private enum CodingKeys: String, CodingKey {
-        case sport, minutes, zone, effort, window, why, label, byUser
+        case sport, minutes, zone, effort, window, why, label, byUser, done
     }
 
     /// Hand-written, and in an extension so the memberwise init survives: a list stored before `byUser`
@@ -174,6 +179,7 @@ extension WorkoutSuggestion {
         why = try c.decode(String.self, forKey: .why)
         label = try c.decodeIfPresent(String.self, forKey: .label)
         byUser = try c.decodeIfPresent(Bool.self, forKey: .byUser) ?? false
+        done = try c.decodeIfPresent(Bool.self, forKey: .done) ?? false
     }
 
     /// Written out by hand as well, so the two sides cannot drift apart from each other.
@@ -187,6 +193,7 @@ extension WorkoutSuggestion {
         try c.encode(why, forKey: .why)
         try c.encodeIfPresent(label, forKey: .label)
         try c.encode(byUser, forKey: .byUser)
+        try c.encode(done, forKey: .done)
     }
 }
 
@@ -325,6 +332,17 @@ enum StateWorkoutChoicesStore {
     }
 }
 
+/// What the coach answered for the rest of today: the explicit answer to "what is still due", and the
+/// sessions that answer consists of.
+///
+/// The sentence is stored and shown, not derived from the rows: "nothing, you are done" has no rows, and a
+/// section that can only speak in rows cannot say it.
+struct WorkoutPlan: Equatable, Codable {
+    /// One sentence naming what is still due today — or that nothing is. nil when the model omitted it.
+    var leftToday: String?
+    var workouts: [WorkoutSuggestion]
+}
+
 /// Reads the coach's workout JSON. Tolerant of everything a chat model does to JSON in practice: code
 /// fences, a sentence before or after, a bare array instead of the wrapper object, numbers as strings
 /// ("40 min", "Z2"), alternative key names. Returns nil only when nothing usable is in the reply.
@@ -333,7 +351,21 @@ enum WorkoutSuggestionParser {
     static let maxCount = 3
     static let minutesRange = 5...180
 
+    /// Just the rows. Its contract is unchanged from before `parsePlan` existed — nil when there is nothing
+    /// usable, INCLUDING the "you are done" answer, whose whole content is the sentence. A caller that wants
+    /// rows must not be handed an empty array it would read as a failed parse.
     static func parse(_ raw: String) -> [WorkoutSuggestion]? {
+        guard let plan = parsePlan(raw), !plan.workouts.isEmpty else { return nil }
+        return plan.workouts
+    }
+
+    /// The whole answer: the explicit "what is left today" sentence AND the sessions.
+    ///
+    /// The sentence is the point of the section — "what is still due" is the question the wearer asks, and
+    /// a list of three rows is not an answer to it when the answer is "nothing, you are done". A plan whose
+    /// `workouts` is empty is still usable when it carries that sentence, which is why this returns
+    /// non-nil for `{"left_today":"…","workouts":[]}` where `parse` returns nil.
+    static func parsePlan(_ raw: String) -> WorkoutPlan? {
         if let out = parseStrict(raw) { return out }
         // Second chance: typographic quotes, which some models emit for every quote in the object. Done
         // only after the plain read failed, because inside a valid "why" string they are just text.
@@ -343,16 +375,28 @@ enum WorkoutSuggestionParser {
         return normalised == raw ? nil : parseStrict(normalised)
     }
 
-    private static func parseStrict(_ raw: String) -> [WorkoutSuggestion]? {
+    /// The keys a model actually uses for the summary line, in the order they are tried.
+    private static let leftTodayKeys = ["left_today", "leftToday", "left", "remaining", "summary",
+                                       "still_due", "stillDue"]
+
+    private static func parseStrict(_ raw: String) -> WorkoutPlan? {
         guard let json = extractJSON(raw), let data = json.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])
         else { return nil }
         let items: [Any]
+        var leftToday: String?
+        var wrapped = false
         if let arr = obj as? [Any] {
             items = arr
         } else if let dict = obj as? [String: Any] {
+            leftToday = leftTodayKeys.lazy.compactMap { string(dict[$0]) }.first
             if let arr = (dict["workouts"] ?? dict["suggestions"] ?? dict["items"]) as? [Any] {
                 items = arr
+                wrapped = true
+            } else if leftToday != nil, dict["sport"] == nil, dict["activity"] == nil {
+                // The summary alone, with no list: a legitimate "nothing more today".
+                items = []
+                wrapped = true
             } else {
                 items = [dict]   // one bare suggestion object
             }
@@ -370,7 +414,10 @@ enum WorkoutSuggestionParser {
             out.append(s)
             if out.count == maxCount { break }
         }
-        return out.isEmpty ? nil : out
+        // An empty list is a valid answer ONLY inside the documented wrapper with a summary: a bare array
+        // that parsed to nothing is a reply the model got wrong, not a day that is finished.
+        guard !out.isEmpty || (wrapped && leftToday != nil) else { return nil }
+        return WorkoutPlan(leftToday: leftToday, workouts: out)
     }
 
     /// The first balanced JSON object or array in `raw`, string-aware so a brace inside a "why" does not
@@ -509,12 +556,52 @@ struct StateTrainingFigures: Equatable {
     var hrvDeltaPct: Double?
     /// Last night's resting HR against its 30-day median, in bpm (+ is worse).
     var rhrDeltaBpm: Double?
+    /// Minutes of meditation / breathwork / NSDR logged today. nil when unknown, 0 when known to be none.
+    var mindfulMinutesToday: Double?
+    /// The level's own parts, worst gap first — what a recommendation should actually be aimed at.
+    var levelGaps: [StateLevelGap] = []
+    /// Parts the level ABSTAINED on (no data). Named separately and never described as low: a part with no
+    /// measurement is not a weak part, and calling it one is the fabrication rule this repo keeps breaking.
+    var levelPartsWithoutData: [String] = []
+    /// The day the level above was frozen for. The level is a property of that morning, not of tonight.
+    var levelDayKey: String?
+    /// The multiplier the 7-day step average applied to the level, 1.0 when at or above the floor. Below 1
+    /// it is the cheapest lever there is, and it is the only one that is not a `LevelPart`.
+    var levelStepPenalty: Double?
 
     /// Effort still to go to today's target, or nil when either end is unknown.
     var remainingEffort: Double? {
         guard let target = effortTarget else { return nil }
         return Swift.max(0, target - (effortNow ?? 0))
     }
+
+    /// Whether today's Effort target is MET — known to be met, not merely un-measured.
+    ///
+    /// Its own property because "you are done for today" must never be said off a missing figure: with no
+    /// target there is nothing to have reached, and `remainingEffort == nil` would read as zero to any
+    /// caller that defaulted it.
+    var effortTargetMet: Bool? {
+        guard let target = effortTarget, target > 0 else { return nil }
+        guard let now = effortNow else { return nil }
+        return now >= target - Self.targetSlack
+    }
+
+    /// How close to the target counts as reached, in Effort points.
+    static let targetSlack: Double = 3
+}
+
+/// One part of the level and how many level points are still available in it.
+///
+/// A PART WITH NO DATA IS NOT HERE. `LevelBreakdown.levers()` already drops those, and this carries the
+/// same contract forward: nothing in this list may be described as low, because everything in it was
+/// measured. The abstentions travel separately, in `levelPartsWithoutData`.
+struct StateLevelGap: Equatable, Codable {
+    /// `LevelPart.rawValue` — "sleep", "heart", "lungs", "muscle", "focus".
+    let part: String
+    /// Level points between today's score and the wearer's own 95th percentile for this part.
+    let headroom: Double
+    /// The part's score, 50 = their average day, 100 = their own 95th percentile.
+    let score: Double
 }
 
 /// One workout, reduced to what the suggestions and the coach block read.
@@ -855,6 +942,103 @@ enum WorkoutSuggestionFallback {
     }
 }
 
+// MARK: - What is still due today
+
+/// The deterministic answer to "what is still due today", and the level lever behind it.
+///
+/// SEPARATE FROM THE ROW LIST on purpose. The rows are instructions; this is the sentence that answers the
+/// question, and it has to be able to say "nothing — you are done", which no list of rows can say. The
+/// coach writes its own version of this line; when the coach is unavailable, or omitted the line, this one
+/// stands in, and it is held to exactly the same honesty rules.
+///
+/// NOTHING HERE IS CLAIMED WITHOUT ITS INPUT. "Done for today" is said only when the Effort target is
+/// KNOWN and KNOWN to be met (`effortTargetMet == true`); an unmeasured target produces a sentence that
+/// says the target is not measured, never a silent "done" and never a silent "keep going".
+enum StateDueToday {
+
+    /// A concrete, level-aimed next step for `gap`, or nil when there is nothing defensible to say.
+    ///
+    /// Only parts the level actually MEASURED reach here (`StateLevelGap` carries that contract), so no
+    /// line below can describe an abstaining part as weak.
+    static func levelAction(for gap: StateLevelGap, hour: Int) -> String? {
+        let plus = String(format: "%+.1f", gap.headroom)
+        switch gap.part {
+        case "sleep":
+            return String(localized: "Sleep is your biggest level gap (\(plus) points): get to bed earlier tonight and keep the time steady.")
+        case "heart":
+            return String(localized: "Heart is your biggest level gap (\(plus) points): it moves on sleep and calm hours, not on more training today.")
+        case "lungs":
+            return String(localized: "Lungs are your biggest level gap (\(plus) points): steady Zone 2 minutes are what raise it.")
+        case "muscle":
+            return hour >= 21
+                ? String(localized: "Muscle is your biggest level gap (\(plus) points): put a lifting session in tomorrow.")
+                : String(localized: "Muscle is your biggest level gap (\(plus) points): a lifting session is what moves it.")
+        case "focus":
+            return String(localized: "Focus is your biggest level gap (\(plus) points): meditation minutes and calm waking hours raise it.")
+        default:
+            return nil
+        }
+    }
+
+    /// The steps lever, when the step average is dragging the level down. Rounded to whole per cent — the
+    /// multiplier itself is not a figure anyone can act on.
+    static func stepAction(penalty: Double?) -> String? {
+        guard let penalty, penalty < 0.995 else { return nil }
+        let lost = Int(((1 - penalty) * 100).rounded())
+        guard lost >= 1 else { return nil }
+        return String(localized: "Your 7-day step average is costing the whole level \(lost)%: a walk is the cheapest point you can buy today.")
+    }
+
+    /// The one sentence the tile shows above the rows.
+    ///
+    /// `stillDue` is the list AFTER removals and after the done ones are ticked off — so a day whose three
+    /// suggestions are all done reads as done, not as three things outstanding.
+    static func sentence(figures: StateTrainingFigures,
+                         stillDue: [WorkoutSuggestion],
+                         hour: Int) -> String {
+        let outstanding = stillDue.filter { !$0.done }
+        let lever = figures.levelGaps.first.flatMap { levelAction(for: $0, hour: hour) }
+            ?? stepAction(penalty: figures.levelStepPenalty)
+
+        // 1. The target is measured and met.
+        if figures.effortTargetMet == true {
+            var s = String(localized: "Today's Effort target is met.")
+            if outstanding.isEmpty {
+                s += " " + String(localized: "Nothing more is due — you are done for today.")
+            } else {
+                s += " " + String(localized: "Only the calm blocks below are left; no more load today.")
+            }
+            if let lever { s += " " + lever }
+            return s
+        }
+
+        // 2. The target is measured and not met.
+        if let remaining = figures.remainingEffort, figures.effortTarget != nil, remaining > StateTrainingFigures.targetSlack {
+            var s = String(localized: "About \(Int(remaining.rounded())) Effort still to go to today's target.")
+            if outstanding.isEmpty {
+                s += " " + String(localized: "Nothing is planned for it yet — add a session with +.")
+            } else if let first = outstanding.first {
+                let name = first.label ?? first.sport
+                s += " " + String(localized: "Next up: \(name), \(first.minutes) min in Zone \(first.zone).")
+            }
+            if hour >= 21 {
+                s += " " + String(localized: "It is late, though: closing the gap tonight would cost more sleep than it is worth.")
+            }
+            if let lever { s += " " + lever }
+            return s
+        }
+
+        // 3. The target is NOT measured. Never a "done", never a "keep going".
+        var s = String(localized: "Today's Effort target isn't measured yet, so there is no target to call done.")
+        if let first = outstanding.first {
+            let name = first.label ?? first.sport
+            s += " " + String(localized: "Next up: \(name), \(first.minutes) min in Zone \(first.zone).")
+        }
+        if let lever { s += " " + lever }
+        return s
+    }
+}
+
 // MARK: - The coach's grounding for the suggestions
 
 enum StateTrainingContext {
@@ -880,6 +1064,34 @@ enum StateTrainingContext {
         return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 
+    /// The level's own parts, as the reason a recommendation is the right one.
+    ///
+    /// The whole level formula already rides `buildFullContext` (`CoachLevelContext`); this is the SHORT
+    /// version, next to today's training figures, because the tile's question is "what should they do in
+    /// the next few hours" and the lever has to be in the same paragraph as the day.
+    ///
+    /// AN ABSTAINING PART IS NAMED AS UNMEASURED, never as low. That is the fabrication rule, and it is the
+    /// one the level screen keeps having to re-learn.
+    static func levelLines(_ f: StateTrainingFigures) -> String {
+        var out: [String] = []
+        let day = f.levelDayKey.map { " (level frozen for \($0))" } ?? ""
+        if !f.levelGaps.isEmpty {
+            out.append("THE LEVEL'S BIGGEST GAPS\(day), worst first — a recommendation should name the part it moves:")
+            for g in f.levelGaps.prefix(3) {
+                out.append(String(format: "  %@: score %.0f, %+.1f level points still available",
+                                  g.part, g.score, g.headroom))
+            }
+        }
+        if !f.levelPartsWithoutData.isEmpty {
+            out.append("NOT MEASURED, so NOT weak — never describe these as low, say they are unmeasured: "
+                       + f.levelPartsWithoutData.joined(separator: ", ") + ".")
+        }
+        if let action = StateDueToday.stepAction(penalty: f.levelStepPenalty) {
+            out.append("  steps: " + action)
+        }
+        return out.joined(separator: "\n")
+    }
+
     private static func line(_ w: StateWorkoutFact, withDate: Bool, _ cal: Calendar) -> String {
         var parts: [String] = []
         parts.append((withDate ? dayKey(w.start, cal) + " " : "") + clock(w.start, cal) + "–" + clock(w.end, cal)
@@ -902,28 +1114,62 @@ enum StateTrainingContext {
                       zones: [HRZoneBPMRange],
                       today: [StateWorkoutFact],
                       recent: [StateWorkoutFact],
+                      now: Date = Date(),
+                      bedtimeMinute: Int? = nil,
                       calendar: Calendar = .current) -> String {
         func n(_ v: Double?, _ fmt: String = "%.0f") -> String { v.map { String(format: fmt, $0) } ?? "—" }
-        var s: [String] = ["TODAY'S TRAINING STATE (use this for the workout suggestions; Effort is NOOP's 0-100 scale):"]
-        var effortLine = "Effort so far today: \(n(figures.effortNow)); today's recommended target (top of the band): \(n(figures.effortTarget))"
-        if let r = figures.remainingEffort { effortLine += "; remaining to target: \(n(r))" }
+        let todayKey = dayKey(now, calendar)
+        // EVERY FIGURE CARRIES ITS DAY. Without the date this block read as a set of timeless facts, and a
+        // model asked "what is due tomorrow" answered with today's charge because nothing said the charge
+        // belonged to one specific morning.
+        var s: [String] = ["TODAY'S TRAINING STATE — all of it for \(todayKey) ONLY (Effort is NOOP's 0-100 scale):"]
+        var effortLine = "Effort so far on \(todayKey) (cumulative since midnight): \(n(figures.effortNow))"
+        effortLine += "; the recommended target for \(todayKey) (top of the band): \(n(figures.effortTarget))"
+        if let r = figures.remainingEffort { effortLine += "; remaining to that target: \(n(r))" }
         s.append(effortLine + ".")
-        s.append("Charge: \(n(figures.charge)). Sleep debt: \(n(figures.sleepDebtMin.map { $0 / 60 }, "%.1f")) h. "
-                 + "Stress score today: \(n(figures.stress, "%.1f")) of 3.")
+        if let met = figures.effortTargetMet {
+            s.append(met
+                ? "The \(todayKey) Effort target IS reached. Do not prescribe further load; say plainly that they are done for today."
+                : "The \(todayKey) Effort target is NOT yet reached.")
+        } else {
+            s.append("Whether the \(todayKey) Effort target is reached is NOT MEASURED (no target or no Effort figure). "
+                     + "Do not say they are done, and do not say they must train more — say the target is not measured.")
+        }
+        s.append("Charge \(n(figures.charge)) — a property of the MORNING of \(todayKey), computed from the night that "
+                 + "ended then. It says nothing about any later day.")
+        s.append("Sleep debt: \(n(figures.sleepDebtMin.map { $0 / 60 }, "%.1f")) h as of \(todayKey). "
+                 + "Stress score for \(todayKey) so far: \(n(figures.stress, "%.1f")) of 3.")
+        if let m = figures.mindfulMinutesToday {
+            s.append("Meditation / breathwork / NSDR logged on \(todayKey): \(n(m)) min.")
+        }
         if let h = figures.hrvDeltaPct {
-            s.append("HRV last night vs 30-day median: \(String(format: "%+.0f", h))%.")
+            s.append("HRV for the night that ended on the morning of \(todayKey), vs its 30-day median: "
+                     + "\(String(format: "%+.0f", h))%.")
         }
         if let r = figures.rhrDeltaBpm {
-            s.append("Resting HR last night vs 30-day median: \(String(format: "%+.0f", r)) bpm.")
+            s.append("Resting HR for the night that ended on the morning of \(todayKey), vs its 30-day median: "
+                     + "\(String(format: "%+.0f", r)) bpm.")
+        }
+        // THE REMAINING WAKING WINDOW. "What is still due today" is a question about how much day is left,
+        // and without this the model planned a 60-minute run into the last twenty minutes before bed.
+        let nowMinute = (calendar.component(.hour, from: now) * 60) + calendar.component(.minute, from: now)
+        if let bed = bedtimeMinute {
+            let left = bed > nowMinute ? bed - nowMinute : (bed + 24 * 60) - nowMinute
+            s.append(String(format: "Waking time left before bedtime: %dh %02dmin (now %02d:%02d, bedtime %02d:%02d). "
+                            + "Everything you suggest has to fit inside that.",
+                            left / 60, left % 60, nowMinute / 60, nowMinute % 60, bed / 60, bed % 60))
+        }
+        if !figures.levelGaps.isEmpty || !figures.levelPartsWithoutData.isEmpty {
+            s.append(levelLines(figures))
         }
         if !zones.isEmpty {
             s.append("The user's heart-rate zones (Karvonen, bpm): "
                      + zones.map { "Z\($0.zone) \($0.lower)-\($0.upper)" }.joined(separator: ", ") + ".")
         }
         if today.isEmpty {
-            s.append("Workouts today: none yet.")
+            s.append("Workouts already completed on \(todayKey): NONE.")
         } else {
-            s.append("Workouts today (oldest first):")
+            s.append("Workouts ALREADY COMPLETED on \(todayKey) (oldest first — these are done, never suggest them again):")
             for w in today.sorted(by: { $0.start < $1.start }) { s.append(line(w, withDate: false, calendar)) }
         }
         if recent.isEmpty {
@@ -944,18 +1190,33 @@ enum StateTrainingContext {
 enum WorkoutSuggestionWriter {
 
     static func systemPrompt(grounding: String, choices: StateWorkoutChoices = .all) -> String {
-        var s = "You are the user's training coach. Suggest 1 to 3 FURTHER sessions for the REST OF TODAY, "
-        s += "chosen from their data: what they already did today, the last two weeks of training and its "
-        s += "effort, today's Effort against the recommended target, charge, sleep debt, HRV and resting HR "
-        s += "against baseline, stress, the time of day and the weather. Rules: never prescribe hard work on "
-        s += "low charge or a strained body; if the target is already reached suggest only easy Zone 1 "
-        s += "movement, mobility or recovery; do not repeat a hard session the day after one. Prefer sports "
-        s += "the user actually does.\n\n"
+        var s = "You are the user's training coach. Answer ONE question: WHAT IS STILL DUE TODAY, given what "
+        s += "they have already done today and the condition they are in now.\n\n"
+        s += "DECIDE, do not list options. Read the sessions already completed today, the day's Effort so far "
+        s += "against its target, the time now and how much waking time is left before bedtime, charge, sleep "
+        s += "debt, HRV and resting HR against baseline, stress, the last two weeks of training, and the "
+        s += "weather. Then say what is left.\n"
+        s += "- If the day's Effort target is already reached, say so plainly and suggest NO further load: "
+        s += "\"left_today\" must state that they are done, and the only sessions you may add are easy Zone 1 "
+        s += "movement, mobility or down-regulation. Adding nothing at all is a correct answer.\n"
+        s += "- If whether the target is reached is NOT MEASURED, say that. Never claim they are done off a "
+        s += "missing figure, and never insist they train more off one either.\n"
+        s += "- Never prescribe hard work on low charge or a strained body, and never repeat a hard session "
+        s += "the day after one.\n"
+        s += "- A session already completed today is DONE. Do not suggest it again.\n"
+        s += "- Everything you suggest has to fit in the waking time that is actually left.\n"
+        s += "- Prefer sports the user actually does.\n\n"
+        s += levelObjective + "\n\n"
         s += StateDayPlanContext.stressObjective + "\n\n"
         s += allowedSection(choices) + "\n\n"
         s += "Answer with JSON ONLY, no prose and no code fence, exactly in this shape:\n"
-        s += #"{"workouts":[{"sport":"Running","minutes":40,"zone":2,"effort":12,"window":"17:00-18:00","why":"one short sentence"},{"sport":"NSDR","minutes":20,"zone":1,"effort":1,"window":"18:30-19:00","why":"one short sentence"}]}"#
+        s += #"{"left_today":"one or two sentences: what is still due today, or that nothing is","workouts":[{"sport":"Running","minutes":40,"zone":2,"effort":12,"window":"17:00-18:00","why":"one short sentence"},{"sport":"NSDR","minutes":20,"zone":1,"effort":1,"window":"18:30-19:00","why":"one short sentence"}]}"#
         s += "\n"
+        s += "left_today: REQUIRED. One or two sentences in the user's language answering \"what is still due "
+        s += "today?\". When the target is met and nothing is outstanding, say exactly that — that they are "
+        s += "done — and name the one thing that still moves their LEVEL today instead. When the day is nearly "
+        s += "over, point at tonight (bedtime, wind-down) rather than at training. \"workouts\" may be an empty "
+        s += "array when nothing further is due.\n"
         s += "sport: exactly one name from the allowed list above. "
         s += "zone: the target heart-rate zone 1-5 on the user's zones listed below (recovery sessions: 1). "
         s += "effort: estimated Effort points (0-100 scale) the session adds today. "
@@ -965,6 +1226,23 @@ enum WorkoutSuggestionWriter {
         s += grounding
         return s
     }
+
+    /// What the advice is FOR. Stated in the tile's own prompt as well as in the full context, because the
+    /// tile asks a short question about the next few hours and the level is the reason one answer beats
+    /// another — a generic "well done, keep it up" is the failure mode this replaces.
+    static let levelObjective: String = {
+        var s = "AIM AT THE LEVEL, NOT AT A COMPLIMENT. The level's parts and the points still available in "
+        s += "each are given below. Every recommendation must be aimed at the part that is actually short:\n"
+        s += "- sleep short → an earlier, steadier bedtime tonight; name the time.\n"
+        s += "- heart short → sleep and calm hours, NOT more training today.\n"
+        s += "- lungs short → steady Zone 2 minutes.\n"
+        s += "- muscle short → a lifting session.\n"
+        s += "- focus short → meditation / breathwork minutes and calm waking hours.\n"
+        s += "- a step average below the floor → a walk, the cheapest point available.\n"
+        s += "A part listed as NOT MEASURED is not a weak part. Never call it low, weak or behind; say it is "
+        s += "not measured yet. Never invent a level figure that is not given to you."
+        return s
+    }()
 
     /// The names the model may use. Always the full list, so "only from these" is a closed set the parser
     /// can hold the answer to.
@@ -1018,7 +1296,8 @@ enum StateDayPlanContext {
 
     /// The mission's version: the same objective, pointed at ONE thing to do today.
     static func missionObjective(choices: StateWorkoutChoices) -> String {
-        var s = stressObjective + "\n"
+        var s = WorkoutSuggestionWriter.levelObjective + "\n\n"
+        s += stressObjective + "\n"
         s += "For TODAY'S MISSION this means: when stress is elevated, HRV is below baseline or a hard session "
         s += "is done or planned today, a down-regulation mission (meditation, breathwork, NSDR / yoga nidra "
         s += "or restorative yoga — GOAL: MEDITATION_MIN) or an earlier bedtime is often the right one thing. "
@@ -1056,9 +1335,20 @@ enum StateDayPlanContext {
             phase = RoomClimateSchedule.within(nowMinute, from: schedule.sleepStartMinute, to: schedule.bedtimeMinute)
                 ? "wind-down" : "night"
         }
-        var s: [String] = ["TODAY'S SCHEDULE (local clock; place every session inside it and later than now):"]
+        let todayKey: String = {
+            let c = calendar.dateComponents([.year, .month, .day], from: now)
+            return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
+        }()
+        var s: [String] = ["TODAY'S SCHEDULE for \(todayKey) (local clock; place every session inside it and later than now):"]
         s.append("Time now: \(clock(nowMinute)) (\(phase)).")
         s.append("Wake: \(clock(schedule.wakeMinute)). Bedtime: \(clock(schedule.bedtimeMinute)) (\(source)).")
+        // Stated as a DURATION as well as a clock time: "22:30" is a fact the model has to subtract from,
+        // and it routinely got that arithmetic wrong and planned an hour of training into twenty minutes.
+        let left = schedule.bedtimeMinute > nowMinute
+            ? schedule.bedtimeMinute - nowMinute
+            : (schedule.bedtimeMinute + 24 * 60) - nowMinute
+        s.append(String(format: "Waking time left today: %dh %02dmin. Nothing you suggest may need more than that.",
+                        left / 60, left % 60))
         s.append("Morning start-up (best for a short meditation or breathwork): "
                  + "\(clock(schedule.wakeMinute))–\(clock(schedule.focusStartMinute)).")
         s.append("Focus / active window (training, focus blocks, movement breaks): "
@@ -1078,6 +1368,265 @@ struct StoredWorkoutSuggestions: Codable, Equatable {
     let fingerprint: String
     let createdAt: Date
     let items: [WorkoutSuggestion]
+    /// The coach's own "what is still due today" sentence. Optional so a record written before it existed
+    /// still decodes.
+    var leftToday: String?
+    /// The state these were generated FROM, so the next read can tell whether the day has moved on enough
+    /// to be worth asking again. Optional for the same reason.
+    var inputs: StateRegenerationInputs?
+
+    init(dayKey: String, fingerprint: String, createdAt: Date, items: [WorkoutSuggestion],
+         leftToday: String? = nil, inputs: StateRegenerationInputs? = nil) {
+        self.dayKey = dayKey
+        self.fingerprint = fingerprint
+        self.createdAt = createdAt
+        self.items = items
+        self.leftToday = leftToday
+        self.inputs = inputs
+    }
+}
+
+// MARK: - When the tile regenerates by itself
+
+/// The state the tile's text describes, reduced to the figures that make a regeneration worthwhile.
+///
+/// PERSISTED WITH THE SUGGESTIONS, not held in memory: a cold launch must be able to tell "nothing has
+/// changed since this text was written" from "I have no idea", or every app start would spend a request.
+struct StateRegenerationInputs: Equatable, Codable {
+    var dayKey: String
+    /// `Repository.workoutsSeq` — bumped by every workout write.
+    var workoutsSeq: Int
+    /// `Repository.refreshSeq` — bumped when the daily caches change.
+    var refreshSeq: Int
+    var choicesSignature: String
+    var effortNow: Double?
+    var effortTarget: Double?
+    var charge: Double?
+    var stress: Double?
+    var mindfulMinutesToday: Double?
+
+    init(dayKey: String, workoutsSeq: Int, refreshSeq: Int, choicesSignature: String,
+         effortNow: Double? = nil, effortTarget: Double? = nil, charge: Double? = nil,
+         stress: Double? = nil, mindfulMinutesToday: Double? = nil) {
+        self.dayKey = dayKey
+        self.workoutsSeq = workoutsSeq
+        self.refreshSeq = refreshSeq
+        self.choicesSignature = choicesSignature
+        self.effortNow = effortNow
+        self.effortTarget = effortTarget
+        self.charge = charge
+        self.stress = stress
+        self.mindfulMinutesToday = mindfulMinutesToday
+    }
+
+    init(dayKey: String, workoutsSeq: Int, refreshSeq: Int, choices: StateWorkoutChoices,
+         figures: StateTrainingFigures) {
+        self.init(dayKey: dayKey, workoutsSeq: workoutsSeq, refreshSeq: refreshSeq,
+                  choicesSignature: choices.signature, effortNow: figures.effortNow,
+                  effortTarget: figures.effortTarget, charge: figures.charge, stress: figures.stress,
+                  mindfulMinutesToday: figures.mindfulMinutesToday)
+    }
+}
+
+/// WHETHER to ask the coach again, and why.
+///
+/// THE PROBLEM THIS SOLVES. The tile's text was written once a day (the mission) or once per set of today's
+/// workouts (the suggestions), so an instruction written at 07:00 was still on screen at 19:00 after a hard
+/// session had made it wrong. The manual refresh button was the only way out, which is not a feature, it is
+/// the wearer doing the app's job.
+///
+/// WHY A POLICY RATHER THAN A `.task(id:)`. A SwiftUI id would fire on every published tick — the live
+/// Effort creeps up every few seconds — so the question is not "did anything change" but "did anything
+/// change ENOUGH", and that decision is worth testing without a view, a store or a provider.
+///
+/// PURE. `now`, the foreground flag and both sides of the comparison are arguments.
+enum StateRegenerationPolicy {
+
+    /// What made a regeneration worth a request. Ordered by how much it invalidates the existing text.
+    enum Cause: String, Equatable {
+        case firstRun
+        case dayRolled
+        case selectionChanged
+        case workoutsChanged
+        case targetReached
+        case effortMoved
+        case chargeMoved
+        case stressMoved
+        case mindfulLogged
+        case dataRefreshed
+        case stale
+    }
+
+    /// Why nothing was asked.
+    enum Skip: String, Equatable {
+        /// The app is not in front. A background request costs the wearer's battery and their provider
+        /// quota to rewrite text nobody is looking at — and the repo's own history says a background
+        /// generation is how you starve a BLE drain.
+        case background
+        case unchanged
+    }
+
+    enum Decision: Equatable {
+        case regenerate(Cause)
+        /// A real change, but too soon after the last automatic run. `after` is how long to wait before
+        /// asking again — the caller schedules ONE re-evaluation, which is what coalesces a burst of
+        /// signals (a sync that bumps refreshSeq, workoutsSeq and the day's figures at once) into a
+        /// single request.
+        case wait(TimeInterval)
+        case skip(Skip)
+    }
+
+    /// Effort points the day must move before the text is worth rewriting.
+    static let effortStep: Double = 8
+    /// Charge points.
+    static let chargeStep: Double = 5
+    /// Stress score, on the 0–3 axis.
+    static let stressStep: Double = 0.5
+    /// Minutes of logged down-regulation.
+    static let mindfulStep: Double = 5
+    /// How old the text may get before it is rewritten even with nothing else moving.
+    static let staleAfter: TimeInterval = 2.5 * 3600
+    /// The shortest gap between two AUTOMATIC regenerations. Nothing to do with the manual refresh
+    /// button's own throttle (`RefreshThrottle`): that one guards a tap, this one guards a signal, and a
+    /// tap must never be blocked because a sync fired thirty seconds ago.
+    static let minAutoInterval: TimeInterval = 90
+    /// How long the automatic side waits after a generation FAILED for a transient reason. A failed attempt
+    /// wrote no cache record, so the day still looks changed and the policy would say "regenerate" again on
+    /// the very next signal — a request every ninety seconds, all of them failing identically, against a
+    /// provider that is most likely rate-limiting precisely because of that.
+    static let failureBackoff: TimeInterval = 10 * 60
+
+    static func decide(previous: StateRegenerationInputs?,
+                       generatedAt: Date?,
+                       current: StateRegenerationInputs,
+                       lastAutoAttempt: Date?,
+                       foreground: Bool,
+                       now: Date = Date()) -> Decision {
+        // FIRST, unconditionally: never spend a request while the app is not in front.
+        guard foreground else { return .skip(.background) }
+
+        guard let cause = reason(previous: previous, generatedAt: generatedAt, current: current, now: now) else {
+            return .skip(.unchanged)
+        }
+        // A day that has rolled over is not coalesced: there is no text for today at all, and making the
+        // wearer wait ninety seconds for the first thing they see in the morning is not a saving.
+        if cause != .dayRolled, cause != .firstRun, let last = lastAutoAttempt {
+            let since = now.timeIntervalSince(last)
+            if since < minAutoInterval { return .wait(minAutoInterval - since) }
+        }
+        return .regenerate(cause)
+    }
+
+    /// The reason, or nil when nothing moved enough. Separated out so the ordering is readable and
+    /// testable on its own.
+    static func reason(previous: StateRegenerationInputs?,
+                       generatedAt: Date?,
+                       current: StateRegenerationInputs,
+                       now: Date = Date()) -> Cause? {
+        guard let previous, let generatedAt else { return .firstRun }
+        if previous.dayKey != current.dayKey { return .dayRolled }
+        if previous.choicesSignature != current.choicesSignature { return .selectionChanged }
+        if previous.workoutsSeq != current.workoutsSeq { return .workoutsChanged }
+        // Crossing the target is a different day from creeping towards it: the advice changes from "here is
+        // what is left" to "you are done", which is exactly the sentence the wearer asked for.
+        if met(previous) == false, met(current) == true { return .targetReached }
+        if moved(previous.effortNow, current.effortNow, by: effortStep) { return .effortMoved }
+        if moved(previous.charge, current.charge, by: chargeStep) { return .chargeMoved }
+        if moved(previous.stress, current.stress, by: stressStep) { return .stressMoved }
+        if moved(previous.mindfulMinutesToday, current.mindfulMinutesToday, by: mindfulStep) { return .mindfulLogged }
+        if previous.refreshSeq != current.refreshSeq { return .dataRefreshed }
+        if now.timeIntervalSince(generatedAt) >= staleAfter { return .stale }
+        return nil
+    }
+
+    /// Whether the target was met, on the same honest three-way rule the figures use: nil when either end
+    /// is unmeasured, so "not measured" never counts as a crossing in either direction.
+    private static func met(_ i: StateRegenerationInputs) -> Bool? {
+        guard let target = i.effortTarget, target > 0, let now = i.effortNow else { return nil }
+        return now >= target - StateTrainingFigures.targetSlack
+    }
+
+    /// Whether a figure moved by at least `step`. A figure APPEARING (nil → a value) counts: the text was
+    /// written without it. A figure vanishing does not — that is a read that has not landed yet, and
+    /// regenerating on it would rewrite good text from a worse position.
+    static func moved(_ before: Double?, _ after: Double?, by step: Double) -> Bool {
+        switch (before, after) {
+        case (nil, .some): return true
+        case (.some(let a), .some(let b)): return abs(b - a) >= step
+        default: return false
+        }
+    }
+}
+
+// MARK: - Why a generation failed
+
+/// What the wearer is told when a generation produced nothing, and whether it is worth retrying.
+///
+/// THE BUG THIS EXISTS FOR. Every failure used to arrive at the tile as a bare nil and was reported as
+/// "Couldn't reach the coach" — for a rejected key, a rate limit, a provider 500 with its own message, an
+/// unreadable reply, a mis-typed local-server URL, a key stored for a different provider, and a request
+/// that was merely cancelled. Six different things to go and do, one sentence for all of them.
+enum StateCoachFailure {
+
+    /// The line under the section. One sentence, and it names what to do.
+    static func notice(_ error: AICoachError) -> String {
+        switch error {
+        case .noKey:
+            return String(localized: "Coach is not set up. Showing the built-in suggestions.")
+        case .dataAccessOff:
+            return String(localized: "Coach data access is off. Showing the built-in suggestions.")
+        case .keyForOtherProvider(let owner):
+            return String(localized: "Your stored key was saved for \(owner), so it isn't sent to the provider you selected. Paste a key for this provider in System.")
+        case .badKey:
+            return String(localized: "The provider rejected your API key. Check it in System.")
+        case .rateLimited:
+            return String(localized: "Your provider is rate-limiting right now. Kept the previous state; try again in a minute.")
+        case .timedOut:
+            return String(localized: "The provider took too long to answer. Kept the previous state.")
+        case .network(let detail):
+            return detail.isEmpty
+                ? String(localized: "No connection to your provider. Kept the previous state.")
+                : String(localized: "No connection to your provider (\(detail)). Kept the previous state.")
+        case .server(let code, let detail):
+            return detail.isEmpty
+                ? String(localized: "Your provider returned an error (\(code)). Kept the previous state.")
+                : String(localized: "Your provider returned an error (\(code)): \(detail)")
+        case .decode:
+            return String(localized: "Couldn't read your provider's reply. Kept the previous state.")
+        case .emptyReply(let message):
+            return message
+        case .badCustomURL(let message):
+            return message
+        case .cancelled:
+            // Nothing to report: the request was abandoned because something newer replaced it.
+            return ""
+        case .emptyQuestion, .keySaveFailed:
+            return String(localized: "Couldn't ask the coach. Kept the previous state.")
+        }
+    }
+
+    /// Whether the tile should offer a retry rather than leave the note standing.
+    static func canRetry(_ error: AICoachError) -> Bool { error.isTransient }
+
+    /// The one failure worth telling the wearer about, out of several parallel requests.
+    ///
+    /// A CANCELLATION IS NOT A FAILURE and is never reported on its own: the two requests the State refresh
+    /// makes are cancelled together when something newer supersedes them, and reporting that as "couldn't
+    /// reach the coach" is exactly the bug. It is only returned when EVERY request failed and all of them
+    /// were cancellations — and even then the caller shows nothing, because `notice` for `.cancelled` is
+    /// empty. A partial failure (one request answered, one did not) reports the real error.
+    static func firstReportable(_ results: [Result<String, AICoachError>]) -> AICoachError? {
+        var sawFailure = false
+        for r in results {
+            guard case .failure(let e) = r else { continue }
+            sawFailure = true
+            if case .cancelled = e { continue }
+            return e
+        }
+        return sawFailure && results.allSatisfy({ if case .failure = $0 { return true } else { return false } })
+            ? .cancelled
+            : nil
+    }
 }
 
 enum WorkoutSuggestionStore {
@@ -1103,7 +1652,12 @@ enum WorkoutSuggestionStore {
     /// workout selection, so changing the selection asks for fresh suggestions once.
     static func fingerprint(today: [StateWorkoutFact], choices: StateWorkoutChoices = .all) -> String {
         let latest = today.map { Int($0.start.timeIntervalSince1970) }.max() ?? 0
-        return "\(today.count)|\(latest)|\(choices.signature)"
+        // The latest END too, not only the start: a session that was still running when the list was
+        // generated, and has since finished, has the same count and the same start — so the cache served
+        // the suggestions written while it was in progress, and a workout finished twenty minutes ago was
+        // invisible to the very next read.
+        let latestEnd = today.map { Int($0.end.timeIntervalSince1970) }.max() ?? 0
+        return "\(today.count)|\(latest)|\(latestEnd)|\(choices.signature)"
     }
 }
 
@@ -1122,14 +1676,30 @@ struct StateWorkoutEdits: Codable, Equatable {
     var pinned: [WorkoutSuggestion]
     /// `dismissKey` of every suggestion they removed.
     var dismissed: Set<String>
+    /// `dismissKey` of every suggestion a session today already satisfied. Ticked off, not removed.
+    var completed: Set<String> = []
 
-    init(dayKey: String, pinned: [WorkoutSuggestion] = [], dismissed: Set<String> = []) {
+    init(dayKey: String, pinned: [WorkoutSuggestion] = [], dismissed: Set<String> = [],
+         completed: Set<String> = []) {
         self.dayKey = dayKey
         self.pinned = pinned
         self.dismissed = dismissed
+        self.completed = completed
     }
 
-    var isEmpty: Bool { pinned.isEmpty && dismissed.isEmpty }
+    private enum CodingKeys: String, CodingKey { case dayKey, pinned, dismissed, completed }
+
+    /// Hand-written for the same reason `WorkoutSuggestion`'s is: a set stored before `completed` existed
+    /// must still decode, or the whole day's pins and removals go down with it.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        dayKey = try c.decode(String.self, forKey: .dayKey)
+        pinned = try c.decodeIfPresent([WorkoutSuggestion].self, forKey: .pinned) ?? []
+        dismissed = try c.decodeIfPresent(Set<String>.self, forKey: .dismissed) ?? []
+        completed = try c.decodeIfPresent(Set<String>.self, forKey: .completed) ?? []
+    }
+
+    var isEmpty: Bool { pinned.isEmpty && dismissed.isEmpty && completed.isEmpty }
 
     /// The key a removal suppresses. NOT the id: the coach re-words and re-times its list on every
     /// regeneration, and "Running at 17:00" coming back as "Running at 17:05" is the same suggestion to
@@ -1171,12 +1741,15 @@ struct StateWorkoutEdits: Codable, Equatable {
         pinned.append(item)
     }
 
-    /// Today's list as the tile shows it: `generated` with the removed ones dropped and the wearer's own
-    /// pinned in, in clock order.
+    /// Today's list as the tile shows it: `generated` with the removed ones dropped, the wearer's own
+    /// pinned in, the ones a session today already satisfies ticked off, in clock order.
     ///
     /// `limit` caps the GENERATED half only. A workout the wearer asked for is theirs and is never squeezed
     /// out by the coach's three; and because the cap is applied AFTER the removals, taking one row away
     /// lets the next generated one through when more than `limit` were produced.
+    ///
+    /// A DONE ROW STILL COUNTS AGAINST THE LIMIT. It is what the wearer did today, and pushing it out of
+    /// sight to make room for one more instruction is the opposite of an acknowledgement.
     func applied(to generated: [WorkoutSuggestion],
                  limit: Int = WorkoutSuggestionParser.maxCount) -> [WorkoutSuggestion] {
         var kept: [WorkoutSuggestion] = []
@@ -1186,10 +1759,66 @@ struct StateWorkoutEdits: Codable, Equatable {
                   !pinned.contains(where: { Self.dismissKey($0) == Self.dismissKey(s) }),
                   !kept.contains(where: { $0.id == s.id })
             else { continue }
-            kept.append(s)
+            kept.append(marked(s))
             if kept.count == limit { break }
         }
-        return WorkoutSuggestionFallback.inClockOrder(pinned + kept)
+        return WorkoutSuggestionFallback.inClockOrder(pinned.map(marked) + kept)
+    }
+
+    /// `s` with `done` set when a session today satisfied it.
+    private func marked(_ s: WorkoutSuggestion) -> WorkoutSuggestion {
+        guard completed.contains(Self.dismissKey(s)) else { return s }
+        var out = s
+        out.done = true
+        return out
+    }
+}
+
+/// Which of today's suggestions the wearer has actually DONE.
+///
+/// Matched from the sessions today rather than from a tap: the tile can start a workout, but a wearer who
+/// went running without touching the app has still done the run, and a suggestion that keeps standing there
+/// afterwards is the tile telling them to do it twice.
+///
+/// THE RULE IS DELIBERATELY LOOSE ON TIME AND STRICT ON KIND. Same selection key (so a suggested Run is
+/// closed by a Run, and an NSDR block by a Meditation session — the activity a variant is recorded as),
+/// and at least `minFraction` of the suggested minutes. The clock window is NOT required: people train
+/// when they can, and a session moved by two hours is the same session.
+enum StateSuggestionCompletion {
+
+    /// How much of the suggested duration a session must cover to close it.
+    static let minFraction: Double = 0.5
+    /// A recovery block is short enough that a proportional rule is noise; five real minutes close it.
+    static let minRecoveryMinutes: Double = 5
+
+    /// The `StateWorkoutEdits.dismissKey` of every suggestion today's sessions satisfy.
+    static func completedKeys(in suggestions: [WorkoutSuggestion], today: [StateWorkoutFact]) -> Set<String> {
+        guard !today.isEmpty else { return [] }
+        var out: Set<String> = []
+        for s in suggestions where satisfied(s, by: today) {
+            out.insert(StateWorkoutEdits.dismissKey(s))
+        }
+        return out
+    }
+
+    /// Whether any of today's sessions closes `s`.
+    static func satisfied(_ s: WorkoutSuggestion, by today: [StateWorkoutFact]) -> Bool {
+        let wanted = StateWorkoutChoices.key(for: s).lowercased()
+        let recordedAs = StateWorkoutChoices.sport(forKey: StateWorkoutChoices.key(for: s)).lowercased()
+        let needed = s.isRecovery
+            ? Swift.min(minRecoveryMinutes, Double(s.minutes))
+            : Double(s.minutes) * minFraction
+        for w in today {
+            let done = w.sport.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            // The session's own catalogue spelling, so "run" and "Running" are one sport.
+            let canonical = (WorkoutCatalog.sport(named: w.sport)?.name ?? w.sport).lowercased()
+            guard canonical == wanted || canonical == recordedAs || done == wanted else { continue }
+            // Absent duration is NOT treated as enough: a session the store could not time says nothing
+            // about whether the block was done.
+            guard let minutes = w.durationMin, minutes >= needed else { continue }
+            return true
+        }
+        return false
     }
 }
 

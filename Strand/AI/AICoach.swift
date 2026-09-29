@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import OSLog
 import Security
 import WhoopStore
 import StrandAnalytics
@@ -104,6 +105,36 @@ enum AIKeyStore {
     }
 }
 
+// MARK: - Log
+
+/// The coach's own log line.
+///
+/// WHY AT ALL. Every headless generation used to fail into a bare nil, so a wearer reporting "it says the
+/// coach is not reachable" left nothing behind to read: not the status code, not the provider, not even
+/// whether a request was made. One line per failure, with the non-localised `logReason`, costs nothing
+/// and is the difference between a diagnosis and a guess.
+///
+/// NO SECRETS, EVER. The key, the prompt and the wearer's data never appear here — only the reason token,
+/// the provider and the model id.
+@MainActor
+enum CoachLog {
+
+    private static let log = Logger(subsystem: "com.noop.strand", category: "coach")
+
+    /// The last few reasons, newest last. In memory only (a failure reason is not worth a store write),
+    /// and readable so a test can assert that the real reason was recorded rather than swallowed.
+    private(set) static var recent: [String] = []
+    private static let recentLimit = 12
+
+    static func ai(_ line: String) {
+        log.info("\(line, privacy: .public)")
+        recent.append(line)
+        if recent.count > recentLimit { recent.removeFirst(recent.count - recentLimit) }
+    }
+
+    static func resetForTesting() { recent = [] }
+}
+
 // MARK: - Errors
 
 /// User-facing failure reasons mapped to clear, non-crashing messages.
@@ -119,6 +150,10 @@ enum AICoachError: LocalizedError {
     static func isKeyRejection(_ status: Int) -> Bool { status == 401 || status == 403 }
 
     case noKey
+    /// The coach is set up but the wearer has not granted data access, so a grounded generation cannot run.
+    /// Its own case because "add a key" and "turn on data access" are two different things to go and do, and
+    /// reporting the second as the first sends someone who already has a key looking for one.
+    case dataAccessOff
     case emptyQuestion
     case badKey
     case rateLimited
@@ -128,11 +163,81 @@ enum AICoachError: LocalizedError {
     case emptyReply(String)   // #1074: verbatim provider-error / empty-reply text (byte-parity with Android emptyReplyMessage)
     case keySaveFailed
     case badCustomURL(String)
+    /// A stored key that belongs to ANOTHER provider than the one selected, so `resolvedKey` refuses to
+    /// send it. Its own case because the symptom — a configured coach that answers nothing — used to be
+    /// indistinguishable from a network failure, and the fix is "re-enter the key for this provider",
+    /// which no network message says. Carries the provider the key was saved for.
+    case keyForOtherProvider(String)
+    /// The request was cancelled (the task that asked for it went away). NOT a failure of the coach, and
+    /// must never be reported as one: it is the one "nil" that means "nobody is waiting any more".
+    case cancelled
+    /// The request ran out of time. Told apart from a general network error because the remedy differs
+    /// (retry, versus check the connection) and because a slow local LLM hits this constantly.
+    case timedOut
+
+    /// A stable, non-localised token for the log. The message the wearer reads is localised and may be
+    /// rewritten; a log line is grepped, so it must not be.
+    var logReason: String {
+        switch self {
+        case .noKey: return "no-key"
+        case .dataAccessOff: return "data-access-off"
+        case .emptyQuestion: return "empty-question"
+        case .badKey: return "key-rejected"
+        case .rateLimited: return "rate-limited"
+        case .server(let code, _): return "provider-error-\(code)"
+        case .network: return "network"
+        case .decode: return "unreadable-reply"
+        case .emptyReply: return "empty-reply"
+        case .keySaveFailed: return "key-save-failed"
+        case .badCustomURL: return "bad-server-url"
+        case .keyForOtherProvider(let owner): return "key-for-\(owner)"
+        case .cancelled: return "cancelled"
+        case .timedOut: return "timed-out"
+        }
+    }
+
+    /// Worth trying again by itself (a transient condition), as opposed to something the wearer has to
+    /// go and change first.
+    var isTransient: Bool {
+        switch self {
+        case .rateLimited, .network, .decode, .timedOut, .cancelled: return true
+        case .server(let code, _): return code >= 500 || code == 408 || code == 409
+        case .noKey, .dataAccessOff, .emptyQuestion, .badKey, .emptyReply, .keySaveFailed, .badCustomURL,
+             .keyForOtherProvider:
+            return false
+        }
+    }
+
+    /// Map a thrown error to a case. `URLSession` reports a cancelled or timed-out request as a
+    /// `URLError`, and Swift concurrency as a `CancellationError`; both used to arrive here wrapped in
+    /// `.network(localizedDescription)`, which is how "the screen went away mid-request" ended up being
+    /// shown to the wearer as "couldn't reach the coach".
+    static func from(_ error: any Error) -> AICoachError {
+        if let e = error as? AICoachError { return e }
+        if error is CancellationError { return .cancelled }
+        if let u = error as? URLError {
+            switch u.code {
+            case .cancelled: return .cancelled
+            case .timedOut: return .timedOut
+            default: return .network(u.localizedDescription)
+            }
+        }
+        return .network(error.localizedDescription)
+    }
 
     var errorDescription: String? {
         switch self {
         case .badCustomURL(let message):
             return message
+        case .keyForOtherProvider(let owner):
+            return "The stored API key was saved for \(owner), so it is not sent to the provider you have "
+                + "selected. Paste a key for this provider, or switch back."
+        case .cancelled:
+            return "That request was cancelled before it finished."
+        case .timedOut:
+            return "The provider took too long to answer. Try again."
+        case .dataAccessOff:
+            return "Turn on \"Let the coach use my data\" to have it read your numbers."
         case .noKey:
             return "Add your own API key first to use the coach."
         case .keySaveFailed:
@@ -299,6 +404,12 @@ final class AICoachEngine: ObservableObject {
     program deloads/periodisation, and treat sleep as the single biggest recovery lever.
     • Always cite the user's ACTUAL numbers, give a concrete plan (today and the week ahead), and \
     be specific, punchy and motivating - like a coach who knows them.
+    • EVERY FIGURE BELONGS TO ONE DAY, and the data says which. Charge/recovery is the state of one \
+    specific MORNING and expires with that day; effort is a running total for its own day; the sleep \
+    figures belong to the night that ENDED on that date. Name the date of a figure you cite, and never \
+    call a row "today" unless it is today's. For a question about tomorrow or any later day: nothing is \
+    measured for it yet, so reason from the trends, their plan and the schedule, never restate today's \
+    charge or effort as if it applied, and say plainly which parts cannot be known yet.
     If no data is provided, coach generally and invite them to turn on data access for personalised \
     advice. You are NOT a doctor - never diagnose; suggest a professional for genuine health concerns.
     Format replies in simple Markdown, chat-sized: short paragraphs, **bold** for key numbers, \
@@ -463,6 +574,16 @@ final class AICoachEngine: ObservableObject {
     /// The key to send with a request: the stored key, or an empty string for the keyless Custom
     /// provider. `nil` means "not configured", the caller surfaces `.noKey`.
     private var resolvedKey: String? {
+        try? resolveKey()
+    }
+
+    /// The key, or the REASON there is none.
+    ///
+    /// `resolvedKey` returning a bare nil is how a coach that is `isConfigured` but has a key stored for
+    /// a different provider ended up reported as "couldn't reach the coach": every caller read nil as
+    /// "the request failed". The two nils are different problems with different remedies, so they are
+    /// told apart here, once, and every caller gets the reason.
+    func resolveKey() throws -> String {
         if let k = AIKeyStore.read() {
             // Only send the stored key to the provider it was SAVED for, never Bearer one provider's
             // key (e.g. a cloud OpenAI/Anthropic secret) to another provider's endpoint, above all the
@@ -471,8 +592,12 @@ final class AICoachEngine: ObservableObject {
             let owner = AIKeyStore.ownerProvider
             if owner == provider.rawValue { return k }
             if owner == nil && provider != .custom { return k }
+            if provider == .custom { return "" }
+            let name = owner.flatMap { AIProvider(rawValue: $0)?.displayName } ?? owner ?? "another provider"
+            throw AICoachError.keyForOtherProvider(name)
         }
-        return provider == .custom ? "" : nil
+        if provider == .custom { return "" }
+        throw AICoachError.noKey
     }
 
     /// Commit the Custom (local) provider once the user has entered a server URL. Optionally stores a
@@ -799,7 +924,16 @@ final class AICoachEngine: ObservableObject {
     func send(_ userText: String, wireText: String? = nil) async {
         let trimmed = userText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { errorText = AICoachError.emptyQuestion.errorDescription; return }
-        guard let key = resolvedKey else { errorText = AICoachError.noKey.errorDescription; return }
+        // The REASON there is no key, not a blanket `.noKey`: a key saved for another provider is a
+        // different thing to go and fix, and reporting it as "add your own API key first" sent wearers
+        // who already had one round in circles.
+        let key: String
+        do {
+            key = try resolveKey()
+        } catch {
+            errorText = AICoachError.from(error).errorDescription
+            return
+        }
 
         // A transcript from an earlier local day is retired before the new turn is appended (#1542,
         // Kotlin twin merged first). `messages` outlives a night — the engine is held for the app's
@@ -1053,18 +1187,55 @@ final class AICoachEngine: ObservableObject {
     /// (the custom-task writer). Every grounded caller keeps the default.
     func generateOneShot(systemPrompt: String, question: String,
                          requiresDataConsent: Bool = true) async -> String? {
-        guard isConfigured, dataConsent || !requiresDataConsent, let key = resolvedKey else { return nil }
+        try? await generateOneShotResult(systemPrompt: systemPrompt, question: question,
+                                         requiresDataConsent: requiresDataConsent).get()
+    }
+
+    /// The same one-shot generation, WITH the reason it failed.
+    ///
+    /// WHY THIS EXISTS. `generateOneShot` returns `String?`, and `try?` on the provider call threw every
+    /// distinct failure away: a rejected key, a 429, a 500 with the provider's own message, an
+    /// unreadable reply, a mis-typed Custom URL, a key saved for a different provider, a cancellation
+    /// and a genuine loss of network all arrived at the caller as the same nil — which the State tile
+    /// then reported, for all of them, as "Couldn't reach the coach". The reason is never guessed from
+    /// nil again: it is carried here.
+    ///
+    /// Still never throws out of the actor: it returns a `Result`, so a caller that only wants the text
+    /// keeps the `String?` shape above and a caller that has to TELL the wearer something gets the case.
+    func generateOneShotResult(systemPrompt: String, question: String,
+                               requiresDataConsent: Bool = true) async -> Result<String, AICoachError> {
+        guard isConfigured else { return .failure(.noKey) }
+        guard dataConsent || !requiresDataConsent else { return .failure(.dataAccessOff) }
+        let key: String
+        do {
+            key = try resolveKey()
+        } catch {
+            return .failure(AICoachError.from(error))
+        }
         backgroundWork += 1
         defer { backgroundWork -= 1 }
-        let reply = try? await provider.client.send(
-            key: key,
-            model: model,
-            systemPrompt: requestSystemPrompt(systemPrompt),
-            messages: [(role: ChatMessage.Role.user, content: question)],
-            session: session
-        )
-        let clean = reply?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return clean.isEmpty ? nil : clean
+        do {
+            let reply = try await provider.client.send(
+                key: key,
+                model: model,
+                systemPrompt: requestSystemPrompt(systemPrompt),
+                messages: [(role: ChatMessage.Role.user, content: question)],
+                session: session
+            )
+            let clean = reply.trimmingCharacters(in: .whitespacesAndNewlines)
+            // A 200 with nothing in it is its own failure, not a network one: it is usually a model id
+            // the provider does not serve, and `emptyReplyError` already writes that sentence.
+            guard !clean.isEmpty else {
+                return .failure(.emptyReply(
+                    "The provider returned an empty reply. If you set a custom model by hand, check "
+                    + "that the model name is one the provider actually offers."))
+            }
+            return .success(clean)
+        } catch {
+            let mapped = AICoachError.from(error)
+            CoachLog.ai("one-shot failed: \(mapped.logReason) · \(provider.rawValue)/\(model)")
+            return .failure(mapped)
+        }
     }
 
     /// Today's mission, generating it if today has none. Nil when it cannot be written.
@@ -1110,13 +1281,23 @@ final class AICoachEngine: ObservableObject {
         s += "RECOVERY, WHOOP's own figure WINS on any day WHOOP scored it: WHOOP can hold the strap overnight, "
         s += "and NOOP's Rest and Charge for such a night are computed from too little data and are wrong. "
         s += "Use NOOP's Charge/Rest only for days WHOOP has no recovery/sleep score. Effort: NOOP's first.\n"
+        // EACH ROW IS LABELLED WITH ITS DAY AND WHAT THAT DAY IS. A newest-first list whose top row is
+        // sometimes today and sometimes yesterday (the overnight has not synced) is how "your charge today
+        // is 62" ended up being said about yesterday's morning.
+        let todayKey = CoachDayFrame.key(Date())
+        func dayTag(_ day: String) -> String { day == todayKey ? " (TODAY, still incomplete)" : "" }
         let own = await repo.noopRecentDays()
         if own.isEmpty {
             s += "NOOP's own scores: none computed for the last week.\n"
         } else {
-            s += "NOOP (primary, newest first):\n"
+            s += "NOOP (primary, newest first). Charge is the state of each date's MORNING; effort is that "
+            s += "date's cumulative total:\n"
             for d in own.reversed() {
-                s += "  \(d.day): charge \(pct(d.charge)), effort \(pct(d.effort)), rest \(pct(d.rest))\n"
+                s += "  \(d.day)\(dayTag(d.day)): charge \(pct(d.charge)), effort \(pct(d.effort)), rest \(pct(d.rest))\n"
+            }
+            if own.first(where: { $0.day == todayKey }) == nil, let newest = own.map(\.day).max() {
+                s += "  NOTE: there is no row for today (\(todayKey)) yet — the newest is \(newest). "
+                s += "Do not present \(newest)'s figures as today's.\n"
             }
         }
         let whoop = await repo.whoopRecentDays()
@@ -1124,7 +1305,7 @@ final class AICoachEngine: ObservableObject {
             s += "WHOOP's own figures (PRIMARY for recovery and sleep on the days listed; strain only where NOOP "
             s += "has no effort; always with WHOOP's names and scales: Recovery %, Strain 0-21, Sleep Score %):\n"
             for d in whoop.reversed() {
-                s += "  \(d.day): recovery \(pct(d.recovery)), strain "
+                s += "  \(d.day)\(dayTag(d.day)): recovery \(pct(d.recovery)), strain "
                 s += (d.strain.map { String(format: "%.1f", $0) } ?? "—")
                 s += ", sleep score \(pct(d.sleep))\n"
             }
@@ -1139,9 +1320,16 @@ final class AICoachEngine: ObservableObject {
         // primary figures — the ones the level, the quests and every screen are built on. WHOOP's own
         // recovery, strain and sleep score follow as a secondary reference, clearly labelled with their
         // own names and scales, so the model never quotes a WHOOP strain of 14 as an effort out of 100.
-        var ctx = await threeScoresBlock()
+        // WHICH DAY EACH FIGURE BELONGS TO, FIRST — before any number. Everything below is dated, and
+        // nothing used to say what those dates meant, so a question about tomorrow was answered with
+        // today's charge. See `CoachDayFrame`.
+        var ctx = CoachDayFrame.block() + "\n\n"
+        ctx += await threeScoresBlock()
         ctx += "\n\n" + CoachLevelContext.promptSection()
-        ctx += "\n\n" + Self.sessionConstraints()
+        // THE ROUTINES AND THE MEMORY MOVED TO THE END (below). They used to sit HERE, between the level and
+        // the biometric table — several paragraphs of non-data prose splitting the figures into two halves,
+        // which is exactly the crowding-out that makes a small model answer from the prose and not from the
+        // numbers. The data is now contiguous and the constraints follow it.
         ctx += "\n\n" + buildContext()
         ctx += "\n\n" + (await recentWorkoutsBlock())
         // Derived stress: a single Baevsky Stress Index summary line over today's R-R, computed the same
@@ -1164,6 +1352,12 @@ final class AICoachEngine: ObservableObject {
             let block = await onDeviceSignalsBlock()
             if !block.isEmpty { ctx += "\n\n" + block }
         }
+        // AFTER the figures, not in the middle of them: what the wearer told the coach about their week and
+        // what it wrote down itself are constraints on the answer, not data to reason from.
+        ctx += "\n\n" + Self.sessionConstraints()
+        // The last thing the model reads before the question. Short on purpose — it is a reminder of the
+        // frame at the top, placed where recency makes it stick.
+        ctx += "\n\n" + CoachDayFrame.closingRule
         return ctx
     }
 
@@ -1410,11 +1604,21 @@ final class AICoachEngine: ObservableObject {
 
         // Last ~14 days, newest first for readability.
         let recent = Array(days.suffix(14)).reversed()
+        let todayKey = CoachDayFrame.key(Date())
         lines.append("")
         lines.append("Recent days (newest first) — charge(0-100), effort(0-100), rest/sleep(h), "
-                     + "deep/REM/light(h), eff(%), HRV(ms), RHR(bpm). A dash means NOT MEASURED, not zero:")
+                     + "deep/REM/light(h), eff(%), HRV(ms), RHR(bpm). A dash means NOT MEASURED, not zero. "
+                     + "The date on each row is the day the charge's MORNING fell on and the day the effort "
+                     + "is the total for; the sleep figures are for the night that ENDED that morning:")
         for d in recent {
-            lines.append("  " + dayLine(d))
+            // Said on the row itself: an unlabelled newest row is read as "now" whatever its date, which is
+            // how yesterday's charge got quoted as today's.
+            let tag = d.day == todayKey ? "  TODAY, incomplete — " : "  "
+            lines.append(tag + dayLine(d))
+        }
+        if !recent.contains(where: { $0.day == todayKey }) {
+            lines.append("  (No row for today (\(todayKey)) yet. The newest row above is an EARLIER day — "
+                         + "do not present it as today.)")
         }
 
         // 30-day averages.

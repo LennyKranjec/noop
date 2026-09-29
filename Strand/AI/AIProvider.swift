@@ -327,7 +327,10 @@ func performRequest(
     do {
         (data, response) = try await session.data(for: req)
     } catch {
-        throw AICoachError.network(error.localizedDescription)
+        // `AICoachError.from` rather than a blanket `.network`: a cancelled or timed-out request is not
+        // an unreachable provider, and collapsing the three into one message is what made every State
+        // tile failure read as "couldn't reach the coach".
+        throw AICoachError.from(error)
     }
 
     guard let http = response as? HTTPURLResponse else {
@@ -406,7 +409,7 @@ func performStreamingRequest(
     do {
         bytes = try await session.bytes(for: req)
     } catch {
-        throw AICoachError.network(error.localizedDescription)
+        throw AICoachError.from(error)
     }
 
     guard let http = bytes.1 as? HTTPURLResponse else {

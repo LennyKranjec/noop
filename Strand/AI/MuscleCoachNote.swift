@@ -39,7 +39,15 @@ enum MuscleCoachNote {
     /// inside the free corner and the card only grows when the reading genuinely needs the room.
     static let maxChars = 480
 
-    static let question = "Which muscle group most needs attention this week, and what should they do?"
+    static let question = "Which muscle group is most undertrained relative to their own recent weeks, and what should they do in their next session?"
+
+    /// How many groups must have a frozen personal normal before the reading is a comparison rather than a
+    /// guess. Below this the note says so instead of ranking two numbers against nothing.
+    static let minBaselinesForVerdict = 3
+
+    /// How many weekly figures the whole chart needs before the note is written at all. One week of volume
+    /// on two groups is not a training history, and a confident paragraph about it is a fabrication.
+    static let minGroupsForNote = 2
 
     /// The stored note, but only when it was written for exactly these loads.
     static func stored(fingerprint: String, _ d: UserDefaults = .standard) -> String? {
@@ -63,12 +71,18 @@ enum MuscleCoachNote {
     /// Hashed with FNV-1a rather than Swift's `hashValue`: Swift seeds its hasher per process, so the
     /// same loads would fingerprint differently after every launch and the note would be rewritten on
     /// each cold start — the exact cost this whole mechanism exists to avoid.
-    static func fingerprint(_ loads: [MuscleGroup: Double]) -> String {
-        let body = loads
-            .map { (MuscleBaselineStore.androidName($0.key), $0.value) }
-            .sorted { $0.0 < $1.0 }
-            .map { "\($0.0):\(Int($0.1.rounded()))" }
-            .joined(separator: ",")
+    static func fingerprint(_ loads: [MuscleGroup: Double],
+                            priorWeek: [MuscleGroup: Double] = [:],
+                            window: String = "") -> String {
+        func digest(_ m: [MuscleGroup: Double]) -> String {
+            m.map { (MuscleBaselineStore.androidName($0.key), $0.value) }
+                .sorted { $0.0 < $1.0 }
+                .map { "\($0.0):\(Int($0.1.rounded()))" }
+                .joined(separator: ",")
+        }
+        // The WINDOW is part of the identity too: the note names its dates, so the same kilograms read over
+        // a window that has since slid forward is a note whose first clause is wrong.
+        let body = digest(loads) + "|" + digest(priorWeek) + "|" + window
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
         for byte in body.utf8 {
             hash ^= UInt64(byte)
@@ -83,37 +97,82 @@ enum MuscleCoachNote {
     /// invent one is the same instruction the chat gets, and for the same reason.
     static func systemPrompt(
         loads: [MuscleGroup: Double],
-        baselines: [MuscleGroup: MuscleBaseline]
+        baselines: [MuscleGroup: MuscleBaseline],
+        from: String? = nil,
+        to: String? = nil,
+        priorWeek: [MuscleGroup: Double] = [:]
     ) -> String {
+        // THE WINDOW, NAMED. Without its dates the table was a set of timeless kilograms, and the note
+        // said "this week" about a figure the reader could not place — the same undated-figure defect the
+        // chat context had.
+        let window: String
+        if let from, let to {
+            window = "\(from) to \(to) inclusive (7 local days, ending today)"
+        } else {
+            window = "the last 7 local days, ending today"
+        }
+        let withBaseline = loads.keys.filter { baselines[$0] != nil }.count
+        let thin = withBaseline < minBaselinesForVerdict
+
         var s = ""
         s += "You are THE SYSTEM, reading this human's training log. Your tone is cold, precise and "
         s += "dryly funny, and your contempt is for the EXCUSE, never for the person.\n"
-        s += "Below is the last seven days of lifting volume per muscle group. Where a group has a "
-        s += "frozen personal normal, its z-score says how unusual this week is FOR THAT GROUP: 0 is "
-        s += "a normal week, +2 is unusually heavy, -2 unusually light.\n"
+        s += "Below is their lifting volume per muscle group for \(window). Volume is TOTAL KILOGRAMS "
+        s += "MOVED in that window (sets x reps x weight), not a weight on a bar. Where a group has a "
+        s += "frozen personal normal, its z-score says how unusual this window is FOR THAT GROUP against "
+        s += "that group's own history: 0 is a normal week for them, +2 unusually heavy, -2 unusually "
+        s += "light. The previous 7 days are given beside it where known, so a direction is visible.\n"
         // THE LENGTH ASKED FOR AND THE LENGTH ALLOWED HAVE TO AGREE. This said "under 180 characters"
         // while `maxChars` allowed 620, so the panel was sized for a reading and the model was told to
         // write a caption — and it obeyed the prompt, which is why the note was one clipped thought.
-        s += "Answer in THREE or FOUR sentences, 260 to 440 characters total. Name the group that most "
-        s += "needs attention, say WHY this week's figure makes it that group, say what to do about it "
-        s += "this week in concrete terms — sets, a session, a day off — and name one group that is "
-        s += "fine, so the reading is not all correction. Cite at most two figures, and only ones that "
-        s += "appear below. NEVER invent a number. No heading, no preamble, no list, no markdown.\n\n"
-        s += "VOLUME, LAST 7 DAYS:\n"
+        s += "Answer in THREE or FOUR sentences, 260 to 440 characters total. "
+        if thin {
+            // THIN DATA GETS AN HONEST NOTE, NOT A VERDICT. With fewer than a few frozen normals there is
+            // nothing to be undertrained RELATIVE TO, and a confident ranking of two raw numbers is the
+            // fabrication this app's rules forbid. So the instruction changes shape rather than the model
+            // being left to bluff.
+            s += "IMPORTANT: only \(withBaseline) of their groups has a personal normal yet, so you CANNOT "
+            s += "say which group is undertrained relative to their own history — there is not enough "
+            s += "history. Say that plainly in the first sentence. Then state what the log DOES show (which "
+            s += "groups were trained at all in this window and which were not), and name the one concrete "
+            s += "thing that would make the next reading possible: train the untrained groups so a normal "
+            s += "can be established. Do NOT rank groups, do NOT call anything low or weak, and do NOT "
+            s += "estimate a normal. "
+        } else {
+            s += "Name the group that is most UNDERTRAINED relative to their own recent weeks — the most "
+            s += "negative z-score, or a group with real history that got nothing in this window. Say WHY "
+            s += "that group's own figures make it that group. Then say exactly what to do in their NEXT "
+            s += "SESSION in concrete terms: which group, how many working sets, and roughly what share of "
+            s += "their usual load. Finally name one group that is genuinely fine, so the reading is not all "
+            s += "correction. "
+        }
+        s += "A group marked \"no personal normal yet\" has no history to compare against: it is NOT low and "
+        s += "NOT weak, and you must never describe it as either. Cite at most two figures, and only ones "
+        s += "that appear below. NEVER invent a number. No heading, no preamble, no list, no markdown.\n\n"
+        s += "VOLUME (total kg moved) FOR \(window.uppercased()):\n"
         for (group, kg) in loads.sorted(by: { $0.value > $1.value }) {
+            var line = "- \(label(group)): \(Int(kg.rounded())) kg"
             if let baseline = baselines[group] {
-                s += "- \(label(group)): \(Int(kg.rounded())) kg (z \(fmt(baseline.z(kg))))\n"
+                line += " (z \(fmt(baseline.z(kg))) vs their own normal)"
             } else {
                 // Said explicitly: without a frozen normal there is nothing to be unusual against, and a
                 // model left to guess would happily call it "low".
-                s += "- \(label(group)): \(Int(kg.rounded())) kg (no personal normal yet)\n"
+                line += " (no personal normal yet — not comparable, so never call it low)"
             }
+            if let before = priorWeek[group] {
+                line += ", previous 7 days \(Int(before.rounded())) kg"
+            }
+            s += line + "\n"
         }
         // The groups that got NOTHING are the interesting ones, and they are absent from the map above
         // rather than present at zero — so they are named here or they cannot be mentioned at all.
         let untouched = MuscleGroup.allCases.filter { loads[$0] == nil }
         if !untouched.isEmpty {
-            s += "NOT TRAINED AT ALL THIS WEEK: " + untouched.map(label).joined(separator: ", ") + "\n"
+            s += "NOT TRAINED AT ALL IN THIS WINDOW (0 kg logged; a group with a personal normal and 0 kg is "
+            s += "genuinely undertrained, a group without one is simply unknown): "
+            s += untouched.map { g in
+                baselines[g] != nil ? "\(label(g)) (has a normal)" : "\(label(g)) (no normal yet)"
+            }.joined(separator: ", ") + "\n"
         }
         return s
     }
