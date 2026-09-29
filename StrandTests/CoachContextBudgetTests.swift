@@ -49,9 +49,13 @@ final class CoachContextBudgetTests: XCTestCase {
     func testTheReserveIsSubtractedFromTheBudgetBeforeAnythingIsAssembled() {
         let blocks = [block("keep", 90, chars: 2_000), block("lose", 10, chars: 2_000)]
         let roomy = CoachContextBudget.fit(blocks, budget: 1_400, reserved: 0)
-        let cramped = CoachContextBudget.fit(blocks, budget: 1_400, reserved: 900)
+        // 1,400 − 790 reserved − 105 held back for the trim note (420 chars / 4) = 505 tokens: room for
+        // exactly one 500-token block. The note's own room is part of the arithmetic — that is the point.
+        let cramped = CoachContextBudget.fit(blocks, budget: 1_400, reserved: 790)
         XCTAssertTrue(roomy.isComplete, "1,000 tokens of blocks inside a 1,400 budget should fit")
-        XCTAssertEqual(cramped.dropped, ["lose"], "with 900 reserved there is room for one block")
+        XCTAssertEqual(cramped.dropped, ["lose"], "with 790 reserved (and the note's room) there is room for one block")
+        let tooCramped = CoachContextBudget.fit(blocks, budget: 1_400, reserved: 900)
+        XCTAssertEqual(Set(tooCramped.dropped), ["keep", "lose"], "900 reserved leaves 395 — not even one block")
     }
 
     /// CHEAPEST VALUE FIRST, and a block with a short form is SHORTENED before a block without one is lost.
