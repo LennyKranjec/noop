@@ -273,7 +273,8 @@ struct MuscleModelCardView: View {
         let answer = await coach.generateOneShot(
             systemPrompt: MuscleCoachNote.systemPrompt(loads: loads, baselines: baselines,
                                                        from: from, to: to, priorWeek: priorWeek),
-            question: MuscleCoachNote.question)
+            question: MuscleCoachNote.question,
+            budget: .note)
         guard let answer else { return }
         let clipped = String(answer.prefix(MuscleCoachNote.maxChars))
         MuscleCoachNote.write(clipped, fingerprint: fingerprint)

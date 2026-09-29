@@ -5,10 +5,16 @@ import UIKit
 import AppKit
 #endif
 
-// MARK: - Strand Typography (§9.2)
+// MARK: - Strand Typography (§9.2) — re-pointed to Telos 2.0 (docs/DESIGN_V2.md §4.2)
 //
-// SF Rounded follows the supplied reference's friendly Apple-native geometry. Tabular digits keep live
-// metrics stable, while named text styles retain Dynamic Type scaling. SF Mono remains reserved for logs.
+// Three voices: numbers are SF Rounded, prose is SF Pro, anything that qualifies a number is SF Mono.
+// The 1.x names are kept and re-pointed so the whole app takes the V2 voice with no call-site edit:
+//   • the PROSE styles (`title1`, `title2`, `headline`, `body`, `subhead`, `caption`, `footnote`) are
+//     SF Pro now (the `.rounded` design is dropped);
+//   • `overline` is SF Mono medium (`TelosType.scale`) with `overlineTracking` 0.8 (was 0.45) — mono
+//     is ~12 % wider, so each screen package re-checks its `strandOverline()` sites for truncation;
+//   • `display` / `rounded` / `number` stay SF Rounded at a FIXED size — geometry-bound callers rely
+//     on that. New numerals use `TelosType` / `.telosNumeral(_:)`.
 //
 // All numeric styles use `.monospacedDigit()` so live values don't reflow.
 
@@ -22,8 +28,8 @@ public enum StrandFont {
 
     // MARK: Scale (§9.2)
 
-    /// Display 64–80 / Bold — the gauge score number. Helvetica Neue 700 with tight
-    /// tracking (≈ -0.04em), tabular digits so a changing value never reflows.
+    /// Display 64–80 / Bold — the gauge score number. SF Rounded, fixed size (geometry-bound callers
+    /// depend on it), tabular digits so a changing value never reflows.
     public static func display(_ size: CGFloat = 72) -> Font {
         roundedSystem(size, weight: .bold).monospacedDigit()
     }
@@ -34,59 +40,62 @@ public enum StrandFont {
         -size * 0.04
     }
 
-    /// A Helvetica-Neue numeric style at an arbitrary size/weight — the house
-    /// numeral. Tabular so live values align. Use anywhere a score/number is shown.
+    /// An SF Rounded numeric style at an arbitrary fixed size/weight — the house numeral. Tabular so
+    /// live values align.
     public static func rounded(_ size: CGFloat, weight: Font.Weight = .bold) -> Font {
         roundedSystem(size, weight: weight).monospacedDigit()
     }
 
-    /// Title1 28 / Bold. Scales with Dynamic Type.
-    public static let title1 = Font.system(.title, design: .rounded, weight: .bold)
+    /// Title1 28 / Bold, SF Pro (`TelosType.title`). Scales with Dynamic Type.
+    public static let title1 = TelosType.title
 
-    /// Title2 22 / Semibold. Scales with Dynamic Type.
-    public static let title2 = Font.system(.title2, design: .rounded, weight: .semibold)
+    /// Title2 22 / Semibold, SF Pro (`TelosType.title2`). Scales with Dynamic Type.
+    public static let title2 = TelosType.title2
 
-    /// Headline 17 / Semibold. Scales with Dynamic Type.
-    public static let headline = Font.system(.headline, design: .rounded, weight: .semibold)
+    /// Headline 17 / Semibold, SF Pro (`TelosType.headline`). Scales with Dynamic Type.
+    public static let headline = TelosType.headline
 
-    /// Body 15 / Regular. Scales with Dynamic Type.
-    public static let body = Font.system(.body, design: .rounded, weight: .regular)
+    /// Body 17 / Regular, SF Pro (`TelosType.body`). Scales with Dynamic Type.
+    public static let body = TelosType.body
 
-    /// Subhead 13. Scales with Dynamic Type.
-    public static let subhead = Font.system(.subheadline, design: .rounded, weight: .regular)
+    /// Subhead 15, SF Pro (`TelosType.subhead`). Scales with Dynamic Type.
+    public static let subhead = TelosType.subhead
 
-    /// Caption 12. Scales with Dynamic Type.
-    public static let caption = Font.system(.caption, design: .rounded, weight: .regular)
+    /// Caption 12, SF Pro (`TelosType.caption`). Scales with Dynamic Type.
+    public static let caption = TelosType.caption
 
-    /// Footnote 11. Scales with Dynamic Type.
-    public static let footnote = Font.system(.footnote, design: .rounded, weight: .regular)
+    /// Footnote 13, SF Pro (`TelosType.footnote`). Scales with Dynamic Type.
+    public static let footnote = TelosType.footnote
 
-    /// Overline / Semibold, letter-spaced by `overlineTracking` (apply it at the use site;
-    /// `strandOverline()` does it for you). Sparing ALL-CAPS labels. Scales with Dynamic Type.
+    /// Overline — SF Mono medium 11 (`TelosType.scale`), letter-spaced by `overlineTracking` (apply it at
+    /// the use site; `strandOverline()` does it for you). Sparing ALL-CAPS labels. Scales with Dynamic
+    /// Type.
     ///
     /// Also the face for compact status copy in constrained chrome (the Today header's sync capsule),
     /// used there WITHOUT the tracking — that is sentence case, not an overline, and the letter-spacing
     /// is what makes an overline read as one.
-    public static let overline = Font.system(.caption2, design: .rounded, weight: .semibold)
+    public static let overline = TelosType.scale
 
-    /// `overline` at a custom point size — same Helvetica face, weight and Dynamic-Type scaling
-    /// (relativeTo `.caption2`), just smaller. Passing 11 returns exactly `.overline`. Lets a caller
-    /// shrink an ALL-CAPS label to fit a small container without losing accessibility text-scaling.
+    /// `overline` at a custom point size — the same SF Mono medium face and Dynamic-Type scaling
+    /// (relativeTo `.caption2`), just a different base. Lets a caller shrink an ALL-CAPS label to fit a
+    /// small container without losing accessibility text-scaling. (V2 minimum rendered size is 11 pt.)
     public static func overlineScaled(_ size: CGFloat) -> Font {
-        #if canImport(UIKit)
-        let base = UIFont.systemFont(ofSize: size, weight: .semibold)
-        let descriptor = base.fontDescriptor.withDesign(.rounded) ?? base.fontDescriptor
-        let rounded = UIFont(descriptor: descriptor, size: size)
-        return Font(UIFontMetrics(forTextStyle: .caption2).scaledFont(for: rounded))
+        #if os(watchOS)
+        return Font.system(size: size, weight: .medium, design: .monospaced)
+        #elseif canImport(UIKit)
+        let base = UIFont.systemFont(ofSize: size, weight: .medium)
+        let descriptor = base.fontDescriptor.withDesign(.monospaced) ?? base.fontDescriptor
+        let mono = UIFont(descriptor: descriptor, size: size)
+        return Font(UIFontMetrics(forTextStyle: .caption2).scaledFont(for: mono))
         #elseif canImport(AppKit)
-        let base = NSFont.systemFont(ofSize: size, weight: .semibold)
-        guard let descriptor = base.fontDescriptor.withDesign(.rounded),
-              let rounded = NSFont(descriptor: descriptor, size: size) else {
+        let base = NSFont.systemFont(ofSize: size, weight: .medium)
+        guard let descriptor = base.fontDescriptor.withDesign(.monospaced),
+              let mono = NSFont(descriptor: descriptor, size: size) else {
             return Font(base)
         }
-        return Font(rounded)
+        return Font(mono)
         #else
-        return roundedSystem(size, weight: .semibold)
+        return Font.system(size: size, weight: .medium, design: .monospaced)
         #endif
     }
 
@@ -95,18 +104,19 @@ public enum StrandFont {
 
     // MARK: Numeric variants (tabular digits)
 
-    /// A numeric style at an arbitrary size/weight, for live values — Helvetica
-    /// Neue, tabular digits. This is the tile/value numeral.
+    /// A numeric style at an arbitrary fixed size/weight, for live values — SF Rounded, tabular
+    /// digits. This is the tile/value numeral.
     public static func number(_ size: CGFloat, weight: Font.Weight = .semibold) -> Font {
         roundedSystem(size, weight: weight).monospacedDigit()
     }
 
-    /// Helvetica-Neue body number — for inline live values that should align. Scales with Dynamic
-    /// Type alongside its sibling `body`/`caption` labels so a value and its label stay matched.
-    public static let bodyNumber = Font.system(.body, design: .rounded, weight: .medium).monospacedDigit()
+    /// Body number — SF Rounded medium 17, tabular (`TelosType.numeralS`). Scales with Dynamic Type
+    /// alongside its sibling `body` label so a value and its label stay matched.
+    public static let bodyNumber = TelosType.numeralS
 
-    /// Helvetica-Neue caption number — for small live values (sparklines, chips). Scales with Dynamic Type.
-    public static let captionNumber = Font.system(.caption, design: .rounded, weight: .medium).monospacedDigit()
+    /// Small number — SF Rounded medium 13, tabular (`TelosType.numeralXS`; was caption 12). Scales
+    /// with Dynamic Type.
+    public static let captionNumber = TelosType.numeralXS
 
     /// Mono at an arbitrary size.
     public static func mono(_ size: CGFloat, weight: Font.Weight = .regular) -> Font {
@@ -115,14 +125,14 @@ public enum StrandFont {
 
     /// The ONE tracking for overline text (ALL-CAPS labels). Every caps label reads this —
     /// state pills, source badges and chart footers each used to carry their own 0.4/0.5, which
-    /// is visible when two of them sit in the same row.
-    public static let overlineTracking: CGFloat = 0.45
+    /// is visible when two of them sit in the same row. V2: 0.45 → 0.8 (`TelosType.Tracking.scale`).
+    public static let overlineTracking: CGFloat = TelosType.Tracking.scale
 }
 
 // MARK: - Text helpers
 
 public extension Text {
-    /// Style as an overline label: ALL-CAPS, semibold, `overlineTracking`, secondary text.
+    /// Style as an overline label: ALL-CAPS, SF Mono medium (V2 `scale`), `overlineTracking`, secondary text.
     func strandOverline() -> some View {
         self.font(StrandFont.overline)
             .tracking(StrandFont.overlineTracking)

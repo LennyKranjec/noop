@@ -19,28 +19,30 @@ import SwiftUI
 // This complements `StrandMotion` (the physiological breathe/pulse set) rather than
 // replacing it: where StrandMotion leans organic, NoopMotion leans crisp and mechanical,
 // matching the white-on-near-black WHOOP target.
+//
+// TELOS 2.0: the names below return the V2 curves (`TelosMotion`, docs/DESIGN_V2.md §4.8):
+// screen → screen (unchanged) · card → settle · value → settle · stagger 0.04 → 0.035 (first 4 items).
+// `CountUpText` counts only when its value CHANGES (never from 0 on appear).
 
 public enum NoopMotion {
 
-    // MARK: Springs — smooth, snappy, minimal bounce
+    // MARK: Springs — smooth, snappy, no bounce
 
-    /// Screen-level spring — page pushes, sheet/tab swaps, large layout moves. A touch
-    /// slower so big surfaces feel weighted, still effectively bounce-free.
-    public static let screen = Animation.spring(response: 0.46, dampingFraction: 0.88)
+    /// Screen-level spring — expand/collapse, in-sheet page swaps — `TelosMotion.screen`.
+    public static let screen = TelosMotion.screen
 
-    /// Card-level spring — the default for card insert/remove, row reflow, expand/collapse.
-    /// The house tempo: `spring(response: 0.4, dampingFraction: 0.85)`.
-    public static let card = Animation.spring(response: 0.40, dampingFraction: 0.85)
+    /// Card-level spring — card insert/remove, row reflow — `TelosMotion.settle`.
+    public static let card = TelosMotion.settle
 
-    /// Value-level spring — number ticks, gauge fraction, small chip/state changes. Snappy
-    /// and tightly damped so a changing read-out settles cleanly without overshoot.
-    public static let value = Animation.spring(response: 0.34, dampingFraction: 0.90)
+    /// Value-level spring — number ticks, gauge fraction, small chip/state changes —
+    /// `TelosMotion.settle` (critically damped enough that a read-out never overshoots).
+    public static let value = TelosMotion.settle
 
     // MARK: Stagger
 
-    /// Per-item delay for a staggered list/grid reveal. Index 0 fires immediately; each
-    /// subsequent item waits `index * stagger` so a column ripples in top-to-bottom.
-    public static let stagger: Double = 0.04
+    /// Per-item delay for a staggered first-arrival reveal (`TelosMotion.stagger`, 0.04 → 0.035). Only
+    /// the first four items step; later items arrive with the fourth (`TelosMotion.staggerDelay`).
+    public static let stagger: Double = TelosMotion.stagger
 
     /// The pre-reveal vertical offset for a staggered/appear item (rises UP into place).
     public static let riseOffset: CGFloat = 8
@@ -173,9 +175,10 @@ public final class NoopMotionState: ObservableObject {
 // MARK: - CountUpText
 //
 // Animates a numeric value counting up (or down) to its latest value whenever `value`
-// changes, and on first appear (from 0 → value). Driven by a custom `Animatable` modifier
-// so it works on the iOS 16 / macOS 13 floor (no TimelineView spring / PhaseAnimator needed)
-// and rides whatever animation the environment supplies — by default `NoopMotion.value`.
+// CHANGES. Telos 2.0 (§2.3 rule 6, §4.8 `countUp`): a count-up is a transition to a NEW value
+// only — on first appear (and on every re-appear) the number is shown at its value, never
+// counted up from 0. Driven by a custom `Animatable` view so it works on the iOS 16 / macOS 13
+// floor, riding `TelosMotion.countUp` by default.
 //
 // Reduce Motion → the final value is shown instantly, with no tick.
 
@@ -208,17 +211,19 @@ public struct CountUpText: View {
     ///   - format: maps the (interpolated) number to its display string — round, clamp, add units here.
     ///   - font: the text font (e.g. `StrandFont.display(72)`).
     ///   - color: the text colour (e.g. `StrandPalette.textPrimary`).
-    ///   - animation: the count-up curve. Defaults to `NoopMotion.value`.
+    ///   - animation: the count-up curve. Defaults to `TelosMotion.countUp`.
     public init(value: Double,
                 format: @escaping (Double) -> String,
                 font: Font,
                 color: Color,
-                animation: Animation = NoopMotion.value) {
+                animation: Animation = TelosMotion.countUp) {
         self.value = value
         self.format = format
         self.font = font
         self.color = color
         self.animation = animation
+        // Start AT the value, so the first frame never shows 0 (and never counts up from it).
+        self._target = State(initialValue: value)
     }
 
     public var body: some View {
@@ -226,14 +231,10 @@ public struct CountUpText: View {
         // frame-by-frame under whatever animation wraps the `target` change.
         _AnimatableNumber(number: target, format: format, font: font, color: color)
             .onAppear {
+                // V2: never count on (re-)appear — show the value. Only a CHANGE counts (below).
                 guard !hasAppeared else { return }
                 hasAppeared = true
-                if reduceMotion {
-                    target = value                      // snap, no tick
-                } else {
-                    target = 0
-                    withAnimation(animation) { target = value }
-                }
+                target = value
             }
             .onChangeCompat(of: value) { newValue in
                 if reduceMotion {
@@ -300,7 +301,7 @@ private struct StaggeredAppear: ViewModifier {
                 if reduceMotion {
                     hasAppeared = true                  // no animation, no delay
                 } else {
-                    let delay = Double(max(0, index)) * NoopMotion.stagger
+                    let delay = TelosMotion.staggerDelay(index: index)   // 0.035 s steps, first 4 items
                     withAnimation(NoopMotion.card.delay(delay)) {
                         hasAppeared = true
                     }
@@ -310,7 +311,7 @@ private struct StaggeredAppear: ViewModifier {
 }
 
 public extension View {
-    /// Fade-in + 8pt rise on first appearance, delayed by `index * 0.04s` for a sequenced
+    /// Fade-in + 8pt rise on first appearance, delayed 0.035 s per item for the first four items
     /// list/grid reveal. Runs ONCE per element. Honours Reduce Motion (appears instantly,
     /// no offset).
     ///

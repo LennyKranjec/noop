@@ -1,4 +1,5 @@
 import Foundation
+import StrandAnalytics
 
 // MARK: - Caffeine window (#526) — log an intake + a rough on-device "still active" estimate
 //
@@ -271,5 +272,30 @@ public final class CaffeineLogStore: ObservableObject {
 
     private func save() {
         if let data = try? JSONEncoder().encode(intakes) { d.set(data, forKey: Self.key) }
+    }
+}
+
+// MARK: - The caffeine cutoff's bedtime (S2)
+
+/// The bedtime the caffeine cutoff works back from: the sleep plan's, else the wearer's own caffeine
+/// bedtime setting (`noop.caffeine.bedtimeMinutes`). The decay model is unchanged — only its bedtime input
+/// comes from the plan, so there is no second caffeine rule.
+@MainActor
+enum CaffeineBedtime {
+
+    /// Pure: the plan's bedtime, or `fallback`.
+    static func bedtimeMinutes(plan: SleepSchedulePlan?, fallback: Int) -> Int {
+        plan?.bedtimeMin ?? fallback
+    }
+
+    /// Tonight's, from the shared provider.
+    static func bedtimeMinutes(fallback: Int, now: Date = Date()) -> Int {
+        bedtimeMinutes(plan: SleepScheduleProvider.shared.plan(wakingOn: SleepScheduleProvider.comingWakeDate(now: now)),
+                       fallback: fallback)
+    }
+
+    /// The cutoff, minutes past midnight, for `plan` (else `fallback` bedtime).
+    static func cutoffMinutes(plan: SleepSchedulePlan?, fallback: Int) -> Int {
+        CaffeineDecay.cutoffMinutesSinceMidnight(bedtimeMinutes: bedtimeMinutes(plan: plan, fallback: fallback))
     }
 }

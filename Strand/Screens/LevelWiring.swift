@@ -21,6 +21,11 @@ import WhoopStore
 //
 // A MISSING METRIC STAYS MISSING. Every read returns nil rather than a stand-in, because the engine
 // redistributes weight around absent components and a zero would be scored as a bad reading.
+//
+// EPOCH 4 (HEALTH_V2 H6 + the owner's 2026-09-29 decisions; see `LevelEngine`'s header): night HRV no
+// longer feeds the sleep part (it is read only for the missing-input list), sleep duration against need
+// joins it, regularity is `SleepRegularity.wakeSdMin` over 14 nights, and meditation is a count of MISSED
+// meditation-era days (`meditationMissedDays`) that only ever deducts.
 
 /// One day's level, for the timeline.
 ///
@@ -47,6 +52,10 @@ struct LevelSeries {
     var daytimeRmssd: [String: Double] = [:]
     /// The estimated-1RM strength index by day, oldest first.
     var strengthIndex: [(day: String, value: Double)] = []
+    /// The sleep need every night's duration is measured against, in hours. Nil reads the need the last
+    /// analysis pass scored Rest with (`AnalyticsEngine.Rest.engineNeedHours`). ONE need for the whole
+    /// history, so a January night and last night are measured against the same yardstick.
+    var sleepNeedHours: Double? = nil
 }
 
 enum LevelWiring {
@@ -105,12 +114,30 @@ enum LevelWiring {
         }
     }
 
-    /// Minutes bedtime and wake time moved against the night before (mean of the two ends).
+    /// Wake-time regularity on `key`: the circular SD of the wake times of the 14 nights ending on it
+    /// (`SleepRegularity.wakeSdMin`, the one canonical regularity), nil with fewer than 7. Already a
+    /// window, so it is NOT averaged again.
     static func regularity(_ key: String, _ series: LevelSeries, _ calendar: Calendar) -> Double? {
-        guard let tonight = series.sleepTimings[key], let prev = shift(key, -1, calendar),
-              let lastNight = series.sleepTimings[prev] else { return nil }
-        return (Streaks.clockDistance(tonight.onsetMinute, lastNight.onsetMinute)
-                + Streaks.clockDistance(tonight.wakeMinute, lastNight.wakeMinute)) / 2
+        let nights = keysBack(key, SleepRegularity.windowNights, calendar).compactMap { k -> SleepTimingNight? in
+            guard let t = series.sleepTimings[k] else { return nil }
+            return SleepTimingNight(wakeDay: k, onsetMin: t.onsetMinute, wakeMin: t.wakeMinute)
+        }
+        return SleepRegularity.wakeSdMin(nights)
+    }
+
+    /// The need nights are measured against (see `LevelSeries.sleepNeedHours`), or nil before any.
+    static func sleepNeedHours(_ series: LevelSeries) -> Double? {
+        guard let need = series.sleepNeedHours ?? AnalyticsEngine.Rest.engineNeedHours(), need.isFinite, need > 0
+        else { return nil }
+        return need
+    }
+
+    /// One night's asleep ÷ need, or nil without a scored night or a need. NOT capped at 1 (owner decision:
+    /// no bound other than physiology — see `LevelEngine`).
+    static func durationRatio(_ d: DailyMetric, needHours: Double?) -> Double? {
+        guard let need = needHours, need > 0, let asleep = d.totalSleepMin, asleep.isFinite, asleep > 0
+        else { return nil }
+        return asleep / (need * 60)
     }
 
     /// Chronic training load on `key`: Σ load × (1 − e^(−1/τ)) × e^(−days ago / τ). Nil when nothing was
@@ -148,22 +175,28 @@ enum LevelWiring {
         return last.value
     }
 
-    /// The weighted share of the last 28 days meditated, or NIL when there is no meditation log to read.
+    /// The first day the wearer logged any meditation — the start of the meditation era — or nil.
     ///
-    /// THE GUARD IS "HAS THE WEARER EVER LOGGED ONE, ON OR BEFORE THIS DAY", not "is there one inside the
-    /// 28-day window". Both answers are honest about a fresh install — which is the bug: a wearer who has
-    /// never meditated was being scored as having meditated on none of the last 28 days, and that
-    /// fabricated zero WAS the whole of a day-one level. The window-scoped version goes further than it
-    /// should, though: a wearer who meditates and then stops for a month would stop being measured at all,
-    /// and their level would RISE for having quit. Once the feature is in use a lapse is a real zero, and
-    /// the engine's header — "a missed day costs a little; nothing resets" — stays true.
+    /// Bounded by how much of the log was read (`LevelBarModel` loads at least 180 days; a backfill reads
+    /// the ledger's whole span). A first session older than the read window starts the era later than it
+    /// truly did, which can only ever UNDER-count misses, never invent one.
+    static func meditationEraStart(_ series: LevelSeries) -> String? {
+        series.meditation.lazy.filter { $0.value > 0 }.map(\.key).min()
+    }
+
+    /// Missed meditation-era days in the level's 7-day window ending on `key`, or NIL when no day of the
+    /// window is in the era (so there is no meditation term at all — January is untouched).
     ///
-    /// Bounded in practice by how much of the log was read: `LevelBarModel` loads at least 180 days.
-    static func meditationShare(_ key: String, _ series: LevelSeries, _ calendar: Calendar) -> Double? {
-        guard series.meditation.contains(where: { $0.key <= key && $0.value > 0 }) else { return nil }
-        let window = keysBack(key, LevelEngine.meditationWindowDays, calendar)
-        let flags = window.map { (series.meditation[$0] ?? 0) >= LevelEngine.meditationMinMinutes }
-        return LevelEngine.meditationShare(meditated: flags)
+    /// A day counts only when it is IN the era AND the wearer's data covers it (a day row exists): a day
+    /// the app could not have known about is "not measured", never "missed". It is a miss when its logged
+    /// minutes are under the minimum in force THAT day (`LevelEngine.meditationMinMinutes(on:)`).
+    static func meditationMissedDays(_ key: String, _ series: LevelSeries, _ byDay: [String: DailyMetric],
+                                     _ calendar: Calendar) -> Int? {
+        guard let eraStart = meditationEraStart(series), key >= eraStart else { return nil }
+        let eligible = keysBack(key, LevelEngine.meditationPenaltyWindowDays, calendar)
+            .filter { $0 >= eraStart && byDay[$0] != nil }
+        guard !eligible.isEmpty else { return nil }
+        return eligible.filter { !LevelEngine.isMeditationDay(minutes: series.meditation[$0] ?? 0, on: $0) }.count
     }
 
     // MARK: - Inputs
@@ -189,12 +222,14 @@ enum LevelWiring {
         series: LevelSeries,
         calendar: Calendar = .current
     ) -> LevelInputs {
-        // The seven-day window, built once and read by all eight rolling metrics.
+        // The seven-day window, built once and read by every rolling metric.
         let window = keysBack(asOf, LevelEngine.rollingDays, calendar)
+        let need = sleepNeedHours(series)
         return LevelInputs(
             restorativeMin: rolling(window: window) { byDay[$0].flatMap(restorative) },
             sleepHrv: rolling(window: window) { byDay[$0]?.avgHrv },
-            regularityMin: rolling(window: window) { regularity($0, series, calendar) },
+            regularityMin: regularity(asOf, series, calendar),
+            sleepDurationRatio: rolling(window: window) { byDay[$0].flatMap { durationRatio($0, needHours: need) } },
             hrv: rolling(window: window) { byDay[$0]?.avgHrv },
             rhr: rolling(window: window) { byDay[$0]?.restingHr.map(Double.init) },
             vo2max: series.vo2max.last { $0.day <= asOf }?.value,
@@ -202,7 +237,7 @@ enum LevelWiring {
             strengthIndex: strength(asOf, series, calendar),
             chronicLoad: chronicLoad(asOf, series, calendar),
             daytimeRmssd: rolling(window: window) { series.daytimeRmssd[$0] },
-            meditationShare: meditationShare(asOf, series, calendar),
+            meditationMissedDays: meditationMissedDays(asOf, series, byDay, calendar),
             steps: rolling(window: window) { byDay[$0]?.steps.map(Double.init) }.map { Int($0.rounded()) }
         )
     }
@@ -215,10 +250,14 @@ enum LevelWiring {
     ) -> [LevelMetric: [Double]] {
         let byDay = byDay(days)
         let keys = days.map(\.day)
+        let need = sleepNeedHours(series)
         func each(_ f: (String) -> Double?) -> [Double] { keys.compactMap(f) }
         return [
             .restorativeMin: each { k in rolling(k, calendar) { byDay[$0].flatMap(restorative) } },
-            .sleepRegularityMin: each { k in rolling(k, calendar) { regularity($0, series, calendar) } },
+            .sleepRegularityMin: each { regularity($0, series, calendar) },
+            .sleepDurationRatio: each { k in
+                rolling(k, calendar) { byDay[$0].flatMap { durationRatio($0, needHours: need) } }
+            },
             .hrv: each { k in rolling(k, calendar) { byDay[$0]?.avgHrv } },
             .rhr: each { k in rolling(k, calendar) { byDay[$0]?.restingHr.map(Double.init) } },
             .vo2max: series.vo2max.map(\.value),
@@ -259,7 +298,8 @@ enum LevelWiring {
                                    series: series, calendar: calendar)
         inputs.steps = previous.steps
         inputs.daytimeRmssd = previous.daytimeRmssd
-        inputs.meditationShare = previous.meditationShare
+        // The window of the last COMPLETE day: this morning's meditation has not happened yet.
+        inputs.meditationMissedDays = previous.meditationMissedDays
         inputs.chronicLoad = previous.chronicLoad
         inputs.strengthIndex = previous.strengthIndex
         return inputs

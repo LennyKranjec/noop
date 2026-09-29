@@ -61,8 +61,22 @@ enum MeditationLog {
     ///
     /// Pure, and TAKES the minutes rather than reading them, so the rule is testable with no store behind
     /// it (`MeditationDoneRuleTests`). Note this is deliberately NOT `countDays`' `> 0`: that helper
-    /// counts the *legacy timer's* window and is left as it is.
-    static func isDayDone(minutes: Double) -> Bool { minutes >= LevelEngine.meditationMinMinutes }
+    /// counts the *legacy timer's* window and feeds nothing on screen (`meditationDaysInWindow` has no
+    /// caller), so it is left as it is.
+    ///
+    /// DATE-EFFECTIVE (owner decision, 2026-09-29): the minimum is 5 minutes for days before 2026-09-29
+    /// and 10 from it (`LevelEngine.meditationMinMinutes(on:)`). This form asks about TODAY — the badge's
+    /// question; a past day's circle must ask `isDayDone(minutes:day:)` so a 6-minute day in August still
+    /// reads as done.
+    static func isDayDone(minutes: Double) -> Bool {
+        isDayDone(minutes: minutes, day: Repository.localDayKey(Date()))
+    }
+
+    /// Whether `minutes` logged on `day` (`yyyy-MM-dd`) count as that day's meditation — the same rule the
+    /// level's meditation deduction and the quest floor read.
+    static func isDayDone(minutes: Double, day: String) -> Bool {
+        LevelEngine.isMeditationDay(minutes: minutes, on: day)
+    }
 
     /// What a `log` actually did, so the screen can say it rather than appear to do nothing.
     enum Outcome {

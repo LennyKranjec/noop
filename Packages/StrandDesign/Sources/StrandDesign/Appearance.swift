@@ -109,10 +109,11 @@ public enum AccentColor: String, CaseIterable, Identifiable, Sendable {
 
     public static func resolve(_ raw: String) -> AccentColor { AccentColor(rawValue: raw) ?? .mint }
 
-    /// The chrome accent. `.custom` resolves the stored hex at read time.
+    /// The chrome accent. `.custom` resolves the stored hex at read time. Mint is the Telos 2.0 value
+    /// (`TelosColor.mint`: #5FE0B5 dark / #0B7F63 light — the 1.x light #149A78 was 3.5:1 on white).
     public var accent: Color {
         switch self {
-        case .mint:      return NoopVisualStyle.mint
+        case .mint:      return TelosColor.mint
         case .whoopBlue: return Color(light: "#234F9E", dark: "#60A0E0")
         case .custom:    return Color(hex: StrandPalette.customAccentHex)
         }
@@ -121,17 +122,17 @@ public enum AccentColor: String, CaseIterable, Identifiable, Sendable {
     /// The brighter hover/pressed accent. For `.custom` it is the chosen colour lightened toward white.
     public var accentHover: Color {
         switch self {
-        case .mint:      return NoopVisualStyle.mintGlow
+        case .mint:      return TelosColor.mintPressed
         case .whoopBlue: return Color(light: "#3A6FC0", dark: "#8FBEEC")
         case .custom:    return AccentColor.lighten(StrandPalette.customAccentHex)
         }
     }
 
     /// A low-opacity tint of the accent for muted fills (chips, selected rows). Translucent so it
-    /// composites over whatever surface is behind it — the same 0.18 the mint world uses.
+    /// composites over whatever surface is behind it. Mint: the V2 precomputed `mintMuted` (@ 0.16).
     public var accentMuted: Color {
         switch self {
-        case .mint:      return NoopVisualStyle.mintDeep.opacity(0.18)
+        case .mint:      return TelosColor.mintMuted
         case .whoopBlue: return Color(light: "#234F9E", dark: "#60A0E0").opacity(0.18)
         case .custom:    return Color(hex: StrandPalette.customAccentHex).opacity(0.18)
         }
@@ -286,10 +287,11 @@ public enum SceneBackgroundPrefs {
     public static let enabledKey = "noop.showDayCycleBackground"
 }
 
-/// Card-surface opacity as a PERCENT (0 = fully see-through, 100 = solid; default 100). `FrostedCardSurface`
-/// reads it via `@AppStorage(CardAppearancePrefs.opacityKey)` and fades the whole glass by it, so cards
-/// (Heart Rate, Key Metrics, Recovery Vitals, …) can be made see-through from Settings → Appearance; the
-/// card content stays fully readable. Mirror in Kotlin via `NoopPrefs.cardOpacityPercent`.
+/// Card-surface opacity as a PERCENT (0 = fully see-through, 100 = solid; default 100). Telos 2.0 reads it
+/// ONCE at the app root (`.telosCardOpacityFromPreferences()`) into `\.telosCardOpacity`, clamped to
+/// 55–100 % so text contrast holds; `FrostedCardSurface` multiplies its fill by that environment value
+/// (it no longer subscribes every card to UserDefaults). The key, its 0–100 semantics and the default are
+/// unchanged. Mirror in Kotlin via `NoopPrefs.cardOpacityPercent`.
 public enum CardAppearancePrefs {
     public static let opacityKey = "noop.cardOpacityPercent"
     public static let defaultPercent = 100

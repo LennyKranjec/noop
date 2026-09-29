@@ -1,83 +1,79 @@
 import SwiftUI
 
-// MARK: - NOOP visual foundation
+// MARK: - NOOP visual foundation (re-pointed to Telos 2.0)
 //
-// These tokens describe the visual treatment used by NOOP's existing views. They deliberately
-// contain no navigation, state, or domain semantics: screens keep their current hierarchy and data
-// bindings, while cards, gauges, typography, and chrome share one maintainable source of truth.
+// These are the 1.x token NAMES. Every screen still reads them, so in 2.0 they are ALIASES of the
+// `Telos*` tokens (docs/DESIGN_V2.md §4, Appendix B): the unmodified app renders V2 surfaces, lines and
+// text with no call-site edit. No name was removed or renamed. New and rewritten code uses `TelosColor` /
+// `TelosSpace` / `TelosRadius` / `TelosStroke` / `TelosOpacity` / `TelosElevation` directly.
+//
+// V2 surfaces are FLAT: one fill + a 1 pt line, no gradient, no rim light, no shadow on anything in a
+// scroll view. The old gradient/rim tokens stay compiled and now resolve to that flat look.
 
 public enum NoopVisualStyle {
-    // Neutral, low-chroma surfaces sampled from the supplied dark-mode reference.
-    public static let canvas = Color(light: "#F3F4F6", dark: "#1D1E23")
-    public static let surface = Color(light: "#FFFFFF", dark: "#2A2C34")
-    public static let surfaceTop = Color(light: "#FFFFFF", dark: "#30323B")
-    public static let surfaceBottom = Color(light: "#F4F5F7", dark: "#282A31")
-    public static let inset = Color(light: "#E8E9ED", dark: "#23252C")
+    // Surfaces — the gradient pair collapses to one flat `surface`.
+    public static let canvas = TelosColor.canvas
+    public static let surface = TelosColor.surface
+    public static let surfaceTop = TelosColor.surface
+    public static let surfaceBottom = TelosColor.surface
+    public static let inset = TelosColor.surfaceInset
 
-    public static let border = Color(light: "#D8DAE0", dark: "#373A44")
-    public static let borderHighlight = Color(light: "#FFFFFF", dark: "#4B4E59")
-    public static let divider = Color(light: "#E4E5E9", dark: "#383A43")
+    public static let border = TelosColor.line
+    public static let borderHighlight = TelosColor.lineStrong
+    public static let divider = TelosColor.lineSoft
 
-    public static let primaryText = Color(light: "#17181C", dark: "#F7F7FA")
-    public static let secondaryText = Color(light: "#555861", dark: "#C3C4CA")
-    public static let tertiaryText = Color(light: "#7D808A", dark: "#7D7F88")
+    public static let primaryText = TelosColor.textPrimary
+    public static let secondaryText = TelosColor.textSecondary
+    public static let tertiaryText = TelosColor.textTertiary
 
-    public static let mint = Color(light: "#149A78", dark: "#69DDB8")
-    public static let mintDeep = Color(light: "#0D765C", dark: "#13A982")
-    public static let mintGlow = Color(light: "#38C99E", dark: "#54E6BD")
+    // The mint accent family (#149A78 light failed AA on white; V2 mint is #0B7F63 / #5FE0B5).
+    public static let mint = TelosColor.mint
+    public static let mintDeep = TelosColor.mint
+    public static let mintGlow = TelosColor.mintPressed
 
-    public static let cardRadius: CGFloat = 22
-    public static let compactRadius: CGFloat = 16
-    public static let pillRadius: CGFloat = 999
-    public static let pagePadding: CGFloat = 16
-    public static let cardPadding: CGFloat = 16
-    public static let itemGap: CGFloat = 12
-    public static let sectionGap: CGFloat = 26
+    public static let cardRadius: CGFloat = TelosRadius.card          // 22 → 20
+    public static let compactRadius: CGFloat = TelosRadius.tile       // 16 → 14
+    public static let pillRadius: CGFloat = TelosRadius.pill
+    public static let pagePadding: CGFloat = TelosSpace.pageGutter    // 16
+    public static let cardPadding: CGFloat = TelosSpace.cardPadding   // 16 → 12 (decision 11: hug content)
+    public static let itemGap: CGFloat = TelosSpace.cardGap           // 12
+    public static let sectionGap: CGFloat = TelosSpace.sectionGap     // 26 → 24
 
     // MARK: Rim / hairline weights — ONE source for every filled-surface edge.
     //
-    // The same top-lit rim used to be hand-tuned per component (a card at .72/.52 @0.8pt, the
-    // segmented track at .48/1.0 @0.8pt, its selected pill at .62 @0.75pt), so two adjacent
-    // surfaces drew visibly different edges at the same nominal "hairline". Every rim reads
-    // these now, which is also the only place to retune the edge weight globally.
+    // V2 has no top-lit rim: every edge is a flat 1 pt `line`. The opacity knobs stay (public API) at
+    // 1.0 so any caller composing its own rim from them draws the flat line too.
 
-    /// Top stop of the top-lit rim gradient (the lit edge).
-    public static let rimTopOpacity: Double = 0.72
-    /// Bottom stop of the top-lit rim gradient (the shaded edge).
-    public static let rimBottomOpacity: Double = 0.52
-    /// Stroke width for a rim edge on a filled surface (card, control track, selected pill).
-    public static let rimWidth: CGFloat = 0.8
-    /// Faint interior separator / grid-line weight — below a full hairline, above invisible.
-    /// Use `StrandPalette.hairlineSoft` rather than re-deriving this at a call site.
+    /// Top stop of the (retired) rim gradient — 1.0: the edge is flat.
+    public static let rimTopOpacity: Double = 1.0
+    /// Bottom stop of the (retired) rim gradient — 1.0: the edge is flat.
+    public static let rimBottomOpacity: Double = 1.0
+    /// Stroke width for a surface edge (card, control track, selected segment). 0.8 → 1.
+    public static let rimWidth: CGFloat = TelosStroke.line
+    /// Retired: `StrandPalette.hairlineSoft` is now the precomputed `TelosColor.lineSoft` (no opacity).
     public static let hairlineSoftOpacity: Double = 0.45
 
     // MARK: Tinted chip surfaces — the pills/badges/chips that borrow a hue.
     //
-    // These were .12/.28 (StatePill), .12/.32 (ScoreStatePill), .16/.34 (SourceBadge) and
-    // .14/none (TrendChip): four weights for one idea, visibly mismatched when two chips sit
-    // in the same row. One fill + one border weight now, so a hue reads the same everywhere.
+    // One fill + one border weight so a hue reads the same everywhere (`TelosOpacity.fill/border`).
 
-    /// Fill opacity for a hue-tinted chip surface.
-    public static let chipFillOpacity: Double = 0.14
-    /// Border opacity for a hue-tinted chip surface.
-    public static let chipBorderOpacity: Double = 0.30
+    /// Fill opacity for a hue-tinted chip surface. 0.14 → 0.16.
+    public static let chipFillOpacity: Double = TelosOpacity.fill
+    /// Border opacity for a hue-tinted chip surface. 0.30 → 0.32.
+    public static let chipBorderOpacity: Double = TelosOpacity.border
 
-    /// The one top-lit rim: a lit top edge falling to a shaded bottom edge. Stroke it with
-    /// `rimWidth`. Shared by the card surface, the segmented track and its selected pill so the
-    /// light in the scene comes from a single direction at a single strength.
-    public static var rimGradient: LinearGradient {
-        LinearGradient(
-            colors: [borderHighlight.opacity(rimTopOpacity), border.opacity(rimBottomOpacity)],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
+    /// The (retired) top-lit rim, now a FLAT `line` gradient (both stops equal) so every old call site
+    /// strokes a plain 1 pt edge. Stored once rather than rebuilt per access.
+    public static let rimGradient = LinearGradient(
+        colors: [TelosColor.line, TelosColor.line],
+        startPoint: .top,
+        endPoint: .bottom
+    )
 }
 
-/// The surface-elevation ladder. "How high does this sit" is a named level instead of a shadow
-/// triple copied between components, so elevation stays ordered and consistent — and it fixes a
-/// real asymmetry: light mode used to draw `resting` and `raised` with the *same* shadow, so an
-/// elevated surface read flat on paper while it read lifted on dark.
+/// The surface-elevation ladder (1.x names, re-pointed to `TelosElevation`). `resting` — every card,
+/// tile and row — is now FLAT: no shadow in either scheme (separation is fill + 1 pt line). `raised`
+/// matches `TelosElevation.raised` (y 3, r 10, 0.30 / 0.10).
 ///
 /// Named `NoopSurfaceElevation`, not `NoopElevation`: `Appearance.swift` already holds a
 /// file-private `NoopElevation` ViewModifier (behind the currently-unused `.noopElevation(hovering:)`)
@@ -85,37 +81,28 @@ public enum NoopVisualStyle {
 public enum NoopSurfaceElevation: Sendable {
     /// No shadow at all — a surface flush with its parent.
     case flat
-    /// The resting card/panel level.
+    /// The resting card/panel level — flat in V2 (r 9 → 0).
     case resting
-    /// A surface deliberately above its neighbours (sheets, floating chrome, active panels).
+    /// A surface deliberately above its neighbours (popovers, floating chrome) — `TelosElevation.raised`.
     case raised
 
-    /// Blur radius of the cast shadow.
-    public var radius: CGFloat {
+    /// The V2 elevation this level resolves to.
+    public var telos: TelosElevation {
         switch self {
-        case .flat:    return 0
-        case .resting: return 9
-        case .raised:  return 18
+        case .flat, .resting: return .flat
+        case .raised:         return .raised
         }
     }
+
+    /// Blur radius of the cast shadow.
+    public var radius: CGFloat { telos.radius }
 
     /// Vertical offset of the cast shadow (shadows always fall down — light comes from above).
-    public var yOffset: CGFloat {
-        switch self {
-        case .flat:    return 0
-        case .resting: return 5
-        case .raised:  return 10
-        }
-    }
+    public var yOffset: CGFloat { telos.yOffset }
 
-    /// Shadow opacity for the active appearance. Dark needs a deeper shadow to separate two
-    /// near-black surfaces; light needs less, but still needs the two levels to *differ*.
+    /// Shadow opacity for the active appearance.
     public func shadowOpacity(dark: Bool) -> Double {
-        switch self {
-        case .flat:    return 0
-        case .resting: return dark ? 0.18 : 0.10
-        case .raised:  return dark ? 0.34 : 0.14
-        }
+        telos.shadowOpacity(dark: dark)
     }
 
     /// The ready-made shadow colour for this level.
@@ -149,9 +136,9 @@ public struct NoopFocusRing: ViewModifier {
             // here, the text the user is typing — every time focus flips.
             .overlay(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(StrandPalette.focusRing, lineWidth: 2)
+                    .strokeBorder(StrandPalette.focusRing, lineWidth: TelosStroke.focus)
                     .opacity(isFocused ? 1 : 0)
-                    .animation(reduceMotion ? nil : StrandMotion.interactive, value: isFocused)
+                    .animation(TelosMotion.animation(.select, reduced: reduceMotion), value: isFocused)
                     .allowsHitTesting(false)
             )
     }
@@ -165,14 +152,23 @@ public extension View {
     }
 }
 
-/// Shared card/panel treatment: a quiet vertical gradient, a top-lit rim, and deep soft elevation.
-/// `tint` is intentionally faint so metric identity never turns the whole card into a coloured tile.
+/// The shared card/panel surface, V2 (§5.1): ONE flat `surface` fill · a 1 pt `line` edge · no
+/// gradient, no rim light, no wash. Cards cast NO shadow in either scheme; `elevated: true` (popovers,
+/// floating chrome — never a card in a scroll view) uses `TelosElevation.raised`.
+///
+/// `tint` no longer washes the card: it draws only a 3 pt top edge in the tint at 0.6, so metric
+/// identity marks a card without turning it into a coloured tile. `surfaceOpacity` multiplies the FILL
+/// (the card-transparency setting); the edge stays fully drawn so the card never loses its outline.
 public struct NoopPanelSurface: View {
     public var tint: Color?
     public var cornerRadius: CGFloat
     public var elevated: Bool
     public var surfaceOpacity: Double
-    @Environment(\.colorScheme) private var scheme
+
+    /// Height of the tint's top edge.
+    static let tintEdgeHeight: CGFloat = 3
+    /// Opacity of the tint's top edge.
+    static let tintEdgeOpacity: Double = 0.6
 
     public init(
         tint: Color? = nil,
@@ -187,56 +183,48 @@ public struct NoopPanelSurface: View {
     }
 
     public var body: some View {
-        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-        shape
-            .fill(
-                LinearGradient(
-                    colors: [NoopVisualStyle.surfaceTop, NoopVisualStyle.surfaceBottom],
-                    startPoint: .top,
-                    endPoint: .bottom
-                )
-            )
-            .overlay {
-                if let tint {
-                    shape.fill(
-                        LinearGradient(
-                            colors: [tint.opacity(0.055), tint.opacity(0.012), .clear],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                }
-            }
-            .overlay(shape.strokeBorder(NoopVisualStyle.rimGradient, lineWidth: NoopVisualStyle.rimWidth))
-            .shadow(
-                color: elevation.shadowColor(dark: scheme == .dark),
-                radius: elevation.radius,
-                x: 0,
-                y: elevation.yOffset
-            )
-            .opacity(surfaceOpacity)
+        if elevated {
+            core.telosElevation(.raised)
+        } else {
+            core
+        }
     }
 
-    /// `elevated` is the long-standing public flag; the ladder is what it means.
-    private var elevation: NoopSurfaceElevation { elevated ? .raised : .resting }
+    /// The flat surface. The tint edge (and the clip it needs) is only built when there IS a tint, so
+    /// the common untinted card is exactly one fill and one stroke.
+    @ViewBuilder private var core: some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        let fillOpacity: Double = min(max(surfaceOpacity, 0), 1)
+        if let tint {
+            shape
+                .fill(TelosColor.surface.opacity(fillOpacity))
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(tint.opacity(NoopPanelSurface.tintEdgeOpacity))
+                        .frame(height: NoopPanelSurface.tintEdgeHeight)
+                }
+                .clipShape(shape)
+                .overlay(shape.strokeBorder(TelosColor.line, lineWidth: TelosStroke.line))
+        } else {
+            shape
+                .fill(TelosColor.surface.opacity(fillOpacity))
+                .overlay(shape.strokeBorder(TelosColor.line, lineWidth: TelosStroke.line))
+        }
+    }
 }
 
-/// Shared edge-to-edge chrome for sheet and split-view headers. Unlike a card it has no
-/// rounded outline or elevation, but it uses the same top-lit surface ramp and divider token.
+/// Shared edge-to-edge chrome for sheet and split-view headers: a flat `surface` with a hairline
+/// `line` divider at the bottom (the gradient ramp is retired).
 public struct NoopChromeSurface: View {
     public init() {}
 
     public var body: some View {
-        LinearGradient(
-            colors: [NoopVisualStyle.surfaceTop, NoopVisualStyle.surfaceBottom],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-        .overlay(alignment: .bottom) {
-            Rectangle()
-                .fill(NoopVisualStyle.divider)
-                .frame(height: 0.5)
-        }
+        TelosColor.surface
+            .overlay(alignment: .bottom) {
+                Rectangle()
+                    .fill(TelosColor.line)
+                    .frame(height: TelosStroke.hair)
+            }
     }
 }
 

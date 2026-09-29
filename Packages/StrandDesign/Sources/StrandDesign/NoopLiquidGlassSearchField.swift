@@ -7,6 +7,13 @@ import SwiftUI
 // hand-rolled blur stack). Liquid Glass is intentionally iOS-only — macOS stays on
 // the standard surface. Clear control, magnifying-glass glyph, and accessibility
 // wiring stay identical across call sites.
+//
+// THE `nativeLiquidGlass*` FAMILY (docs/DESIGN_V2.md §4.9) is the ONLY way the app touches Liquid Glass:
+// never call `glassEffect` / `.buttonStyle(.glass)` at a call site, never a second idiom. Glass is
+// allowed on five static chrome roles only (system tab bar · Today header cluster · live control row on
+// an opaque band · a fixed-position search field · the close/skip control of a full-screen cover), at
+// most five visible at once, never on cards / tiles / chips / rows / charts. Every non-glass path uses
+// `nativeLiquidGlassFallbackSurface(_:)` — a solid `surfaceRaised` fill + 1 pt `line`, NO material.
 
 /// Full-width rounded search field with native Liquid Glass on iOS 26+.
 public struct NoopLiquidGlassSearchField: View {
@@ -29,7 +36,7 @@ public struct NoopLiquidGlassSearchField: View {
     public var body: some View {
         HStack(spacing: NoopMetrics.space2) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 16, weight: .semibold))
+                .font(TelosType.glyphField)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .accessibilityHidden(true)
             TextField(prompt, text: $text)
@@ -47,7 +54,7 @@ public struct NoopLiquidGlassSearchField: View {
                     text = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(TelosType.glyphField)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .frame(width: 28, height: 28)
                         .contentShape(Circle())
@@ -141,8 +148,16 @@ public extension View {
 
     @ViewBuilder
     private func noopStandardSearchChrome() -> some View {
-        self.background(
-            NoopPanelSurface(cornerRadius: NoopVisualStyle.pillRadius, elevated: false)
-        )
+        self.nativeLiquidGlassFallbackSurface(Capsule(style: .continuous))
+    }
+
+    /// THE one non-glass fallback for every glass role (§4.9): a solid `surfaceRaised` fill in `shape`
+    /// plus a 1 pt `line` edge — no material, no blur, no shadow, so it costs nothing over scrolling
+    /// content. App-side role helpers (header button, workout control, search field) call this on the
+    /// pre-iOS-26 path instead of hand-rolling their own.
+    func nativeLiquidGlassFallbackSurface<S: Shape>(_ shape: S) -> some View {
+        self
+            .background(shape.fill(TelosColor.surfaceRaised))
+            .overlay(shape.stroke(TelosColor.line, lineWidth: TelosStroke.line))
     }
 }

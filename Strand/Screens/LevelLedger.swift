@@ -80,7 +80,20 @@ final class LevelLedger: @unchecked Sendable {
     /// (every entry is immutable), so the ledger is emptied once and walked again: the days that were
     /// scored from almost nothing now settle as `.empty` instead, and every other day is re-scored
     /// against the re-frozen scale.
-    static let currentEpoch = 3
+    ///
+    /// 4 = THE RECIPE OF 2026-09-29 (HEALTH_V2 H6 and the owner's decisions; see `LevelEngine`'s header):
+    /// HRV counted once (heart only), sleep = duration vs need 0.50 + wake-time regularity 0.30 (circular
+    /// SD over 14 nights) + restorative 0.20, focus = daytime calm alone, and meditation taken off the
+    /// positive side entirely — it only deducts, one point per missed day, and only from the wearer's first
+    /// logged meditation, against the date-effective minimum (5 min before 2026-09-29, 10 min from it).
+    /// Nothing is capped. The owner asked for the WHOLE history to be recomputed under one recipe so a
+    /// January day and today compare, so this is the one sanctioned exception to "a committed day never
+    /// changes": the ledger is emptied once through the existing path (`adoptCurrentEpochIfNeeded`: the
+    /// baselines are re-frozen FIRST from the history as the new recipe reads it — including the new
+    /// `sleepDurationRatio` and the redefined `sleepRegularityMin` — then the ledger is emptied and stamped
+    /// in one save) and every day is walked again. No user data is touched: only the derived ledger and
+    /// the derived baselines. From epoch 4 on, a committed day never changes again.
+    static let currentEpoch = 4
 
     private struct Stored: Codable {
         var entries: [String: FrozenLevel]
@@ -590,6 +603,7 @@ final class LevelLedger: @unchecked Sendable {
         i.restorativeMin = FrozenLevel.finite(i.restorativeMin)
         i.sleepHrv = FrozenLevel.finite(i.sleepHrv)
         i.regularityMin = FrozenLevel.finite(i.regularityMin)
+        i.sleepDurationRatio = FrozenLevel.finite(i.sleepDurationRatio)
         i.hrv = FrozenLevel.finite(i.hrv)
         i.rhr = FrozenLevel.finite(i.rhr)
         i.vo2max = FrozenLevel.finite(i.vo2max)
@@ -597,9 +611,7 @@ final class LevelLedger: @unchecked Sendable {
         i.strengthIndex = FrozenLevel.finite(i.strengthIndex)
         i.chronicLoad = FrozenLevel.finite(i.chronicLoad)
         i.daytimeRmssd = FrozenLevel.finite(i.daytimeRmssd)
-        // NOT `?? 0`. A share that came out not-a-number is no reading, and the whole point of making
-        // this optional was that a fabricated zero here scores as "meditated on none of 28 days".
-        i.meditationShare = FrozenLevel.finite(i.meditationShare)
+        // `meditationMissedDays` is an Int count and cannot be not-a-number.
         return i
     }
 

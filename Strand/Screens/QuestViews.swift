@@ -79,7 +79,27 @@ func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
 struct QuestStripView: View {
     @ObservedObject private var store = QuestStore.shared
     @ObservedObject private var modes = QuestModeStore.shared
-    @State private var reviewing: Quest?
+    /// The game layer's books — the pinned penalties board and the XP chip read it.
+    @ObservedObject private var penalties = QuestPenaltyStore.shared
+    /// For judging closed quests on their data (`QuestPenaltyAssessor`). The same environment object the
+    /// review sheet's progress panel already reads.
+    @EnvironmentObject private var repo: Repository
+    /// What the strip's ONE sheet is showing — a quest under review, or the penalty record.
+    @State private var sheet: StripSheet?
+
+    /// Everything the strip's single presenter can show. One enum behind one `.sheet(item:)`, so adding
+    /// the penalty record did not add a second presenter to this view (see the note on `body`).
+    enum StripSheet: Identifiable {
+        case review(Quest)
+        case history
+
+        var id: String {
+            switch self {
+            case .review(let quest): return "review-" + quest.id
+            case .history: return "history"
+            }
+        }
+    }
 
     /// The quest day — the same key the quests carry and the morning flow recorded the choice under.
     private var dayKey: String { DailyMissionStore.dayKey() }
@@ -101,16 +121,43 @@ struct QuestStripView: View {
     // VStack is zero-height, like the always-present leaves above this strip in Today's section list.
     //
     // AND THERE IS ONLY ONE. Neither the gear chip nor a quest chip presents anything of its own — a chip
-    // sets `reviewing` and nothing else — so there is no second sheet on this view for the last one to
-    // win over. The day's plan summary is not a sheet from here either: it is an overlay on the shell
-    // (`RootTabView` → `DiagnosticAlertView`), which no change to this row can tear down.
+    // sets `sheet` and nothing else — so there is no second sheet on this view for the last one to win
+    // over. The penalty record goes through the SAME presenter (`StripSheet.history`). The day's plan
+    // summary is not a sheet from here either: it is an overlay on the shell (`RootTabView` →
+    // `DiagnosticAlertView`), which no change to this row can tear down.
+    //
+    // PENALTIES / DEBT IS PINNED ABOVE THE QUESTS. What was missed, when, by how much and what it cost —
+    // plus any make-up still open — comes first, so yesterday's miss is read before today's directives.
+    // It is its own child of the root, so the board appearing or clearing cannot touch the presenter.
     var body: some View {
-        VStack(spacing: 0) {
-            if Self.hasContent(mode: mode, activeCount: store.active.count) { row }
+        VStack(spacing: 8) {
+            if QuestPenaltyBoard.hasContent(ledger: penalties.ledger, today: dayKey) {
+                QuestPenaltyBoard(ledger: penalties.ledger, today: dayKey) { sheet = .history }
+            }
+            if Self.hasContent(mode: mode, activeCount: store.active.count, ledgerChip: showsLedgerChip) { row }
         }
-        .sheet(item: $reviewing) { quest in
-            QuestReviewSheet(quest: quest) { reviewing = nil }
+        .sheet(item: $sheet) { item in
+            switch item {
+            case .review(let quest):
+                QuestReviewSheet(quest: quest) { sheet = nil }
+            case .history:
+                QuestPenaltyHistorySheet(today: dayKey) { sheet = nil }
+            }
         }
+        // JUDGE WHAT HAS CLOSED, on its data. Keyed on the pending queue so a freshly swept quest is judged
+        // at once, and repeated every few minutes while Today is up so data that lands late is read.
+        .task(id: penalties.pendingSignature) {
+            while !Task.isCancelled {
+                await QuestPenaltyAssessor.run(repo: repo)
+                try? await Task.sleep(nanoseconds: 300 * 1_000_000_000)
+            }
+        }
+    }
+
+    /// Whether the XP chip has anything to say: a balance, a streak, or a record to open.
+    private var showsLedgerChip: Bool {
+        let l = penalties.ledger
+        return l.balance != 0 || l.streak > 0 || !l.history(today: dayKey).isEmpty
     }
 
     /// Whether the strip has anything to DRAW.
@@ -119,8 +166,8 @@ struct QuestStripView: View {
     /// `body`. A day whose quests have all resolved keeps its gear chip (the wearer did pick a gear, and
     /// that is worth saying); a day that was never asked and carries nothing draws nothing at all, rather
     /// than an empty card.
-    static func hasContent(mode: QuestDifficulty?, activeCount: Int) -> Bool {
-        mode != nil || activeCount > 0
+    static func hasContent(mode: QuestDifficulty?, activeCount: Int, ledgerChip: Bool = false) -> Bool {
+        mode != nil || activeCount > 0 || ledgerChip
     }
 
     /// The row itself — one concrete view, so nothing about it can replace the presenter above it.
@@ -131,7 +178,13 @@ struct QuestStripView: View {
                 ForEach(store.active, id: \.id) { quest in
                     QuestChip(quest: quest) {
                         SystemHaptics.play(.tap)
-                        reviewing = quest
+                        sheet = .review(quest)
+                    }
+                }
+                if showsLedgerChip {
+                    QuestLedgerChip(ledger: penalties.ledger) {
+                        SystemHaptics.play(.tap)
+                        sheet = .history
                     }
                 }
             }
@@ -304,16 +357,19 @@ struct QuestReviewSheet: View {
                 .buttonStyle(.plain)
             }
 
+            // ABANDONING IS CONCEDING, NOT ESCAPING. An accepted system quest given up here is still judged
+            // on its data at the deadline it would have had (`QuestStore.abandon`) — otherwise "Abandon it"
+            // would be a button that deletes the penalty. The label says so.
             Button {
                 SystemHaptics.play(.tap)
                 if isCustom {
                     store.removeCustom(id: quest.id)
                 } else {
-                    store.setState(id: quest.id, state: .declined)
+                    store.abandon(id: quest.id)
                 }
                 onClose()
             } label: {
-                Text(isCustom ? "Remove task" : "Abandon it")
+                Text(isCustom ? "Remove task" : "Abandon it (still judged at the deadline)")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .frame(maxWidth: .infinity)

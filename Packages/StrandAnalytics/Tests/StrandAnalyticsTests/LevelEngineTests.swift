@@ -2,7 +2,8 @@ import XCTest
 @testable import StrandAnalytics
 
 /// The level, iOS lane: no ceiling, 50 = your average, 100 = your own 95th-percentile, built from state
-/// rather than the week's trend.
+/// rather than the week's trend. Epoch 4 (HEALTH_V2 H6 + the owner's 2026-09-29 decisions): HRV counted
+/// once, sleep duration in the sleep part, focus = daytime calm, meditation only ever a deduction.
 final class LevelEngineTests: XCTestCase {
 
     /// Mean 50, 95th percentile 100, 5th percentile 0 — scores read off directly.
@@ -35,19 +36,27 @@ final class LevelEngineTests: XCTestCase {
         XCTAssertEqual(LevelPart.focus.weight, 0.11, accuracy: 1e-9)
     }
 
+    func testTheSharesInsideEveryPartSumToOne() {
+        let s = LevelEngine.sleepShares
+        XCTAssertEqual(s.duration + s.regularity + s.restorative, 1, accuracy: 1e-9)
+        XCTAssertEqual(LevelEngine.heartShares.hrv + LevelEngine.heartShares.rhr, 1, accuracy: 1e-9)
+        XCTAssertEqual(LevelEngine.focusShares.calm, 1, accuracy: 1e-9)
+    }
+
     // MARK: - the level
 
     private func atBest() -> LevelInputs {
         LevelInputs(
-            restorativeMin: 100, sleepHrv: 100, regularityMin: 0,
+            restorativeMin: 100, sleepHrv: 100, regularityMin: 0, sleepDurationRatio: 100,
             hrv: 100, rhr: 0, vo2max: 100, respRate: 0,
             strengthIndex: 100, chronicLoad: 100,
-            daytimeRmssd: 100, meditationShare: 1, steps: 10_000)
+            daytimeRmssd: 100, steps: 10_000)
     }
 
     func testEveryPartAtItsOwnHundredIsALevelOfAHundred() throws {
         let b = try XCTUnwrap(LevelEngine.compute(inputs: atBest(), baselines: allUnit))
         XCTAssertEqual(b.level, 100, accuracy: 1e-9)
+        XCTAssertEqual(b.meditationPenalty, 0, accuracy: 1e-9)
     }
 
     func testBeyondYourBestTheLevelKeepsRising() throws {
@@ -57,14 +66,36 @@ final class LevelEngineTests: XCTestCase {
         XCTAssertGreaterThan(b.level, 100)
     }
 
+    /// Owner decision: no bound other than physiology. A very high but real reading on every input —
+    /// including the chronic training load HEALTH_V2 H6 had proposed capping — is scored as far above 100
+    /// as it is, with nothing clipped anywhere.
+    func testVeryHighRealInputsGiveALevelAboveOneHundredWithNoClipping() throws {
+        var high = atBest()
+        high.chronicLoad = 400
+        high.hrv = 250
+        high.sleepDurationRatio = 180
+        high.daytimeRmssd = 220
+        let b = try XCTUnwrap(LevelEngine.compute(inputs: high, baselines: allUnit))
+        let muscle = try XCTUnwrap(b.components.first { $0.part == .muscle }?.score)
+        XCTAssertEqual(muscle, 0.6 * 100 + 0.4 * 400, accuracy: 1e-9, "the load term is not capped")
+        let expected = 0.30 * (0.5 * 180 + 0.3 * 100 + 0.2 * 100)
+            + 0.23 * (0.5 * 250 + 0.5 * 100)
+            + 0.12 * 100
+            + 0.24 * muscle
+            + 0.11 * 220
+        XCTAssertEqual(b.level, expected, accuracy: 1e-9)
+        XCTAssertGreaterThan(b.level, 150)
+    }
+
     func testMuscleIsStrengthAndChronicLoadSixtyForty() {
         let m = LevelEngine.part(LevelEngine.muscleSubScores(LevelInputs(strengthIndex: 100, chronicLoad: 50), allUnit))
         XCTAssertEqual(m ?? 0, 0.6 * 100 + 0.4 * 50, accuracy: 1e-9)
     }
 
-    func testFocusIsCalmSeventyFiveAndMeditationTwentyFive() {
-        let f = LevelEngine.part(LevelEngine.focusSubScores(LevelInputs(daytimeRmssd: 50, meditationShare: 1), allUnit))
-        XCTAssertEqual(f ?? 0, 0.75 * 50 + 0.25 * 100, accuracy: 1e-9)
+    func testFocusIsDaytimeCalmAlone() {
+        let f = LevelEngine.part(LevelEngine.focusSubScores(LevelInputs(daytimeRmssd: 64), allUnit))
+        XCTAssertEqual(f ?? 0, 64, accuracy: 1e-9)
+        XCTAssertEqual(LevelEngine.focusSubScores(LevelInputs(daytimeRmssd: 64), allUnit).map { $0.0 }, [.daytimeCalm])
     }
 
     func testAMissingSubMetricIsRedistributedInsideItsPart() {
@@ -72,45 +103,107 @@ final class LevelEngineTests: XCTestCase {
         XCTAssertEqual(s ?? 0, 75, accuracy: 1e-9)
     }
 
-    // MARK: - meditation
+    // MARK: - HEALTH_V2 H6: HRV once, duration in, sleep = 0.50 / 0.30 / 0.20
 
-    func testEveryDayMeditatedIsAFullShareAndOneMissedDayCostsOnlyALittle() {
-        XCTAssertEqual(LevelEngine.meditationShare(meditated: Array(repeating: true, count: 28)), 1, accuracy: 1e-9)
-        XCTAssertEqual(LevelEngine.meditationShare(meditated: []), 0, accuracy: 1e-9)
-        var missedYesterday = Array(repeating: true, count: 28)
-        missedYesterday[1] = false
-        let share = LevelEngine.meditationShare(meditated: missedYesterday)
-        XCTAssertGreaterThan(share, 0.9, "one missed day does not reset anything")
-        XCTAssertLessThan(share, 1)
+    func testHRVIsCountedInExactlyOnePart() throws {
+        let all = LevelEngine.sleepSubScores(atBest(), allUnit) + LevelEngine.heartSubScores(atBest(), allUnit)
+            + LevelEngine.lungsSubScores(atBest(), allUnit) + LevelEngine.muscleSubScores(atBest(), allUnit)
+            + LevelEngine.focusSubScores(atBest(), allUnit)
+        let hrvDrivers = all.map { $0.0 }.filter { $0 == .hrv || $0 == .sleepHrv }
+        XCTAssertEqual(hrvDrivers, [.hrv])
+        // Night HRV no longer moves the level at all.
+        var low = atBest(); low.sleepHrv = 0
+        var high = atBest(); high.sleepHrv = 500
+        let a = try XCTUnwrap(LevelEngine.compute(inputs: low, baselines: allUnit))
+        let b = try XCTUnwrap(LevelEngine.compute(inputs: high, baselines: allUnit))
+        XCTAssertEqual(a.level, b.level, accuracy: 1e-12)
     }
 
-    func testRecentDaysWeighMoreThanOldOnes() {
-        var recent = Array(repeating: false, count: 28); recent[0] = true
-        var old = Array(repeating: false, count: 28); old[27] = true
-        XCTAssertGreaterThan(LevelEngine.meditationShare(meditated: recent),
-                             LevelEngine.meditationShare(meditated: old))
+    func testTheSleepPartIsDurationRegularityAndRestorative() {
+        let s = LevelEngine.part(LevelEngine.sleepSubScores(
+            LevelInputs(restorativeMin: 40, regularityMin: 20, sleepDurationRatio: 90), allUnit))
+        // regularity is lower-is-better: 20 min on this scale scores 80.
+        XCTAssertEqual(s ?? 0, 0.50 * 90 + 0.30 * 80 + 0.20 * 40, accuracy: 1e-9)
+    }
+
+    func testAShortNightLowersSleepThroughDurationEvenWithoutStaging() throws {
+        // No staging at all (restorative nil): duration alone still reads the short week.
+        let table = LevelBaselines.table
+        let rested = try XCTUnwrap(LevelEngine.part(LevelEngine.sleepSubScores(
+            LevelInputs(regularityMin: 30, sleepDurationRatio: 1.0), table)))
+        let short = try XCTUnwrap(LevelEngine.part(LevelEngine.sleepSubScores(
+            LevelInputs(regularityMin: 30, sleepDurationRatio: 0.75), table)))
+        XCTAssertLessThan(short, rested)
+    }
+
+    // MARK: - Meditation: a date-effective minimum, and a deduction only
+
+    func testTheMeditationMinimumIsFiveBeforeTheChangeoverAndTenFromIt() {
+        XCTAssertEqual(LevelEngine.meditationMinChangeoverDay, "2026-09-29")
+        XCTAssertEqual(LevelEngine.meditationMinMinutes(on: "2026-08-14"), 5, accuracy: 1e-9)
+        XCTAssertEqual(LevelEngine.meditationMinMinutes(on: "2026-09-28"), 5, accuracy: 1e-9)
+        XCTAssertEqual(LevelEngine.meditationMinMinutes(on: "2026-09-29"), 10, accuracy: 1e-9)
+        XCTAssertEqual(LevelEngine.meditationMinMinutes(on: "2027-01-01"), 10, accuracy: 1e-9)
+        // Six minutes in August met the rule in force then; six minutes now do not.
+        XCTAssertTrue(LevelEngine.isMeditationDay(minutes: 6, on: "2026-08-14"))
+        XCTAssertFalse(LevelEngine.isMeditationDay(minutes: 6, on: "2026-09-30"))
+        XCTAssertEqual(LevelEngine.meditationMinMinutes, LevelEngine.meditationMinMinutes(on: "2026-09-29"))
+    }
+
+    func testMeditationNeverAddsToTheLevel() throws {
+        var none = atBest(); none.meditationMissedDays = nil
+        var met = atBest(); met.meditationMissedDays = 0
+        let a = try XCTUnwrap(LevelEngine.compute(inputs: none, baselines: allUnit))
+        let b = try XCTUnwrap(LevelEngine.compute(inputs: met, baselines: allUnit))
+        XCTAssertEqual(a.level, b.level, accuracy: 1e-12, "a met meditation era equals no meditation term")
+    }
+
+    func testEachMissedEraDayCostsExactlyTheDocumentedPenalty() throws {
+        var met = atBest(); met.meditationMissedDays = 0
+        var oneMiss = atBest(); oneMiss.meditationMissedDays = 1
+        var week = atBest(); week.meditationMissedDays = 7
+        let m = try XCTUnwrap(LevelEngine.compute(inputs: met, baselines: allUnit))
+        let o = try XCTUnwrap(LevelEngine.compute(inputs: oneMiss, baselines: allUnit))
+        let w = try XCTUnwrap(LevelEngine.compute(inputs: week, baselines: allUnit))
+        XCTAssertEqual(m.level - o.level, LevelEngine.meditationMissPenaltyPoints, accuracy: 1e-9)
+        XCTAssertEqual(LevelEngine.meditationMissPenaltyPoints, 1.0, accuracy: 1e-12)
+        XCTAssertEqual(m.level - w.level, 7, accuracy: 1e-9)
+        XCTAssertEqual(o.meditationPenalty, 1, accuracy: 1e-9)
+        XCTAssertEqual(w.meditationPenalty, 7, accuracy: 1e-9)
+        // After the step multiplier, not scaled by it.
+        var walkedLittle = oneMiss; walkedLittle.steps = 0
+        let s = try XCTUnwrap(LevelEngine.compute(inputs: walkedLittle, baselines: allUnit))
+        XCTAssertEqual(s.level, s.raw * s.stepPenalty - 1, accuracy: 1e-9)
+    }
+
+    func testTheDeductionIsNotACapTheLevelStillGoesAboveOneHundred() throws {
+        var high = atBest()
+        high.hrv = 300
+        high.meditationMissedDays = 7
+        let b = try XCTUnwrap(LevelEngine.compute(inputs: high, baselines: allUnit))
+        XCTAssertGreaterThan(b.level, 100)
+    }
+
+    func testTheFocusCardsShareFunctionStillCounts() {
+        XCTAssertEqual(LevelEngine.meditationShare(meditated: Array(repeating: true, count: 28)), 1, accuracy: 1e-9)
+        XCTAssertEqual(LevelEngine.meditationShare(meditated: []), 0, accuracy: 1e-9)
     }
 
     // MARK: - absent inputs
 
-    /// Regression: the meditation sub-score was the one input that could never be missing — a plain
-    /// `Double` defaulting to 0, so `part(.focus)` was never nil and `compute` never returned nil.
-    func testMeditationWithNoLogIsAbsentNotAMeasuredZero() {
-        // Nothing logged at all: focus has no reading, and its weight goes to the parts that do.
-        XCTAssertNil(LevelEngine.part(LevelEngine.focusSubScores(LevelInputs(), allUnit)))
-        // A log that exists and says nought is still a measured zero, and still scores as one.
-        XCTAssertEqual(LevelEngine.part(LevelEngine.focusSubScores(LevelInputs(meditationShare: 0), allUnit)) ?? -1,
-                       0, accuracy: 1e-9)
+    /// Regression (epoch 3): a meditation reading could make a level out of nothing. It no longer scores
+    /// at all, so it cannot.
+    func testMeditationAloneIsNeverALevel() {
+        XCTAssertNil(LevelEngine.compute(inputs: LevelInputs(meditationMissedDays: 0), baselines: allUnit))
+        XCTAssertNil(LevelEngine.compute(inputs: LevelInputs(meditationMissedDays: 7), baselines: allUnit))
+        XCTAssertNil(LevelEngine.part(LevelEngine.focusSubScores(LevelInputs(meditationMissedDays: 0), allUnit)))
     }
 
-    /// Regression: day one of a fresh install. Every rolling metric is still under its 3-of-7-day
-    /// minimum, so the only sub-score with a value was the fabricated meditation zero — the level came
-    /// out a confident 0.0 at 11 % coverage, was frozen for the day, and then polluted the 3-day mean for
-    /// three days and the 30-day mean for a month.
+    /// Regression: day one of a fresh install — nothing but a sliver of the formula must not be a level.
     func testALevelBuiltFromAlmostNothingAbstainsInsteadOfScoringZero() {
         XCTAssertNil(LevelEngine.compute(inputs: LevelInputs(), baselines: allUnit))
-        // Even with a meditation log, focus alone is 11 % of the formula. That is not a level.
-        XCTAssertNil(LevelEngine.compute(inputs: LevelInputs(meditationShare: 0), baselines: allUnit))
+        // Focus alone is 11 % of the formula. That is not a level.
+        XCTAssertNil(LevelEngine.compute(inputs: LevelInputs(daytimeRmssd: 0), baselines: allUnit))
         // Nor is sleep alone, at 30 %.
         XCTAssertNil(LevelEngine.compute(inputs: LevelInputs(restorativeMin: 50), baselines: allUnit))
     }
@@ -120,10 +213,8 @@ final class LevelEngineTests: XCTestCase {
             inputs: LevelInputs(restorativeMin: 50, sleepHrv: 50, hrv: 50, rhr: 50), baselines: allUnit))
         XCTAssertEqual(b.coverage, LevelPart.sleep.weight + LevelPart.heart.weight, accuracy: 1e-9)
         XCTAssertGreaterThanOrEqual(b.coverage, LevelEngine.minCoverage)
-        // The figure the breakdown shows, so a thin level cannot look like a solid one.
         XCTAssertEqual(b.coveragePercent, 53)
         XCTAssertTrue(b.isPartialCoverage)
-        // A fully measured day says nothing, because there is nothing to say.
         let full = try XCTUnwrap(LevelEngine.compute(inputs: atBest(), baselines: allUnit))
         XCTAssertEqual(full.coveragePercent, 100)
         XCTAssertFalse(full.isPartialCoverage)
@@ -140,8 +231,9 @@ final class LevelEngineTests: XCTestCase {
     // MARK: - drivers
 
     func testTheDriverIsTheSubMetricWithTheMostRoom() {
-        let inputs = LevelInputs(restorativeMin: 95, sleepHrv: 40, regularityMin: 50)
-        XCTAssertEqual(LevelDrivers.driver(for: .sleep, inputs: inputs, baselines: allUnit), .sleepHrv)
+        let inputs = LevelInputs(restorativeMin: 95, regularityMin: 50, sleepDurationRatio: 40)
+        // duration: (100 − 40) × 0.50 = 30 of room, the most in the part.
+        XCTAssertEqual(LevelDrivers.driver(for: .sleep, inputs: inputs, baselines: allUnit), .sleepDuration)
         XCTAssertEqual(LevelDrivers.driver(for: .muscle, inputs: LevelInputs(strengthIndex: 40, chronicLoad: 90),
                                            baselines: allUnit), .strength)
     }
@@ -159,10 +251,15 @@ final class LevelEngineTests: XCTestCase {
         XCTAssertEqual(thin, LevelBaselines.table[.hrv])
     }
 
+    func testEveryMetricHasATableEntryIncludingSleepDuration() {
+        for metric in LevelMetric.allCases {
+            XCTAssertNotNil(LevelBaselines.table[metric], metric.rawValue)
+        }
+        XCTAssertEqual(LevelBaselines.table[.sleepDurationRatio]?.mean ?? 0, 0.95, accuracy: 1e-9)
+    }
+
     /// Regression: a scale was frozen — permanently — from 14 readings, and a reading is a 7-day rolling
-    /// mean taken once per calendar day, so consecutive ones share six of their seven days. Fourteen of
-    /// them is about two independent weeks, and the 5th/95th percentiles of two weeks are what 0 and 100
-    /// then meant for that wearer for good.
+    /// mean taken once per calendar day, so consecutive ones share six of their seven days.
     func testAScaleIsNotFrozenFromTwoOverlappingWeeks() {
         XCTAssertFalse(LevelBaselines.isDerivable(Array(repeating: 55.0, count: 14)))
         XCTAssertGreaterThanOrEqual(LevelBaselines.minSamples / LevelEngine.rollingDays, 5,
@@ -170,23 +267,16 @@ final class LevelEngineTests: XCTestCase {
         XCTAssertTrue(LevelBaselines.isDerivable((0..<LevelBaselines.minSamples).map(Double.init)))
     }
 
-    /// Regression: `safeSd` was a hard-coded 1 on metrics that do not share a unit. Reached through
-    /// `score`'s degenerate-span branch, which fires whenever `max == mean` — the ordinary case for a
-    /// flat `strengthIndex`. `MuscleBaselines` fixed exactly this; the comment there explains why.
+    /// Regression: `safeSd` was a hard-coded 1 on metrics that do not share a unit.
     func testADegenerateSpanFallsBackToTheMetricsOwnScaleNotToOne() {
-        // `strengthIndex` lives around 1.0. With an SD of 1 the span was 1.645 and a DOUBLED one-rep max
-        // scored 80 — it could never reach the wearer's own 100.
         let strength = Baseline(mean: 1.0, sd: 0, min: 1.0, max: 1.0)
         XCTAssertEqual(strength.safeSd, 0.5, accuracy: 1e-9)
         XCTAssertGreaterThan(strength.score(2.0, higherIsBetter: true), 100)
 
-        // `chronicLoad` lives around 3,000. With an SD of 1 a load ten kilograms above the mean scored
-        // 354 — and `score` is unbounded, so nothing clipped it.
         let load = Baseline(mean: 3000, sd: 0, min: 3000, max: 3000)
         XCTAssertEqual(load.safeSd, 1500, accuracy: 1e-9)
         XCTAssertEqual(load.score(3010, higherIsBetter: true), 50, accuracy: 0.5)
 
-        // No spread AND no scale: there is nothing to be relative to, so the literal 1 stays.
         XCTAssertEqual(Baseline(mean: 0, sd: 0, min: 0, max: 0).safeSd, 1, accuracy: 1e-9)
     }
 }

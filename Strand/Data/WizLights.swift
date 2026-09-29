@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import StrandAnalytics
 
 // WizLights.swift — Philips WiZ bulbs on the home Wi-Fi, driven directly.
 //
@@ -12,9 +13,16 @@ import Network
 // search asks each address of the phone's own /24 subnet directly instead: two hundred and fifty-four
 // small unicast questions, which need nothing but the local-network permission.
 //
-// WHAT IT IS FOR, here: light that follows the day. Bright, cold light in the morning to set the body
-// clock; warm, dim light in the evening so it is not pushed back again. Two automations do that at the
-// wearer's times, and four scenes do it by hand.
+// WHAT IT IS FOR, here: light that follows the day. Bright, cold light in the morning; warm, dim light in
+// the evening so the body clock is not pushed back again. Two automations do that at the wearer's times,
+// and four scenes do it by hand.
+//
+// HEALTH_V2 S2 — THE LIGHTS FOLLOW THE SLEEP ANCHOR (`wiz.followSleepAnchor`, on by default). While the
+// sleep plan exists, the evening automation dims to the Evening scene at the plan's lights-dim time
+// (bedtime − 2 h) and to Wind-down at its wind-down start (bedtime − 1 h), and the morning automation
+// turns Daylight on at the anchor. The wearer's fixed times stay as the fallback whenever there is no
+// plan or they switch following off. No light-therapy claim: indoor bulbs are a small fraction of
+// daylight, which the morning scene says (`WizScene.morningLightNote`).
 
 /// One bulb, as remembered.
 struct WizBulb: Codable, Identifiable, Equatable, Hashable {
@@ -56,6 +64,9 @@ enum WizScene: String, CaseIterable, Identifiable {
         case .off: return "power"
         }
     }
+
+    /// The honest line under the morning scene (S2): a bulb is not daylight.
+    static let morningLightNote = "Indoor light is far dimmer than daylight — a few minutes outside does more."
 
     /// `setPilot` parameters. Colour temperatures in kelvin, brightness in percent.
     var params: [String: Any] {
@@ -202,6 +213,11 @@ final class WizLightStore: ObservableObject {
     @Published var windDownMinute: Int {
         didSet { d.set(windDownMinute, forKey: K.windMinute); rescheduleAutomation() }
     }
+    /// S2: time the two automations off the sleep plan while one exists (default ON). Off, or with no
+    /// plan, the fixed times above apply exactly as before.
+    @Published var followSleepAnchor: Bool {
+        didSet { d.set(followSleepAnchor, forKey: K.follow); rescheduleAutomation() }
+    }
 
     private let d = UserDefaults.standard
     private enum K {
@@ -209,6 +225,7 @@ final class WizLightStore: ObservableObject {
         static let wakeOn = "wiz.auto.wake.on", wakeMinute = "wiz.auto.wake.minute"
         static let windOn = "wiz.auto.wind.on", windMinute = "wiz.auto.wind.minute"
         static let wakeRan = "wiz.auto.wake.ran", windRan = "wiz.auto.wind.ran"
+        static let follow = "wiz.followSleepAnchor", eveningRan = "wiz.auto.evening.ran"
     }
     /// `startAutomation()` has been called (the app wants automations for the rest of the process).
     private var automating = false
@@ -223,6 +240,7 @@ final class WizLightStore: ObservableObject {
         wakeMinute = d.object(forKey: K.wakeMinute) as? Int ?? 6 * 60 + 30
         windDownOn = d.bool(forKey: K.windOn)
         windDownMinute = d.object(forKey: K.windMinute) as? Int ?? 21 * 60 + 30
+        followSleepAnchor = d.object(forKey: K.follow) as? Bool ?? true
         if let data = d.data(forKey: K.bulbs), let stored = try? JSONDecoder().decode([WizBulb].self, from: data) {
             bulbs = stored
         }
@@ -341,13 +359,56 @@ final class WizLightStore: ObservableObject {
         }
     }
 
+    // MARK: S2 — the times the automations actually run at
+
+    /// When each automation fires today. `evening` is nil unless the lights follow a plan (the fixed
+    /// schedule has no separate evening step).
+    struct AutomationTimes: Equatable {
+        let wake: Int
+        let evening: Int?
+        let windDown: Int
+        /// True when the times came from the sleep plan.
+        let fromPlan: Bool
+    }
+
+    /// Pure: the plan's times when following and a plan exists (the morning from the plan that ends this
+    /// morning, the evening from the one that ends tomorrow morning), else the fixed settings.
+    static func automationTimes(follow: Bool, morningPlan: SleepSchedulePlan?, eveningPlan: SleepSchedulePlan?,
+                                wakeMinute: Int, windDownMinute: Int) -> AutomationTimes {
+        let morning = follow ? morningPlan : nil
+        let evening = follow ? eveningPlan : nil
+        return AutomationTimes(wake: morning?.morningLightMin ?? wakeMinute,
+                               evening: evening?.lightsDimMin,
+                               windDown: evening?.windDownStartMin ?? windDownMinute,
+                               fromPlan: morning != nil || evening != nil)
+    }
+
+    /// Today's times, from the shared sleep plan.
+    func automationTimes(now: Date = Date(), calendar: Calendar = .current) -> AutomationTimes {
+        let provider = SleepScheduleProvider.shared
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: now) ?? now
+        return Self.automationTimes(follow: followSleepAnchor,
+                                    morningPlan: provider.plan(wakingOn: now, calendar: calendar),
+                                    eveningPlan: provider.plan(wakingOn: tomorrow, calendar: calendar),
+                                    wakeMinute: wakeMinute, windDownMinute: windDownMinute)
+    }
+
+    /// The sleep plan changed: recompute when the loop next wakes.
+    func sleepPlanDidChange() {
+        guard followSleepAnchor else { return }
+        rescheduleAutomation()
+    }
+
     /// Seconds from `now` to the next moment an enabled automation's window opens (the start of its set
     /// minute), capped at `automationMaxSleep`, never under one second. Waking at a window start that has
     /// already run today is harmless: `runDueAutomations` is idempotent within the day.
     func secondsUntilNextAutomationCheck(now: Date = Date()) -> TimeInterval {
         let calendar = Calendar.current
         var next = now.addingTimeInterval(Self.automationMaxSleep)
-        for (on, at) in [(wakeLightOn, wakeMinute), (windDownOn, windDownMinute)] where on {
+        let times = automationTimes(now: now, calendar: calendar)
+        var starts: [(Bool, Int)] = [(wakeLightOn, times.wake), (windDownOn, times.windDown)]
+        if let evening = times.evening { starts.append((windDownOn, evening)) }
+        for (on, at) in starts where on {
             var start = DateComponents()
             start.hour = at / 60
             start.minute = at % 60
@@ -370,11 +431,17 @@ final class WizLightStore: ObservableObject {
         func due(_ on: Bool, _ at: Int, _ ranKey: String) -> Bool {
             on && minute >= at && minute < at + 15 && d.string(forKey: ranKey) != today
         }
-        if due(wakeLightOn, wakeMinute, K.wakeRan) {
+        let times = automationTimes(now: now)
+        if due(wakeLightOn, times.wake, K.wakeRan) {
             d.set(today, forKey: K.wakeRan)
             await apply(.daylight)
         }
-        if due(windDownOn, windDownMinute, K.windRan) {
+        // S2: with a plan, the evening dims in two steps — Evening at lights-dim, Wind-down an hour later.
+        if let evening = times.evening, due(windDownOn, evening, K.eveningRan) {
+            d.set(today, forKey: K.eveningRan)
+            await apply(.evening)
+        }
+        if due(windDownOn, times.windDown, K.windRan) {
             d.set(today, forKey: K.windRan)
             await apply(.windDown)
         }

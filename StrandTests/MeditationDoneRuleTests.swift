@@ -22,8 +22,8 @@ final class MeditationDoneRuleTests: XCTestCase {
         XCTAssertFalse(MeditationLog.isDayDone(minutes: LevelEngine.meditationMinMinutes - 0.01))
     }
 
-    /// Inclusive at the line — five minutes IS five minutes. The card's footer tells the wearer "a day
-    /// counts from 5 minutes", so a day of exactly five that did not count would contradict the screen.
+    /// Inclusive at the line — the minimum IS the minimum. The card's footer tells the wearer "a day counts
+    /// from N minutes", so a day of exactly N that did not count would contradict the screen.
     func testTheThresholdItselfIsDone() {
         XCTAssertTrue(MeditationLog.isDayDone(minutes: LevelEngine.meditationMinMinutes))
     }
@@ -41,6 +41,23 @@ final class MeditationDoneRuleTests: XCTestCase {
             let minutes = line + step
             XCTAssertEqual(MeditationLog.isDayDone(minutes: minutes), minutes >= line,
                            "minutes \(minutes) against the level's line \(line)")
+        }
+    }
+
+    /// Owner decision, 2026-09-29: the minimum is DATE-EFFECTIVE — 5 minutes before the changeover, 10 from
+    /// it. Six minutes in August met the rule in force then; six minutes now do not. The badge, the level's
+    /// deduction and the quest floor all read `LevelEngine.meditationMinMinutes(on:)`.
+    func testSixMinutesCountedBeforeTheChangeoverAndDoNotAfterIt() {
+        XCTAssertTrue(MeditationLog.isDayDone(minutes: 6, day: "2026-08-14"))
+        XCTAssertTrue(MeditationLog.isDayDone(minutes: 5, day: "2026-09-28"))
+        XCTAssertFalse(MeditationLog.isDayDone(minutes: 6, day: "2026-09-29"))
+        XCTAssertFalse(MeditationLog.isDayDone(minutes: 9.99, day: "2026-10-02"))
+        XCTAssertTrue(MeditationLog.isDayDone(minutes: 10, day: "2026-10-02"))
+        // Today's badge is the dated rule for today.
+        let today = Repository.localDayKey(Date())
+        for minutes in [0.0, 5, 6, 9.9, 10, 30] {
+            XCTAssertEqual(MeditationLog.isDayDone(minutes: minutes),
+                           MeditationLog.isDayDone(minutes: minutes, day: today))
         }
     }
 

@@ -258,6 +258,7 @@ func levelDriverLabel(_ driver: LevelDriver) -> LocalizedStringKey {
     case .restorativeSleep: return "deep + rem"
     case .sleepHrv: return "night hrv"
     case .sleepRegularity: return "regularity"
+    case .sleepDuration: return "sleep vs need"
     case .hrv: return "hrv"
     case .rhr: return "rhr"
     case .vo2max: return "vo₂max"

@@ -3,29 +3,46 @@ import Foundation
 // LevelEngine.swift — the level.
 //
 // iOS lane. The Android `LevelEngine` is unchanged and no longer matches this one: on iOS the level was
-// rebuilt to have NO CEILING, at the wearer's request.
+// rebuilt to have NO CEILING, at the wearer's request. (HEALTH_V2 H6 and the owner's recipe decisions of
+// 2026-09-29 below diverge from Android further; the PR says so.)
 //
 // WHAT 100 MEANS. Every input is scored against the wearer's own frozen baseline: 50 is their average
 // day, 100 is their own 95th-percentile day in the good direction (see `Baseline.score`). A day on which
-// every part sits at its own 95th percentile, with no step penalty, is a level of 100. Beyond that the
-// level keeps rising — nothing is clipped, anywhere — and a bad enough day falls below 0. The only
-// ceiling left is the body's.
+// every part sits at its own 95th percentile, with no step penalty and no meditation deduction, is a
+// level of 100. Beyond that the level keeps rising — nothing is clipped, anywhere: no part has a ceiling
+// and no input is capped (owner decision, 2026-09-29: "no bound other than my physiology") — and a bad
+// enough day falls below 0. The only ceiling left is the body's.
 //
-// A LEVEL OF STATE, NOT OF THE WEEK'S TREND. Every physiological input is a 7-day mean, strength is a
-// twelve-week best, training load is a 42-day chronic figure, and meditation is a 28-day share — so a bad
+// A LEVEL OF STATE, NOT OF THE WEEK'S TREND. Every physiological input is a 7-day mean (regularity a
+// 14-night spread), strength is a twelve-week best and training load a 42-day chronic figure — so a bad
 // night, a deload week or one missed session barely moves the level, and months of real progress do.
 //
-//   · SLEEP  (30 %) — deep + REM minutes (0.60), night HRV (0.25), bedtime/wake regularity (0.15, lower
-//                     is better). 7-night means.
+// THE RECIPE (ledger epoch 4, `LevelLedger.currentEpoch`) — ONE RECIPE FOR THE WHOLE HISTORY. Every
+// scored input is something the strap, the WHOOP data or the workout log carried in January as it does
+// now, so a day in January and a day today are scored the same way and can be compared:
+//
+//   · SLEEP  (30 %) — duration against need (0.50: the 7-night mean of asleep ÷ need), wake-time
+//                     regularity (0.30: circular SD of wake times over 14 nights, `SleepRegularity`,
+//                     lower is better) and deep + REM minutes (0.20, 7-night mean). HRV is NOT here any
+//                     more: it was counted twice (sleep and heart, ≈ 19 % of the level together) and now
+//                     lives in HEART only.
 //   · MUSCLE (24 %) — strength (0.60: the estimated-1RM index) and chronic training load (0.40).
 //   · HEART  (23 %) — HRV (0.5) and resting HR (0.5, lower is better). 7-day means.
 //   · LUNGS  (12 %) — VO₂max (0.75) and respiratory rate (0.25, lower is better, 7-day mean).
-//   · FOCUS  (11 %) — daytime calm (0.75, 7-day mean) and meditation (0.25).
+//   · FOCUS  (11 %) — daytime calm only (7-day mean RMSSD over the still, scored waking hours).
 //
-// MEDITATION is the one input not scored against a baseline — it has no biological ceiling. It is the
-// share of the last 28 days on which the wearer meditated at least `meditationMinMinutes`, the newest
-// days weighted most (e^(−days ago / 14)), times 100. A missed day costs a little; nothing resets. It is
-// ABSENT, not zero, until the wearer has logged one at all: see `LevelInputs.meditationShare`.
+// MEDITATION IS NOT A PLUS ANY MORE — ONLY A DEDUCTION, AND ONLY IN ITS ERA. (Owner decision, 2026-09-29:
+// meditation did not exist in the app in January, so it must not lift today's level over January's.) It
+// is the ONE place a behaviour touches the measured level, and only because the owner asked for it by
+// name; every other quest penalty stays on the game layer (XP, streaks, debt quests).
+//   · The era starts on the wearer's first logged meditation. Before it there is no meditation term at
+//     all — no bonus, no penalty — so January is untouched.
+//   · In the era, each day of the level's 7-day window that has data behind it (a day row exists) and
+//     whose logged minutes are under the minimum in force THAT day (`meditationMinMinutes(on:)`: 5 min
+//     before 2026-09-29, 10 min from it) is a miss and costs `meditationMissPenaltyPoints` (1.0) level
+//     point, subtracted after the step multiplier. A fully missed week costs 7 points; a met day costs
+//     nothing; a day with no data at all is not a miss — "not measured" is never "missed".
+//   · It is a deduction, not a cap: the level stays unbounded above.
 //
 // EVERY INPUT IS MEASURED. A component with no data is EXCLUDED and its weight redistributed over the
 // ones that do; inside a part, a missing sub-metric is redistributed the same way. `coverage` says how
@@ -34,6 +51,11 @@ import Foundation
 //
 // STEPS ARE A PENALTY, NOT A COMPONENT: the 7-day average against `stepsFloor`, by at most
 // `stepsMaxPenalty`.
+//
+// A FINDING FOR THE OWNER, NOT A BOUND: the chronic-training-load term measures training DONE, not
+// adaptation. Left uncapped (owner decision), the muscle part can rise from volume alone before any
+// physiological change shows in strength, HRV or resting HR. The honest fix, if wanted, is a different
+// input (load-normalised strength, HR at a fixed pace), not a cap.
 
 /// Everything the level is computed from, already extracted from the stores.
 ///
@@ -41,10 +63,14 @@ import Foundation
 public struct LevelInputs: Equatable, Sendable {
     /// Deep + REM minutes a night, 7-night mean.
     public var restorativeMin: Double?
-    /// Night HRV, 7-night mean.
+    /// Night HRV, 7-night mean. NOT SCORED since epoch 4 (HRV is counted once, in heart); kept so the
+    /// missing-input list can still say whether a night carried HRV.
     public var sleepHrv: Double?
-    /// Minutes bedtime and wake time moved against the night before, 7-night mean.
+    /// Wake-time regularity: the circular SD of wake times over the last 14 nights, in minutes
+    /// (`SleepRegularity.wakeSdMin`, needs 7). Lower is better.
     public var regularityMin: Double?
+    /// Sleep duration against need: the 7-night mean of asleep ÷ need. Not capped (see the header).
+    public var sleepDurationRatio: Double?
     /// HRV, 7-day mean.
     public var hrv: Double?
     /// Resting HR, 7-day mean.
@@ -58,16 +84,12 @@ public struct LevelInputs: Equatable, Sendable {
     public var chronicLoad: Double?
     /// Daytime calm, 7-day mean.
     public var daytimeRmssd: Double?
-    /// The weighted share of the last 28 days meditated, 0–1 — or NIL when there is no meditation log
-    /// to read at all.
+    /// Meditation-era days in the level's 7-day window that had data and fell under that day's minimum —
+    /// or NIL outside the meditation era (no log at all, or every window day before the first one), where
+    /// there is no meditation term whatsoever. 0 is a real reading: in the era, nothing missed.
     ///
-    /// ABSENT IS NOT ZERO. This used to be a plain `Double` defaulting to 0, which made the meditation
-    /// sub-score the one input that could never be missing: a wearer who had never opened the feature
-    /// was scored as having meditated on none of their last 28 days, `focus` became a measured 0, and on
-    /// a fresh install that single fabricated zero was the WHOLE level — a confident 0.0, frozen for the
-    /// day and then polluting the 3- and 30-day means for a month afterwards. Once a log exists, a day
-    /// without a session is a real zero and the header's "a missed day costs a little" still holds.
-    public var meditationShare: Double?
+    /// NEVER A PLUS. Meditation only ever deducts (see the header), so nil and 0 score identically.
+    public var meditationMissedDays: Int?
     /// Average daily steps over the last 7 days. Nil when steps are not being recorded at all.
     public var steps: Int?
 
@@ -75,6 +97,7 @@ public struct LevelInputs: Equatable, Sendable {
         restorativeMin: Double? = nil,
         sleepHrv: Double? = nil,
         regularityMin: Double? = nil,
+        sleepDurationRatio: Double? = nil,
         hrv: Double? = nil,
         rhr: Double? = nil,
         vo2max: Double? = nil,
@@ -82,12 +105,13 @@ public struct LevelInputs: Equatable, Sendable {
         strengthIndex: Double? = nil,
         chronicLoad: Double? = nil,
         daytimeRmssd: Double? = nil,
-        meditationShare: Double? = nil,
+        meditationMissedDays: Int? = nil,
         steps: Int? = nil
     ) {
         self.restorativeMin = restorativeMin
         self.sleepHrv = sleepHrv
         self.regularityMin = regularityMin
+        self.sleepDurationRatio = sleepDurationRatio
         self.hrv = hrv
         self.rhr = rhr
         self.vo2max = vo2max
@@ -95,7 +119,7 @@ public struct LevelInputs: Equatable, Sendable {
         self.strengthIndex = strengthIndex
         self.chronicLoad = chronicLoad
         self.daytimeRmssd = daytimeRmssd
-        self.meditationShare = meditationShare
+        self.meditationMissedDays = meditationMissedDays
         self.steps = steps
     }
 }
@@ -163,6 +187,11 @@ public struct LevelBreakdown: Equatable, Sendable {
         self.coverage = coverage
     }
 
+    /// Level points the meditation term deducted (0 outside the meditation era or with nothing missed).
+    /// DERIVED from the stored figures — `raw × stepPenalty − level` — so a breakdown rebuilt from the
+    /// ledger (`FrozenLevel.breakdown`) carries it without a new stored field.
+    public var meditationPenalty: Double { Swift.max(0, raw * stepPenalty - level) }
+
     /// `coverage` as whole per cent — the figure the breakdown puts on screen beside the level, so a
     /// level built from half the formula cannot read like one built from all of it.
     public var coveragePercent: Int { Int((Swift.min(Swift.max(coverage, 0), 1) * 100).rounded()) }
@@ -197,11 +226,46 @@ public enum LevelEngine {
     /// Chronic training load's time constant, in days (the Banister "fitness" constant).
     public static let chronicLoadDays: Double = 42
 
-    /// The meditation share's window and its recency constant, in days.
+    /// The Focus card's 28-day meditation window and its recency constant. Not part of the level since
+    /// epoch 4; kept for the card and `meditationShare(meditated:)`.
     public static let meditationWindowDays = 28
     public static let meditationDecayDays: Double = 14
-    /// The minutes a day needs to count as a meditated day.
-    public static let meditationMinMinutes: Double = 5
+
+    // MARK: - The meditation minimum (date-effective)
+
+    /// THE MEDITATION MINIMUM IS DATE-EFFECTIVE (owner decision, 2026-09-29: "raise it to 10 minutes").
+    /// Days before this are judged by the rule in force then (5 min), days from it on by the new one
+    /// (10 min), so a recompute never re-labels a past day that met its own rule as a miss. Everything
+    /// that asks "was this a meditation day" reads `meditationMinMinutes(on:)`: the level's deduction, the
+    /// Focus card's circles and badge (`MeditationLog.isDayDone`) and the quest floor (`QuestDayPlan`).
+    public static let meditationMinChangeoverDay = "2026-09-29"
+    /// The minimum before the changeover.
+    public static let meditationMinMinutesBeforeChangeover: Double = 5
+    /// The minimum in force from the changeover on — the CURRENT rule, for copy that names today's line.
+    /// A dated question must use `meditationMinMinutes(on:)`.
+    public static let meditationMinMinutes: Double = 10
+
+    /// The minutes `day` (`yyyy-MM-dd`) needed to count as a meditated day.
+    public static func meditationMinMinutes(on day: String) -> Double {
+        day < meditationMinChangeoverDay ? meditationMinMinutesBeforeChangeover : meditationMinMinutes
+    }
+
+    /// Whether `minutes` logged on `day` meet that day's rule.
+    public static func isMeditationDay(minutes: Double, on day: String) -> Bool {
+        minutes.isFinite && minutes >= meditationMinMinutes(on: day)
+    }
+
+    /// Level points each missed meditation-era day in the 7-day window deducts. A fully missed week is
+    /// 7 points — about the step multiplier's worst case at a level of 50 (15 % of 50 = 7.5): meaningful
+    /// against a typical day's ~50 without dominating it.
+    public static let meditationMissPenaltyPoints: Double = 1.0
+    /// The window misses are counted over: the level's own rolling window.
+    public static let meditationPenaltyWindowDays = rollingDays
+
+    /// Points deducted for `missedDays`. Nil (outside the era) deducts nothing.
+    public static func meditationPenalty(missedDays: Int?) -> Double {
+        Double(Swift.max(0, missedDays ?? 0)) * meditationMissPenaltyPoints
+    }
 
     /// The least of the level's weight that has to have real data behind it before there is a level.
     ///
@@ -220,12 +284,12 @@ public enum LevelEngine {
     public static let rollingDays = 7
     public static let rollingMinDays = 3
 
-    /// The shares inside each part.
-    public static let sleepShares = (restorative: 0.60, hrv: 0.25, regularity: 0.15)
+    /// The shares inside each part. HRV is in exactly one of them (heart); focus is daytime calm alone.
+    public static let sleepShares = (duration: 0.50, regularity: 0.30, restorative: 0.20)
     public static let heartShares = (hrv: 0.5, rhr: 0.5)
     public static let lungsShares = (vo2max: 0.75, respRate: 0.25)
     public static let muscleShares = (strength: 0.60, load: 0.40)
-    public static let focusShares = (calm: 0.75, meditation: 0.25)
+    public static let focusShares = (calm: 1.0, meditation: 0.0)
 
     /// Weighted average over the sub-scores that are present, their shares re-normalised.
     static func blend(_ parts: [(score: Double?, share: Double)]) -> Double? {
@@ -242,7 +306,8 @@ public enum LevelEngine {
     }
 
     /// The weighted share of meditated days in the last 28, given whether each day (index 0 = the scored
-    /// day, 1 = the day before …) was meditated. Days beyond the array count as not meditated.
+    /// day, 1 = the day before …) was meditated. Days beyond the array count as not meditated. Not part
+    /// of the level since epoch 4.
     public static func meditationShare(meditated: [Bool]) -> Double {
         var num = 0.0, den = 0.0
         for k in 0..<meditationWindowDays {
@@ -257,9 +322,9 @@ public enum LevelEngine {
 
     public static func sleepSubScores(_ i: LevelInputs, _ b: [LevelMetric: Baseline]) -> [(LevelDriver, Double?, Double)] {
         [
-            (.restorativeSleep, scored(i.restorativeMin, .restorativeMin, b, higherIsBetter: true), sleepShares.restorative),
-            (.sleepHrv, scored(i.sleepHrv, .hrv, b, higherIsBetter: true), sleepShares.hrv),
+            (.sleepDuration, scored(i.sleepDurationRatio, .sleepDurationRatio, b, higherIsBetter: true), sleepShares.duration),
             (.sleepRegularity, scored(i.regularityMin, .sleepRegularityMin, b, higherIsBetter: false), sleepShares.regularity),
+            (.restorativeSleep, scored(i.restorativeMin, .restorativeMin, b, higherIsBetter: true), sleepShares.restorative),
         ]
     }
 
@@ -284,13 +349,11 @@ public enum LevelEngine {
         ]
     }
 
+    /// Daytime calm only. Meditation left the positive side of the formula at epoch 4 (see the header):
+    /// it is a deduction in `compute`, never a sub-score.
     public static func focusSubScores(_ i: LevelInputs, _ b: [LevelMetric: Baseline]) -> [(LevelDriver, Double?, Double)] {
         [
             (.daytimeCalm, scored(i.daytimeRmssd, .daytimeRmssd, b, higherIsBetter: true), focusShares.calm),
-            // A logged zero is a measured zero; NO LOG AT ALL is not a zero, it is no reading — and it
-            // is redistributed onto daytime calm like every other absent sub-metric. See
-            // `LevelInputs.meditationShare`.
-            (.meditation, i.meditationShare.map { 100 * min(max($0, 0), 1) }, focusShares.meditation),
         ]
     }
 
@@ -305,7 +368,8 @@ public enum LevelEngine {
         return Swift.max(1 - stepsMaxPenalty * shortfall, 1 - stepsMaxPenalty)
     }
 
-    /// The level. Weights redistributed over the parts that have data; nothing clamped.
+    /// The level. Weights redistributed over the parts that have data; nothing clamped. The meditation
+    /// deduction (meditation era only) is subtracted after the step multiplier.
     public static func compute(
         inputs: LevelInputs,
         baselines: [LevelMetric: Baseline] = LevelBaselines.table
@@ -330,7 +394,8 @@ public enum LevelEngine {
         }
         let raw = components.reduce(0) { $0 + $1.contribution }
         let penalty = stepPenalty(inputs.steps)
+        let meditation = meditationPenalty(missedDays: inputs.meditationMissedDays)
         return LevelBreakdown(components: components, raw: raw, stepPenalty: penalty,
-                              level: raw * penalty, coverage: presentWeight)
+                              level: raw * penalty - meditation, coverage: presentWeight)
     }
 }

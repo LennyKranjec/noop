@@ -124,27 +124,23 @@ final class LevelDayFreezeTests: XCTestCase {
         XCTAssertFalse(LevelLedger.isReady(day: "2026-09-17", byDay: byDay, series: series, calendar: calendar))
     }
 
-    func testTheMeditationShareIsNotResetByOneMissedDay() throws {
-        var minutes: [String: Double] = [:]
-        for d in 1...28 where d != 20 { minutes[String(format: "2026-09-%02d", d)] = 10 }
-        let series = LevelSeries(vo2max: [], muscleByDay: [:], meditation: minutes)
-        let share = try XCTUnwrap(LevelWiring.meditationShare("2026-09-28", series, calendar))
-        XCTAssertGreaterThan(share, 0.9)
-    }
-
-    /// Regression: a wearer who had never logged a meditation was scored as having meditated on none of
-    /// their last 28 days. That is not a zero, it is no reading — and it was the ONLY sub-score a fresh
-    /// install had.
-    func testMeditationIsAbsentUntilTheWearerHasLoggedOneAndAZeroAfterwards() throws {
+    /// Epoch 4: meditation is a count of MISSED meditation-era days, absent before the era.
+    func testMeditationIsAbsentBeforeTheEraAndALapseInsideItIsCountedAsMissed() throws {
+        let rows = (1...30).map { d in
+            DailyMetric(day: String(format: "2026-09-%02d", d), totalSleepMin: 450, efficiency: nil,
+                        deepMin: nil, remMin: nil, lightMin: nil, disturbances: nil, restingHr: 55,
+                        avgHrv: 60, recovery: nil, strain: nil, exerciseCount: nil, steps: 9_000)
+        }
+        let byDay = LevelWiring.byDay(rows)
         let empty = LevelSeries(vo2max: [], muscleByDay: [:], meditation: [:])
-        XCTAssertNil(LevelWiring.meditationShare("2026-09-28", empty, calendar))
-        // One session, then two months of nothing: the lapse is a MEASURED zero, not an absence — the
+        XCTAssertNil(LevelWiring.meditationMissedDays("2026-09-28", empty, byDay, calendar))
+        // One session on the 1st, then nothing: every data day of the week to the 28th is a miss — the
         // level must not rise for having quit.
-        let lapsed = LevelSeries(vo2max: [], muscleByDay: [:], meditation: ["2026-07-01": 20])
-        XCTAssertEqual(try XCTUnwrap(LevelWiring.meditationShare("2026-09-28", lapsed, calendar)), 0,
-                       accuracy: 1e-9)
-        // And a log that only begins later is still absent on the days before it.
-        XCTAssertNil(LevelWiring.meditationShare("2026-06-30", lapsed, calendar))
+        let lapsed = LevelSeries(vo2max: [], muscleByDay: [:], meditation: ["2026-09-01": 20])
+        XCTAssertEqual(LevelWiring.meditationMissedDays("2026-09-28", lapsed, byDay, calendar), 7)
+        // And before the first session there is no term at all.
+        let later = LevelSeries(vo2max: [], muscleByDay: [:], meditation: ["2026-09-20": 20])
+        XCTAssertNil(LevelWiring.meditationMissedDays("2026-09-15", later, byDay, calendar))
     }
 
     /// Regression: day one. One synced night, nothing else — every rolling metric still short of its
@@ -159,7 +155,7 @@ final class LevelDayFreezeTests: XCTestCase {
         let series = LevelSeries(vo2max: [], muscleByDay: [:], meditation: [:])
         let byDay = LevelWiring.byDay([row])
         let inputs = LevelWiring.dayInputs(byDay: byDay, day: day, series: series, calendar: calendar)
-        XCTAssertNil(inputs.meditationShare, "the input that used to make this a level")
+        XCTAssertNil(inputs.meditationMissedDays, "no meditation log, no meditation term")
         XCTAssertNil(LevelEngine.compute(inputs: inputs, baselines: LevelBaselines.table))
 
         // So the day is written as a gap at its deadline — which is what `.empty` was always for.

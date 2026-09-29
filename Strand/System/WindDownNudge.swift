@@ -1,4 +1,5 @@
 import Foundation
+import StrandAnalytics
 import UserNotifications
 
 /// The wind-down nudge (#207) — a gentle, NON-critical evening local notification suggesting it's
@@ -9,6 +10,12 @@ import UserNotifications
 /// repeating calendar trigger at a time DERIVED from the user's earliest wake time minus their usual
 /// sleep need minus a short lead. State is its own UserDefaults-backed store so it doesn't couple to
 /// the shared BehaviorStore. On-device only; nothing is sent anywhere.
+///
+/// HEALTH_V2 S2 — ONE SCHEDULE. While the sleep anchor has a plan (`SleepScheduleProvider`), the nudge
+/// fires at the plan's wind-down start for each wake weekday (bedtime − 60 min), so it agrees with the
+/// room, the lights, the caffeine cutoff and the bedtime quests. The wearer's own wake / need / lead
+/// settings below keep working, as the fallback used ONLY while there is no plan. The on/off switch is
+/// unchanged and still the wearer's.
 @MainActor
 enum WindDownNudge {
 
@@ -189,6 +196,21 @@ enum WindDownNudge {
         return ((raw % day) + day) % day
     }
 
+    // MARK: - HEALTH_V2 S2: the sleep plan first
+
+    /// When a wake weekday's nudge fires with `plan` present: the plan's wind-down start, on the plan's
+    /// day (0 the wake day, −1 the evening before). Nil without a plan — the settings above apply. Pure.
+    static func planNudge(forWeekday weekday: Int, plan: SleepSchedulePlan?) -> (minute: Int, weekday: Int)? {
+        guard let plan else { return nil }
+        return (plan.windDownStartMin, shiftedWeekday(weekday: weekday, by: plan.windDownDayShift))
+    }
+
+    /// Re-arm the triggers against the current plan, if the nudge is on. The sleep provider calls this
+    /// whenever the plan changes.
+    static func reschedule() {
+        if isEnabled { schedule() }
+    }
+
     // MARK: - Scheduling
 
     /// Per-weekday request ids — cleared alongside the single id so toggling overrides on/off never leaves
@@ -205,6 +227,27 @@ enum WindDownNudge {
         content.title = String(localized: "Time to wind down")
         content.body = String(localized: "A calm hour now helps you hit your wake time well-rested.")
         content.sound = .default
+
+        // S2 — THE SLEEP PLAN FIRST: one trigger per wake weekday at that night's wind-down start, pinned
+        // to the evening it falls on. The settings below are the fallback only while there is no plan.
+        let plans = SleepScheduleProvider.shared.plans
+        if !plans.isEmpty {
+            for weekday in 1...7 {
+                guard let plan = plans[weekday], let at = planNudge(forWeekday: weekday, plan: plan) else { continue }
+                let planned = UNMutableNotificationContent()
+                planned.title = content.title
+                planned.body = String(localized: "Lights out around \(SleepClock.clock(plan.bedtimeMin)) to wake at \(SleepClock.clock(plan.anchorMin)).")
+                planned.sound = .default
+                var comps = DateComponents()
+                comps.weekday = at.weekday
+                comps.hour = at.minute / 60
+                comps.minute = at.minute % 60
+                let trigger = UNCalendarNotificationTrigger(dateMatching: comps, repeats: true)
+                center.add(UNNotificationRequest(identifier: "\(requestId)-wd\(weekday)",
+                                                 content: planned, trigger: trigger))
+            }
+            return
+        }
 
         // PR#554 — with per-day overrides set, fan out to seven weekday-pinned triggers each at that day's
         // own nudge time; with none, keep the single daily trigger (identical to the pre-#554 behaviour).

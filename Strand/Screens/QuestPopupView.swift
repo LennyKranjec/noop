@@ -212,11 +212,11 @@ struct QuestPopupView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// THE CLOCK, and what runs out with it. The warning is plain rather than threatening: the app has
-    /// no way to impose a penalty, and implying one would be a threat it cannot keep.
+    /// THE CLOCK, and what runs out with it. Plain, and now true: an accepted quest that runs out unmet
+    /// is judged on its data and costs XP (`QuestPenaltyRules`) — a stated price, not an implied threat.
     private var deadline: some View {
         VStack(spacing: 6) {
-            Text("The window closes when the clock does.")
+            Text("The window closes when the clock does. Accept it and miss it, and it costs XP.")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.statusWarning)
                 .multilineTextAlignment(.center)
@@ -332,6 +332,20 @@ struct QuestFailedPopupView: View {
 
     @State private var typed = 0
     @State private var hapticsOn = SystemHaptics.enabled
+    /// The penalty, as the ledger judged it. Observed: the card is usually up before the assessor has
+    /// read the day's data, and the price lands on it the moment the judgement is made.
+    @ObservedObject private var penalties = QuestPenaltyStore.shared
+
+    private var judgement: QuestJudgement? { penalties.judgement(for: quest.id) }
+    private var pending: Bool { penalties.isPending(quest.id) }
+
+    /// The figure in the corner: the price once judged, "PENDING" while the data is awaited, and the old
+    /// "+0 XP" only for a quest nothing can judge (no goal).
+    private var costText: String {
+        if let judgement { return judgement.costText.uppercased() }
+        if pending { return "PENDING" }
+        return "+0 XP"
+    }
 
     private var quest: Quest { failure.quest }
     private var full: String { failure.summary }
@@ -420,12 +434,18 @@ struct QuestFailedPopupView: View {
                             .accessibilityLabel(Text(questRewardLabel(reward)))
                     }
                     Spacer(minLength: 0)
-                    Text("+0 XP")
+                    Text(costText)
                         .font(StrandFont.headline.weight(.bold))
-                        .foregroundStyle(red)
+                        .monospacedDigit()
+                        .foregroundStyle(judgement.map { $0.outcome != .penalised } == true ? StrandPalette.textTertiary : red)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
+
+            // THE PRICE, SPELLED OUT: how far short, which multipliers, the streak, the make-up — or, for a
+            // quest the data never carried, that it is not being punished. Game layer only; the note under
+            // it says the Level is untouched.
+            penaltyPanel
 
             VStack(spacing: 6) {
                 Text("The window has closed.")
@@ -467,6 +487,43 @@ struct QuestFailedPopupView: View {
                 .strokeBorder(red.opacity(0.70), lineWidth: 1)
         )
         .shadow(color: red.opacity(0.55), radius: questGlowRadius)
+    }
+
+    @ViewBuilder
+    private var penaltyPanel: some View {
+        if let judgement {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(judgement.detailText)
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                if !judgement.reasonText.isEmpty {
+                    Text(judgement.reasonText)
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
+                if let streak = judgement.streakText {
+                    Text(streak.uppercased())
+                        .font(StrandFont.overline)
+                        .tracking(1.4)
+                        .foregroundStyle(red)
+                }
+                if let debt = judgement.debtText {
+                    Text(debt)
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.statusWarning)
+                }
+                Text(questPenaltyLevelNote)
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else if pending {
+            Text("The penalty is decided by the data, not the clock. It lands here, and on Today's board, as soon as the day is read.")
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 }
 
@@ -639,6 +696,15 @@ struct QuestCompletedPopupView: View {
 
     private var quest: Quest { completion.quest }
 
+    /// What the completion pays. A make-up quest pays back its share of the penalty it was owed for —
+    /// that is what the ledger credits (`QuestLedger.credit`), so that is what the card says.
+    private var xpText: String {
+        if QuestDebt.isDebtQuest(quest.id), let debt = QuestPenaltyStore.shared.debt(for: quest.id) {
+            return "+\(debt.restoreXp) XP BACK"
+        }
+        return "+\(quest.xp) XP"
+    }
+
     /// The typed explanation: what was read, then how it was read.
     private var explanation: String {
         completion.summary + " Closed automatically — the system read it off your data, so there is "
@@ -695,7 +761,7 @@ struct QuestCompletedPopupView: View {
                             .accessibilityLabel(Text(questRewardLabel(reward)))
                     }
                     Spacer(minLength: 0)
-                    Text("+\(quest.xp) XP")
+                    Text(xpText)
                         .font(StrandFont.headline.weight(.bold))
                         .foregroundStyle(StrandPalette.statusPositive)
                 }

@@ -7,7 +7,8 @@ import StrandAnalytics
 ///   * N UNMET PLAN DIRECTIVES PRODUCE NO RED CARDS OF THEIR OWN. They are still cancelled when their
 ///     window closes — a commitment does not quietly vanish — but the day is summarised once instead of
 ///     handing the wearer four punishments for aiming high.
-///   * ORDINARY SIDE QUESTS AND THE DAILY ARE UNTOUCHED: each still gets its own card, one at a time.
+///   * ORDINARY SIDE QUESTS SHARE ONE CARD (HEALTH_V2 H3): one red card a day, never a stack, and never
+///     for a physiology, effort or trial quest.
 ///   * A COMPLETED PLAN DIRECTIVE IS NEVER SWEPT. It keeps its completion, and its XP with it.
 ///   * THE SUMMARY SHOWS ONCE, ACROSS A RELAUNCH. The guard is on disk and is spent only when a card is
 ///     actually shown.
@@ -60,16 +61,57 @@ final class QuestPlanSummaryTests: XCTestCase {
         XCTAssertTrue(store.failures.isEmpty)
     }
 
-    func testAnOrdinarySideQuestStillGetsItsOwnCard() {
+    /// HEALTH_V2 H3a: two triggered quests closing in one sweep are ONE red card naming both — never a
+    /// stack of modals — and the plan directive beside them adds nothing to it.
+    func testSideQuestsThatCloseTogetherShareOneCard() {
         let store = QuestStore(defaults: suite())
         let created = yesterdayMs
         store.upsert(sideQuest("side-one", createdAt: created))
         store.upsert(sideQuest("side-two", createdAt: created + 1))
         store.upsert(planQuest(.steps, threshold: 100, createdAt: created + 2))
         store.sweepExpired()
-        // Two cards for the two triggered quests, and none for the plan directive beside them.
-        XCTAssertEqual(store.failures.count, 2)
-        XCTAssertEqual(Set(store.failures.map(\.quest.id)), ["side-one", "side-two"])
+        XCTAssertEqual(store.failures.count, 1)
+        XCTAssertEqual(store.failures.first?.quest.id, "side-one")
+        XCTAssertTrue(store.failures.first?.summary.contains("2 closed") == true)
+        XCTAssertEqual(store.forDay(day).filter { $0.state == .declined }.count, 3, "all still cancelled")
+    }
+
+    /// H3a: one red card a day, shared with the plan card. A second sweep later the same day, or the day's
+    /// plan card after a failure card was shown, waits for the next day instead of stacking.
+    func testOneRedCardADayAcrossFailuresAndThePlanCard() {
+        let defaults = suite()
+        let store = QuestStore(defaults: defaults)
+        store.upsert(sideQuest("first", createdAt: yesterdayMs))
+        store.sweepExpired()
+        XCTAssertEqual(store.failures.count, 1)
+        store.dismissFailure()
+        store.upsert(sideQuest("second", createdAt: yesterdayMs + 5))
+        store.sweepExpired()
+        XCTAssertTrue(store.failures.isEmpty, "the day's card was already shown")
+        XCTAssertEqual(store.quests.first { $0.id == "second" }?.state, .declined, "still closed, just not carded")
+        XCTAssertFalse(store.presentPlanReport(report()))
+        XCTAssertFalse(store.planDayReported(day), "the plan card's guard is not spent while it waits")
+        // Tomorrow the slot is free again.
+        let tomorrow = Date().addingTimeInterval(86_400)
+        XCTAssertTrue(store.presentPlanReport(report(), now: tomorrow))
+    }
+
+    /// H3c: a physiology quest (sleep hours), an effort quest and a trial arm never appear as failures.
+    func testPhysiologyEffortAndTrialQuestsAreNeverFailureCards() {
+        let store = QuestStore(defaults: suite())
+        func quest(_ id: String, _ metric: QuestMetric) -> Quest {
+            Quest(id: id, kind: .side, title: id, taunt: "", target: "t", rewards: [.sleep], xp: 40,
+                  state: .active, dayKey: day, createdAtMs: yesterdayMs, goal: QuestGoal(metric: metric, threshold: 1))
+        }
+        store.upsert(quest("sleep", .sleepHours))
+        store.upsert(quest("effort", .strain))
+        store.upsert(quest("trial-2026-09-29-a", .steps))
+        store.sweepExpired()
+        XCTAssertTrue(store.failures.isEmpty)
+        XCTAssertFalse(QuestStore.showsAsFailure(quest("sleep", .sleepHours)))
+        XCTAssertFalse(QuestStore.showsAsFailure(quest("trial-x", .journal)))
+        XCTAssertTrue(QuestStore.showsAsFailure(quest("walk", .steps)))
+        XCTAssertTrue(QuestStore.showsAsFailure(quest("water", .waterMl)))
     }
 
     func testACompletedPlanDirectiveIsNeverSweptIntoTheSummaryAsAFailure() {

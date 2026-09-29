@@ -2,10 +2,10 @@ import SwiftUI
 
 // MARK: - StatePill (§9.4 chrome) & ConnectionDot (sidebar status footer)
 //
-// Small status chips used in chrome: a rounded pill with an optional leading dot
-// and a tinted label. Tones map to the status palette (positive/warning/critical)
-// plus neutral and accent. The ConnectionDot is a tiny pulsing presence indicator
-// used in the strap-status footer / menu-bar.
+// Small status chips used in chrome: a capsule with an optional leading dot and a tinted `scale`
+// label (§5.5: dot 7 + `scale`, tone colour). Tones map to the V2 status palette (positive / warning /
+// critical) plus neutral and accent. The ConnectionDot is the presence indicator used in the
+// strap-status footer / menu bar; when pulsing it runs the gated `live` loop (§4.8) — never a halo.
 
 public enum StrandTone: Sendable {
     case neutral
@@ -46,21 +46,23 @@ public struct StatePill: View {
                 ConnectionDot(tone: tone, pulsing: pulsing, size: 7)
             }
             Text(title)
-                .font(StrandFont.overline)
-                .tracking(StrandFont.overlineTracking)
+                .telosScale()
+                .textCase(.uppercase)
                 .foregroundStyle(tone.color)
+                .lineLimit(1)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        // Shared tinted-chip weights (was .12/.28) so this pill, a ScoreStatePill and a SourceBadge
-        // sitting in the same header row draw the same fill and edge.
+        .padding(.horizontal, TelosSpace.s)
+        .padding(.vertical, TelosSpace.xxs)
+        .frame(minHeight: 20)
+        // Shared tinted-chip weights (`TelosOpacity.fill` / `.border`) so this pill, a ScoreStatePill
+        // and a TrendChip in the same row draw the same fill and edge.
         .background(
             Capsule(style: .continuous)
                 .fill(tone.color.opacity(NoopVisualStyle.chipFillOpacity))
         )
         .overlay(
             Capsule(style: .continuous)
-                .stroke(tone.color.opacity(NoopVisualStyle.chipBorderOpacity), lineWidth: 1)
+                .strokeBorder(tone.color.opacity(NoopVisualStyle.chipBorderOpacity), lineWidth: TelosStroke.line)
         )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(title)
@@ -69,22 +71,22 @@ public struct StatePill: View {
 
 // MARK: - ConnectionDot
 
-/// A tiny status dot with an optional breathing pulse halo. Used for connection
-/// state, live indicators, and inside StatePill.
+/// A tiny status dot. `pulsing` runs the V2 `live` loop (opacity 1 to 0.35 over 2 s) while it is true —
+/// the one allowed never-settling animation, reserved for something actually live (a stream, a sync).
 public struct ConnectionDot: View {
 
     public var tone: StrandTone
     public var pulsing: Bool
     public var size: CGFloat
 
-    @State private var animate = false
+    @State private var dimmed = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Low Power Mode / "Reduce motion in NOOP". This halo is a `repeatForever` loop that never
-    /// settles and is on screen for long stretches — a connected strap in Settings, a backfill on
-    /// every scaffolded screen — so it belongs behind the same gate as the liquid surfaces.
+    /// Low Power Mode / "Reduce motion in NOOP". The loop is on screen for long stretches — a connected
+    /// strap in Settings, a backfill on every scaffolded screen — so it sits behind the same gate as the
+    /// liquid surfaces.
     @ObservedObject private var motion = NoopMotionState.shared
     private var poseStill: Bool { motion.poseStill(reduceMotion) }
-    @Environment(\.colorScheme) private var scheme
+    private var looping: Bool { pulsing && !poseStill }
 
     public init(tone: StrandTone = .positive, pulsing: Bool = false, size: CGFloat = 9) {
         self.tone = tone
@@ -93,33 +95,16 @@ public struct ConnectionDot: View {
     }
 
     public var body: some View {
-        ZStack {
-            // Dark-mode only (#review): AdditiveBloom used to hide this expanding ring on light
-            // (content.opacity(0)); now that we drop the offscreen bloom, gate it explicitly so light
-            // mode stays ring-free (the resting dot + its shadow carry the live state there).
-            if pulsing && scheme == .dark {
-                Circle()
-                    .fill(tone.color)
-                    .frame(width: size, height: size)
-                    .scaleEffect(animate ? 2.4 : 1.0)
-                    .opacity(animate ? 0.0 : 0.5)
-                    // No .additiveBloom(): the .plusLighter blend forced an offscreen pass every
-                    // frame of the repeatForever pulse, a continuous cost while a strap is backfilling
-                    // (exactly when this live dot is on screen). The expanding/fading ring reads the
-                    // same without it; the resting dot's shadow still carries the "live" glow.
-            }
-            Circle()
-                .fill(tone.color)
-                .frame(width: size, height: size)
-                .shadow(color: tone.color.opacity(0.8), radius: pulsing ? 4 : 2)
-        }
-        .frame(width: size, height: size)
-        // Honour the quiet-motion gate (system Reduce Motion, Low Power Mode, or the in-app
-        // toggle): don't kick off the looping pulse (it settles at the resting dot) and never
-        // attach the repeatForever breathe animation.
-        .onAppear { if pulsing && !poseStill { animate = true } }
-        .animation(pulsing && !poseStill ? StrandMotion.breathe : nil, value: animate)
-        .accessibilityHidden(true)
+        Circle()
+            .fill(tone.color)
+            .frame(width: size, height: size)
+            .opacity(dimmed ? 0.35 : 1)
+            // Honour the quiet-motion gate (system Reduce Motion, Low Power Mode, or the in-app toggle):
+            // the loop only exists while `looping`; turning it off snaps back to the resting dot.
+            .animation(TelosMotion.liveLoop(poseStill: !looping), value: dimmed)
+            .onAppear { dimmed = looping }
+            .onChangeCompat(of: looping) { active in dimmed = active }
+            .accessibilityHidden(true)
     }
 }
 

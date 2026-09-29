@@ -51,11 +51,11 @@ final class QuestDifficultyTests: XCTestCase {
             XCTAssertLessThanOrEqual(steady ?? 0, push ?? 0, "\(metric) must not fall from Steady to Push")
             XCTAssertLessThanOrEqual(push ?? 0, hard ?? 0, "\(metric) must not fall from Push to Relentless")
         }
-        // A bedtime is the one that goes DOWN as the gear goes up: earlier is harder.
-        let steady = threshold(all(.steady, full), .bedtimeBy)
-        let hard = threshold(all(.relentless, full), .bedtimeBy)
-        XCTAssertEqual(steady, Double(23 * 60 + 20))
-        XCTAssertEqual(hard, Double(22 * 60 + 40))
+        // HEALTH_V2 H9b: the bedtime is NOT scaled by the gear any more. Steady issues none; Push and
+        // Relentless both ask for the wearer's own usual onset (no anchor in this baseline), unshifted.
+        XCTAssertNil(threshold(all(.steady, full), .bedtimeBy))
+        XCTAssertEqual(threshold(all(.push, full), .bedtimeBy), Double(23 * 60 + 20))
+        XCTAssertEqual(threshold(all(.relentless, full), .bedtimeBy), Double(23 * 60 + 20))
     }
 
     func testStepsNeverTargetBelowTheFloorAtWhichADayCounted() {
@@ -74,7 +74,79 @@ final class QuestDifficultyTests: XCTestCase {
     func testMeditationIsFlooredAtWhatCountsAsASessionAtAll() {
         let barely = QuestBaseline(medianMeditationMinutes: 2)
         XCTAssertEqual(threshold(all(.steady, barely), .meditationMinutes),
-                       LevelEngine.meditationMinMinutes)
+                       LevelEngine.meditationMinMinutes(on: day))
+    }
+
+    /// The quest floor reads the SAME date-effective minimum as the level and the Focus badge: a day
+    /// before the 2026-09-29 changeover floors at 5, a day from it at 10.
+    func testTheMeditationFloorIsDateEffective() {
+        let barely = QuestBaseline(medianMeditationMinutes: 2)
+        let before = QuestDayPlan.targets(baseline: barely, difficulty: .steady, day: "2026-09-20")
+        let after = QuestDayPlan.targets(baseline: barely, difficulty: .steady, day: "2026-09-30")
+        XCTAssertEqual(threshold(before, .meditationMinutes), 5)
+        XCTAssertEqual(threshold(after, .meditationMinutes), 10)
+        XCTAssertEqual(threshold(after, .meditationMinutes), LevelEngine.meditationMinMinutes(on: "2026-09-30"))
+    }
+
+    // MARK: - HEALTH_V2 H9: the gear respects the day
+
+    func testASuppressedDayGivesNoTrainingFactorAboveOne() {
+        for state in [QuestDayState.easy, .rest, .moveHard] {
+            for difficulty in QuestDifficulty.allCases {
+                let t = QuestDayPlan.targets(baseline: full, difficulty: difficulty, day: day, dayState: state)
+                let minutes = threshold(t, .workoutMinutes) ?? 0
+                XCTAssertLessThanOrEqual(minutes, 40, "\(difficulty) on \(state): never above their usual 40 min")
+                if state.isRecoveryDay {
+                    XCTAssertLessThanOrEqual(minutes, QuestDayState.easyMovementMaxMinutes)
+                    XCTAssertEqual(threshold(t, .strain), 10, "the band's floor, Steady's point")
+                } else {
+                    XCTAssertLessThanOrEqual(threshold(t, .strain) ?? 0, 12, "no higher than mid-band")
+                }
+            }
+        }
+        // Relentless on a red day no longer asks 1.30 × training.
+        let red = QuestDayPlan.targets(baseline: full, difficulty: .relentless, day: day,
+                                       dayState: QuestDayState.standIn(charge: 20, illnessRaised: false))
+        XCTAssertEqual(threshold(red, .workoutMinutes), 30)
+        XCTAssertTrue(red.first { $0.goal.metric == .workoutMinutes }?.target.contains("easy movement") == true)
+    }
+
+    func testStepsAreNotReducedOnARecoveryDay() {
+        let easy = QuestDayPlan.targets(baseline: full, difficulty: .relentless, day: day, dayState: .easy)
+        XCTAssertEqual(threshold(easy, .steps), 12_250)
+    }
+
+    func testTheDayStateCanComeFromTheBaselineAndAnUnknownMorningIsAsPlanned() {
+        var red = full
+        red.dayState = .easy
+        XCTAssertEqual(threshold(all(.relentless, red), .workoutMinutes), 30)
+        XCTAssertEqual(QuestDayState.standIn(charge: nil, illnessRaised: false), .asPlanned)
+        XCTAssertEqual(QuestDayState.standIn(charge: 20, illnessRaised: false), .easy)
+        XCTAssertEqual(QuestDayState.standIn(charge: 80, illnessRaised: true), .rest)
+        XCTAssertEqual(QuestDayState.standIn(charge: 50, illnessRaised: false), .asPlanned)
+        XCTAssertEqual(threshold(all(.relentless, full), .workoutMinutes), 50, "as planned: 40 × 1.30 → 50")
+    }
+
+    func testTheBedtimeThresholdEqualsTheAnchorForPushAndRelentless() {
+        var anchored = full
+        anchored.bedtimeTargetMin = 22 * 60 + 47   // used exactly as the plan states it
+        XCTAssertNil(threshold(all(.steady, anchored), .bedtimeBy), "Steady issues no bedtime directive")
+        XCTAssertEqual(threshold(all(.push, anchored), .bedtimeBy), Double(22 * 60 + 47))
+        XCTAssertEqual(threshold(all(.relentless, anchored), .bedtimeBy), Double(22 * 60 + 47))
+    }
+
+    func testRelentlessAddsAWindDownOnTopOfItsFourDirectives() throws {
+        var anchored = full
+        anchored.bedtimeTargetMin = 23 * 60
+        let plan = QuestDayPlan.plan(baseline: anchored, difficulty: .relentless, day: day)
+        XCTAssertEqual(plan.filter { $0.goal.metric != .journal }.count, 4)
+        let windDown = try XCTUnwrap(plan.first { $0.goal.metric == .journal })
+        XCTAssertTrue(windDown.target.contains("21:45"), "an hour before lights out at 22:45")
+        XCTAssertNil(QuestDayPlan.plan(baseline: anchored, difficulty: .push, day: day)
+            .first { $0.goal.metric == .journal })
+        // No bedtime, no wind-down.
+        XCTAssertNil(QuestDayPlan.plan(baseline: QuestBaseline(medianSteps: 9_000), difficulty: .relentless, day: day)
+            .first { $0.goal.metric == .journal })
     }
 
     // MARK: - The effort band
@@ -134,7 +206,8 @@ final class QuestDifficultyTests: XCTestCase {
     func testTheGearSetsHowManyDirectivesTheDayCarries() {
         XCTAssertEqual(QuestDayPlan.plan(baseline: full, difficulty: .steady, day: day).count, 2)
         XCTAssertEqual(QuestDayPlan.plan(baseline: full, difficulty: .push, day: day).count, 3)
-        XCTAssertEqual(QuestDayPlan.plan(baseline: full, difficulty: .relentless, day: day).count, 4)
+        // Four measured directives, plus the wind-down (the baseline has a bedtime).
+        XCTAssertEqual(QuestDayPlan.plan(baseline: full, difficulty: .relentless, day: day).count, 5)
     }
 
     func testAThinBaselineNeverPadsTheCountToTheGearsPromise() {
@@ -184,9 +257,12 @@ final class QuestDifficultyTests: XCTestCase {
     }
 
     func testTheFocusPutsItsOwnDirectivesFirstAndKeepsTheRestInOrder() {
-        // Steady carries two directives. With sleep as the focus, both of them are the sleep ones.
+        // Steady carries two directives and no bedtime one: with sleep as the focus, the sleep-hours
+        // directive leads and the base order follows.
         let ordered = QuestDayPlan.plan(baseline: full, difficulty: .steady, focus: .sleep, day: day)
-        XCTAssertEqual(ordered.map(\.goal.metric), [.sleepHours, .bedtimeBy])
+        XCTAssertEqual(ordered.map(\.goal.metric), [.sleepHours, .steps])
+        let push = QuestDayPlan.plan(baseline: full, difficulty: .push, focus: .sleep, day: day)
+        XCTAssertEqual(push.map(\.goal.metric), [.sleepHours, .bedtimeBy, .steps])
         // With focus on muscle, the training and effort directives lead instead.
         let muscle = QuestDayPlan.plan(baseline: full, difficulty: .steady, focus: .muscle, day: day)
         XCTAssertEqual(muscle.map(\.goal.metric), [.workoutMinutes, .strain])

@@ -63,26 +63,30 @@ public extension Color {
 // macOS / iOS, so the names never change — only the VALUES were re-themed. New
 // Titanium & Gold tokens (gold ramp, titanium ramp, gradients) are ADDED at the end
 // of the type; nothing existing was removed or renamed.
+//
+// TELOS 2.0 (docs/DESIGN_V2.md §4.1, Appendix B): the CHROME names below are re-pointed to the
+// `TelosColor` tokens (surfaces, lines, text, status, rest / heart / lungs identity), so every existing
+// call site renders V2 with no edit. The DATA ramps (recovery / strain / sleep stages / HR zones /
+// stress gradient / Oura-Garmin `BrandSleepRamp`) and every `ChartStyle.classic` branch keep their
+// values — they are measurements, pinned by tests and by the Android twin.
 
 public enum StrandPalette {
 
-    // MARK: Surfaces — deep navy canvas, tinted frosted cards
-    // Background is a near-black navy (NOT pure black); cards float just above it.
-    public static let surfaceBase    = NoopVisualStyle.canvas
-    public static let surfaceRaised  = NoopVisualStyle.surface
-    public static let surfaceOverlay = NoopVisualStyle.surfaceTop
-    public static let surfaceInset   = NoopVisualStyle.inset
-    public static let hairline       = NoopVisualStyle.border
-    public static let hairlineStrong = NoopVisualStyle.borderHighlight
-    /// The faint interior line — chart grid lines, in-card separators, tick rules. Reach for this
-    /// instead of `hairline.opacity(0.4 / 0.5 / 0.6)`, which is how the same line ended up drawn at
-    /// three different weights on three adjacent surfaces.
-    public static let hairlineSoft   = NoopVisualStyle.border.opacity(NoopVisualStyle.hairlineSoftOpacity)
+    // MARK: Surfaces — V2: canvas < surface < surfaceRaised, flat, separated by 1 pt lines
+    public static let surfaceBase    = TelosColor.canvas
+    public static let surfaceRaised  = TelosColor.surface
+    public static let surfaceOverlay = TelosColor.surfaceRaised
+    public static let surfaceInset   = TelosColor.surfaceInset
+    public static let hairline       = TelosColor.line
+    public static let hairlineStrong = TelosColor.lineStrong
+    /// The faint interior line — chart grid lines, in-card separators, tick rules. Precomputed
+    /// (`TelosColor.lineSoft`), never an `.opacity()` of another line.
+    public static let hairlineSoft   = TelosColor.lineSoft
 
-    // MARK: Text — deep navy-ink on paper / cool off-white on navy
-    public static let textPrimary    = NoopVisualStyle.primaryText
-    public static let textSecondary  = NoopVisualStyle.secondaryText
-    public static let textTertiary   = NoopVisualStyle.tertiaryText
+    // MARK: Text — V2 values (textTertiary now ≥ 4.5:1 on `surface` in both schemes)
+    public static let textPrimary    = TelosColor.textPrimary
+    public static let textSecondary  = TelosColor.textSecondary
+    public static let textTertiary   = TelosColor.textTertiary
 
     // MARK: Text ON a permanently-dark surface (scheme-invariant)
     // Use these — NOT textPrimary/Secondary/Tertiary — for labels/pills drawn over a fill that is pinned
@@ -91,9 +95,9 @@ public enum StrandPalette {
     // dark-on-near-black and vanish (#1013). These hold the light-on-dark values in BOTH schemes, so a
     // label always reads. (The Liquid hero card USED to need these, but its `heroFill` is theme-aware as of
     // #1160, so the hero now uses the normal text* tokens.)
-    public static let onDarkPrimary   = Color(hex: "#F4F6F8")
-    public static let onDarkSecondary = Color(hex: "#C8CFD8")
-    public static let onDarkTertiary  = Color(hex: "#8A94A4")
+    public static let onDarkPrimary   = TelosColor.onDarkPrimary
+    public static let onDarkSecondary = TelosColor.onDarkSecondary
+    public static let onDarkTertiary  = TelosColor.onDarkTertiary
 
     // MARK: Liquid hero card surface (#1160/#1161)
     // Was pinned near-black in BOTH themes, which read as a broken dark block in Light mode (#1160) and
@@ -101,11 +105,15 @@ public enum StrandPalette {
     // Light, so the hero fits in with the other cards. Its own text uses the regular text*/tint tokens
     // (which flip) — NOT onDark*, which stays fixed for the genuinely-always-dark SKY backdrop
     // (ScreenScaffold's over-sky title). 8-digit hex = RRGGBBAA (alpha last).
-    public static let heroFill   = Color(light: "FFFFFFD9", dark: "0D0E14CC")
-    public static let heroBorder = Color(light: "0000001A", dark: "FFFFFF1C")
+    //
+    // V2: the hero is a card like any other — flat `surface` + 1 pt `line` (card transparency is applied
+    // by the hero's own container from `\.telosCardOpacity`).
+    public static let heroFill   = TelosColor.surface
+    public static let heroBorder = TelosColor.line
 
-    // MARK: Glow — ambient bloom behind heroes / charts (additive on dark; faint warm on light)
-    public static let glowAmbient    = NoopVisualStyle.mintGlow.opacity(0.28)
+    // MARK: Glow — RETIRED in V2 (no additive bloom anywhere). Resolves to clear so old call sites
+    // draw nothing.
+    public static let glowAmbient    = Color.clear
 
     // MARK: Accent — chrome anchor (links, selection, focus, generic accent). USER-SELECTABLE (mint /
     // WHOOP blue / custom) via `accentChoice` below, default mint (#1068). Only the chrome accent is
@@ -122,8 +130,9 @@ public enum StrandPalette {
     public static var focusRing: Color { accentChoice.focusRing }
     /// Opacity for dimmed/disabled sections (shared so screens don't invent their own value).
     public static let disabledOpacity: Double = 0.45
-    /// Liquid-scene activity tint shared by heart-rate feedback and transient sync chrome.
-    public static let liquidHeart = Color(light: "#D94C64", dark: "#FF6B81")
+    /// Liquid-scene activity tint shared by heart-rate feedback and transient sync chrome (= the V2
+    /// `heart` identity; same hex as 1.x).
+    public static let liquidHeart = TelosColor.heart
 
     // MARK: - Chart style (data-viz colour mode) — Titanium (brand) or Classic (throwback)
     //
@@ -238,13 +247,19 @@ public enum StrandPalette {
     /// HR zones indexed 1...5; index 0 mirrors zone1 for convenience.
     public static var hrZones: [Color] { [zone1, zone1, zone2, zone3, zone4, zone5] }
 
-    // MARK: Status — Titanium gold/amber/orange, or the Classic green/amber/red.
-    public static var statusPositive: Color { isClassic ? Color(light: "#2E9E4F", dark: "#46B45A") : Color(light: "#1F8A5B", dark: "#03E095") }
-    public static var statusWarning:  Color { isClassic ? Color(light: "#CFA528", dark: "#F2C53D") : Color(light: "#C2792E", dark: "#F0A020") }
-    public static var statusCritical: Color { isClassic ? Color(light: "#CB3A2F", dark: "#E5483B") : Color(light: "#C84E1E", dark: "#E0662F") }
+    // MARK: Status — V2 positive / warning / critical (default style), or the Classic green/amber/red.
+    // Both arms are stored once (§2.1 rule 6: a computed `Color(light:dark:)` allocates per access).
+    static let cStatusPositive = Color(light: "#2E9E4F", dark: "#46B45A")
+    static let cStatusWarning  = Color(light: "#CFA528", dark: "#F2C53D")
+    static let cStatusCritical = Color(light: "#CB3A2F", dark: "#E5483B")
+    public static var statusPositive: Color { isClassic ? cStatusPositive : TelosColor.positive }
+    public static var statusWarning:  Color { isClassic ? cStatusWarning  : TelosColor.warning }
+    public static var statusCritical: Color { isClassic ? cStatusCritical : TelosColor.critical }
 
     // MARK: Per-metric accents — HRV / SpO₂ / energy / risk. Classic leans the traditional hues (purple HRV, red risk).
-    public static var metricCyan:   Color { isClassic ? Color(light: "#2E92B4", dark: "#3FA9C9") : Color(light: "#2E92B4", dark: "#3FA9C9") }
+    // `metricCyan` is the V2 `lungs` identity in the default style (light #2E92B4 → #1F7F9E for AA).
+    static let cMetricCyan = Color(light: "#2E92B4", dark: "#3FA9C9")
+    public static var metricCyan:   Color { isClassic ? cMetricCyan : TelosColor.lungs }
     public static var metricPurple: Color { isClassic ? Color(light: "#6A4FC0", dark: "#8E6FD6") : Color(light: "#3A80D6", dark: "#4A90E2") }
     public static var metricAmber:  Color { isClassic ? Color(light: "#CFA528", dark: "#F2C53D") : Color(light: "#C2792E", dark: "#D98A3D") }
     public static var metricRose:   Color { isClassic ? Color(light: "#CB3A2F", dark: "#E5483B") : Color(light: "#C84E1E", dark: "#E0662F") }
@@ -275,20 +290,21 @@ public enum StrandPalette {
     public static var effortGlow: Color    { isClassic ? Color(light: "#3A74C4", dark: "#4A90E2") : Color(light: "#2A78C8", dark: "#4090E0") }
     public static var effortGradient: Gradient { Gradient(colors: [effortDeep, effortBright]) }
 
-    /// Rest (sleep) — blue world / Classic indigo.
-    public static var restColor: Color     { isClassic ? Color(light: "#3A80D6", dark: "#6FA8E8") : Color(light: "#5E7896", dark: "#83A0B8") }
-    public static var restDeep: Color      { isClassic ? Color(light: "#203E73", dark: "#2A4C8F") : Color(light: "#234F9E", dark: "#2F6FCB") }
-    public static var restBright: Color    { isClassic ? Color(light: "#6A4FC0", dark: "#8E6FD6") : Color(light: "#5790DA", dark: "#6FA8E8") }
-    public static var restGlow: Color      { isClassic ? Color(light: "#3A80D6", dark: "#6FA8E8") : Color(light: "#3A80D6", dark: "#4A90E2") }
+    /// Rest (sleep) — V2 lavender (tied to the hypnogram's light-sleep hue; was steel #83A0B8) /
+    /// Classic indigo. Classic arms stored once.
+    static let cRestColor  = Color(light: "#3A80D6", dark: "#6FA8E8")
+    static let cRestDeep   = Color(light: "#203E73", dark: "#2A4C8F")
+    static let cRestBright = Color(light: "#6A4FC0", dark: "#8E6FD6")
+    public static var restColor: Color     { isClassic ? cRestColor  : TelosColor.rest }
+    public static var restDeep: Color      { isClassic ? cRestDeep   : TelosColor.restDeep }
+    public static var restBright: Color    { isClassic ? cRestBright : TelosColor.restBright }
+    public static var restGlow: Color      { isClassic ? cRestColor  : TelosColor.rest }
     /// The Rest family's most legible LINE colour — for strokes that must read on a busy or translucent
     /// surface, such as the body-clock dial's arcs over a custom background image.
     ///
-    /// Introduces no new value: it selects the existing token that is the bright blue in each palette.
-    /// The families are not parallel — classic's `restBright` is a PURPLE accent while modern's is the
-    /// blue, and classic's `restColor` is the blue where modern's is a muted steel — so a card naming
-    /// either token directly gets the right colour in one palette and the wrong one in the other. Both
-    /// resolve to #6FA8E8 in dark.
-    public static var restLine: Color { isClassic ? restColor : restBright }
+    /// Classic: its blue `restColor` (#6FA8E8 dark). Default style: the V2 `rest` identity — the
+    /// lavender line is the Rest colour everywhere in 2.0 (restColor / restLine / restGlow → rest).
+    public static var restLine: Color { isClassic ? cRestColor : TelosColor.rest }
 
     public static var restGradient: Gradient { Gradient(colors: [restDeep, restBright]) }
 
@@ -302,14 +318,15 @@ public enum StrandPalette {
 
     // MARK: Scenic background (NEW) — detail-screen hero gradient + starfield.
     /// Radial canvas: lit center → deep edge. Used by `ScenicHeroBackground` (warm-lit on light).
-    public static let scenicCenter     = Color(light: "#FBF6EA", dark: "#1C2128")
-    public static let scenicEdge       = Color(light: "#EDE6D6", dark: "#121518")
+    /// RETIRED in V2 (§3): both stops are the canvas, so a remaining `ScenicHeroBackground` draws flat.
+    public static let scenicCenter     = TelosColor.canvas
+    public static let scenicEdge       = TelosColor.canvas
     /// Star tint for the scenic starfield (very faint on light; the hero suppresses stars there).
     public static let scenicStar       = Color(light: "#D8CDB6", dark: "#C8CFD8")
 
-    /// Frosted-card tint endpoints (white→warm on light; the accent wash sits over them).
-    public static let cardFillTop      = Color(light: "#FFFFFF", dark: "#15243C")
-    public static let cardFillBottom   = Color(light: "#FAF7F0", dark: "#0B1424")
+    /// Frosted-card fill endpoints — V2: both are the flat `surface` (the gradient collapses).
+    public static let cardFillTop      = TelosColor.surface
+    public static let cardFillBottom   = TelosColor.surface
 
     // MARK: - Titanium & Gold core tokens (NEW)
     //
@@ -324,8 +341,9 @@ public enum StrandPalette {
     public static let goldLight     = Color(light: "#6FA8E0", dark: "#9FC8F0")
     /// Deep blue — accent low stop (was bronze).
     public static let goldDeep      = Color(light: "#2A5C9E", dark: "#3A78C8")
-    /// Near-black brown — text / icons placed ON gold surfaces (scheme-invariant; gold fills stay gold).
-    public static let goldDeepText  = Color(hex: "#FFFFFF") // white text/icons on accent fills (WHOOP, gold killed)
+    /// Text / icons placed ON an accent fill — V2 `onAccent` (#062019 on the bright dark-scheme mint,
+    /// white on the deep light-scheme mint; both ≥ 4.5:1).
+    public static let goldDeepText  = TelosColor.onAccent
     /// The bright core dot at a gauge arc tip / sparkline head. White reads as a highlight on the dark
     /// canvas; on light it would vanish into the white card, so it flips to a deep ink that reads as a
     /// crisp centre on the (deepened) coloured tip bead.
@@ -340,7 +358,7 @@ public enum StrandPalette {
     public static let titaniumTop   = Color(light: "#DDE1E6", dark: "#F1F3F5")
     public static let titaniumMid   = Color(light: "#BBC2C9", dark: "#C9CFD4")
     public static let titaniumLow   = Color(light: "#98A0A8", dark: "#969DA4")
-    public static let titaniumDeep  = Color(hex: "#6B737B")
+    public static let titaniumDeep  = Color(light: "#6B737B", dark: "#6B737B")
     /// 150° titanium ramp for tiles / avatars / icon plates.
     public static let titaniumGradient = Gradient(colors: [titaniumTop, titaniumMid, titaniumLow, titaniumDeep])
 
@@ -687,7 +705,7 @@ private func swatchRow(_ title: String, _ items: [(String, Color)]) -> some View
                         .fill(color)
                         .frame(width: 64, height: 48)
                         .overlay(RoundedRectangle(cornerRadius: 8).stroke(StrandPalette.hairline, lineWidth: 1))
-                    Text(name).font(.system(size: 9)).foregroundStyle(StrandPalette.textSecondary)
+                    Text(name).font(TelosType.scaleFixed).foregroundStyle(StrandPalette.textSecondary)
                 }
             }
         }

@@ -112,22 +112,26 @@ final class CoachSuggestionsTests: XCTestCase {
     // MARK: - High strain
 
     func testHighStrainAddsLoadedChip() {
-        let today = metric(day: 10, recovery: 70, strain: 16)
+        let today = metric(day: 10, recovery: 70, strain: 80)
         let chips = CoachSuggestions.suggestions(for: today, recent: [])
         XCTAssertTrue(chips.contains("Have I done enough today, or push more?"))
     }
 
-    func testStrainBelow14DoesNotAddLoadedChip() {
-        let today = metric(day: 10, recovery: 70, strain: 13)
-        let chips = CoachSuggestions.suggestions(for: today, recent: [])
-        XCTAssertFalse(chips.contains("Have I done enough today, or push more?"))
+    /// HEALTH_V2 H14: Effort is stored on 0–100. The old cutoff of 14 (WHOOP's 0–21 floor) fired on an
+    /// ordinary 40/100 day; the cutoff is now that floor mapped to 0–100.
+    func testAnEffortOfFortyOutOfAHundredDoesNotAddLoadedChip() {
+        for strain in [13.0, 16.0, 40.0, 66.0] {
+            let chips = CoachSuggestions.suggestions(for: metric(day: 10, recovery: 70, strain: strain), recent: [])
+            XCTAssertFalse(chips.contains("Have I done enough today, or push more?"), "effort \(strain)")
+        }
+        XCTAssertEqual(CoachSuggestions.highStrain, 67, accuracy: 1e-9)
     }
 
     // MARK: - Cap + stable generic
 
     func testAllSignalsFireCapsAtFour() {
         let recent = (1...30).map { metric(day: $0, hrv: 60) }
-        let today = metric(day: 31, recovery: 20, hrv: 40, sleepMin: 300, strain: 16)
+        let today = metric(day: 31, recovery: 20, hrv: 40, sleepMin: 300, strain: 80)
         let chips = CoachSuggestions.suggestions(for: today, recent: recent)
         // charge + hrv + sleep + strain + stable generic = 5 candidates → capped at 4.
         XCTAssertEqual(chips.count, 4)

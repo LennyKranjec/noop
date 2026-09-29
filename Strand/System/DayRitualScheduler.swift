@@ -172,7 +172,8 @@ enum DayRitualScheduler {
         }
         guard let prose = await coach.generateOneShot(
             systemPrompt: ritual.systemPrompt(grounding: block),
-            question: ritual.question)
+            question: ritual.question,
+            budget: .ritual)
         else { return nil }
 
         // MARKED RUN ONLY ONCE THERE IS SOMETHING TO SHOW. Marking before the round trip would turn a
@@ -215,7 +216,8 @@ enum DayRitualScheduler {
                                    grounding: String, dayKey: String) async -> Quest? {
         guard let answer = await coach.generateOneShot(
             systemPrompt: ritual.questSystemPrompt(grounding: grounding),
-            question: "Set the directive."),
+            question: "Set the directive.",
+            budget: .ritual),
             let written = DayRitualWriter.parseQuest(answer),
             // NO GOAL, NO QUEST. It would be a directive nothing can close, and quests are no longer
             // closed by the wearer saying so.

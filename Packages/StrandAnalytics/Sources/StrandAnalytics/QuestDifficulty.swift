@@ -27,6 +27,19 @@ import Foundation
 // this wearer never reaches a baseline field at all — see the note on `effortBand21`, which is only
 // ever set when the day's strain is actually being measured.
 //
+// THE GEAR RESPECTS THE DAY (HEALTH_V2 H9). The ambition stays on behaviour that is safe to push — steps,
+// water, meditation, the journal — and training and effort are bounded by the day's state
+// (`QuestDayState`): on an `easy` or `rest` day (low Charge, illness heads-up) training and strain drop
+// to Steady's factors and the training directive becomes easy movement of at most 30 minutes; on a
+// `moveHard` day no training factor exceeds 1.0 and the strain point stops at the band's middle. Steps
+// are never reduced: walking is compatible with recovery.
+//
+// ONE BEDTIME FOR EVERY GEAR (HEALTH_V2 H9b / S2). The bedtime threshold is the sleep anchor's
+// (`QuestBaseline.bedtimeTargetMin`, from `SleepAnchor`), the same whichever gear was picked — the gear
+// used to pull bedtime 20–40 minutes earlier by the morning's choice, which made bedtimes LESS regular.
+// The gear only decides WHETHER a bedtime directive is issued (Steady no, Push yes, Relentless yes plus a
+// wind-down directive). Swift-only change; the Android twin is not updated in 2.0.
+//
 // Pure + deterministic, so the whole table is unit-tested without a strap, an app target or a model —
 // and so an Android twin, when it is written, can assert the same numbers off the same constants.
 
@@ -55,8 +68,9 @@ public enum QuestDifficulty: String, Equatable, Codable, CaseIterable, Sendable 
     public var blurb: String {
         switch self {
         case .steady: return "Hold your own normal. Two directives, scaled to what you already do."
-        case .push: return "A real step up on your own numbers. Three directives."
-        case .relentless: return "The top of what today's data says is sensible. Four directives."
+        case .push: return "A real step up on your own numbers. Three directives, and your anchored bedtime."
+        case .relentless:
+            return "The top of what today's data says is sensible. Four directives, and a wind-down."
         }
     }
 
@@ -87,8 +101,9 @@ public enum QuestDifficulty: String, Equatable, Codable, CaseIterable, Sendable 
     ///   - `training` × the median length of their training days
     ///   - `meditation` × the median length of their meditation sessions
     ///   - `sleep` × their personal sleep need (`AnalyticsEngine.Rest.engineNeedHours`)
-    ///   - `bedtimeEarlierMin` is SUBTRACTED from their own median sleep onset
     ///   - `bandPosition` picks a point in the day's recommended effort band (0 = its floor, 1 = its top)
+    ///   - `issuesBedtime` / `issuesWindDown` decide WHETHER a bedtime / wind-down directive is issued.
+    ///     The bedtime itself is the sleep anchor's, identical for every gear (H9b) — no gear moves it.
     ///
     /// Two deliberate asymmetries. `sleep` barely moves (0.95 → 1.05): sleeping far past your need is
     /// not a harder day, it is a different one, and the ambition in a sleep directive is hitting the
@@ -101,23 +116,56 @@ public enum QuestDifficulty: String, Equatable, Codable, CaseIterable, Sendable 
         public let training: Double
         public let meditation: Double
         public let sleep: Double
-        public let bedtimeEarlierMin: Int
         public let bandPosition: Double
+        /// Whether the gear issues a bedtime directive (at the anchor, never shifted).
+        public let issuesBedtime: Bool
+        /// Whether the gear also issues a wind-down directive (a journal entry as the evening winds down).
+        public let issuesWindDown: Bool
     }
 
     public var scale: Scale {
         switch self {
         case .steady:
             return Scale(steps: 1.00, water: 0.85, training: 0.75, meditation: 1.00,
-                         sleep: 0.95, bedtimeEarlierMin: 0, bandPosition: 0.0)
+                         sleep: 0.95, bandPosition: 0.0, issuesBedtime: false, issuesWindDown: false)
         case .push:
             return Scale(steps: 1.15, water: 1.00, training: 1.00, meditation: 1.50,
-                         sleep: 1.00, bedtimeEarlierMin: 20, bandPosition: 0.5)
+                         sleep: 1.00, bandPosition: 0.5, issuesBedtime: true, issuesWindDown: false)
         case .relentless:
             return Scale(steps: 1.35, water: 1.10, training: 1.30, meditation: 2.00,
-                         sleep: 1.05, bedtimeEarlierMin: 40, bandPosition: 1.0)
+                         sleep: 1.05, bandPosition: 1.0, issuesBedtime: true, issuesWindDown: true)
         }
     }
+}
+
+/// What the day's body allows, for the gear's training and effort directives (HEALTH_V2 H9a).
+///
+/// The cases mirror S3's `DayGuidance` (`asPlanned`, `moveHard`, `easy`, `rest`) so the week plan can map
+/// onto it one to one when it lands; until then `standIn(charge:illnessRaised:)` derives it from the two
+/// figures the app already has, the same stand-in the penalty rules use (`charge < QuestTriggers.chargeLow`).
+public enum QuestDayState: String, Equatable, Codable, CaseIterable, Sendable {
+    /// Nothing holds the day back — or nothing was measured this morning (never invented as low).
+    case asPlanned
+    /// Hard sessions are not advised: no training factor above 1.0, effort no higher than mid-band.
+    case moveHard
+    /// A recovery day: training and effort at Steady's factors; training is easy movement ≤ 30 min.
+    case easy
+    /// An illness heads-up is up: as `easy`.
+    case rest
+
+    /// Whether the day is suppressed for training (easy or rest).
+    public var isRecoveryDay: Bool { self == .easy || self == .rest }
+
+    /// Until S3's week plan exists: illness heads-up ⇒ rest; Charge under `QuestTriggers.chargeLow` ⇒
+    /// easy; anything else, including an unknown Charge, ⇒ as planned.
+    public static func standIn(charge: Double?, illnessRaised: Bool) -> QuestDayState {
+        if illnessRaised { return .rest }
+        guard let charge, charge.isFinite else { return .asPlanned }
+        return charge < QuestTriggers.chargeLow ? .easy : .asPlanned
+    }
+
+    /// On a recovery day the training directive asks for at most this much easy movement.
+    public static let easyMovementMaxMinutes: Double = 30
 }
 
 /// What this wearer actually does — the figures every target is scaled from.
@@ -137,8 +185,15 @@ public struct QuestBaseline: Equatable, Sendable {
     public var medianMeditationMinutes: Double?
     /// Their personal sleep need in hours, as the last analysis pass scored Rest with.
     public var sleepNeedHours: Double?
-    /// Median sleep onset, in minutes past midnight on the evening clock.
+    /// Median sleep onset, in minutes past midnight on the evening clock. Used for a bedtime directive's
+    /// threshold only while there is no sleep anchor (`bedtimeTargetMin`) — the wearer's own usual, never
+    /// shifted by the gear.
     public var medianSleepOnsetMinute: Int?
+    /// The sleep anchor's asleep-by minute for tonight (`SleepSchedulePlan.asleepByMin`): the ONE bedtime
+    /// threshold, the same for every gear (HEALTH_V2 H9b). Nil while the anchor abstains.
+    public var bedtimeTargetMin: Int?
+    /// What the day's body allows (H9a). Nil is `asPlanned`: an unmeasured morning is not a low one.
+    public var dayState: QuestDayState?
     /// The day's recommended day-strain band on WHOOP's 0–21 axis.
     ///
     /// SET ONLY WHEN THE DAY'S STRAIN IS ACTUALLY MEASURED for this wearer. `QuestMetric.strain` is
@@ -150,7 +205,8 @@ public struct QuestBaseline: Equatable, Sendable {
     public init(medianSteps: Double? = nil, hydrationGoalMl: Double? = nil,
                 medianTrainingMinutes: Double? = nil, medianMeditationMinutes: Double? = nil,
                 sleepNeedHours: Double? = nil, medianSleepOnsetMinute: Int? = nil,
-                effortBand21: ClosedRange<Int>? = nil) {
+                effortBand21: ClosedRange<Int>? = nil, bedtimeTargetMin: Int? = nil,
+                dayState: QuestDayState? = nil) {
         self.medianSteps = medianSteps
         self.hydrationGoalMl = hydrationGoalMl
         self.medianTrainingMinutes = medianTrainingMinutes
@@ -158,6 +214,8 @@ public struct QuestBaseline: Equatable, Sendable {
         self.sleepNeedHours = sleepNeedHours
         self.medianSleepOnsetMinute = medianSleepOnsetMinute
         self.effortBand21 = effortBand21
+        self.bedtimeTargetMin = bedtimeTargetMin
+        self.dayState = dayState
     }
 }
 
@@ -263,12 +321,19 @@ public enum QuestDayPlan {
     ///
     /// The order is fixed except for `focus`: a directive that moves the level's weakest MEASURED part
     /// comes first, and the rest keep their base order behind it (stable, so the same inputs always
-    /// produce the same day). Take `difficulty.questCount` of these to get the day's quests.
+    /// produce the same day). Take `difficulty.questCount` of these to get the day's quests — `plan` does,
+    /// and adds Relentless's wind-down on top.
+    ///
+    /// `dayState` overrides `baseline.dayState`; with neither, the day is `asPlanned`.
     public static func targets(baseline: QuestBaseline, difficulty: QuestDifficulty,
-                               focus: LevelPart? = nil, day: String) -> [QuestPlanTarget] {
+                               focus: LevelPart? = nil, day: String,
+                               dayState: QuestDayState? = nil) -> [QuestPlanTarget] {
         let s = difficulty.scale
+        let steady = QuestDifficulty.steady.scale
+        let state = dayState ?? baseline.dayState ?? .asPlanned
         let xp = difficulty.xp
         var out: [QuestPlanTarget] = []
+        var windDown: QuestPlanTarget?
 
         func add(_ metric: QuestMetric, threshold: Double, observation: String, target: String,
                  rewards: [QuestReward], parts: Set<LevelPart>) {
@@ -299,34 +364,76 @@ public enum QuestDayPlan {
                 rewards: [.sleep, .brain], parts: [.sleep])
         }
 
-        // BEDTIME — measured off their own median onset, so "earlier" means earlier than THEY are.
-        if let onset = baseline.medianSleepOnsetMinute {
-            // ONE EXPRESSION FOR THE NUMBER, read by both the goal and the sentence — a card that said
-            // 22:40 while the goal checked 22:37 would be two answers to one question.
-            let deadline = round(wrapMinute(onset - s.bedtimeEarlierMin), to: 5)
-            add(.bedtimeBy, threshold: Double(deadline),
-                observation: "They usually fall asleep around \(clock(onset)), and they picked "
-                    + "\(difficulty.title) for today.",
+        // BEDTIME — ONE threshold for every gear: the sleep anchor's asleep-by, or, while the anchor
+        // abstains, the wearer's own median onset unshifted. The gear only decides whether it is issued.
+        // ONE EXPRESSION FOR THE NUMBER, read by both the goal and the sentence.
+        // The anchor's figure is used EXACTLY as the plan states it; only the median fallback is rounded.
+        let anchored = baseline.bedtimeTargetMin.map { wrapMinute($0) }
+        let usualOnset = baseline.medianSleepOnsetMinute.map { round(wrapMinute($0), to: 5) }
+        if s.issuesBedtime, let deadline = anchored ?? usualOnset {
+            let observation = baseline.bedtimeTargetMin != nil
+                ? "Their sleep anchor puts asleep-by at \(clock(deadline)) whichever gear they pick, and "
+                    + "they picked \(difficulty.title) for today."
+                : "They usually fall asleep around \(clock(deadline)) (no sleep anchor yet), and they "
+                    + "picked \(difficulty.title) for today."
+            add(.bedtimeBy, threshold: Double(deadline), observation: observation,
                 target: "Asleep by \(clock(deadline))",
                 rewards: [.sleep], parts: [.sleep])
-        }
-
-        // TRAINING — off the length of the days they actually train on.
-        if let usual = baseline.medianTrainingMinutes, usual > 0 {
-            let minutes = Double(round(Int((usual * s.training).rounded()), to: 5))
-            if minutes > 0 {
-                add(.workoutMinutes, threshold: minutes,
-                    observation: "Their training days run about \(whole(usual)) minutes, and they "
-                        + "picked \(difficulty.title) for today.",
-                    target: "\(whole(minutes)) minutes of training logged today",
-                    rewards: [.muscle, .heart], parts: [.muscle, .lungs])
+            // WIND-DOWN (Relentless) — a journal entry as the evening winds down, an hour before lights
+            // out. The journal is what is checked; the time is the plan's guidance.
+            if s.issuesWindDown {
+                let start = wrapMinute(deadline - SleepAnchor.onsetBufferMin - SleepAnchor.windDownLeadMin)
+                windDown = QuestPlanTarget(
+                    id: questId(day: day, metric: .journal),
+                    observation: "Their wind-down starts around \(clock(start)), and they picked "
+                        + "\(difficulty.title) for today.",
+                    target: "A journal entry tonight as you wind down (from \(clock(start)))",
+                    rewards: [.brain, .sleep], xp: xp,
+                    goal: QuestGoal(metric: .journal, threshold: 1), parts: [])
             }
         }
 
-        // EFFORT — a point in the day's OWN recommended band. Never past its top; see `Scale`.
+        // TRAINING — off the length of the days they actually train on, bounded by the day's state.
+        if let usual = baseline.medianTrainingMinutes, usual > 0 {
+            if state.isRecoveryDay {
+                // A recovery day: Steady's factor, and never more than 30 minutes of easy movement.
+                let minutes = Swift.min(QuestDayState.easyMovementMaxMinutes,
+                                        Double(round(Int((usual * steady.training).rounded()), to: 5)))
+                if minutes > 0 {
+                    add(.workoutMinutes, threshold: minutes,
+                        observation: "Today is a recovery day for their body, so they get easy movement "
+                            + "whatever gear they picked (\(difficulty.title)).",
+                        target: "\(whole(minutes)) minutes of easy movement — no more than "
+                            + "\(whole(QuestDayState.easyMovementMaxMinutes)) today",
+                        rewards: [.muscle, .heart], parts: [.muscle, .lungs])
+                }
+            } else {
+                let factor = state == .moveHard ? Swift.min(s.training, 1.0) : s.training
+                let minutes = Double(round(Int((usual * factor).rounded()), to: 5))
+                if minutes > 0 {
+                    add(.workoutMinutes, threshold: minutes,
+                        observation: "Their training days run about \(whole(usual)) minutes, and they "
+                            + "picked \(difficulty.title) for today"
+                            + (state == .moveHard ? ", on a day not suited to hard sessions." : "."),
+                        target: state == .moveHard
+                            ? "\(whole(minutes)) minutes of easy aerobic or strength at held loads today"
+                            : "\(whole(minutes)) minutes of training logged today",
+                        rewards: [.muscle, .heart], parts: [.muscle, .lungs])
+                }
+            }
+        }
+
+        // EFFORT — a point in the day's OWN recommended band. Never past its top; see `Scale`. On a
+        // recovery day the band's floor (Steady), on a moveHard day no higher than its middle.
         if let band = baseline.effortBand21 {
+            let position: Double
+            switch state {
+            case .easy, .rest: position = steady.bandPosition
+            case .moveHard: position = Swift.min(s.bandPosition, 0.5)
+            case .asPlanned: position = s.bandPosition
+            }
             let span = Double(band.upperBound - band.lowerBound)
-            let strain = (Double(band.lowerBound) + span * Swift.min(Swift.max(s.bandPosition, 0), 1))
+            let strain = (Double(band.lowerBound) + span * Swift.min(Swift.max(position, 0), 1))
             let rounded = (strain * 2).rounded() / 2
             add(.strain, threshold: rounded,
                 observation: "Today's charge puts their recommended day strain at "
@@ -336,13 +443,14 @@ public enum QuestDayPlan {
                 rewards: [.muscle, .heart], parts: [.muscle, .lungs])
         }
 
-        // MEDITATION — off the length of their own sessions, floored at what counts as one at all.
+        // MEDITATION — off the length of their own sessions, floored at what counts as one at all ON THIS
+        // DAY (`LevelEngine.meditationMinMinutes(on:)`, the one date-effective rule).
         if let usual = baseline.medianMeditationMinutes, usual > 0 {
-            let scaled = Swift.max(LevelEngine.meditationMinMinutes, usual * s.meditation)
+            let floor = LevelEngine.meditationMinMinutes(on: day)
+            let scaled = Swift.max(floor, usual * s.meditation)
             // Rounded to five, then floored again: rounding DOWN to zero or to under what counts as a
             // session at all would be a target met by not sitting down.
-            let minutes = Swift.max(LevelEngine.meditationMinMinutes,
-                                    Double(round(Int(scaled.rounded()), to: 5)))
+            let minutes = Swift.max(floor, Double(round(Int(scaled.rounded()), to: 5)))
             add(.meditationMinutes, threshold: minutes,
                 observation: "Their own sessions run about \(whole(usual)) minutes, and they picked "
                     + "\(difficulty.title) for today.",
@@ -362,17 +470,25 @@ public enum QuestDayPlan {
                 rewards: [.heart], parts: [])
         }
 
-        guard let focus else { return out }
+        // The wind-down goes LAST: it is issued on top of the gear's count (see `plan`), never in place of
+        // one of its measured directives.
+        guard let focus else { return out + (windDown.map { [$0] } ?? []) }
         // Stable partition: the focus part's directives first, everything else in its base order.
         let leading = out.filter { $0.parts.contains(focus) }
-        return leading + out.filter { !$0.parts.contains(focus) }
+        return leading + out.filter { !$0.parts.contains(focus) } + (windDown.map { [$0] } ?? [])
     }
 
-    /// The day's quests: `targets(...)` cut to the chosen mode's count.
+    /// The day's quests: `targets(...)` cut to the chosen mode's count, plus Relentless's wind-down
+    /// directive on top when the day has a bedtime.
     public static func plan(baseline: QuestBaseline, difficulty: QuestDifficulty,
-                            focus: LevelPart? = nil, day: String) -> [QuestPlanTarget] {
-        Array(targets(baseline: baseline, difficulty: difficulty, focus: focus, day: day)
-            .prefix(difficulty.questCount))
+                            focus: LevelPart? = nil, day: String,
+                            dayState: QuestDayState? = nil) -> [QuestPlanTarget] {
+        let all = targets(baseline: baseline, difficulty: difficulty, focus: focus, day: day,
+                          dayState: dayState)
+        let measured = all.filter { $0.goal.metric != .journal }
+        var cut = Array(measured.prefix(difficulty.questCount))
+        if let windDown = all.first(where: { $0.goal.metric == .journal }) { cut.append(windDown) }
+        return cut
     }
 
     // MARK: - Arithmetic and formatting

@@ -1,6 +1,6 @@
 import SwiftUI
 
-// MARK: - NoopButton — the unified button system (Design Reset, 2026-06-22)
+// MARK: - NoopButton — the unified button system (Telos 2.0 values, §5.10)
 //
 // One button, four kinds, no glow. Beauty comes from a crisp filled accent, honest
 // surface fills, restrained spacing and a subtle press — never neon, bloom or a halo.
@@ -17,13 +17,13 @@ import SwiftUI
 
 /// The four button roles. Colour + emphasis differ; geometry is identical across all four.
 public enum NoopButtonKind: Sendable {
-    /// Filled accent (blue), white label — the one primary action on a screen.
+    /// Filled accent, `onAccent` label — the one primary action on a screen.
     case primary
-    /// Raised-surface fill, primary-text label, hairline edge — secondary actions.
+    /// `surfaceInset` fill, primary-text label, 1 pt `line` edge — secondary actions.
     case secondary
     /// No fill, accent label — low-emphasis / inline actions.
     case tertiary
-    /// Filled critical (red), white label — destructive / irreversible actions.
+    /// The secondary shape with `critical` ink (V2) — destructive / irreversible actions; confirm via a system dialog.
     case destructive
 }
 
@@ -32,24 +32,25 @@ public enum NoopButtonKind: Sendable {
 /// Fixed geometry shared by the convenience view and the ButtonStyle so the two paths
 /// are pixel-identical. The single source of truth for button shape.
 public enum NoopButtonMetrics {
-    /// Standard control height (48) — also the source for the min hit target floor.
-    public static let height: CGFloat = NoopMetrics.controlHeight
-    /// Corner radius (14) — softer than a card, not a pill.
-    public static let cornerRadius: CGFloat = 14
+    /// Button height (V2 §5.10: 50). A floor — the label may grow it at large text sizes.
+    public static let height: CGFloat = 50
+    /// Corner radius — the V2 `control` radius (14 → 12).
+    public static let cornerRadius: CGFloat = TelosRadius.control
     /// Horizontal label inset.
     public static let hPadding: CGFloat = 18
     /// Spacing between a leading icon and the label.
     public static let iconSpacing: CGFloat = 8
-    /// Label tracking — a hair of openness on the semibold face.
-    public static let tracking: CGFloat = 0.2
+    /// Label tracking — none in V2 (SF Pro `headline` is tracked by the system).
+    public static let tracking: CGFloat = 0
     /// Apple's minimum touch target. The button never reports a hit area below this.
-    public static let minHitTarget: CGFloat = 44
-    /// Pressed scale (spec: subtle 0.97). Reduce-Motion collapses this to 1 (dim only).
-    public static let pressedScale: CGFloat = 0.97
-    /// Pressed dim — a slight opacity drop, applied in BOTH motion modes.
-    public static let pressedOpacity: Double = 0.82
-    /// Disabled dim, shared so call sites don't invent their own.
-    public static let disabledOpacity: Double = 0.4
+    public static let minHitTarget: CGFloat = TelosSpace.hitTarget
+    /// Pressed scale — the `press` token (0.97). Reduce Motion collapses this to 1 (dim only).
+    public static let pressedScale: CGFloat = TelosMotion.pressScale
+    /// Pressed dim — the `press` token's opacity (0.82 → 0.88), applied in BOTH motion modes.
+    public static let pressedOpacity: Double = TelosMotion.pressOpacity
+    /// Disabled dim for non-primary kinds (0.4 → 0.45, `TelosOpacity.disabled`). A disabled PRIMARY
+    /// instead draws the `lineStrong` fill with a `textDisabled` label.
+    public static let disabledOpacity: Double = TelosOpacity.disabled
 }
 
 /// Resolves a `NoopButtonKind` to its concrete fill / label / border tokens. Internal
@@ -58,30 +59,35 @@ struct NoopButtonAppearance {
     let fill: Color?          // nil = no fill (tertiary)
     let label: Color
     let border: Color?        // nil = no hairline edge
-    let usesPanelSurface: Bool
+    /// Whether a disabled state is drawn by fading the whole button (every kind but primary, which
+    /// swaps to its own disabled fill and label instead).
+    let dimsWhenDisabled: Bool
 
-    init(_ kind: NoopButtonKind) {
+    /// V2 (§5.10): primary = accent fill + `onAccent`; secondary = `surfaceInset` + `line` +
+    /// `textPrimary`; tertiary = accent label only; destructive = the SECONDARY shape with `critical`
+    /// ink (confirm through a system dialog at the call site).
+    init(_ kind: NoopButtonKind, enabled: Bool = true) {
         switch kind {
         case .primary:
-            fill = StrandPalette.accent
-            label = StrandPalette.goldDeepText   // designated crisp white for text on accent fills
+            fill = enabled ? StrandPalette.accent : TelosColor.lineStrong
+            label = enabled ? StrandPalette.goldDeepText : TelosColor.textDisabled
             border = nil
-            usesPanelSurface = false
+            dimsWhenDisabled = false
         case .secondary:
-            fill = nil
+            fill = TelosColor.surfaceInset
             label = StrandPalette.textPrimary
-            border = nil
-            usesPanelSurface = true
+            border = TelosColor.line
+            dimsWhenDisabled = true
         case .tertiary:
             fill = nil
             label = StrandPalette.accent
             border = nil
-            usesPanelSurface = false
+            dimsWhenDisabled = true
         case .destructive:
-            fill = StrandPalette.statusCritical
-            label = StrandPalette.goldDeepText   // crisp white on the critical fill
-            border = nil
-            usesPanelSurface = false
+            fill = TelosColor.surfaceInset
+            label = TelosColor.critical
+            border = TelosColor.line
+            dimsWhenDisabled = true
         }
     }
 }
@@ -89,21 +95,18 @@ struct NoopButtonAppearance {
 // MARK: - The crisp background (no glow, ever)
 
 /// The flat, glow-free button background: a filled (or unfilled) rounded rect with an
-/// optional hairline edge. No shadow, no blur halo, no additive bloom — restraint only.
+/// optional 1 pt edge. No shadow, no blur halo, no additive bloom — restraint only.
 private struct NoopButtonBackground: View {
     let appearance: NoopButtonAppearance
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: NoopButtonMetrics.cornerRadius, style: .continuous)
         ZStack {
-            if appearance.usesPanelSurface {
-                NoopPanelSurface(cornerRadius: NoopButtonMetrics.cornerRadius)
-            }
             if let fill = appearance.fill {
                 shape.fill(fill)
             }
             if let border = appearance.border {
-                shape.strokeBorder(border, lineWidth: 1)
+                shape.strokeBorder(border, lineWidth: TelosStroke.line)
             }
         }
     }
@@ -126,31 +129,32 @@ public struct NoopButtonStyle: ButtonStyle {
     }
 
     public func makeBody(configuration: Configuration) -> some View {
-        let appearance = NoopButtonAppearance(kind)
+        let appearance = NoopButtonAppearance(kind, enabled: isEnabled)
         let pressed = configuration.isPressed
-        // Reduce Motion: no scale, dim only. Otherwise subtle scale + dim.
+        // Reduce Motion: no scale, dim only. Otherwise subtle scale + dim (the `press` token).
         let scale: CGFloat = (pressed && !reduceMotion) ? NoopButtonMetrics.pressedScale : 1
-        let opacity: Double = pressed ? NoopButtonMetrics.pressedOpacity : 1
+        let pressedOpacity: Double = pressed ? NoopButtonMetrics.pressedOpacity : 1
+        let disabledOpacity: Double = (isEnabled || !appearance.dimsWhenDisabled) ? 1 : NoopButtonMetrics.disabledOpacity
 
-        configuration.label
+        return configuration.label
             .labelStyle(.titleAndIcon)
-            .font(StrandFont.headline.weight(.semibold))
+            .font(TelosType.headline)
             .tracking(NoopButtonMetrics.tracking)
             .lineLimit(1)
             .minimumScaleFactor(0.9)
             .foregroundStyle(appearance.label)
             .frame(maxWidth: fullWidth ? .infinity : nil)
             .padding(.horizontal, NoopButtonMetrics.hPadding)
-            .frame(height: NoopButtonMetrics.height)
-            .frame(minHeight: NoopButtonMetrics.minHitTarget)
+            .frame(minHeight: NoopButtonMetrics.height)
             .contentShape(Rectangle())
             .background(NoopButtonBackground(appearance: appearance))
             .clipShape(RoundedRectangle(cornerRadius: NoopButtonMetrics.cornerRadius, style: .continuous))
-            .opacity(isEnabled ? opacity : NoopButtonMetrics.disabledOpacity)
+            .opacity(pressedOpacity * disabledOpacity)
             .scaleEffect(scale)
-            .animation(reduceMotion ? nil : StrandMotion.interactive, value: pressed)
+            .animation(TelosMotion.press, value: pressed)
     }
 }
+
 
 // MARK: - NoopButton (the convenience view)
 

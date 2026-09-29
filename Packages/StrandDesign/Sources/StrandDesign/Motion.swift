@@ -1,68 +1,73 @@
 import SwiftUI
 
-// MARK: - Strand Motion (§9.6)
+// MARK: - Strand Motion (§9.6) — re-pointed to Telos 2.0 (docs/DESIGN_V2.md §4.8)
 //
-// Physiological motion — breathe / pulse / flow, no cartoon bounce.
-// Ring draw-in, per-beat ripple, hover lift, sliding sidebar indicator.
+// The 1.x names stay and return the V2 curves (`TelosMotion`), so every existing call site moves the
+// V2 way with no edit: data settles on springs WITHOUT bounce, and nothing loops unless it is live.
+//   interactive → select · gentle → settle · hero / drawIn → flow · fade → fade (0.30 → 0.20 s)
+//   breathe → the gated `live` loop (2.0 s, was 3.2 s) · pulse → beat · breathPeriod → breath (5.5 s)
+// The charge-to-sync indicator's timing below is unchanged (pinned by ChargeSyncIndicatorMathTests).
 
 public enum StrandMotion {
 
     // MARK: Spring presets
 
-    /// Interactive spring — snappy, for direct manipulation (hover, press, sidebar slide).
-    public static let interactive = Animation.interactiveSpring(response: 0.28, dampingFraction: 0.82, blendDuration: 0.1)
+    /// Selection / direct manipulation (hover, press, segment slide) — `TelosMotion.select`.
+    public static let interactive = TelosMotion.select
 
-    /// Gentle spring — the house style for value changes (ring draw-in, gauges).
-    /// spring(response: 0.5, damping: 0.8) per the brief.
-    public static let gentle = Animation.spring(response: 0.5, dampingFraction: 0.8)
+    /// The house style for value changes (numerals, carets, gauges) — `TelosMotion.settle`.
+    public static let gentle = TelosMotion.settle
 
-    /// A slower, more deliberate spring for hero transitions (e.g. first ring materialize).
-    public static let hero = Animation.spring(response: 0.85, dampingFraction: 0.85)
+    /// A liquid level / hero value change — `TelosMotion.flow`.
+    public static let hero = TelosMotion.flow
 
     // MARK: Durations
 
-    /// Fast UI feedback (hover lift, chip state).
-    public static let durationFast: Double = 0.18
+    /// Fast UI feedback (press) — the `press` token's 0.12 s (was 0.18).
+    public static let durationFast: Double = 0.12
 
-    /// Standard transition (card appear, fades).
-    public static let durationStandard: Double = 0.30
+    /// Standard transition (insert/remove, fades) — the `fade` token's 0.20 s (was 0.30).
+    public static let durationStandard: Double = TelosMotion.fadeDuration
 
-    /// Slow / draw-in (ring arc, waveform ignite).
+    /// Slow / draw-in (legacy duration constant; `drawIn` itself is the `flow` spring now).
     public static let durationSlow: Double = 0.9
 
-    /// One breath cycle for ambient pulsing (bloom, listening flatline).
-    public static let breathPeriod: Double = 3.2
+    /// Guided-breathing period — the V2 `breath` token (5.5 s, was 3.2). Breathing CONTENT only.
+    public static let breathPeriod: Double = TelosMotion.breathPeriod
 
     // MARK: Curves
 
-    /// Ease for the ring/gauge draw-in when a value changes.
-    public static let drawIn = Animation.easeOut(duration: durationSlow)
+    /// The ring/gauge value change — the `flow` spring (was a 0.9 s easeOut). V2 charts never draw in
+    /// on appear; this animates a value that CHANGED.
+    public static let drawIn = TelosMotion.flow
 
-    /// The ring/gauge draw-in, suppressed when Reduce Motion is on. Returns `nil`
+    /// The ring/gauge value change, suppressed when Reduce Motion is on. Returns `nil`
     /// (no animation) when reduced so `withAnimation` sets the fraction instantly and
-    /// the arc/bead snaps to its final frame instead of sweeping. Mirrors
-    /// `breathe(reduced:)` and honours Apple's Reduce Motion HIG.
+    /// the arc/bead snaps to its final frame instead of sweeping.
     public static func drawIn(reduced: Bool) -> Animation? {
         reduced ? nil : drawIn
     }
 
-    /// Looping breathe animation for ambient glow/pulse.
+    /// The looping LIVE pulse — the V2 `live` loop (easeInOut 2.0 s, autoreversing). Allowed only while
+    /// something is actually live, and every call site must gate it on `NoopMotionState.poseStill`
+    /// (censused by QuietMotionCoverageTests).
     public static var breathe: Animation {
-        .easeInOut(duration: breathPeriod).repeatForever(autoreverses: true)
+        TelosMotion.live.repeatForever(autoreverses: true)
     }
 
-    /// Looping breathe animation, suppressed when Reduce Motion is on. Returns
-    /// `nil` (no animation) when reduced so call sites collapse to the resting
-    /// frame instead of an indefinite loop. Honours Apple's Reduce Motion HIG.
+    /// Looping breathe animation, suppressed when `reduced` (pass the composed `poseStill`). Returns
+    /// `nil` (no animation) when reduced so call sites collapse to the resting frame instead of an
+    /// indefinite loop.
     public static func breathe(reduced: Bool) -> Animation? {
         reduced ? nil : breathe
     }
 
-    /// A single heartbeat ripple pulse.
-    public static let pulse = Animation.easeOut(duration: 0.6)
+    /// A single heartbeat pulse — the V2 `beat` token (easeOut 0.30 s, was 0.6).
+    public static let pulse = TelosMotion.beat
 
-    /// Standard fade.
-    public static let fade = Animation.easeInOut(duration: durationStandard)
+    /// Standard fade — the V2 `fade` token (easeInOut 0.20 s, was 0.30).
+    public static let fade = TelosMotion.fade
+
 
     // MARK: Compact charge-to-sync indicator
     //

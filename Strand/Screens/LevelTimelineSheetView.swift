@@ -262,7 +262,8 @@ struct LevelTimelineSheetView: View {
         }
         let answer = await coach.generateOneShot(
             systemPrompt: LevelCoachNote.systemPrompt(breakdown),
-            question: LevelCoachNote.question)
+            question: LevelCoachNote.question,
+            budget: .note)
         guard let answer else { return }
         let clipped = String(answer.prefix(LevelCoachNote.maxChars))
         LevelCoachNote.write(clipped, fingerprint: fingerprint)

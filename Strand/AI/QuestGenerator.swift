@@ -163,17 +163,36 @@ enum QuestIssuer {
         // breakfast and silence the one trigger that matters — overreaching on an empty tank. So the
         // budget is counted over the triggered quests only, while the CONDITION check below still sees
         // the whole day: a trigger that asks for a metric the day's plan already asks for is not news.
+        //
+        // MAKE-UP QUESTS DO NOT SPEND IT EITHER. A make-up (`QuestDebt`) is the price of an earlier miss,
+        // not the data noticing something today; counting it would let one missed directive silence the
+        // day's only trigger. And a metric a make-up is still open on is TAKEN: a side quest asking for
+        // the same steps the make-up already asks for is the same demand twice.
         let days = repo.days
-        let triggered = existingToday.filter { !QuestDayPlan.isPlanQuest($0) }
         guard let trigger = QuestTriggers.next(
             today: days.last,
             recent: Array(days.suffix(14)),
-            existingToday: triggered)
+            existingToday: sideBudgetQuests(existingToday))
         else { return }
-        let planned = Set(existingToday.filter { QuestDayPlan.isPlanQuest($0) && $0.state != .declined }
-            .compactMap { $0.effectiveGoal?.metric })
-        if let metric = trigger.goal?.metric, planned.contains(metric) { return }
+        let taken = takenMetrics(existingToday: existingToday, all: store.quests)
+        if let metric = trigger.goal?.metric, taken.contains(metric) { return }
         store.upsert(await QuestGenerator.fromTrigger(trigger, coach: coach, dayKey: dayKey))
+    }
+
+    /// The quests that count against the side-quest budget: everything on the day except the chosen
+    /// gear's plan directives and make-up quests. Pure.
+    nonisolated static func sideBudgetQuests(_ existingToday: [Quest]) -> [Quest] {
+        existingToday.filter { !QuestDayPlan.isPlanQuest($0) && !QuestDebt.isDebtQuest($0.id) }
+    }
+
+    /// Metrics a new side quest may not ask for: the day's live plan directives, and every make-up that
+    /// is still open (offered or active, whichever day it was issued for). Pure.
+    nonisolated static func takenMetrics(existingToday: [Quest], all: [Quest]) -> Set<QuestMetric> {
+        let planned = existingToday.filter { QuestDayPlan.isPlanQuest($0) && $0.state != .declined }
+        let openMakeUps = all.filter {
+            QuestDebt.isDebtQuest($0.id) && ($0.state == .active || $0.state == .offered)
+        }
+        return Set((planned + openMakeUps).compactMap { $0.effectiveGoal?.metric })
     }
 
     /// Issue the day's quests for a freshly picked difficulty, replacing whatever the last pick left.
@@ -186,12 +205,27 @@ enum QuestIssuer {
     /// Each quest is named by the coach one at a time, exactly as `issueIfDue` names one, and appears as
     /// it is named. A coach that cannot be reached returns at once and the written fallbacks are used, so
     /// the day's plan is never delayed by its writer.
+    ///
+    /// ONLY UPWARD ONCE ISSUED. A day whose plan has gone out at a gear can be re-picked HIGHER (Steady ->
+    /// Push -> Relentless) but not lower: otherwise picking Relentless at breakfast and Steady at nine in
+    /// the evening would swap four directives the wearer is about to miss for two they already met, and be
+    /// judged on the easy set. A downward re-pick leaves the higher gear's quests untouched, puts the
+    /// higher gear back on the day (`QuestModeStore`, which Today's chip and the penalty judge read), and
+    /// returns the note that says so.
+    @discardableResult
     static func issuePlan(_ difficulty: QuestDifficulty, repo: Repository, coach: AICoachEngine,
-                          focus: LevelPart?, dayKey: String = DailyMissionStore.dayKey()) async {
+                          focus: LevelPart?, dayKey: String = DailyMissionStore.dayKey()) async -> QuestPlanIssue {
         let store = QuestStore.shared
+        let gear = QuestGearFloor.effective(picked: difficulty, issued: QuestGearFloor.issued(for: dayKey))
+        if gear != difficulty {
+            // A downward re-pick: nothing is re-issued, and the day keeps the gear it was issued at.
+            QuestModeStore.shared.set(gear, for: dayKey)
+            return QuestPlanIssue(gear: gear, note: QuestGearFloor.downgradeNote(picked: difficulty, held: gear))
+        }
+        QuestGearFloor.note(gear, for: dayKey)
         let baseline = await QuestBaselineReader.read(repo: repo, day: dayKey)
-        let targets = QuestDayPlan.plan(baseline: baseline, difficulty: difficulty, focus: focus,
-                                        day: dayKey)
+        let targets = QuestPlanComposer.targets(baseline: baseline, difficulty: gear, focus: focus,
+                                                day: dayKey, repo: repo)
 
         // Withdraw the previous pick's unfinished quests. `.declined` rather than deleted, so the store's
         // own history rules apply and nothing re-raises them.
@@ -211,6 +245,120 @@ enum QuestIssuer {
             }
             store.upsert(await QuestGenerator.fromPlan(target, coach: coach, dayKey: dayKey))
         }
+        return QuestPlanIssue(gear: gear, note: nil)
+    }
+}
+
+/// What `QuestIssuer.issuePlan` did with a pick: the gear the day now runs at, and, when that is not the
+/// gear that was picked, the sentence that says why.
+struct QuestPlanIssue: Equatable {
+    let gear: QuestDifficulty
+    let note: String?
+}
+
+// MARK: - The gear a day was issued at
+//
+// Why a day's plan cannot be re-picked downward. `QuestModeStore` holds the LAST pick (the morning flow
+// writes it before issuing), so it cannot say what went out before; this keeps the highest gear each
+// day's plan was actually issued at.
+
+enum QuestGearFloor {
+
+    /// One key, a `[day: rawValue]` dictionary, like `QuestModeStore.key`.
+    static let key = "system.questGearIssued.v1"
+    /// Days kept, like `QuestModeStore.kept`: only the current day is ever read.
+    static let kept = 14
+
+    /// Steady < Push < Relentless.
+    static func rank(_ gear: QuestDifficulty) -> Int {
+        switch gear {
+        case .steady: return 0
+        case .push: return 1
+        case .relentless: return 2
+        }
+    }
+
+    /// The gear a pick runs at: the pick itself, unless the day was already issued at a higher one.
+    static func effective(picked: QuestDifficulty, issued: QuestDifficulty?) -> QuestDifficulty {
+        guard let issued, rank(issued) > rank(picked) else { return picked }
+        return issued
+    }
+
+    /// The UI copy for a downward re-pick; nil when the pick stands.
+    static func downgradeNote(picked: QuestDifficulty, held: QuestDifficulty) -> String? {
+        guard rank(held) > rank(picked) else { return nil }
+        return "Today's quests already went out at \(held.title). The gear can go up once the day is "
+            + "issued, not down, so \(held.title)'s targets stand."
+    }
+
+    /// The highest gear `day`'s plan was issued at, or nil when none was.
+    static func issued(for day: String, _ d: UserDefaults = .standard) -> QuestDifficulty? {
+        read(d)[day]
+    }
+
+    /// Record that `day`'s plan went out at `gear`. Only ever raises the stored gear.
+    static func note(_ gear: QuestDifficulty, for day: String, _ d: UserDefaults = .standard) {
+        var next = read(d)
+        next[day] = effective(picked: gear, issued: next[day])
+        if next.count > kept {
+            for old in next.keys.sorted().prefix(next.count - kept) { next[old] = nil }
+        }
+        d.set(next.mapValues(\.rawValue), forKey: key)
+    }
+
+    private static func read(_ d: UserDefaults) -> [String: QuestDifficulty] {
+        let raw = d.dictionary(forKey: key) as? [String: String] ?? [:]
+        return raw.compactMapValues(QuestDifficulty.init(rawValue:))
+    }
+}
+
+// MARK: - The day's plan, bounded by the day
+//
+// ONE PLACE the gear's targets meet the day's state and the week plan, read both by issuing and by the
+// morning flow's preview, so the card shows exactly what will be issued.
+
+enum QuestPlanComposer {
+
+    /// The gear's plan for `day`, bounded by what the day allows. Pure.
+    ///
+    /// THE BRIDGE UNDOES THE GEAR'S TRAINING FACTOR (`threshold / scale.training`), so it must be handed
+    /// the plan at the gear's own factors, an `asPlanned` plan, or the day's state would be applied twice
+    /// and a recovery day's minutes would be cut a second time. So:
+    ///   - When the week plan (or, with no plan, a known Charge at or under `QuestTriggers.chargeLow`)
+    ///     constrains the day, the bridge is the authority: `asPlanned` plan in, bridge applied.
+    ///   - An illness heads-up (`baseline.dayState == .rest`, from `QuestDayState.standIn`) makes the day a
+    ///     rest day whatever the week plan said: the heads-up can be newer than the plan.
+    ///   - Otherwise the plan runs with the stand-in state `QuestBaselineReader` put on the baseline.
+    static func targets(baseline: QuestBaseline, difficulty: QuestDifficulty, focus: LevelPart?,
+                        day: String, guidance: DayGuidance?, charge: Double?) -> [QuestPlanTarget] {
+        var dayGuidance = guidance
+        if baseline.dayState == .rest, guidance?.kind != .rest {
+            dayGuidance = DayGuidance(day: day, kind: .rest, notes: [.illness],
+                                      hrvNights: guidance?.hrvNights ?? 0, charge: charge)
+        }
+        let bridgeActs: Bool
+        if let g = dayGuidance {
+            bridgeActs = g.kind != .asPlanned
+        } else if let c = charge {
+            bridgeActs = c <= QuestTriggers.chargeLow
+        } else {
+            bridgeActs = false
+        }
+        guard bridgeActs else {
+            return QuestDayPlan.plan(baseline: baseline, difficulty: difficulty, focus: focus, day: day)
+        }
+        let raw = QuestDayPlan.plan(baseline: baseline, difficulty: difficulty, focus: focus, day: day,
+                                    dayState: .asPlanned)
+        return WeekPlanQuestBridge.apply(raw, guidance: dayGuidance, difficulty: difficulty, charge: charge)
+    }
+
+    /// The same, reading the day's week-plan guidance and Charge from the app.
+    @MainActor
+    static func targets(baseline: QuestBaseline, difficulty: QuestDifficulty, focus: LevelPart?,
+                        day: String, repo: Repository) -> [QuestPlanTarget] {
+        targets(baseline: baseline, difficulty: difficulty, focus: focus, day: day,
+                guidance: WeekPlanSource.shared.guidance(for: day),
+                charge: repo.days.first { $0.day == day }?.recovery)
     }
 }
 
@@ -238,8 +386,11 @@ enum QuestPlanReporter {
 
         let today = DailyMissionStore.dayKey(now)
         let plan = store.quests.filter { QuestDayPlan.isPlanQuest($0) && $0.dayKey < today }
-        // Oldest first, so a wearer who was away for a week closes those days in order.
-        guard let day = plan.map(\.dayKey).min(), !store.planDayReported(day) else { return }
+        // Oldest UNREPORTED first, so a wearer who was away for a week closes those days in order. Not
+        // the oldest day outright: that one is usually reported already, and returning on it meant no
+        // later day's card was ever shown.
+        guard let day = nextDayToReport(planDays: plan.map(\.dayKey),
+                                        isReported: { store.planDayReported($0) }) else { return }
 
         let quests = plan.filter { $0.dayKey == day }.sorted { $0.createdAtMs < $1.createdAtMs }
         // STILL RUNNING IS NOT AN OUTCOME. A sleep or bedtime directive stays checkable until noon the
@@ -270,6 +421,11 @@ enum QuestPlanReporter {
         }
         store.presentPlanReport(report)
     }
+
+    /// The earliest plan day not yet reported, or nil. Pure.
+    nonisolated static func nextDayToReport(planDays: [String], isReported: (String) -> Bool) -> String? {
+        Set(planDays).filter { !isReported($0) }.min()
+    }
 }
 
 // MARK: - The wearer's own numbers
@@ -297,10 +453,22 @@ enum QuestBaselineReader {
         // SLEEP NEED — what the last analysis pass scored Rest with. Nil before any pass has run.
         out.sleepNeedHours = AnalyticsEngine.Rest.engineNeedHours()
 
-        // BEDTIME — their own median onset, on the evening clock.
+        // BEDTIME — their own median onset, on the evening clock. Only the fallback now: the sleep
+        // anchor's asleep-by for the night that ends the morning after `day` is THE bedtime when there is
+        // one (HEALTH_V2 H9b), the same for every gear. Nil while the anchor abstains.
         let timings = await repo.sleepTimingsByDay(days: window + 1)
         out.medianSleepOnsetMinute = QuestDayPlan.medianOnsetMinute(
             timings.filter { $0.key < day }.values.map(\.onsetMinute))
+        if let date = LevelWiring.date(from: day),
+           let wake = Calendar.current.date(byAdding: .day, value: 1, to: date) {
+            out.bedtimeTargetMin = SleepScheduleProvider.shared.plan(wakingOn: wake)?.asleepByMin
+        }
+
+        // THE DAY'S STATE (H9a): the stand-in `QuestPlanComposer` falls back to when the week plan does
+        // not constrain the day. An illness heads-up is a rest day, a Charge under the low line an easy
+        // one, and an unmeasured morning is never invented as low.
+        out.dayState = QuestDayState.standIn(charge: repo.days.first { $0.day == day }?.recovery,
+                                             illnessRaised: resolvedAppModel(nil)?.healthAlert != nil)
 
         // TRAINING — the median length of the days they train on. Days with no session are excluded:
         // the question is how long a session of theirs runs, not how often they have one.

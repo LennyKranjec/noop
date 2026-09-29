@@ -450,6 +450,8 @@ final class AppModel: ObservableObject {
             self?.evaluateStrainTarget()
             // Keep the battery night-guard's learned bedtime warm off the same signal (throttled inside).
             self?.refreshHabitualMidsleep()
+            // HEALTH_V2 S2: the one sleep plan every evening consumer reads (throttled inside).
+            if let repo = self?.repo { SleepScheduleProvider.shared.noteDaysChanged(repo: repo) }
         }.store(in: &hrCancellables)
         // Re-arm the strap's firmware alarm once the connection has SETTLED — not the instant it (re)bonds.
         // A smart-alarm time changed while the strap was away never reached it , the send is gated on bond
@@ -2275,17 +2277,26 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             // Confounder tags from the recent journal (within the last ~2 days). Read once, off the
             // engine's hot path , the engine only needs presence flags, not the rows.
+            //
+            // HEALTH_V2 H7b: by EXACT starter-question identity (`IllnessInputFilter.journalFlags`), not
+            // substrings ("ill" matched "pill"); stress and sauna are set too. The hard-or-late workout
+            // comes from the workout table, not the journal.
             let recentDays = Set(days.suffix(2).map(\.day))
             let journal = await self.repo.journalEntries(days: 7)
-            var ctxAlcohol = false, ctxHardWorkout = false, ctxAlreadyUnwell = false
-            for e in journal where e.answeredYes && recentDays.contains(e.day) {
-                let q = e.question.lowercased()
-                if q.contains("alcohol") || q.contains("drink") { ctxAlcohol = true }
-                if q.contains("workout") || q.contains("train") || q.contains("exercise") { ctxHardWorkout = true }
-                if q.contains("sick") || q.contains("ill") || q.contains("unwell") { ctxAlreadyUnwell = true }
-            }
-            self.applyIllnessSignal(days, alcohol: ctxAlcohol, hardOrLateWorkout: ctxHardWorkout,
-                                    alreadyUnwell: ctxAlreadyUnwell)
+            let flags = IllnessInputFilter.journalFlags(
+                journal.filter { recentDays.contains($0.day) }.map { (question: $0.question, answeredYes: $0.answeredYes) })
+            let now = Int(Date().timeIntervalSince1970)
+            let sleeps = await self.repo.sleepSessions(from: now - 3 * 86_400, to: now + 3_600)
+            let onsets = sleeps
+                .filter { recentDays.contains(Repository.localDayKey(Date(timeIntervalSince1970: TimeInterval($0.endTs)))) }
+                .map(\.effectiveStartTs)
+            let workouts = await self.repo.workoutRows(days: 90)
+            let hardOrLate = IllnessInputFilter.hardOrLateWorkout(
+                workouts: workouts.filter { $0.endTs >= now - 4 * 86_400 }.map { (endTs: $0.endTs, effort: $0.strain) },
+                historyEfforts: workouts.compactMap(\.strain),
+                nightOnsets: onsets)
+            self.applyIllnessSignal(days, alcohol: flags.alcohol, stress: flags.stress, sauna: flags.sauna,
+                                    hardOrLateWorkout: hardOrLate, alreadyUnwell: flags.alreadyUnwell)
         }
     }
 
@@ -2302,7 +2313,7 @@ final class AppModel: ObservableObject {
 
     /// Run the `IllnessSignalEngine` from the day history + the journal-derived confounder context, then
     /// publish the result + the semantic `healthAlert` banner payload.
-    private func applyIllnessSignal(_ days: [DailyMetric], alcohol: Bool,
+    private func applyIllnessSignal(_ days: [DailyMetric], alcohol: Bool, stress: Bool = false, sauna: Bool = false,
                                     hardOrLateWorkout: Bool, alreadyUnwell: Bool) {
         let previous = healthAlert
         let recent = Array(days.suffix(2))
@@ -2328,9 +2339,10 @@ final class AppModel: ObservableObject {
         let resp = signal({ $0.respRateBpm }, cfgKey: "resp", illnessUp: true)
         // Skin-temp deviation: a stored °C delta. Build a small zero-centred state from its own recent
         // spread so a +0.6 °C reads as a meaningful z without needing a separate baseline column.
+        // HEALTH_V2 H7a: an imported night stores ABSOLUTE wrist °C in this column, and ~33 °C / 0.3 was a
+        // z of ~110 — a heads-up out of nothing. Only deviations count; a night without one is absent.
         var skin: (IllnessSignalEngine.SignalReading, Bool)? = nil
-        if let recentSkin = rm({ $0.skinTempDevC }) {
-            let z = recentSkin / 0.3     // ~0.3 °C ≈ one personal spread (matches skin_temp floorSpread)
+        if let z = IllnessInputFilter.skinZ(recent: recent.map(\.skinTempDevC)) {
             skin = (IllnessSignalEngine.SignalReading(zIllnessward: z), true)
         }
 
@@ -2356,7 +2368,7 @@ final class AppModel: ObservableObject {
         // baselineTrusted: require the HRV/RHR baselines to be trusted before the engine may raise.
         let trusted = (rhr?.1 ?? false) || (hrv?.1 ?? false)
         let context = IllnessSignalEngine.Context(
-            alcohol: alcohol, hardOrLateWorkout: hardOrLateWorkout,
+            alcohol: alcohol, stress: stress, sauna: sauna, hardOrLateWorkout: hardOrLateWorkout,
             alreadyUnwell: alreadyUnwell, baselineTrusted: trusted)
 
         // Caller-rendered phrases for the signals that fire (the engine surfaces only the firing ones).
@@ -2369,7 +2381,7 @@ final class AppModel: ObservableObject {
             let percent = Int(((1 - r / b) * 100).rounded())
             labels["hrv"] = String(localized: "HRV −\(percent)%")
         }
-        if let r = rm({ $0.skinTempDevC }), r > 0 {
+        if let r = IllnessInputFilter.recentSkinDeviation(recent: recent.map(\.skinTempDevC)), r > 0 {
             // The value is STORED in °C but must be SHOWN in the reader's unit: this label welded "°C"
             // into the translated string, so a Fahrenheit user got "+0.7 °C" from the banner while every
             // other surface rendered the same night as "+1.3 Δ°F".
@@ -2405,8 +2417,9 @@ final class AppModel: ObservableObject {
             healthAlert = nil
         }
         if healthAlert != nil, previous == nil {
-            // Notifications retain their established copy contract; Home renders the semantic result.
-            IllnessNotifier.post(result.copy)
+            // H7c/H8: only the `raised` level pushes ("Body off baseline"); `alreadyUnwell` keeps the
+            // banner and gets no push. Home renders the semantic result.
+            IllnessNotifier.post(result)
         }
     }
 
@@ -2500,14 +2513,17 @@ final class AppModel: ObservableObject {
         // the deviation against its own folded spread , a zero-centred personal baseline. RHR + HRV
         // z-score their raw columns. Oldest→newest.
         let sorted = days.sorted { $0.day < $1.day }
-        let skinState = Baselines.foldHistory(sorted.map { $0.skinTempDevC }, cfg: tempCfg)
+        // HEALTH_V2 H7a, the second skin path: an imported absolute °C is not a deviation, and folding it
+        // into the spread would poison every night's z. Absent instead.
+        func deviation(_ d: DailyMetric) -> Double? { IllnessInputFilter.skinDeviations([d.skinTempDevC]).first }
+        let skinState = Baselines.foldHistory(sorted.map(deviation), cfg: tempCfg)
         let rhrState = Baselines.foldHistory(sorted.map { $0.restingHr.map(Double.init) }, cfg: rhrCfg)
         let hrvState = Baselines.foldHistory(sorted.map { $0.avgHrv }, cfg: hrvCfg)
 
         var nights: [CyclePhaseEngine.Night] = []
         var curve: [Double] = []
         for d in sorted {
-            let tempZ = d.skinTempDevC.map { skinState.usable ? Baselines.deviation($0, state: skinState).z : $0 / 0.3 }
+            let tempZ = deviation(d).map { skinState.usable ? Baselines.deviation($0, state: skinState).z : $0 / 0.3 }
             let rhrZ = (rhrState.usable ? d.restingHr.map { Baselines.deviation(Double($0), state: rhrState).z } : nil)
             let hrvZ = (hrvState.usable ? d.avgHrv.map { Baselines.deviation($0, state: hrvState).z } : nil)
             nights.append(CyclePhaseEngine.Night(day: d.day, tempZ: tempZ, rhrZ: rhrZ, hrvZ: hrvZ))

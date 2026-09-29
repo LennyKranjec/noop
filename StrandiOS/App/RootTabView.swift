@@ -68,6 +68,9 @@ struct RootTabView: View {
     /// summary that replaces four of them. Publishes only when a quest changes, so it costs nothing like
     /// the live stores do.
     @ObservedObject private var questStore = QuestStore.shared
+    /// The game layer's books, for the prices on the day's card. Publishes only when a judgement, a
+    /// payout or a make-up changes — rarely, like the quest list.
+    @ObservedObject private var penaltyStore = QuestPenaltyStore.shared
     /// The full-screen stress alarm. Separate from the pill in the level strip, which follows the live
     /// reading alone — ignoring the screen does not hide the pill.
     @State private var showStressScreen = false
@@ -480,29 +483,47 @@ struct RootTabView: View {
             }
         }
         .animation(.easeOut(duration: 0.25), value: dayAlerts.optimum)
-        // YESTERDAY'S PLAN, CLOSED IN ONE CARD. The directives a difficulty choice issues do not each
-        // get a red card when they run out — four of them the morning after a Relentless day would read
-        // as four punishments for aiming high — so `QuestStore.sweepExpired` cancels them without cards
-        // and `QuestPlanReporter` summarises the day once: what was met, what fell short with the reading
-        // behind it, and what could not be measured at all. The same diagnostic look a failed directive
-        // uses, and one acknowledgement.
+        // YESTERDAY'S PLAN, CLOSED IN ONE CARD — WITH ITS PRICE. The directives a difficulty choice issues
+        // still do not each get a red card when they run out (four modal cards in a row is noise, not
+        // teeth), so `QuestStore.sweepExpired` cancels them without cards and `QuestPlanReporter`
+        // summarises the day once. What changed is the card: every line that fell short now carries its
+        // penalty — how far short, the gear's multiplier, any escalation, the make-up it rolled into — and
+        // the headline is the XP the day cost (`QuestPenaltyDayCard`). A line the data never carried says
+        // "not measured — no penalty". The store holds the card back until the day's plan quests are all
+        // judged, so it never shows a verdict without its numbers.
         //
         // NOT OVER THE MORNING FLOW OR A SHEET. The card is not urgent and the store holds it until it is
         // dismissed, so gating the RENDER is enough — nothing is lost by drawing it a moment later.
         .overlay {
             if let report = questStore.planReport, !showMorning, !backgroundCovered {
+                let card = QuestPenaltyDayCard.make(
+                    report: report,
+                    judgements: penaltyStore.ledger.judgements.filter {
+                        $0.dayKey == report.day && $0.questId.hasPrefix(QuestDayPlan.idPrefix)
+                    })
                 DiagnosticAlertView(
-                    overline: "DAY CLOSED",
-                    symbol: "flag.checkered",
-                    title: report.headline,
-                    subtitle: report.subtitle,
-                    message: report.body,
-                    primary: ("UNDERSTOOD", { questStore.dismissPlanReport() }))
+                    overline: card.overline,
+                    symbol: card.totalCost > 0 ? "xmark.octagon" : "flag.checkered",
+                    title: card.title,
+                    subtitle: card.subtitle,
+                    message: card.message,
+                    primary: ("UNDERSTOOD", { questStore.dismissPlanReport() }),
+                    ringed: card.totalCost > 0)
                 .transition(.opacity)
                 .task { SystemHaptics.play(.summon) }
             }
         }
         .animation(.easeOut(duration: 0.25), value: questStore.planReport?.day)
+        // CLOSED QUESTS ARE JUDGED ON THEIR DATA from the shell as well as from Today's strip, so a miss
+        // is priced (and the day's card let through) whichever tab the wearer is on. Keyed on the pending
+        // queue, re-read every few minutes while the app is in front so late data is picked up.
+        .task(id: "\(penaltyStore.pendingSignature)|\(scenePhase == .active)") {
+            guard scenePhase == .active else { return }
+            while !Task.isCancelled {
+                await QuestPenaltyAssessor.run(repo: repo)
+                try? await Task.sleep(nanoseconds: 300 * 1_000_000_000)
+            }
+        }
         .onChange(of: stressAlert != nil) { _, high in
             if high { presentStressScreenIfDue() } else { showStressScreen = false }
         }

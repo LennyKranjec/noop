@@ -322,12 +322,14 @@ struct RoomClimateContext: Equatable, Sendable {
 
 // MARK: - The app's schedule
 
-/// Where the night is, for this wearer: their own plan when they have one, else how they have actually
-/// slept, else 22:30–07:00.
+/// Where the night is, for this wearer: the sleep anchor's plan when there is one, else their own
+/// wind-down plan, else how they have actually slept, else 22:30–07:00.
 ///
-/// THE PLAN is the wind-down reminder's wake time and sleep need — the one place the app holds a
-/// bedtime the wearer chose. THE HISTORY is the typical onset and wake of the last two weeks, cached in
-/// defaults so the notification path (which has no repository) reads the same schedule as the tile.
+/// HEALTH_V2 S2: THE SLEEP ANCHOR FIRST (`SleepScheduleProvider`) — the room's sleep window is the plan's
+/// wind-down start … anchor, the same bedtime the reminder, the lights, the caffeine cutoff and the
+/// bedtime quests read. THE WIND-DOWN PLAN is the reminder's wake time and sleep need, used only while the
+/// anchor has no plan. THE HISTORY is the typical onset and wake of the last two weeks, cached in defaults
+/// so the notification path (which has no repository) reads the same schedule as the tile.
 @MainActor
 enum RoomClimatePlan {
 
@@ -338,11 +340,19 @@ enum RoomClimatePlan {
     static let minNights = 3
 
     static func schedule(now: Date = Date(), calendar: Calendar = .current,
-                         defaults: UserDefaults = .standard) -> RoomClimateSchedule {
+                         defaults: UserDefaults = .standard,
+                         sleepPlan: ((Date) -> SleepSchedulePlan?)? = nil) -> RoomClimateSchedule {
+        // The wake that ends the coming night: tomorrow's after noon, this morning's before.
+        let nextDay = RoomClimateSchedule.minuteOfDay(now, calendar) >= 12 * 60
+        let day = nextDay ? (calendar.date(byAdding: .day, value: 1, to: now) ?? now) : now
+        let lookup: (Date) -> SleepSchedulePlan? = sleepPlan
+            ?? { SleepScheduleProvider.shared.plan(wakingOn: $0, calendar: calendar) }
+        if let plan = lookup(day) {
+            return RoomClimateSchedule(bedtimeMinute: plan.bedtimeMin, wakeMinute: plan.roomSleepWindowEndMin,
+                                       windDownLeadMinutes: SleepClock.wrap(plan.bedtimeMin - plan.roomSleepWindowStartMin),
+                                       source: .plan)
+        }
         if WindDownNudge.isEnabled {
-            // The wake that ends the coming night: tomorrow's after noon, this morning's before.
-            let nextDay = RoomClimateSchedule.minuteOfDay(now, calendar) >= 12 * 60
-            let day = nextDay ? (calendar.date(byAdding: .day, value: 1, to: now) ?? now) : now
             let wake = WindDownNudge.wakeMinutes(forWeekday: calendar.component(.weekday, from: day))
             return RoomClimateSchedule(bedtimeMinute: wake - WindDownNudge.sleepNeedMinutes,
                                        wakeMinute: wake, source: .plan)

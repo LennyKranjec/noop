@@ -12,10 +12,15 @@ import Foundation
 // named, because that is still where the next point is cheapest.
 
 /// The named metric behind a part's score, as the header's lever labels it.
+///
+/// `sleepHrv` and `meditation` are no longer produced (epoch 4: HRV is counted once, in heart; meditation
+/// only deducts). They stay so a stored driver still decodes.
 public enum LevelDriver: String, CaseIterable, Sendable, Codable {
     case restorativeSleep
     case sleepHrv
     case sleepRegularity
+    /// Sleep duration against need (epoch 4).
+    case sleepDuration
     case hrv
     case rhr
     case vo2max
@@ -27,7 +32,7 @@ public enum LevelDriver: String, CaseIterable, Sendable, Codable {
 
     public var part: LevelPart {
         switch self {
-        case .restorativeSleep, .sleepHrv, .sleepRegularity: return .sleep
+        case .restorativeSleep, .sleepHrv, .sleepRegularity, .sleepDuration: return .sleep
         case .hrv, .rhr: return .heart
         case .vo2max, .respRate: return .lungs
         case .strength, .trainingLoad: return .muscle

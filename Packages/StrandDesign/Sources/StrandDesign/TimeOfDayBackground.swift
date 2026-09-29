@@ -11,11 +11,9 @@ import SwiftUI
 //    very low opacity; stars are tiny crisp dots. Beauty = restraint, spacing, type, motion.
 //  - TOKENS first (`StrandPalette`). The only literal hexes are the few subtle atmosphere
 //    tints the spec calls for (warm peach lift, indigo wash, etc.) — kept deliberately faint.
-//  - Reduce Motion — and Low Power Mode, and the in-app "Reduce motion in NOOP" toggle —
-//    pin every drifting element still (no looping translation, and the frame loop is `paused:`).
+//  - STATIC (Telos 2.0, §7.4): nothing here moves. The floaters are drawn at their resting phase
+//    and there is no frame clock at all, so Reduce Motion / Low Power need no special case.
 //  - Light mode is even MORE restrained: warm-paper tints, fewer/softer elements.
-//  - CPU-light: drift runs off a single `TimelineView(.animation)` tick that the system
-//    pauses when the view is off-screen; no per-frame allocation, no timers we own.
 
 // MARK: Day part
 
@@ -51,21 +49,17 @@ public struct TimeOfDayBackground: View {
     private let dayPart: DayPart
     private let animated: Bool
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
-    /// Low Power Mode and the in-app "Reduce motion in NOOP" toggle, neither of which has a SwiftUI
-    /// environment key. The Android twin (`TimeOfDayBackground.kt`) has consulted battery saver since
-    /// #911; this side was left reading Reduce Motion alone.
-    @ObservedObject private var motion = NoopMotionState.shared
 
+    /// `animated` is kept for API stability and ignored: Telos 2.0 backgrounds never animate
+    /// (docs/DESIGN_V2.md §7.4 — "backgrounds and the sky are static"), so there is no frame clock here.
     public init(dayPart: DayPart, animated: Bool = true) {
         self.dayPart = dayPart
         self.animated = animated
     }
 
-    /// Whether drifting elements should actually move: the caller opted in AND nothing is asking
-    /// for quiet (system Reduce Motion, Low Power Mode, or the in-app toggle).
-    private var drift: Bool { animated && !motion.poseStill(reduceMotion) }
+    /// Always false in V2: the floaters are posed at rest.
+    private var drift: Bool { false }
 
     public var body: some View {
         GeometryReader { geo in
@@ -239,18 +233,12 @@ private struct FloatingLayer: View {
     let isLight: Bool
     let size: CGSize
     let drift: Bool
-    @Environment(\.noopBackgroundCovered) private var covered
 
     var body: some View {
-        // One animation clock drives every shape's horizontal phase. The system pauses this
-        // TimelineView while off-screen, so it costs nothing when not visible — and while a sheet
-        // covers it, which the system does NOT count as off-screen.
-        TimelineView(.animation(minimumInterval: 1.0 / 20.0, paused: !drift || covered)) { timeline in
-            let t = drift ? timeline.date.timeIntervalSinceReferenceDate : 0
-            ZStack {
-                ForEach(shapes.indices, id: \.self) { i in
-                    floater(shapes[i], t: t)
-                }
+        // V2: static. The shapes are drawn once at their resting phase — no frame clock (§2.1 rule 1).
+        ZStack {
+            ForEach(shapes.indices, id: \.self) { i in
+                floater(shapes[i], t: 0)
             }
         }
     }
@@ -269,9 +257,8 @@ private struct FloatingLayer: View {
             .frame(width: dim, height: dim * (s.isCloud ? 0.62 : 1.0))
             .opacity(s.opacity * (isLight ? 0.55 : 1.0))   // even fainter in light mode
             .position(x: w * s.baseX + dx, y: h * s.baseY)
-            // Dark: a faint additive lift off the near-black canvas (flat fill, never a halo).
-            // Light: plain blending so pale tints don't blow out the warm-paper surface.
-            .blendMode(isLight ? .normal : .plusLighter)
+            // V2: plain blending in both schemes — the additive `.plusLighter` lift forced an
+            // offscreen pass and is retired with the other bloom helpers.
     }
 
     /// Clouds (day/dusk) read as wide soft ellipses; orbs (night/dawn) as round soft discs.

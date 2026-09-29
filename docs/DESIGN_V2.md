@@ -36,7 +36,9 @@ pentagon radar. *Package* means one implementation agent's unit of work (§8).
 >    in Today (next to the quest strip / the running trial's card), from the Coach, and from More. The daily
 >    trial assignment reaches the wearer as a quest in Today, so no tab is needed for the one-tap entry.
 >    The Android tab bar therefore does not diverge.
-> 4. **No owner-requested feature is removed.** The "Optimum reached" full-screen, the full-screen stress
+> 4. **No owner-requested feature is removed.** (Later owner decision: the stress ALERT that pops up on its own
+>    is OFF by default from 2.0 — the diagnostic screen stays reachable from the stress tile and the alert can be
+>    re-enabled in Settings.) The "Optimum reached" full-screen, the full-screen stress
 >    diagnostic with BREATHE / IGNORE, the step-calibration tile, the wake-buzz alarm, the State tile's
 >    WORKOUTS TODAY with its gear/checklist/+/✕, the level widget, the window-ventilation advice, the morning
 >    gate and the Steady/Push/Relentless gear choice all stay. They may be restyled; they may not be dropped
@@ -62,6 +64,94 @@ pentagon radar. *Package* means one implementation agent's unit of work (§8).
 >      exact numbers, one primary action. Motion must encode data; Reduce Motion gets a cross-fade.
 >    - Performance: the backdrop animates only while visible and for at most the entrance + one settle
 >      (≈1.2 s), then rests; content underneath pauses (it is covered). No blur over live content.
+> 9. **The Level is unbounded (owner's explicit decision).** No cap, ceiling, clamp, saturation or
+>    diminishing-returns curve on the level or any of its parts — the only bound is the wearer's physiology.
+>    100 means the wearer's own 95th percentile, not a maximum. Any UI (radar, bar, widget, gauges, full-screen
+>    moments) must render values above 100 honestly: axes and vessels scale or overflow visibly rather than
+>    clipping at 100, and no copy calls 100 "max". Correctness fixes (e.g. HRV counted once) are allowed; limits
+>    are not. `HEALTH_V2.md` H6's load cap is overridden.
+> 10. **Meditation is a penalty-only input to the Level (owner's explicit decision), for comparability.** The
+>    Level's positive side uses only inputs that exist across the whole history (strap/WHOOP physiology and
+>    workouts), so January and today are scored by the same recipe. From the first day with a logged
+>    meditation onward, a day under the meditation minimum subtracts a documented penalty; before that day
+>    there is no meditation term at all. This is the single exception to "penalties never touch the Level".
+>    UI consequence: the level breakdown must not show meditation as a positive contributor; it may show a
+>    missed-meditation deduction as its own line.
+> 11. **Size to content — density (owner's direction).** No panel is bigger than what it shows. A tile that
+>    carries one attribute (HRV, resting HR, respiratory rate, SpO₂, skin temp, steps, water …) is a compact
+>    tile: number + unit + delta/confidence + an optional micro-sparkline, laid out several per row (a 2-, 3-
+>    or 4-column grid chosen by content width and Dynamic Type, never a full-width card for one number).
+>    Cards hug their content: no fixed minimum heights, no decorative padding, no empty hero areas; the
+>    spacing scale's smaller steps are the default inside cards. Large surfaces are reserved for content that
+>    needs them (charts, the hero, the full-screen moments). Dynamic Type still must not clip — compact tiles
+>    reflow to fewer columns at large text sizes rather than truncating. Applies to every screen; TODAY and
+>    BODY are the first places to fix.
+> 12. **Meditation history glow-up (owner's direction).** The Focus tab's per-day meditation log is too
+>    simplistic. Replace it with a real practice view: a calendar/heat-map of the meditation era (from the first
+>    logged session) where each day's cell encodes minutes against the day's minimum (10 minutes from
+>    2026-09-29, 5 minutes before — the threshold is date-effective, so past days keep the rule they were set under); the current and best
+>    streak; weekly minutes as a compact bar series; the session list with time, duration and — where the new
+>    honest breathing sessions (HEALTH_V2 S4) recorded one — the before/after reading or "—" with its reason;
+>    and, because meditation is now a penalty-only Level input (item 10), the missed days in the era marked
+>    plainly with the Level deduction each cost. Days before the era are shown as "not tracked yet", never as
+>    missed. Ownership: the BODY package (P6, which owns the Focus screen) builds the view; the MeditationCardView
+>    part in PROGRESS part A adopts the same visual language. The data comes from the existing meditation log —
+>    no new storage.
+> 13. **Look ahead — projections (owner's direction, key 2.0 feature).** A "Look ahead" view projects where the
+>    wearer will be in 4 / 8 / 12 weeks on two scenarios side by side: **"on your current trend"** and **"if you
+>    follow the plan"** (the weekly movement plan, sleep anchor and gear). Metrics: the Level and its measured
+>    parts, resting HR, HRV, VO₂max (with its ±5 error band), weekly aerobic minutes, steps, and strength
+>    (estimated 1RM per main lift). Honesty is the whole design problem:
+>    - every projection is drawn as a widening band (prediction interval), never a single line, and the band
+>      is computed, not decorative;
+>    - the "current trend" uses a robust trend over the wearer's own recent weeks; the "plan" scenario uses the
+>      wearer's own measured response where it exists (e.g. their dose-response from past weeks) and literature
+>      priors only where it doesn't, labelled as such, with wider bands;
+>    - a metric with too little history, or a trend that is not distinguishable from noise, abstains ("not
+>      enough history to project" / "no clear trend") instead of drawing a line;
+>    - physiological ceilings and floors are not invented; the Level projection stays unbounded (item 9);
+>    - copy says "projection", never "you will"; the horizon is capped where the interval becomes uninformative.
+>    Placement: its own screen, reached from the Level breakdown, the Health tab and the weekly review, plus a
+>    compact "in 8 weeks" line inside the Level breakdown. Built by health package HF (new files); the design
+>    packages add the entry points.
+> 14. **Goals (owner's direction, key 2.0 feature — built together with Look ahead, item 13).** A Goals screen,
+>    reached from More (and from the Level breakdown and Look ahead), laid out like a calendar: the wearer sets,
+>    for any metric (Level and its parts, resting HR, HRV, VO₂max, weekly aerobic minutes, steps, estimated 1RM
+>    per lift, sleep regularity, meditation minutes …), a target value on a target date. The calendar shows
+>    goals as dated markers, the months between as the projection bands from Look ahead, and each goal's
+>    status. Each goal gets an honest feasibility verdict computed from the required rate of change versus
+>    (a) the wearer's own projection band and (b) documented physiological rates of change: **on track** /
+>    **ambitious but plausible** / **unrealistic at this date — here is a realistic date or value** /
+>    **can't judge yet (too little history)**. No verdict is shown without its reasoning numbers.
+>    - The coach receives the active goals (target, date, current value, required weekly rate, verdict) as a
+>      compact dated block inside its token budget, plans toward them (the weekly plan, gear suggestions and
+>      quests may reference a goal), and says plainly when a goal is too ambitious — including what would make
+>      it realistic.
+>    - A short coach panel sits on the Goals screen (a compact prompt row + the latest answer), reusing the
+>      coach engine and its budget — not a second chat implementation.
+>    - Goals never alter measured values; the Level stays unbounded; reaching a goal is a full-screen moment
+>      (item 7). A missed goal date produces an honest review, not a penalty (goals are aspirations; the
+>      penalty system stays on daily quests).
+>    Built by health package HF (new files + minimal hooks); the design packages add entry points in More,
+>    the Level breakdown and Look ahead.
+> 15. **A dynamic, context-aware Today (owner's direction).** Today reorders itself by time of day and state,
+>    so the thing that matters now is on top. Concretely:
+>    - **Evening → night:** the Sleep panel appears from the evening (18:00, or the wind-down start from the S2
+>      sleep anchor if that is earlier) until the next morning, and it sits at the TOP of Today, with its
+>      recommendations (improved in 2.0 from the sleep anchor: tonight's bedtime target, wind-down start,
+>      caffeine cut-off, the room's window/temperature advice, the WiZ light plan, sleep debt pay-back) right
+>      there. In the morning it disappears again (after wake + the morning flow, or by 10:00 at the latest).
+>    - **Morning:** last night's result, the gear choice / today's quests and any penalty board on top.
+>    - **Day:** the State tile with what's left today, the workout suggestions, and climate focus advice.
+>    - **During a workout:** the live workout card first.
+>    - Other time-bound cards (e.g. an active trial assignment, a goal milestone, a stress alert follow-up)
+>      rise when they are relevant and settle when they are not.
+>    Rules: one pure, tested ordering function (inputs: clock, sleep-anchor schedule, workout state, open
+>    penalties/trial/goal events, the wearer's own Today layout preferences) in a NEW logic file; the wearer's
+>    customised order is respected as the base order and dynamic promotion only lifts the time-relevant cards
+>    above it; nothing the wearer hid is ever shown; movement between positions animates with the settle
+>    token (cross-fade under Reduce Motion) and never jumps while the wearer is scrolling. Owned by the TODAY
+>    package (P4) plus that new logic file; the SLEEP package supplies the evening sleep panel component.
 > 8. **Haptic, organic feel (owner's direction for 2.0).** Define ONE haptic vocabulary in the design system
 >    (P1 owns `Haptics.swift`): named patterns — select (light tick), settle (soft), commit (rigid), success,
 >    warning, failure/penalty (a heavier two-beat), level-settle (a slow three-step rise), and a subtle

@@ -66,16 +66,19 @@ public enum NoopMetrics {
     public static let space10: CGFloat = 40
 
     // MARK: Named layout constants — the canonical margins/heights screens compose with.
+    //
+    // Telos 2.0 density (coordinator decision 11): the smaller steps are the default INSIDE cards —
+    // cards hug their content, no decorative padding. See `TelosSpace` for the full scale.
     /// Horizontal page margin (the gutter on the left/right edge of a screen). Use via `.screenPadding()`.
     public static let screenHPadding: CGFloat = NoopVisualStyle.pagePadding
-    /// Vertical gap between top-level page sections.
+    /// Vertical gap between top-level page sections. 26 → 24.
     public static let sectionSpacing: CGFloat = NoopVisualStyle.sectionGap
-    /// Interior padding inside a card's content (matches `cardPadding`).
-    public static let cardInnerPadding: CGFloat = 16
-    /// Vertical gap between stacked elements INSIDE a card.
-    public static let cardInnerSpacing: CGFloat = 12
-    /// Vertical gap between rows in a list-style card.
-    public static let rowSpacing: CGFloat = 10
+    /// Interior padding inside a card's content (matches `cardPadding`). 16 → 12.
+    public static let cardInnerPadding: CGFloat = TelosSpace.cardPadding
+    /// Vertical gap between stacked elements INSIDE a card. 12 → 8.
+    public static let cardInnerSpacing: CGFloat = TelosSpace.cardInner
+    /// Vertical gap between rows in a list-style card (the row's own vertical padding in V2). 10 → 12.
+    public static let rowSpacing: CGFloat = TelosSpace.rowVertical
     /// Standard interactive-control height (buttons, fields, segmented controls).
     public static let controlHeight: CGFloat = 48
     /// Standard one-pixel edge used by cards and compact controls.
@@ -116,19 +119,30 @@ public extension View {
     /// NOT receive this, so the helper is iOS-only and call sites stay shared via #if.
     /// `largeFirst == false` opens at .medium with .large reachable by dragging up (short
     /// forms); `true` opens full-height (long scrolls).
+    ///
+    /// V2 (§5.12): the sheet background is the solid `canvas` (no material) where the OS can set it
+    /// (iOS 16.4+); earlier systems keep the system sheet background.
+    @ViewBuilder
     func noopSheetPresentation(largeFirst: Bool) -> some View {
-        self
-            .presentationDragIndicator(.visible)
-            .presentationDetents(largeFirst ? [.large] : [.medium, .large])
+        if #available(iOS 16.4, *) {
+            self
+                .presentationDragIndicator(.visible)
+                .presentationDetents(largeFirst ? [.large] : [.medium, .large])
+                .presentationBackground(TelosColor.canvas)
+        } else {
+            self
+                .presentationDragIndicator(.visible)
+                .presentationDetents(largeFirst ? [.large] : [.medium, .large])
+        }
     }
 }
 #endif
 
 // MARK: - Surface
 
-/// The one card surface — now the Bevel frosted card. PUBLIC API is unchanged
-/// (padding + content); an optional `tint` was ADDED (defaulted) so callers can opt
-/// into a per-domain accent wash without breaking existing call sites.
+/// The one card surface — the V2 flat card (§5.1: `surface` fill, 1 pt `line`, radius 20, no shadow,
+/// fill × `\.telosCardOpacity`). PUBLIC API is unchanged (padding + content + optional `tint`, which
+/// now draws only a 3 pt identity top edge). Default padding hugs content (12, decision 11).
 public struct NoopCard<Content: View>: View {
     private let padding: CGFloat
     private let tint: Color?
@@ -161,9 +175,9 @@ public struct NoopCard<Content: View>: View {
         #if os(macOS)
         FrostedCardSurface(tint: tint, cornerRadius: NoopMetrics.cardRadius)
             .overlay(
-                shape.strokeBorder(StrandPalette.hairlineStrong, lineWidth: 1).opacity(hover ? 1 : 0)
+                shape.strokeBorder(StrandPalette.hairlineStrong, lineWidth: TelosStroke.line).opacity(hover ? 1 : 0)
             )
-            .animation(.easeOut(duration: 0.16), value: hover)
+            .animation(TelosMotion.select, value: hover)
         #else
         FrostedCardSurface(tint: tint, cornerRadius: NoopMetrics.cardRadius)
         #endif
@@ -178,10 +192,16 @@ public struct SectionHeader: View {
         self.title = title; self.overline = overline; self.trailing = trailing
     }
     public var body: some View {
+        // V2 (§5.9): `scale` overline in `textTertiary` → `title2` title → trailing text.
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                if let overline { Text(overline).strandOverline() }
-                Text(title).font(StrandFont.title2).foregroundStyle(StrandPalette.textPrimary)
+                if let overline {
+                    Text(overline)
+                        .telosScale()
+                        .textCase(.uppercase)
+                        .foregroundStyle(TelosColor.textTertiary)
+                }
+                Text(title).font(TelosType.title2).foregroundStyle(StrandPalette.textPrimary)
             }
             Spacer()
             if let trailing {
@@ -217,46 +237,50 @@ public struct StatTile<Accessory: View>: View {
     }
 
     public var body: some View {
-        // The tile borrows its accent as a faint card wash, so each metric tile reads as
-        // part of its colour world while staying legible on the deep blue-black.
-        NoopCard(padding: 14, tint: accent) {
-            VStack(alignment: .leading, spacing: 0) {
-                // Header row: the metric label, and (right-aligned) the optional accessory laid out in
-                // flow so it reserves its own space rather than floating over the value below (#495).
-                HStack(alignment: .top, spacing: 4) {
-                    Text(label).strandOverline()
-                    Spacer(minLength: 0)
-                    accessory()
-                }
-                Spacer(minLength: 4)
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text(value).font(StrandFont.number(26)).foregroundStyle(accent).lineLimit(1).minimumScaleFactor(0.6)
-                    Spacer(minLength: 0)
-                    // Trend chip — the delta as a tinted pill with a direction arrow.
-                    if let delta { TrendChip(text: delta, color: deltaColor) }
-                }
-                // Sparkline isn't available on watchOS (it relies on chart-hover helpers); the watch
-                // doesn't use StatTile, but guard the reference so the file still compiles there.
-                #if !os(watchOS)
-                if let sparkline, sparkline.count > 1 {
-                    Sparkline(values: sparkline, gradient: Gradient(colors: [sparkColor.opacity(0.5), sparkColor]))
-                        .frame(height: 22).padding(.top, 4)
-                        .accessibilityHidden(true)
-                }
-                #endif
-                if let caption {
-                    Text(caption).font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary).lineLimit(1)
-                        .padding(.top, 2)
-                }
+        // V2 (§5.4 + decision 11): a compact tile — radius `tile` 14, padding 12, flat surface, NO tint
+        // wash and NO minimum height (it hugs its content). `accent` colours the numeral only.
+        // New single-attribute tiles should use `TelosMetricTile` (it carries the honesty states).
+        VStack(alignment: .leading, spacing: TelosSpace.xs) {
+            // Header row: the metric label, and (right-aligned) the optional accessory laid out in
+            // flow so it reserves its own space rather than floating over the value below (#495).
+            HStack(alignment: .top, spacing: 4) {
+                Text(label)
+                    .telosScale()
+                    .textCase(.uppercase)
+                    .foregroundStyle(TelosColor.textTertiary)
+                Spacer(minLength: 0)
+                accessory()
+            }
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(value)
+                    .telosNumeral(.numeralM)
+                    .foregroundStyle(accent)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Spacer(minLength: 0)
+                // Trend chip — the delta as a tinted pill with a direction arrow.
+                if let delta { TrendChip(text: delta, color: deltaColor) }
+            }
+            // Sparkline isn't available on watchOS (it relies on chart-hover helpers); the watch
+            // doesn't use StatTile, but guard the reference so the file still compiles there.
+            #if !os(watchOS)
+            if let sparkline, sparkline.count > 1 {
+                Sparkline(values: sparkline, gradient: Gradient(colors: [sparkColor.opacity(0.5), sparkColor]))
+                    .frame(height: 22)
+                    .accessibilityHidden(true)
+            }
+            #endif
+            if let caption {
+                Text(caption).font(TelosType.footnote).foregroundStyle(StrandPalette.textTertiary).lineLimit(1)
             }
         }
-        // A FLOOR, not a fixed height: a sparkline tile's content exceeds the 96pt base and must be
-        // allowed to grow rather than clip. maxHeight: .infinity lets a caller that DOES hand this tile a
-        // bounded height (e.g. the Key Metrics grid pins every cell to NoopMetrics.keyMetricTileHeight)
-        // stretch it to fill; in an unbounded parent it resolves to the content's own height, unchanged.
-        // Note: inside a LazyVGrid the cell only offers content height, so equal heights come from the
-        // caller pinning a fixed height, not from maxHeight: .infinity alone.
-        .frame(minHeight: NoopMetrics.tileHeight, maxHeight: .infinity)
+        .padding(TelosSpace.tilePadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // No floor (decision 11). maxHeight: .infinity still lets a caller that DOES hand this tile a
+        // bounded height (e.g. a grid pinned to NoopMetrics.keyMetricTileHeight) stretch it to fill; in an
+        // unbounded parent it resolves to the content's own height.
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(FrostedCardSurface(tint: nil, cornerRadius: TelosRadius.tile))
         // One VoiceOver stop per tile (label, value, caption, delta) instead of up
         // to four fragmented stops; the decorative sparkline is hidden above.
         .accessibilityElement(children: .combine)
@@ -296,11 +320,13 @@ public struct TrendChip: View {
         return nil
     }
     public var body: some View {
+        // V2 DeltaChip (§5.5): arrow 9 pt + signed value `numeralXS`, fill @ 0.16, no border. Pass "±0"
+        // for a flat delta and "—" when none was computed (`TelosDelta` / `TelosFormat.signedDelta`).
         HStack(spacing: 3) {
-            if let symbol { Image(systemName: symbol).font(.system(size: 8, weight: .bold)) }
+            if let symbol { Image(systemName: symbol).font(TelosType.glyphDelta) }
             // One line, always: a long chip (e.g. a workout's kcal) truncates rather than wraps, so
             // the pill never grows a tile past its floor. Matches Android's unconditional ellipsize (#934).
-            Text(text).font(StrandFont.captionNumber).lineLimit(1)
+            Text(text).font(TelosType.numeralXS).lineLimit(1)
         }
         .foregroundStyle(color)
         .padding(.horizontal, 6).padding(.vertical, 2)
@@ -332,19 +358,21 @@ public struct ChartCard<ChartBody: View, Footer: View>: View {
 
     public var body: some View {
         NoopCard(tint: tint) {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                 HStack(alignment: .firstTextBaseline) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(title).strandOverline()
-                        if let subtitle { Text(subtitle).font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary) }
+                        if let subtitle { Text(subtitle).font(TelosType.footnote).foregroundStyle(StrandPalette.textTertiary) }
                     }
                     Spacer()
-                    if let trailing { Text(trailing).font(StrandFont.bodyNumber).foregroundStyle(StrandPalette.textPrimary) }
+                    if let trailing { Text(trailing).font(TelosType.numeralS).foregroundStyle(StrandPalette.textPrimary) }
                 }
                 chart().frame(height: height)
                 let f = footer()
                 if !(f is EmptyView) {
-                    Divider().overlay(StrandPalette.hairline)
+                    Rectangle()
+                        .fill(TelosColor.lineSoft)
+                        .frame(height: TelosStroke.line)
                     f
                 }
             }
@@ -392,13 +420,13 @@ public struct InsightCard: View {
         // insight card reads a touch stronger than a tile: an explicit hue wash
         // (.14 → .04) + a matching .22 hue border on top of the frosted surface.
         let hue = tint ?? statusColor
-        // Apple-flat: a plain flat card. Identity comes from the COLOURED status headline alone — no extra
-        // hue-gradient wash, no border (so it reads identical to every other card on the page).
-        return NoopCard(padding: 18, tint: hue) {
+        // V2 flat card: identity is the coloured status word plus the card's 3 pt tint edge — no wash.
+        // The status is a WORD, so it is set in the prose voice (`title`, SF Pro bold 28).
+        return NoopCard(tint: hue) {
             VStack(alignment: .leading, spacing: 8) {
                 Text(category).strandOverline()
                     .padding(.trailing, titleTrailingInset)
-                Text(status).font(StrandFont.rounded(28, weight: .bold)).foregroundStyle(statusColor)
+                Text(status).font(TelosType.title).foregroundStyle(statusColor)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.trailing, titleTrailingInset)
                 Text(detail).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
@@ -425,6 +453,7 @@ public struct SegmentedPillControl<T: Hashable>: View {
     let fillsAvailableWidth: Bool
     @Binding var selection: T
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     public init(_ items: [T], selection: Binding<T>, adaptsToAvailableWidth: Bool = false,
                 fillsAvailableWidth: Bool = false,
                 label: @escaping (T) -> String) {
@@ -465,80 +494,63 @@ public struct SegmentedPillControl<T: Hashable>: View {
     }
 
     private func track(equalWidth: Bool) -> some View {
-        HStack(spacing: 4) {
+        // V2 (§5.11): track 44 high (36 segment + 4 inner padding), radius 12, `surfaceInset` + 1 pt
+        // `line`. Selected segment: radius 9, `surfaceRaised` + 1 pt `lineStrong`, NO shadow; label
+        // `subhead` semibold `textPrimary`; unselected `textSecondary`; disabled `textDisabled` (and the
+        // system "dimmed" trait via `.disabled`). Selection slides with `select`; Reduce Motion: instant.
+        HStack(spacing: TelosSpace.xs) {
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 let sel = item == selection
                 let enabled = isEnabled(item)
                 Button {
                     guard selection != item else { return }   // re-tapping the active segment stays silent
                     StrandHaptic.selection.play()
-                    withAnimation(StrandMotion.interactive) { selection = item }
+                    withAnimation(TelosMotion.animation(.select, reduced: reduceMotion)) { selection = item }
                 } label: {
                     Text(label(item))
-                        .font(StrandFont.captionNumber)
+                        .font(TelosType.subhead.weight(.semibold))
                         .lineLimit(equalWidth ? 1 : nil)
                         // Range selection stays deliberately neutral so the control works above charts
                         // from every metric colour world without borrowing their green/blue/amber tint.
-                        // Disabled segments drop to a fainter tertiary so the lock reads at a glance.
-                        .foregroundStyle(sel ? StrandPalette.textPrimary
-                                             : StrandPalette.textTertiary.opacity(enabled ? 1 : 0.35))
+                        .foregroundStyle(sel ? TelosColor.textPrimary
+                                             : (enabled ? TelosColor.textSecondary : TelosColor.textDisabled))
                         // Fill the segment height so the selected pill has EQUAL margins to the track
-                        // on every side. (The old compact pill inside a taller 44pt touch frame left
-                        // more vertical margin than horizontal — it read as off-centre.)
+                        // on every side.
                         .frame(minWidth: equalWidth ? nil : 26,
                                maxWidth: equalWidth ? .infinity : nil,
                                maxHeight: .infinity)
-                        .padding(.horizontal, equalWidth ? NoopMetrics.space1 : 9)
+                        .padding(.horizontal, equalWidth ? NoopMetrics.space1 : 10)
                         .background {
                             if sel {
-                                let selectedShape = RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                let selectedShape = RoundedRectangle(cornerRadius: TelosRadius.segment, style: .continuous)
                                 selectedShape
-                                    .fill(
-                                        LinearGradient(
-                                            colors: [NoopVisualStyle.surfaceTop, NoopVisualStyle.surface],
-                                            startPoint: .top,
-                                            endPoint: .bottom
-                                        )
-                                    )
-                                    // Same rim as every other filled surface (it used to be its own
-                                    // .62 @0.75pt), so the pill's edge matches the track it sits in.
+                                    .fill(TelosColor.surfaceRaised)
                                     .overlay(
-                                        selectedShape.strokeBorder(
-                                            NoopVisualStyle.rimGradient,
-                                            lineWidth: NoopVisualStyle.rimWidth
-                                        )
+                                        selectedShape.strokeBorder(TelosColor.lineStrong, lineWidth: TelosStroke.line)
                                     )
-                                    .shadow(color: .black.opacity(0.20), radius: 4, x: 0, y: 2)
                             }
                         }
-                        .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+                        .contentShape(RoundedRectangle(cornerRadius: TelosRadius.segment, style: .continuous))
                 }
-                // Was `.plain`, which gives a touchscreen no press feedback at all — the one control
-                // used on every screen felt dead until the selection animation caught up. Reuses the
-                // shared press-down style (scale + hairline edge) rather than a second press idiom.
-                .buttonStyle(StrandPressableButtonStyle(cornerRadius: 10, scale: 0.96))
+                // The shared press style (`press` token) — the one control used on every screen must
+                // never feel dead while the selection animation catches up.
+                .buttonStyle(StrandPressableButtonStyle(cornerRadius: TelosRadius.segment))
                 .frame(maxWidth: equalWidth ? .infinity : nil)
-                .frame(height: 32)   // segment height; the pill fills it for an even inset
+                // A FLOOR, not a fixed height: the 36 pt segment grows with Dynamic Type instead of
+                // clipping its label.
+                .frame(minHeight: 36)
                 .disabled(!enabled)
                 // Announce the active range to VoiceOver and give a non-colour cue.
                 .accessibilityAddTraits(sel ? .isSelected : [])
             }
         }
-        .padding(3)
+        .padding(TelosSpace.xs)
         .frame(maxWidth: equalWidth ? .infinity : nil)
         .background {
-            let trackShape = RoundedRectangle(cornerRadius: 13, style: .continuous)
+            let trackShape = RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
             trackShape
-                .fill(
-                    LinearGradient(
-                        colors: [NoopVisualStyle.inset, NoopVisualStyle.canvas.opacity(0.78)],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
-                .overlay(
-                    trackShape.strokeBorder(NoopVisualStyle.rimGradient, lineWidth: NoopVisualStyle.rimWidth)
-                )
+                .fill(TelosColor.surfaceInset)
+                .overlay(trackShape.strokeBorder(TelosColor.line, lineWidth: TelosStroke.line))
         }
     }
 }
@@ -552,16 +564,16 @@ public struct SourceBadge: View {
         // `.frame(height:)` centres its content by default, so the label sits mid-capsule for free. Noted
         // because the Android twin pinned the same 18 with `heightIn` applied to the label itself, which
         // top-aligns — same number, different render. That one is matched to this, not the reverse.
-        // The font stays a FIXED 10pt (not `StrandFont.overlineScaled(10)`): the capsule is pinned to
-        // an 18pt height, so a Dynamic-Type-scaling face here would clip at large text sizes.
-        // Tracking follows the overline token so it reads as the same voice as every other caps label.
-        Text(text).textCase(.uppercase).font(.system(size: 10, weight: .semibold, design: .rounded))
-            .tracking(StrandFont.overlineTracking)
-            .padding(.horizontal, 9).frame(height: NoopMetrics.sourceBadgeHeight)
-            .background(tint.opacity(NoopVisualStyle.chipFillOpacity), in: Capsule(style: .continuous))
+        // The font stays FIXED (`TelosType.scaleFixed`, SF Mono 11 — the V2 minimum size): the capsule is
+        // pinned to an 18pt height, so a Dynamic-Type-scaling face here would clip at large text sizes.
+        // V2 (§5.3): an OUTLINE tag — no fill, 1 pt edge at 0.32, ink at full strength, `scale` voice.
+        Text(text).textCase(.uppercase).font(TelosType.scaleFixed)
+            .tracking(TelosType.Tracking.scale)
+            .lineLimit(1)
+            .padding(.horizontal, TelosSpace.s).frame(height: NoopMetrics.sourceBadgeHeight)
             .foregroundStyle(tint)
             .overlay(Capsule(style: .continuous)
-                .strokeBorder(tint.opacity(NoopVisualStyle.chipBorderOpacity), lineWidth: 1))
+                .strokeBorder(tint.opacity(NoopVisualStyle.chipBorderOpacity), lineWidth: TelosStroke.line))
     }
 }
 
@@ -600,77 +612,81 @@ public extension View {
     }
 }
 
-// MARK: - Buttons (Titanium & Gold) — ADDED additively, no existing API touched.
+// MARK: - Buttons (Telos 2.0, §5.10) — the public API is unchanged; the look is V2.
 //
-// Three house button styles for primary actions, secondary chrome and ghost/gold
-// CTAs. Drop in via `.buttonStyle(.noopPrimary)` etc. on any `Button`. All read off
-// the new gold tokens so they match Apple ⇄ Android. Pressed = subtle dim + scale.
+// No gradient, no shadow on any button (the gold-gradient fill is retired). Height 50, radius
+// `control` 12, `headline` label. Press = the `press` token (scale 0.97 + opacity 0.88; opacity only
+// under Reduce Motion). Drop in via `.buttonStyle(.noopPrimary)` etc. on any `Button`.
 
-/// Primary call-to-action: gold-gradient fill, dark gold-deep ink (700), rounded 13.
+/// Primary call-to-action: a solid accent fill with `onAccent` ink. Disabled: `lineStrong` fill,
+/// `textDisabled` label.
 public struct NoopPrimaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     public init() {}
+
     public func makeBody(configuration: Configuration) -> some View {
         let pressed = configuration.isPressed
+        let shape = RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
         return configuration.label
-            .font(StrandFont.body.weight(.bold))
-            .foregroundStyle(StrandPalette.goldDeepText)
-            .padding(.vertical, 11).padding(.horizontal, 18)
-            .frame(maxWidth: .infinity)
-            .background(
-                RoundedRectangle(cornerRadius: 13, style: .continuous)
-                    .fill(LinearGradient(gradient: StrandPalette.goldGradient, startPoint: .topLeading, endPoint: .bottomTrailing))
-            )
-            // A crisp, subtle NEUTRAL elevation — the gold cast-glow read as too much against the
-            // clean design, so it's a soft dark lift now, no bloom.
-            .shadow(color: .black.opacity(pressed ? 0.08 : 0.16), radius: 6, x: 0, y: 3)
-            .opacity(pressed ? 0.9 : 1)
-            .scaleEffect(pressed ? 0.98 : 1)
-            .animation(StrandMotion.interactive, value: pressed)
+            .font(TelosType.headline)
+            .foregroundStyle(isEnabled ? StrandPalette.goldDeepText : TelosColor.textDisabled)
+            .padding(.vertical, TelosSpace.s).padding(.horizontal, 18)
+            .frame(maxWidth: .infinity, minHeight: NoopButtonMetrics.height)
+            .background(shape.fill(isEnabled ? StrandPalette.accent : TelosColor.lineStrong))
+            .opacity(pressed ? TelosMotion.pressOpacity : 1)
+            .scaleEffect(pressed && !reduceMotion ? TelosMotion.pressScale : 1)
+            .animation(TelosMotion.press, value: pressed)
             .contentShape(Rectangle())
     }
 }
 
-/// Secondary: inset well + 1px white-12 border + primary text. Quieter than gold.
+/// Secondary: `surfaceInset` well + 1 pt `line` edge + `textPrimary` label.
 public struct NoopSecondaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     public init() {}
+
     public func makeBody(configuration: Configuration) -> some View {
         let pressed = configuration.isPressed
-        let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
         return configuration.label
-            .font(StrandFont.body.weight(.semibold))
-            .foregroundStyle(StrandPalette.textPrimary)
-            .padding(.vertical, 11).padding(.horizontal, 18)
-            .frame(maxWidth: .infinity)
-            .background(shape.fill(StrandPalette.surfaceInset))
-            .overlay(shape.strokeBorder(StrandPalette.hairline, lineWidth: 1))
-            .opacity(pressed ? 0.82 : 1)
-            .scaleEffect(pressed ? 0.98 : 1)
-            .animation(StrandMotion.interactive, value: pressed)
+            .font(TelosType.headline)
+            .foregroundStyle(isEnabled ? TelosColor.textPrimary : TelosColor.textDisabled)
+            .padding(.vertical, TelosSpace.s).padding(.horizontal, 18)
+            .frame(maxWidth: .infinity, minHeight: NoopButtonMetrics.height)
+            .background(shape.fill(TelosColor.surfaceInset))
+            .overlay(shape.strokeBorder(TelosColor.line, lineWidth: TelosStroke.line))
+            .opacity(pressed ? TelosMotion.pressOpacity : 1)
+            .scaleEffect(pressed && !reduceMotion ? TelosMotion.pressScale : 1)
+            .animation(TelosMotion.press, value: pressed)
             .contentShape(Rectangle())
     }
 }
 
-/// Ghost / gold: transparent + 1px gold@.3 hairline + gold text. Tertiary CTA.
+/// Ghost (tertiary): no fill, no border, accent `headline` label, 44 pt hit; pressed opacity 0.6.
 public struct NoopGhostButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
     public init() {}
+
     public func makeBody(configuration: Configuration) -> some View {
         let pressed = configuration.isPressed
-        let shape = RoundedRectangle(cornerRadius: 13, style: .continuous)
         return configuration.label
-            .font(StrandFont.body.weight(.semibold))
-            .foregroundStyle(StrandPalette.gold)
-            .padding(.vertical, 11).padding(.horizontal, 18)
-            .frame(maxWidth: .infinity)
-            .background(shape.fill(StrandPalette.gold.opacity(pressed ? 0.10 : 0)))
-            .overlay(shape.strokeBorder(StrandPalette.gold.opacity(0.3), lineWidth: 1))
-            .scaleEffect(pressed ? 0.98 : 1)
-            .animation(StrandMotion.interactive, value: pressed)
+            .font(TelosType.headline)
+            .foregroundStyle(isEnabled ? StrandPalette.accent : TelosColor.textDisabled)
+            .padding(.horizontal, TelosSpace.m)
+            .frame(maxWidth: .infinity, minHeight: TelosSpace.hitTarget)
+            .opacity(pressed ? 0.6 : 1)
+            .animation(TelosMotion.press, value: pressed)
             .contentShape(Rectangle())
     }
 }
 
 public extension ButtonStyle where Self == NoopPrimaryButtonStyle {
-    /// Gold-gradient primary CTA.
+    /// Solid accent primary CTA.
     static var noopPrimary: NoopPrimaryButtonStyle { .init() }
 }
 public extension ButtonStyle where Self == NoopSecondaryButtonStyle {
@@ -678,15 +694,16 @@ public extension ButtonStyle where Self == NoopSecondaryButtonStyle {
     static var noopSecondary: NoopSecondaryButtonStyle { .init() }
 }
 public extension ButtonStyle where Self == NoopGhostButtonStyle {
-    /// Transparent gold-outline ghost button.
+    /// Borderless accent ghost button.
     static var noopGhost: NoopGhostButtonStyle { .init() }
 }
 
 // MARK: - Score state pill (SOLID / BUILDING / CALIBRATING / LIVE)
 //
-// ADDED additively — the existing `StatePill` (tone-based, in StatePill.swift) is
-// untouched. This is the score-lifecycle chip the new design calls for: SOLID = gold
-// fill, BUILDING = blue, CALIBRATING = slate, LIVE = gold dot with a pulsing halo.
+// The 1.x score-lifecycle chip, now drawn with the V2 confidence language (§5.3 / §5.5). Its API is
+// unchanged: CALIBRATING = tertiary ink + DASHED border (visibly provisional), BUILDING = warning ink
+// with a 0.10 wash, SOLID = tertiary (settled, quiet), LIVE = accent with the gated `live` dot.
+// For new code prefer `ConfidenceTag` (which omits SOLID on heroes and tiles).
 
 public enum ScoreState: Sendable, Equatable {
     case solid        // a settled, trustworthy score
@@ -694,13 +711,13 @@ public enum ScoreState: Sendable, Equatable {
     case calibrating  // baseline still forming
     case live         // streaming right now
 
-    /// The chip's hue, drawn from the re-pointed palette (gold / blue / slate).
+    /// The chip's ink.
     public var color: Color {
         switch self {
-        case .solid:        return StrandPalette.statusPositive // settled / trustworthy — WHOOP green
-        case .live:         return StrandPalette.accent          // streaming now — WHOOP blue
-        case .building:     return StrandPalette.sleepLight   // #4A90E2 blue
-        case .calibrating:  return StrandPalette.textTertiary // #8A94A4 slate
+        case .solid:        return TelosColor.textTertiary
+        case .live:         return StrandPalette.accent
+        case .building:     return TelosColor.warning
+        case .calibrating:  return TelosColor.textTertiary
         }
     }
     public var label: LocalizedStringKey {
@@ -714,8 +731,9 @@ public enum ScoreState: Sendable, Equatable {
     var pulsing: Bool { self == .live }
 }
 
-/// The score-lifecycle chip: dot + hue@.12 fill + hue@.32 border + hue text. LIVE
-/// pulses its dot. `text` overrides the default state label (e.g. "Building — 2 of 4").
+/// The score-lifecycle chip: dot 7 + `scale` label in the state's ink, capsule height at least 20, 1 pt
+/// border at 0.32 (dashed for calibrating), a 0.10 wash for building. LIVE loops its dot (gated).
+/// `text` overrides the default state label (e.g. "Building, 2 of 4").
 public struct ScoreStatePill: View {
     public var state: ScoreState
     public var text: LocalizedStringKey?
@@ -724,58 +742,47 @@ public struct ScoreStatePill: View {
     }
     public var body: some View {
         let hue = state.color
+        let shape = Capsule(style: .continuous)
+        let dash: [CGFloat] = state == .calibrating ? [2, 2] : []
         return HStack(spacing: 6) {
             PulseDot(color: hue, pulsing: state.pulsing, size: 7)
             Text(text ?? state.label)
-                .font(StrandFont.overline)
-                .tracking(StrandFont.overlineTracking)
+                .telosScale()
+                .textCase(.uppercase)
                 .foregroundStyle(hue)
+                .lineLimit(1)
         }
-        .padding(.horizontal, 10).padding(.vertical, 5)
-        .background(Capsule(style: .continuous).fill(hue.opacity(NoopVisualStyle.chipFillOpacity)))
-        .overlay(Capsule(style: .continuous)
-            .stroke(hue.opacity(NoopVisualStyle.chipBorderOpacity), lineWidth: 1))
+        .padding(.horizontal, TelosSpace.s).padding(.vertical, TelosSpace.xxs)
+        .frame(minHeight: 20)
+        .background(shape.fill(state == .building ? hue.opacity(TelosOpacity.wash) : Color.clear))
+        .overlay(shape.strokeBorder(hue.opacity(TelosOpacity.border),
+                                    style: StrokeStyle(lineWidth: TelosStroke.line, dash: dash)))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(text ?? state.label)
     }
 }
 
-/// A small dot with an optional breathing pulse halo (LIVE). Honours Reduce Motion.
-/// Local to the score pill so it doesn't disturb StatePill.swift's ConnectionDot.
+/// The status dot. When `pulsing` it runs the V2 `live` loop (opacity 1 to 0.35, 2 s): the one allowed
+/// never-settling animation, and only while something is actually live. It poses still (a static dot)
+/// under Reduce Motion, Low Power Mode or "Reduce motion in NOOP" via `NoopMotionState`, and stops the
+/// moment `pulsing` turns off. No glow, no halo, no shadow.
 private struct PulseDot: View {
     var color: Color
     var pulsing: Bool
     var size: CGFloat
-    @State private var animate = false
+    @State private var dimmed = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// Low Power Mode / "Reduce motion in NOOP". This halo is a `repeatForever` loop that never
-    /// settles and is on screen for long stretches — a connected strap in Settings, a backfill on
-    /// every scaffolded screen — so it belongs behind the same gate as the liquid surfaces.
     @ObservedObject private var motion = NoopMotionState.shared
     private var poseStill: Bool { motion.poseStill(reduceMotion) }
-    @Environment(\.colorScheme) private var scheme
+    private var looping: Bool { pulsing && !poseStill }
+
     var body: some View {
-        ZStack {
-            // Dark-mode only (#review): AdditiveBloom used to hide this expanding ring on light
-            // (content.opacity(0)); now that we drop the offscreen bloom, gate it explicitly so light
-            // mode stays ring-free (the resting dot + its shadow carry the live state there).
-            if pulsing && scheme == .dark {
-                Circle().fill(color)
-                    .frame(width: size, height: size)
-                    .scaleEffect(animate ? 2.4 : 1.0)
-                    .opacity(animate ? 0.0 : 0.5)
-                    // No .additiveBloom(): the .plusLighter blend forced an offscreen pass every
-                    // frame of the repeatForever pulse, a continuous cost while a strap is backfilling
-                    // (exactly when this live dot is on screen). The expanding/fading ring reads the
-                    // same without it; the resting dot's shadow still carries the "live" glow.
-            }
-            Circle().fill(color)
-                .frame(width: size, height: size)
-                .shadow(color: color.opacity(0.8), radius: pulsing ? 4 : 2)
-        }
-        .frame(width: size, height: size)
-        .onAppear { if pulsing && !poseStill { animate = true } }
-        .animation(pulsing && !poseStill ? StrandMotion.breathe : nil, value: animate)
-        .accessibilityHidden(true)
+        Circle().fill(color)
+            .frame(width: size, height: size)
+            .opacity(dimmed ? 0.35 : 1)
+            .animation(TelosMotion.liveLoop(poseStill: !looping), value: dimmed)
+            .onAppear { dimmed = looping }
+            .onChangeCompat(of: looping) { active in dimmed = active }
+            .accessibilityHidden(true)
     }
 }
