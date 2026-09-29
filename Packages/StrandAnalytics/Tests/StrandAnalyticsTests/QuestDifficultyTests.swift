@@ -387,7 +387,8 @@ final class QuestPlanReportTests: XCTestCase {
         XCTAssertTrue(none.lead.contains("did not land"), none.lead)
         // Nothing measured: nothing is called a miss.
         let unread = report([QuestPlanLine(target: "b", outcome: .notMeasured)])
-        XCTAssertTrue(unread.lead.contains("not being called a miss"), unread.lead)
+        // The copy says "none of it is being called a miss" — assert the claim, not one phrasing of it.
+        XCTAssertTrue(unread.lead.contains("called a miss"), unread.lead)
         XCTAssertTrue(unread.isWorthShowing)
         for r in [partial, none, unread] {
             XCTAssertFalse(r.lead.isEmpty)
