@@ -180,7 +180,9 @@ final class StateRegenerationPolicyTests: XCTestCase {
                                            foreground: true, now: now.addingTimeInterval(5)),
             .regenerate(.workoutsChanged))
         // And the reverse: an automatic run a second ago does not stop the button.
-        XCTAssertTrue(RefreshThrottle(minInterval: 20).tryStart(at: now.addingTimeInterval(1)))
+        // Bound to a var: `tryStart` is mutating, so it cannot be called on a temporary.
+        var fresh = RefreshThrottle(minInterval: 20)
+        XCTAssertTrue(fresh.tryStart(at: now.addingTimeInterval(1)))
     }
 
     // MARK: - Honest comparisons
