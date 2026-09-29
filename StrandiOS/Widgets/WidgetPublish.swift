@@ -178,6 +178,9 @@ extension WidgetSnapshot {
         // Read AFTER every await above, so figures the Today screen published meanwhile are not lost.
         let stored = load()
         mergeStripFallback(stored: stored, into: &full, now: now)
+        // The level comes from the LEDGER, through `LevelBarModel.publish`, and is not in this snapshot's
+        // reach at all. Carried over rather than rebuilt, so a full publish cannot blank it.
+        carryLevel(stored: stored, into: &full)
         saveAndReloadIfChanged(full, previous: stored, reload: reload)
     }
 
@@ -286,8 +289,16 @@ extension WidgetSnapshot {
         }
     }
 
+    /// Edit the STORED snapshot in place — every other field untouched — and reload only the widgets whose
+    /// figures this write owns, and only while the app is in front (a background reload spends the day's
+    /// WidgetKit budget; each widget's own timeline picks the figures up instead).
+    ///
+    /// `kinds` so the level publish can use the same one write path: it has exactly the same shape (one
+    /// small edit over the stored blob, dedup on the rendered content) and only a different widget to
+    /// reload.
     @MainActor
-    private static func writeStripFigures(_ edit: (inout WidgetSnapshot) -> Void) {
+    private static func writeStripFigures(kinds: [String] = [WidgetSnapshot.stripWidgetKind],
+                                          _ edit: (inout WidgetSnapshot) -> Void) {
         guard let defaults = UserDefaults(suiteName: suiteName) else { return }
         let previous = load()
         var snap = previous ?? .unavailable
@@ -299,7 +310,37 @@ extension WidgetSnapshot {
         defaults.set(data, forKey: storageKey)
         if renderedContentChanged(from: previous, to: snap),
            UIApplication.shared.applicationState == .active {
-            WidgetCenter.shared.reloadTimelines(ofKind: stripWidgetKind)
+            for kind in kinds { WidgetCenter.shared.reloadTimelines(ofKind: kind) }
+        }
+    }
+
+    /// THE LEVEL WIDGET'S FIGURES: the level of the day the app is showing, the day before it, and the day
+    /// each belongs to.
+    ///
+    /// CALLED FROM `LevelBarModel.publish` — the ONE place that resolves which day's level the app is
+    /// showing (today's own entry, else the single held stand-in day). Nothing is scored, derived or
+    /// rounded differently here: `shown` and `previous` are `LevelLedger` entries, immutable per day, so
+    /// the tile cannot drift from the radar it mirrors and cannot show a number the app itself refuses.
+    ///
+    /// A NIL `shown` IS PUBLISHED, NOT SKIPPED. "There is no level yet" is a state the tile has to be able
+    /// to draw, and `levelPublishedAt` is what separates it from "the app has never told us" — the fresh
+    /// install the water tile used to render as the setting being off.
+    @MainActor
+    static func publishLevel(shown: FrozenLevel?, previous: FrozenLevel?) {
+        writeStripFigures(kinds: [WidgetSnapshot.levelWidgetKind]) { snap in
+            snap.levelValue = shown.map { Int($0.level.rounded()) }
+            snap.levelDay = shown?.day
+            snap.levelCoverage = shown?.coverage
+            snap.levelPartial = shown?.partial
+            // A previous day only ever travels WITH a shown day; the adjacency of the two is checked
+            // again on read (`levelRender`) before any delta is drawn.
+            let prev: FrozenLevel? = shown == nil ? nil : previous
+            snap.levelPrevValue = prev.map { Int($0.level.rounded()) }
+            snap.levelPrevDay = prev?.day
+            // SET ONCE AND THEN LEFT ALONE. It answers "has the app ever told us", not "when" — and
+            // `LevelBarModel` publishes on every refresh, so restamping it would make every one of those
+            // a fresh blob and defeat the dedup above.
+            if snap.levelPublishedAt == nil { snap.levelPublishedAt = Date() }
         }
     }
 

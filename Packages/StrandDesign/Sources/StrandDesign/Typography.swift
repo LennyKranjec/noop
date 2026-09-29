@@ -61,8 +61,8 @@ public enum StrandFont {
     /// Footnote 11. Scales with Dynamic Type.
     public static let footnote = Font.system(.footnote, design: .rounded, weight: .regular)
 
-    /// Overline 11 / Bold, +1.4 tracking (apply `.tracking(1.4)` at use site;
-    /// `overlineText(_:)` does it for you). Sparing ALL-CAPS labels. Scales with Dynamic Type.
+    /// Overline / Semibold, letter-spaced by `overlineTracking` (apply it at the use site;
+    /// `strandOverline()` does it for you). Sparing ALL-CAPS labels. Scales with Dynamic Type.
     ///
     /// Also the face for compact status copy in constrained chrome (the Today header's sync capsule),
     /// used there WITHOUT the tracking — that is sentence case, not an overline, and the letter-spacing
@@ -113,14 +113,16 @@ public enum StrandFont {
         .system(size: size, weight: weight, design: .monospaced)
     }
 
-    /// The recommended tracking for overline text (wide ALL-CAPS labels, ≈ 0.13em).
+    /// The ONE tracking for overline text (ALL-CAPS labels). Every caps label reads this —
+    /// state pills, source badges and chart footers each used to carry their own 0.4/0.5, which
+    /// is visible when two of them sit in the same row.
     public static let overlineTracking: CGFloat = 0.45
 }
 
 // MARK: - Text helpers
 
 public extension Text {
-    /// Style as an overline label: ALL-CAPS, bold, +1.4 tracking, tertiary text.
+    /// Style as an overline label: ALL-CAPS, semibold, `overlineTracking`, secondary text.
     func strandOverline() -> some View {
         self.font(StrandFont.overline)
             .tracking(StrandFont.overlineTracking)

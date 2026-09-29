@@ -95,11 +95,22 @@ public struct TrendChart: View {
     public var height: CGFloat
     /// Whether hovering reveals a crosshair + tooltip for the nearest point.
     public var showsHover: Bool
-    /// iPhone touch scrub: when true (and `showsHover`), touch-and-hold pins the crosshair under the finger
-    /// and dragging scrubs it, driving the SAME readout the Mac pointer hover drives. The gesture and its
-    /// hold gate are `OverviewHRChart.touchScrub`'s verbatim, so a vertical swipe that starts on the chart
-    /// still scrolls the page (it moves past the hold's 8 pt before the 0.25 s elapse). Off by default:
-    /// a chart inside a NavigationLink (the hosted Today cards) keeps its tap-to-open unobstructed.
+    /// iPhone touch scrub: when true (and `showsHover`), dragging a finger sideways across the chart moves
+    /// the crosshair under it, driving the SAME readout the Mac pointer hover drives.
+    ///
+    /// The drag engages on the first 8 pt of movement and the axis is decided from that same movement
+    /// (`ChartHoverMath.scrubAxis`), which is what lets all three intents coexist on one chart inside a
+    /// scrolling page of tappable cards: sideways scrubs, up/down is left to the enclosing `ScrollView`
+    /// (a vertical scroll view never claims cross-axis movement, so a sideways drag doesn't fight it), and
+    /// anything under 8 pt is not a drag at all, so a tap still reaches an enclosing `NavigationLink`.
+    ///
+    /// This deliberately does NOT gate on a long press. It used to: 0.25 s stationary within 8 pt, copied
+    /// from `OverviewHRChart`, where the hold is load-bearing because the Deep Timeline's own pan and
+    /// pinch own immediate movement. Here nothing competes for an immediate sideways drag, and the hold
+    /// made a plain swipe — the one thing a reader actually does to a trend line — fail the gesture
+    /// outright, so the chart appeared not to scrub at all.
+    ///
+    /// Off by default: a decorative or non-interactive copy of a chart shouldn't claim drags.
     public var touchScrub: Bool
     /// Formats a point's value for the tooltip's bold line (default: rounded int).
     public var valueFormat: (Double) -> String
@@ -181,8 +192,9 @@ public struct TrendChart: View {
     /// The x-position the cursor is hovering, in chart-local coordinates.
     @State private var hoverX: CGFloat? = nil
 
-    /// True while a touch scrub is engaged (the hold completed) — fires the engage haptic once per scrub.
-    @State private var scrubEngaged = false
+    /// Which way the touch drag in progress was resolved. Decided once per drag from its first 8 pt and
+    /// reset on lift; `.horizontal` is also the "engaged" flag the engage haptic fires on.
+    @State private var scrubAxis: ChartHoverMath.ScrubAxis = .undecided
 
     /// PERF: a 365-day (or longer) series feeds Swift Charts hundreds of LineMark/AreaMark vertices, each
     /// catmullRom-interpolated — far more than the ~360pt plot has pixels, so most are sub-pixel and pure
@@ -224,40 +236,52 @@ public struct TrendChart: View {
         return f.string(from: date)
     }
 
+    /// The REAL sample nearest `date` — never a value interpolated between two of them.
+    /// Pure and `static` so a test can pin the snapping without rendering a chart.
+    /// `sorted` must be ascending by date (`init` sorts, so `points` always is).
+    static func nearestPoint(toDate date: Date, in sorted: [TrendPoint]) -> TrendPoint? {
+        guard let i = ChartHoverMath.nearestIndex(toDate: date, dates: sorted.map(\.date)) else { return nil }
+        return sorted[i]
+    }
+
     /// The point nearest a given chart-local x, using the proxy to map back.
     private func nearestPoint(toX x: CGFloat, proxy: ChartProxy, plot: CGRect) -> TrendPoint? {
         guard !points.isEmpty else { return nil }
         // Map the cursor x (relative to the plot area) back to a Date.
         let relX = x - plot.minX
         guard let date: Date = proxy.value(atX: relX) else { return nil }
-        // Find the TrendPoint whose date is closest.
-        return points.min(by: {
-            abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
-        })
+        return Self.nearestPoint(toDate: date, in: points)
     }
 
     #if os(iOS)
-    /// Touch-and-hold-then-drag scrub — `OverviewHRChart.touchScrubGesture` verbatim (#979 spin-off): the
-    /// stationary hold (0.25 s within 8 pt) separates a scrub from a scroll, then the drag moves the same
-    /// `hoverX` the pointer hover drives, and lifting clears it.
+    /// Touch scrub: drag sideways to move the crosshair, immediately.
+    ///
+    /// `CompareView`'s proven shape — an ordinary `DragGesture` with a small minimum distance, attached
+    /// `.simultaneously` so the page keeps scrolling — plus the one thing `CompareView` doesn't need: an
+    /// EXPLICIT axis decision. `CompareView`'s chart is not inside a tappable card, so it can leave the
+    /// horizontal/vertical call to the scroll view. These charts are (every Trends small-multiple is a
+    /// `NavigationLink`), so the axis is resolved here from the first 8 pt of travel and then held: a
+    /// sideways drag scrubs, an up/down drag is dropped on the floor for the `ScrollView` to carry, and
+    /// under 8 pt nothing happens at all so a tap still opens the metric.
+    ///
+    /// Because a `.vertical` drag never touches `hoverX`, a scroll that cancels this gesture (so `onEnded`
+    /// never arrives) cannot leave a crosshair stranded on the chart.
     private var touchScrubGesture: some Gesture {
-        LongPressGesture(minimumDuration: 0.25, maximumDistance: 8)
-            .sequenced(before: DragGesture(minimumDistance: 0, coordinateSpace: .local))
-            .onChanged { value in
-                guard case .second(true, let drag) = value else { return }
-                if !scrubEngaged {
-                    scrubEngaged = true
-                    StrandHaptic.selection.play()
+        DragGesture(minimumDistance: ChartHoverMath.scrubMinimumDistance, coordinateSpace: .local)
+            .onChanged { drag in
+                if scrubAxis == .undecided {
+                    scrubAxis = ChartHoverMath.scrubAxis(translation: drag.translation)
+                    // Mark the mode switch the instant the scrub claims the finger, as the hold used to.
+                    if scrubAxis == .horizontal { StrandHaptic.selection.play() }
                 }
-                if let drag {
-                    // Non-animating transaction, same reason as hover (#104 flicker).
-                    var tx = Transaction()
-                    tx.disablesAnimations = true
-                    withTransaction(tx) { hoverX = drag.location.x }
-                }
+                guard scrubAxis == .horizontal else { return }
+                // Non-animating transaction, same reason as hover (#104 flicker).
+                var tx = Transaction()
+                tx.disablesAnimations = true
+                withTransaction(tx) { hoverX = drag.location.x }
             }
             .onEnded { _ in
-                scrubEngaged = false
+                scrubAxis = .undecided
                 var tx = Transaction()
                 tx.disablesAnimations = true
                 withTransaction(tx) { hoverX = nil }
@@ -388,6 +412,18 @@ public struct TrendChart: View {
             GeometryReader { geo in
                 let plot = proxy.plotRectCompat(in: geo)
                 ZStack(alignment: .topLeading) {
+                    // The overlay's hit region. Everything else in this ZStack is conditional, so with
+                    // nothing hovered and no `nowCapColor` the stack had NO children — a 0×0 layout, which
+                    // `.contentShape(Rectangle())` below faithfully turned into a 0×0 hit shape. The
+                    // scrub gesture and the pointer hover therefore had no area to land on at all on every
+                    // caller that doesn't pass a now-cap (Explore, Apple Health, Mi Band: exactly the HRV
+                    // and resting-HR charts reported as unscrubbable). Trends only worked because its
+                    // now-cap dot happens to be a `.position`ed child, which fills the proposal.
+                    // A greedy clear layer makes the region the chart's frame. Gated on `showsHover` so a
+                    // deliberately non-interactive copy (the hosted Today card, the skin-temp cards) keeps
+                    // its current zero-size, zero-hit overlay exactly as it is.
+                    if showsHover { Color.clear }
+
                     if showsHover,
                        let hx = hoverX,
                        let p = nearestPoint(toX: hx, proxy: proxy, plot: plot),
@@ -446,9 +482,14 @@ public struct TrendChart: View {
                     }
                 }
                 #if os(iOS)
-                // Touch scrub (see `touchScrub`). `.subviews` masks the gesture entirely on the call sites
-                // that don't opt in, so their touch handling is exactly as before.
-                .gesture(touchScrubGesture, including: (touchScrub && showsHover) ? .all : .subviews)
+                // Touch scrub (see `touchScrub`). SIMULTANEOUS, not `.gesture`: the enclosing ScrollView's
+                // pan and any enclosing NavigationLink must keep running alongside, so an up/down drag
+                // still scrolls the page and a tap still opens the metric. The axis decision inside the
+                // gesture is what keeps the two from contradicting each other. `.subviews` masks the
+                // gesture entirely on the call sites that don't opt in, so their touch handling is
+                // exactly as before.
+                .simultaneousGesture(touchScrubGesture,
+                                     including: (touchScrub && showsHover) ? .all : .subviews)
                 #endif
             }
         }

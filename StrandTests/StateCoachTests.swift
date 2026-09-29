@@ -527,12 +527,49 @@ final class StateCoachTests: XCTestCase {
                                           stress: 1.2, hrvDeltaPct: 12, rhrDeltaBpm: -2),
             zones: [HRZoneBPMRange(zone: 1, lower: 120, upper: 133), HRZoneBPMRange(zone: 2, lower: 134, upper: 147)],
             today: today, recent: recent)
-        XCTAssertTrue(block.contains("remaining to target: 28"))
+        XCTAssertTrue(block.contains("remaining to that target: 28"))
         XCTAssertTrue(block.contains("Z1 120-133, Z2 134-147"))
         XCTAssertTrue(block.contains("Running"))
         XCTAssertTrue(block.contains("zones Z1 3m Z2 20m Z3 15m Z4 6m Z5 1m"))
-        XCTAssertTrue(block.contains("HRV last night vs 30-day median: +12%"))
+        XCTAssertTrue(block.contains("vs its 30-day median: +12%"))
         XCTAssertTrue(block.contains("Most recent hard session"))
+    }
+
+    /// EVERY FIGURE IN THE BLOCK CARRIES ITS DAY, and says what it is a property of. The wearer's report was
+    /// that the coach answered a question about tomorrow with today's charge; an undated "Charge: 71" is how
+    /// that starts.
+    func testTrainingBlockDatesEveryFigureAndBoundsTheTarget() throws {
+        let cal = Calendar.current
+        let at = try XCTUnwrap(cal.date(bySettingHour: 14, minute: 0, second: 0, of: now))
+        let key = StateCoachTests.dayKey(at, cal)
+        let block = StateTrainingContext.block(
+            figures: StateTrainingFigures(charge: 71, effortNow: 64, effortTarget: 62, sleepDebtMin: 90,
+                                          stress: 1.2),
+            zones: [], today: [], recent: [], now: at, bedtimeMinute: 22 * 60 + 30, calendar: cal)
+        XCTAssertTrue(block.contains("all of it for \(key) ONLY"), block)
+        XCTAssertTrue(block.contains("Effort so far on \(key) (cumulative since midnight)"), block)
+        XCTAssertTrue(block.contains("a property of the MORNING of \(key)"), block)
+        XCTAssertTrue(block.contains("says nothing about any later day"), block)
+        XCTAssertTrue(block.contains("The \(key) Effort target IS reached"), block)
+        XCTAssertTrue(block.contains("Workouts already completed on \(key): NONE"), block)
+        XCTAssertTrue(block.contains("Waking time left before bedtime: 8h 30min"), block)
+    }
+
+    /// THE ABSTENTION, in the prompt. With no target the block must say the question is not measured — not
+    /// "reached" and not "not reached", either of which the model would turn into a confident instruction.
+    func testTrainingBlockSaysTheTargetIsUnmeasuredRatherThanUnreached() {
+        let block = StateTrainingContext.block(
+            figures: StateTrainingFigures(charge: 71, effortNow: nil, effortTarget: nil),
+            zones: [], today: [], recent: [])
+        XCTAssertTrue(block.contains("is NOT MEASURED"), block)
+        XCTAssertTrue(block.contains("Do not say they are done"), block)
+        XCTAssertFalse(block.contains("IS reached"), block)
+        XCTAssertFalse(block.contains("is NOT yet reached"), block)
+    }
+
+    private static func dayKey(_ d: Date, _ cal: Calendar) -> String {
+        let c = cal.dateComponents([.year, .month, .day], from: d)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 
     func testLatestVsBaselineNeedsFiveValues() {

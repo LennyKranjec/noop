@@ -542,6 +542,16 @@ public struct OverviewHRChart: View {
             GeometryReader { geo in
                 let plot = proxy.plotRectCompat(in: geo)
                 ZStack(alignment: .topLeading) {
+                    // The overlay's hit region. Both layers below are entirely conditional, so on a day
+                    // with no sleep band, no recovery/effort marker and no workout — and nothing hovered —
+                    // the stack had NO children, a 0×0 layout that `.contentShape(Rectangle())` turned into
+                    // a 0×0 hit shape, leaving the hold-to-scrub nothing to land on. Unnoticed because a
+                    // normal day HAS a sleep band, which makes the stack full-size; that is also why a
+                    // greedy clear layer is safe here — it is the shape this overlay already has on every
+                    // annotated day, and pan/zoom (an ANCESTOR gesture, plus the `scrubActive()` mask)
+                    // works fine against it. Same fix as TrendChart, gated the same way.
+                    if showsHover { Color.clear }
+
                     markerLabels(proxy: proxy, plot: plot)
                     hoverLayer(proxy: proxy, plot: plot, container: geo.size)
                 }

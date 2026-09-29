@@ -39,4 +39,29 @@ final class TrendChartScrubLabelTests: XCTestCase {
     func testDefaultLocaleOverloadIsNonEmpty() {
         XCTAssertFalse(TrendChart.dayKeyDateString(friday18Sep).isEmpty)
     }
+
+    /// The contrast that makes the UTC formatter load-bearing rather than decorative: rendering the SAME
+    /// instant in a western zone genuinely names the previous day, so a scrub callout built on the device's
+    /// own zone would tell a Los Angeles reader their Friday HRV was Thursday's. `dayKeyDateString` carries
+    /// its own UTC zone, so the callout is correct in every zone the device can be in.
+    func testAWesternZoneWouldNameThePreviousDayWhichIsWhyTheLabelIsFormattedInUTC() {
+        let local = DateFormatter()
+        local.locale = Locale(identifier: "en_US")
+        local.timeZone = TimeZone(identifier: "America/Los_Angeles")
+        local.setLocalizedDateFormatFromTemplate("EEE d MMM")
+        let westward = local.string(from: friday18Sep)
+        XCTAssertTrue(westward.contains("17"), westward)   // the zone really does shift the day
+        XCTAssertNotEqual(westward, TrendChart.dayKeyDateString(friday18Sep, locale: Locale(identifier: "en_US")))
+        XCTAssertTrue(TrendChart.dayKeyDateString(friday18Sep, locale: Locale(identifier: "en_US")).contains("18"))
+    }
+
+    /// An eastern zone shifts nothing for a UTC-midnight point, but the label must still be the day key's
+    /// own day — the same one, from the same formatter, with no zone-dependent branch anywhere.
+    func testLabelIsStableAcrossRepeatedCallsAndLocales() {
+        let a = TrendChart.dayKeyDateString(friday18Sep, locale: Locale(identifier: "en_GB"))
+        let b = TrendChart.dayKeyDateString(friday18Sep, locale: Locale(identifier: "en_GB"))
+        XCTAssertEqual(a, b)
+        XCTAssertTrue(a.contains("18"), a)
+        XCTAssertTrue(a.contains("Fri"), a)
+    }
 }

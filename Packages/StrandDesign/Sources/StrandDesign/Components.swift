@@ -304,7 +304,9 @@ public struct TrendChip: View {
         }
         .foregroundStyle(color)
         .padding(.horizontal, 6).padding(.vertical, 2)
-        .background(color.opacity(0.14), in: Capsule(style: .continuous))
+        // Deliberately borderless (it sits inside a tile, beside a big value) but on the shared chip
+        // fill weight, so a trend chip and a state pill in the same row read as one family.
+        .background(color.opacity(NoopVisualStyle.chipFillOpacity), in: Capsule(style: .continuous))
         .accessibilityHidden(true)
     }
 }
@@ -358,7 +360,11 @@ public struct ChartFooter: View {
         HStack(spacing: 0) {
             ForEach(Array(items.enumerated()), id: \.offset) { _, it in
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(it.0).textCase(.uppercase).font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                    // An ALL-CAPS label IS an overline, so use the house helper instead of
+                    // re-rolling uppercase + font + colour (it was bare `footnote`/tertiary, which
+                    // read looser than the overline in the card header directly above it, and put
+                    // 13pt tertiary text below the contrast the caps face wants).
+                    Text(it.0).strandOverline()
                     Text(it.1).font(StrandFont.captionNumber).foregroundStyle(StrandPalette.textSecondary)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -494,10 +500,12 @@ public struct SegmentedPillControl<T: Hashable>: View {
                                             endPoint: .bottom
                                         )
                                     )
+                                    // Same rim as every other filled surface (it used to be its own
+                                    // .62 @0.75pt), so the pill's edge matches the track it sits in.
                                     .overlay(
                                         selectedShape.strokeBorder(
-                                            NoopVisualStyle.borderHighlight.opacity(0.62),
-                                            lineWidth: 0.75
+                                            NoopVisualStyle.rimGradient,
+                                            lineWidth: NoopVisualStyle.rimWidth
                                         )
                                     )
                                     .shadow(color: .black.opacity(0.20), radius: 4, x: 0, y: 2)
@@ -505,7 +513,10 @@ public struct SegmentedPillControl<T: Hashable>: View {
                         }
                         .contentShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
-                .buttonStyle(.plain)
+                // Was `.plain`, which gives a touchscreen no press feedback at all — the one control
+                // used on every screen felt dead until the selection animation caught up. Reuses the
+                // shared press-down style (scale + hairline edge) rather than a second press idiom.
+                .buttonStyle(StrandPressableButtonStyle(cornerRadius: 10, scale: 0.96))
                 .frame(maxWidth: equalWidth ? .infinity : nil)
                 .frame(height: 32)   // segment height; the pill fills it for an even inset
                 .disabled(!enabled)
@@ -526,14 +537,7 @@ public struct SegmentedPillControl<T: Hashable>: View {
                     )
                 )
                 .overlay(
-                    trackShape.strokeBorder(
-                        LinearGradient(
-                            colors: [NoopVisualStyle.borderHighlight.opacity(0.48), NoopVisualStyle.border],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        ),
-                        lineWidth: 0.8
-                    )
+                    trackShape.strokeBorder(NoopVisualStyle.rimGradient, lineWidth: NoopVisualStyle.rimWidth)
                 )
         }
     }
@@ -548,11 +552,16 @@ public struct SourceBadge: View {
         // `.frame(height:)` centres its content by default, so the label sits mid-capsule for free. Noted
         // because the Android twin pinned the same 18 with `heightIn` applied to the label itself, which
         // top-aligns — same number, different render. That one is matched to this, not the reverse.
-        Text(text).textCase(.uppercase).font(.system(size: 10, weight: .semibold, design: .rounded)).tracking(0.5)
+        // The font stays a FIXED 10pt (not `StrandFont.overlineScaled(10)`): the capsule is pinned to
+        // an 18pt height, so a Dynamic-Type-scaling face here would clip at large text sizes.
+        // Tracking follows the overline token so it reads as the same voice as every other caps label.
+        Text(text).textCase(.uppercase).font(.system(size: 10, weight: .semibold, design: .rounded))
+            .tracking(StrandFont.overlineTracking)
             .padding(.horizontal, 9).frame(height: NoopMetrics.sourceBadgeHeight)
-            .background(tint.opacity(0.16), in: Capsule(style: .continuous))
+            .background(tint.opacity(NoopVisualStyle.chipFillOpacity), in: Capsule(style: .continuous))
             .foregroundStyle(tint)
-            .overlay(Capsule(style: .continuous).strokeBorder(tint.opacity(0.34), lineWidth: 1))
+            .overlay(Capsule(style: .continuous)
+                .strokeBorder(tint.opacity(NoopVisualStyle.chipBorderOpacity), lineWidth: 1))
     }
 }
 
@@ -719,12 +728,13 @@ public struct ScoreStatePill: View {
             PulseDot(color: hue, pulsing: state.pulsing, size: 7)
             Text(text ?? state.label)
                 .font(StrandFont.overline)
-                .tracking(0.4)
+                .tracking(StrandFont.overlineTracking)
                 .foregroundStyle(hue)
         }
         .padding(.horizontal, 10).padding(.vertical, 5)
-        .background(Capsule(style: .continuous).fill(hue.opacity(0.12)))
-        .overlay(Capsule(style: .continuous).stroke(hue.opacity(0.32), lineWidth: 1))
+        .background(Capsule(style: .continuous).fill(hue.opacity(NoopVisualStyle.chipFillOpacity)))
+        .overlay(Capsule(style: .continuous)
+            .stroke(hue.opacity(NoopVisualStyle.chipBorderOpacity), lineWidth: 1))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(text ?? state.label)
     }

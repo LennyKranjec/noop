@@ -72,6 +72,34 @@ public struct WidgetSnapshot: Codable, Equatable {
     public var waterMl: Int?
     public var waterGoalMl: Int?
 
+    // THE LEVEL WIDGET. Optional for the same reason as every field above.
+    /// The level of the day the app is SHOWING, rounded exactly as the radar rounds it, and the day that
+    /// level is FOR.
+    ///
+    /// PER-FIELD DAY STAMPS, like the strip's steps and effort and for the same reason: `updated` is
+    /// advanced by the live and water publishes, which know nothing about the level, so it can neither
+    /// vouch for a stale level nor blank a fresh one. `levelDay` — not `updated` — is what decides
+    /// whether the tile may say "today".
+    public var levelValue: Int?
+    public var levelDay: String?
+    /// How much of the formula the level actually rested on, 0–1 (`LevelBreakdown.coverage`), and whether
+    /// the day was written at its deadline with its night only partly in (`FrozenLevel.partial`). Either
+    /// one makes the tile mark the figure as partial rather than present it as a whole measurement.
+    public var levelCoverage: Double?
+    public var levelPartial: Bool?
+    /// The written level of the day BEFORE `levelDay`, and that day's own key. The delta is DERIVED from
+    /// the two on read rather than stored, so the arrow, the signed figure and the number can never
+    /// disagree — and the key is what proves the two days are adjacent before any delta is shown.
+    public var levelPrevValue: Int?
+    public var levelPrevDay: String?
+    /// When the app last published a level state — INCLUDING the honest "there is no level yet" one.
+    ///
+    /// nil therefore means "the app has never told us", which is a different thing from "there is none".
+    /// That is exactly the distinction the water tile got wrong: a fresh install where nothing had been
+    /// published read as the wearer having turned the setting off. A tile that has never been told asks
+    /// for the app to be opened; one that has been told says the day is not scored yet.
+    public var levelPublishedAt: Date?
+
     public init(recovery: Int?, bpm: Int?, batteryPct: Int?, bonded: Bool, updated: Date,
                 effort: Int? = nil, rest: Int? = nil, hrv: Int? = nil, restingHr: Int? = nil,
                 effortDisplay: String? = nil, effortWhoop: Bool? = nil,
@@ -356,6 +384,18 @@ public struct WidgetSnapshot: Codable, Equatable {
             || previous.waterDay != next.waterDay
             || previous.waterMl != next.waterMl
             || previous.waterGoalMl != next.waterGoalMl
+            || previous.levelValue != next.levelValue
+            || previous.levelDay != next.levelDay
+            || previous.levelCoverage != next.levelCoverage
+            || previous.levelPartial != next.levelPartial
+            || previous.levelPrevValue != next.levelPrevValue
+            || previous.levelPrevDay != next.levelPrevDay
+            // The stamp joins the comparison as a PRESENCE check only. The first publish that says "there
+            // is no level yet" changes nothing else at all, and it still has to reach WidgetKit so the
+            // tile stops asking for the app to be opened; later re-confirmations of the same state must
+            // not spend a reload, which is why the DATE itself is not compared (and why `publishLevel`
+            // writes it once and then leaves it alone).
+            || (previous.levelPublishedAt == nil) != (next.levelPublishedAt == nil)
     }
 
     private static func stampMoved(_ a: Date?, _ b: Date?, by seconds: TimeInterval) -> Bool {
@@ -446,6 +486,157 @@ public struct WidgetSnapshot: Codable, Equatable {
             return s.count >= w ? s : String(repeating: "0", count: w - s.count) + s
         }
         return pad(c.year ?? 0, 4) + "-" + pad(c.month ?? 0, 2) + "-" + pad(c.day ?? 0, 2)
+    }
+
+    // MARK: - The level widget
+
+    /// The level widget's kind, so the app can reload it alone.
+    public static let levelWidgetKind = "TelosLevelWidget"
+
+    /// A level is PARTIAL below this much coverage — `LevelBreakdown.isPartialCoverage`'s own threshold,
+    /// restated because the widget extension links no analytics package. `StrandTests` compiles both and
+    /// pins the two together, the same arrangement `StressTrace.highBandFloor` has.
+    public static let levelFullCoverage: Double = 0.999
+
+    /// What the level tile should draw. Pure, so the ENTIRE decision — which of the states, whether there
+    /// is a delta at all, whether the day may be called today — is testable without an App Group.
+    ///
+    /// NOTHING IS COMPUTED HERE OR IN THE WIDGET. Every figure is a ledger value the app published; a day
+    /// missing from the ledger is a gap, and a gap draws as a gap.
+    public enum LevelRender: Equatable {
+        /// The app has never published a level state: a fresh install, or a build older than these
+        /// fields. NOT the same as having no level — the tile asks for the app to be opened once.
+        case unknown
+        /// The app published, and there is no level to show: nothing scorable yet, or the day settled as
+        /// a gap because too little of the formula had data behind it. The app shows "–" here, so does this.
+        ///
+        /// NOT named `none`: an enum case called that collides with `Optional.none` at every use site,
+        /// which is exactly the sort of ambiguity a rendering decision should not be resting on.
+        case notScored
+        case level(Level)
+
+        public struct Level: Equatable {
+            /// The level, rounded as the app rounds it.
+            public let value: Int
+            /// The day this level is FOR.
+            public let day: String
+            /// Points against the day before `day`, or nil when that day has no written level. Then there
+            /// is NO delta — nothing draws a "+0", which would claim a comparison that was never made.
+            public let delta: Int?
+            /// Part of the formula had no data behind it, or the day was written at its deadline with its
+            /// night only partly in.
+            public let partial: Bool
+            /// How many days behind the render date `day` is: 0 is today, 1 is yesterday. nil when the two
+            /// cannot be compared (a malformed key, or a day AHEAD of the render date after a clock
+            /// change) — and nil counts as not-today, so nothing can present a stale day as today's.
+            public let daysBehind: Int?
+
+            public init(value: Int, day: String, delta: Int?, partial: Bool, daysBehind: Int?) {
+                self.value = value
+                self.day = day
+                self.delta = delta
+                self.partial = partial
+                self.daysBehind = daysBehind
+            }
+
+            /// Whether the figure IS the render day's own level. Everything else is a written past day.
+            public var isToday: Bool { daysBehind == 0 }
+        }
+    }
+
+    /// Resolve the level tile's state from the stored snapshot. `nil` snapshot is `.unknown`.
+    public static func levelRender(snapshot: WidgetSnapshot?, now: Date = Date(),
+                                   calendar: Calendar = .current) -> LevelRender {
+        guard let snapshot, snapshot.levelPublishedAt != nil else { return .unknown }
+        guard let value = snapshot.levelValue, let day = snapshot.levelDay else { return .notScored }
+        // THE DELTA NEEDS THE DAY BEFORE, PROVEN. A stored previous day that is not adjacent — a gap in
+        // the ledger, a snapshot half-updated across a rollover — is not "yesterday", so it yields no
+        // delta at all rather than a difference across an unknown span.
+        var delta: Int?
+        if let prev = snapshot.levelPrevValue, let prevDay = snapshot.levelPrevDay,
+           prevDay == dayBefore(day, calendar: calendar) {
+            delta = value - prev
+        }
+        let partial = snapshot.levelPartial == true
+            || (snapshot.levelCoverage.map { $0 < levelFullCoverage } ?? false)
+        return .level(LevelRender.Level(value: value, day: day, delta: delta, partial: partial,
+                                       daysBehind: daysBehind(day, now: now, calendar: calendar)))
+    }
+
+    /// `yyyy-MM-dd` back to the start of that local day. The widget extension cannot see the app's
+    /// `LevelWiring.date(from:)`, so the parse is restated — the same reason `dayKey` builds the string
+    /// without a formatter.
+    public static func day(from key: String, calendar: Calendar = .current) -> Date? {
+        let parts = key.split(separator: "-", omittingEmptySubsequences: false)
+        guard parts.count == 3,
+              let year = Int(parts[0]), let month = Int(parts[1]), let day = Int(parts[2])
+        else { return nil }
+        var c = DateComponents()
+        c.year = year; c.month = month; c.day = day
+        return calendar.date(from: c)
+    }
+
+    /// The key of the day before `key`, or nil when `key` will not parse.
+    ///
+    /// Through the CALENDAR, never by subtracting 86 400: a DST day is 23 or 25 hours long, and the one
+    /// thing this is used for is proving two ledger days are adjacent.
+    public static func dayBefore(_ key: String, calendar: Calendar = .current) -> String? {
+        guard let date = day(from: key, calendar: calendar),
+              let before = calendar.date(byAdding: .day, value: -1, to: date) else { return nil }
+        return dayKey(before, calendar: calendar)
+    }
+
+    /// How many local days `key` is behind `now`: 0 for today, 1 for yesterday. nil when `key` will not
+    /// parse or is AHEAD of `now` — a day the render date has not reached cannot be described at all, and
+    /// guessing would be the one mistake this exists to prevent.
+    public static func daysBehind(_ key: String, now: Date, calendar: Calendar = .current) -> Int? {
+        guard let date = day(from: key, calendar: calendar) else { return nil }
+        guard let diff = calendar.dateComponents([.day], from: calendar.startOfDay(for: date),
+                                                 to: calendar.startOfDay(for: now)).day,
+              diff >= 0 else { return nil }
+        return diff
+    }
+
+    /// The signed delta as the tile prints it, or nil when there is none.
+    ///
+    /// A GENUINE NO-CHANGE IS "±0", not "+0": "+0" reads as a rise that rounded away, and the absence of
+    /// a delta must look like nothing at all rather than like a zero.
+    public static func levelDeltaText(_ delta: Int?) -> String? {
+        guard let delta else { return nil }
+        if delta == 0 { return "±0" }
+        return (delta > 0 ? "+" : "\u{2212}") + "\(abs(delta))"
+    }
+
+    /// The one line under the figure. Pure, so "a stale day never reads as today" is a test rather than a
+    /// code-reading exercise.
+    public static func levelCaption(_ render: LevelRender) -> String {
+        switch render {
+        case .unknown: return "open Telos to score"
+        case .notScored: return "not scored yet"
+        case .level(let level):
+            switch level.daysBehind {
+            case 0: return level.delta == nil ? "no day before" : "vs yesterday"
+            case 1: return "yesterday's level"
+            case .some(let n): return "\(n) days ago"
+            case .none: return "last scored level"
+            }
+        }
+    }
+
+    /// Carry the LEVEL fields over a full publish.
+    ///
+    /// `publish` builds its snapshot from scratch, and the level does not come from the repository at
+    /// all — it comes from the ledger, through `LevelBarModel`. A full publish therefore knows nothing
+    /// about it and must not blank it, exactly like the stress curve it carries forward.
+    static func carryLevel(stored: WidgetSnapshot?, into next: inout WidgetSnapshot) {
+        guard let stored else { return }
+        next.levelValue = stored.levelValue
+        next.levelDay = stored.levelDay
+        next.levelCoverage = stored.levelCoverage
+        next.levelPartial = stored.levelPartial
+        next.levelPrevValue = stored.levelPrevValue
+        next.levelPrevDay = stored.levelPrevDay
+        next.levelPublishedAt = stored.levelPublishedAt
     }
 
     /// A live-only update may reuse score fields only within the same local calendar day. At rollover,

@@ -127,7 +127,7 @@ public struct BevelGauge: View {
                     center: .center, startRadius: diameter * 0.10, endRadius: diameter * 0.5
                 )
             )
-            .overlay(Circle().strokeBorder(StrandPalette.hairline.opacity(0.5), lineWidth: 1))
+            .overlay(Circle().strokeBorder(StrandPalette.hairlineSoft, lineWidth: 1))
             .padding(lineWidth * 1.4)
     }
 

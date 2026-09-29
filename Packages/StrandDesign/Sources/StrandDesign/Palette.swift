@@ -74,6 +74,10 @@ public enum StrandPalette {
     public static let surfaceInset   = NoopVisualStyle.inset
     public static let hairline       = NoopVisualStyle.border
     public static let hairlineStrong = NoopVisualStyle.borderHighlight
+    /// The faint interior line — chart grid lines, in-card separators, tick rules. Reach for this
+    /// instead of `hairline.opacity(0.4 / 0.5 / 0.6)`, which is how the same line ended up drawn at
+    /// three different weights on three adjacent surfaces.
+    public static let hairlineSoft   = NoopVisualStyle.border.opacity(NoopVisualStyle.hairlineSoftOpacity)
 
     // MARK: Text — deep navy-ink on paper / cool off-white on navy
     public static let textPrimary    = NoopVisualStyle.primaryText

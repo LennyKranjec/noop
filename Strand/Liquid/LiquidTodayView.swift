@@ -360,6 +360,13 @@ struct LiquidTodayView: View {
     private static let topAnchorID = "liquidToday.top"
 
     var body: some View {
+        // HOW OFTEN THIS ACTUALLY RUNS, when the Display & Performance test mode is on — and nothing at
+        // all when it is off (one Bool read). This screen's observation was narrowed deliberately (see the
+        // `ble`/`coachRef` notes above), but "narrow enough" is not a property the source can state: a
+        // publisher added to any of `repo` / `profile` / `router` puts a screen-sized body back on a
+        // high-rate clock, and the only honest way to know is to count the passes on the device that is
+        // stuttering. See `RenderTrace`.
+        let _ = RenderTrace.note("LiquidTodayView")
         // THE COLUMN IS PINNED TO THE VIEWPORT, and this is a guard rather than a layout choice.
         //
         // A vertical ScrollView sizes its content column to the WIDEST child, so any one view that
@@ -1524,7 +1531,12 @@ struct LiquidTodayView: View {
                     // THE WORKOUT HALF: further sessions for today. Today only — suggestions for a day
                     // that is over are instructions nobody can follow.
                     if selectedDayOffset == 0 {
-                        StateWorkoutsSection(figures: stateFigures)
+                        StateWorkoutsSection(figures: stateFigures) {
+                            // The tile now rewrites the mission by itself when the day has moved on
+                            // (a finished session, the Effort target reached, two and a half hours of
+                            // staleness). Re-read it here so the strip above stops showing the morning's.
+                            if let mission = DailyMissionStore.today()?.text { dailyMission = mission }
+                        }
                     }
                 }
             }

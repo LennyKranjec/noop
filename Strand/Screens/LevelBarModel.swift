@@ -438,6 +438,15 @@ final class LevelBarModel: ObservableObject {
             // is not this morning's number.
             pendingToday: LevelDayFreeze.isPendingToday(ledger: ledger, now: now, calendar: calendar)
         )
+        #if os(iOS)
+        // THE HOME-SCREEN LEVEL TILE READS WHAT THIS PUBLISHED, and nothing else: the same shown day, the
+        // same day before it, both ledger entries. Sent from here rather than from a widget-side read so
+        // there is one resolution of "which day's level is current" — and it goes out on every publish,
+        // including the ones where there is no level at all, because "not scored yet" is a state the tile
+        // has to be told about (see `WidgetSnapshot.levelPublishedAt`). The write itself is deduped and
+        // costs nothing when the level has not moved.
+        WidgetSnapshot.publishLevel(shown: shown, previous: written(-1))
+        #endif
     }
 
     /// Every written day over `spanDays`, for the timeline — straight from the ledger.

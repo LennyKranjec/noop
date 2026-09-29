@@ -122,6 +122,63 @@ public enum ChartHoverMath {
         }
         return best
     }
+
+    /// Index of the point in an ASCENDING-by-date series whose date is nearest `date`, by binary search.
+    /// Ties snap to the EARLIER point. Returns nil for an empty series.
+    ///
+    /// The scrub readout snaps to a REAL sample rather than interpolating between two of them: a value
+    /// read off the line between Tuesday and Thursday is a number the data never contained, and an
+    /// invented reading is worse than a snapped one. Same rule and same tie-break as `CompareView`'s
+    /// `nearestEntry`, so every scrubbable chart names the same day for the same finger position.
+    public static func nearestIndex(toDate date: Date, dates: [Date]) -> Int? {
+        guard !dates.isEmpty else { return nil }
+        // Lower bound: first entry whose date is >= the cursor date.
+        var lo = 0, hi = dates.count
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2
+            if dates[mid] < date { lo = mid + 1 } else { hi = mid }
+        }
+        if lo == 0 { return 0 }
+        if lo == dates.count { return dates.count - 1 }
+        let before = dates[lo - 1], after = dates[lo]
+        return date.timeIntervalSince(before) <= after.timeIntervalSince(date) ? lo - 1 : lo
+    }
+
+    // MARK: Touch-scrub axis decision
+
+    /// How far a finger must travel before a touch drag over a chart is classified.
+    ///
+    /// Small enough that a scrub engages within a couple of millimetres — the user reads it as immediate —
+    /// and large enough that a tap, including the jitter a real thumb adds to one, never reaches the
+    /// decision at all. That is what leaves a chart inside a `NavigationLink` its tap-to-open.
+    public static let scrubMinimumDistance: CGFloat = 8
+
+    /// Which gesture a touch drag over a chart belongs to. Decided ONCE from the first translation that
+    /// clears `scrubMinimumDistance`, then held for the rest of that drag so a scrub that curves upward
+    /// mid-stroke doesn't hand itself to the scroll view halfway through (or vice versa).
+    public enum ScrubAxis: Equatable, Sendable {
+        /// No movement past `scrubMinimumDistance` yet — neither owner claimed, nothing drawn.
+        case undecided
+        /// Mostly sideways: the chart scrubs. A vertical `ScrollView` does not claim cross-axis movement,
+        /// so the page stays put on its own.
+        case horizontal
+        /// Mostly up/down: the enclosing `ScrollView` owns it and the chart must leave the crosshair
+        /// alone, so the page scrolls exactly as it did before the chart became scrubbable.
+        case vertical
+    }
+
+    /// Classify a drag by its translation.
+    ///
+    /// Distance is the straight line, matching `DragGesture(minimumDistance:)`, so the gesture's own gate
+    /// and this decision fire on the same movement. A perfect diagonal goes to `.vertical`: an enclosing
+    /// scroll view is the safer owner of an ambiguous drag, because a page that refuses to scroll is far
+    /// more noticeable than a crosshair that doesn't appear.
+    public static func scrubAxis(translation: CGSize,
+                                 minimumDistance: CGFloat = scrubMinimumDistance) -> ScrubAxis {
+        let dx = abs(translation.width), dy = abs(translation.height)
+        guard (dx * dx + dy * dy).squareRoot() >= minimumDistance else { return .undecided }
+        return dx > dy ? .horizontal : .vertical
+    }
 }
 
 // MARK: - Crosshair rule

@@ -58,7 +58,9 @@ public struct NoopLiquidGlassSearchField: View {
         }
         .padding(.horizontal, NoopMetrics.space4)
         .padding(.vertical, NoopMetrics.space3)
-        .nativeLiquidGlassSearchChrome()
+        // Focus used to be invisible here: the field looked identical whether or not the keyboard
+        // was attached to it. The chrome now carries the state (tinted glass + the house focus ring).
+        .nativeLiquidGlassSearchChrome(focused: focusBinding.wrappedValue)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(Text(accessibilityPrompt))
     }
@@ -72,17 +74,14 @@ public extension View {
     /// Capsule Liquid Glass search chrome. iOS 26 uses interactive `glassEffect`; macOS and older
     /// iOS use the shared elevated pill surface. Glass APIs stay behind `#if os(iOS)` so macOS
     /// (deployment 13) never type-checks or applies Liquid Glass.
-    @ViewBuilder
-    func nativeLiquidGlassSearchChrome() -> some View {
-        #if os(iOS)
-        if #available(iOS 26.0, *) {
-            self.glassEffect(.regular.interactive(), in: Capsule())
-        } else {
-            self.noopStandardSearchChrome()
-        }
-        #else
-        self.noopStandardSearchChrome()
-        #endif
+    ///
+    /// `focused` renders the focused state. On iOS 26 that is Liquid Glass's own accent *tint* —
+    /// the same glass layer, just tinted, so focus costs no extra blur pass — and on every path
+    /// (glass, older iOS, macOS) the shared `noopFocusRing` traces the capsule, so focus is never
+    /// signalled by colour alone. `focused` defaults to false: existing call sites are unchanged.
+    func nativeLiquidGlassSearchChrome(focused: Bool = false) -> some View {
+        self.noopSearchChromeFill(focused: focused)
+            .noopFocusRing(focused, cornerRadius: NoopVisualStyle.pillRadius)
     }
 
     /// Circular / capsule interactive Liquid Glass button chrome (Home header, live-workout controls,
@@ -120,6 +119,23 @@ public extension View {
         }
         #else
         self
+        #endif
+    }
+
+    /// The fill layer only (no focus ring): tinted interactive glass on iOS 26, the shared pill
+    /// surface everywhere else.
+    @ViewBuilder
+    private func noopSearchChromeFill(focused: Bool) -> some View {
+        #if os(iOS)
+        if #available(iOS 26.0, *) {
+            self.glassEffect(focused ? .regular.tint(StrandPalette.focusRing.opacity(0.14)).interactive()
+                                     : .regular.interactive(),
+                             in: Capsule())
+        } else {
+            self.noopStandardSearchChrome()
+        }
+        #else
+        self.noopStandardSearchChrome()
         #endif
     }
 

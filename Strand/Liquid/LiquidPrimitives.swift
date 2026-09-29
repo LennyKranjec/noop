@@ -279,6 +279,16 @@ struct LiquidVessel: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.noopBackgroundCovered) private var covered
     @ObservedObject private var motion = NoopMotionState.shared
+    /// Scrolled fully out of view (iOS 18 / macOS 15+; always false before) — the 60 fps loop stands down.
+    ///
+    /// The SAME gate `LiquidThread` has carried since it was written, and the half of the offscreen pass
+    /// that never reached the two primitives that need it most: a hero vessel sits at the TOP of a long
+    /// column (Health's fitness age + vitality, Stress, Workouts' typical effort, Hydration,
+    /// Intelligence, Metric Explorer), so scrolling down leaves a full-rate Canvas — plus a `LiquidSim`
+    /// step and a CoreMotion tilt read — running on something nobody can see, for as long as the reader
+    /// stays below it. `paused:` resumes exactly as the `covered` arm already does (`LiquidSim.step`
+    /// clamps `dt` to 33 ms, so a long gap cannot jolt the liquid), so nothing about the picture changes.
+    @State private var offscreen = false
     @State private var sim: LiquidSim
     @State private var splashes = 0
 
@@ -300,7 +310,7 @@ struct LiquidVessel: View {
         // 60fps: on the 120Hz ProMotion panel a 30fps cap updated the fluid only every 4th refresh,
         // which read as juddery slosh. Only the 3 hero gauges + HR thread run live now (the small ones
         // are static), so the higher rate is affordable and the liquid actually flows.
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: covered)) { tl in
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: covered || offscreen)) { tl in
             let now = liquidSeconds(tl.date)
             Canvas { context, size in
                 sim.step(now: now, tilt: LiquidMotion.shared.tilt, target: value ?? 0)
@@ -308,6 +318,7 @@ struct LiquidVessel: View {
             }
         }
         .aspectRatio(1, contentMode: .fit)
+        .liquidOffscreen { offscreen = $0 }
         .contentShape(Circle())
         .modifier(LiquidSplashTap(passesThrough: tapPassesThrough) { sim.splash(12); splashes &+= 1 })
         .liquidTapHaptic(trigger: splashes)   // light tap feedback (guarded so the primitives compile on macOS 13)
@@ -340,6 +351,8 @@ struct LiquidTube: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.noopBackgroundCovered) private var covered
     @ObservedObject private var motion = NoopMotionState.shared
+    /// Scrolled fully out of view — see the same flag on `LiquidVessel` for why a live tube needs it.
+    @State private var offscreen = false
     @State private var sim = LiquidSim(target: 0)
 
     var body: some View {
@@ -347,7 +360,7 @@ struct LiquidTube: View {
     }
 
     private var liveTube: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: covered)) { tl in
+        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: covered || offscreen)) { tl in
             let now = liquidSeconds(tl.date)
             Canvas { context, size in
                 sim.step(now: now, tilt: LiquidMotion.shared.tilt, target: frac)
@@ -357,6 +370,7 @@ struct LiquidTube: View {
             }
         }
         .frame(height: height)
+        .liquidOffscreen { offscreen = $0 }
         .onAppear { LiquidMotion.shared.acquire() }
         .onDisappear { LiquidMotion.shared.release() }
     }

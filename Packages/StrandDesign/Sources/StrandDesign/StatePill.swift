@@ -47,18 +47,20 @@ public struct StatePill: View {
             }
             Text(title)
                 .font(StrandFont.overline)
-                .tracking(0.4)
+                .tracking(StrandFont.overlineTracking)
                 .foregroundStyle(tone.color)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 5)
+        // Shared tinted-chip weights (was .12/.28) so this pill, a ScoreStatePill and a SourceBadge
+        // sitting in the same header row draw the same fill and edge.
         .background(
             Capsule(style: .continuous)
-                .fill(tone.color.opacity(0.12))
+                .fill(tone.color.opacity(NoopVisualStyle.chipFillOpacity))
         )
         .overlay(
             Capsule(style: .continuous)
-                .stroke(tone.color.opacity(0.28), lineWidth: 1)
+                .stroke(tone.color.opacity(NoopVisualStyle.chipBorderOpacity), lineWidth: 1)
         )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(title)

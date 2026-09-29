@@ -201,12 +201,23 @@ struct MuscleModelCardView: View {
         let weekFrom = calendar.date(byAdding: .day, value: -(muscleWindowDays - 1), to: today) ?? today
         let todayKey = Repository.localDayKey(today)
 
+        let weekFromKey = Repository.localDayKey(weekFrom)
+        // FOURTEEN DAYS IN THE SAME READ, split by day key. The note now says which direction a group is
+        // moving, which needs the week before this one — and reading it as a second range per group would
+        // have doubled the store reads on a card that rebuilds every time Today opens. One wider read per
+        // group costs the same number of reads.
+        let priorFrom = calendar.date(byAdding: .day, value: -(2 * muscleWindowDays - 1), to: today) ?? weekFrom
+        let priorFromKey = Repository.localDayKey(priorFrom)
+
         var week: [MuscleGroup: Double] = [:]
+        var priorWeek: [MuscleGroup: Double] = [:]
         for group in MuscleGroup.allCases {
             let rows = await repo.series(key: group.volumeKey, source: LiftingImporter.sourceId,
-                                         from: Repository.localDayKey(weekFrom), to: todayKey)
-            let sum = rows.reduce(0) { $0 + $1.value }
+                                         from: priorFromKey, to: todayKey)
+            let sum = rows.filter { $0.day >= weekFromKey }.reduce(0) { $0 + $1.value }
             if sum > 0 { week[group] = sum }
+            let before = rows.filter { $0.day < weekFromKey }.reduce(0) { $0 + $1.value }
+            if before > 0 { priorWeek[group] = before }
         }
 
         var baselines = MuscleBaselineStore.read()
@@ -225,14 +236,21 @@ struct MuscleModelCardView: View {
         }
 
         loaded = MuscleLoads(thisWeek: week, baselines: baselines)
-        await loadNote(loads: week, baselines: baselines)
+        await loadNote(loads: week, baselines: baselines, from: weekFromKey, to: todayKey,
+                       priorWeek: priorWeek)
     }
 
     /// The stored note first, so an unchanged week paints immediately; only a changed fingerprint
     /// reaches the model.
-    private func loadNote(loads: [MuscleGroup: Double], baselines: [MuscleGroup: MuscleBaseline]) async {
-        guard !loads.isEmpty else {
+    private func loadNote(loads: [MuscleGroup: Double], baselines: [MuscleGroup: MuscleBaseline],
+                          from: String, to: String, priorWeek: [MuscleGroup: Double]) async {
+        // TOO LITTLE TO READ IS NOT A READING. One group with one week of volume gives the model nothing to
+        // be undertrained relative to, and the note it wrote from it was a confident paragraph about
+        // nothing — the "thin data" half of the fabrication rule. No note is the honest outcome, and the
+        // card already says the log is empty in its footnote.
+        guard loads.count >= MuscleCoachNote.minGroupsForNote else {
             note = nil
+            unavailableReason = nil
             return
         }
         // WHY THE PANEL WAS EMPTY. The note is written by the coach, and the coach needs a provider and
@@ -246,13 +264,15 @@ struct MuscleModelCardView: View {
             return
         }
         unavailableReason = nil
-        let fingerprint = MuscleCoachNote.fingerprint(loads)
+        let fingerprint = MuscleCoachNote.fingerprint(loads, priorWeek: priorWeek,
+                                                      window: from + ".." + to)
         if let stored = MuscleCoachNote.stored(fingerprint: fingerprint) {
             note = stored
             return
         }
         let answer = await coach.generateOneShot(
-            systemPrompt: MuscleCoachNote.systemPrompt(loads: loads, baselines: baselines),
+            systemPrompt: MuscleCoachNote.systemPrompt(loads: loads, baselines: baselines,
+                                                       from: from, to: to, priorWeek: priorWeek),
             question: MuscleCoachNote.question)
         guard let answer else { return }
         let clipped = String(answer.prefix(MuscleCoachNote.maxChars))
