@@ -42,6 +42,18 @@ private struct SleepAlarmSheetContent: View {
     /// it anywhere on this screen.
     @State private var strapConnected = false
 
+    /// Whether the strap is REFUSING NOOP's writes ("Authentication is insufficient") — connected, but the
+    /// encrypted pairing is gone from this phone, so nothing NOOP sends can land.
+    ///
+    /// THE FACT THIS SCREEN WAS MISSING. `strapConnected` is true in that state, so the reach row drew a
+    /// green tick and said "Strap connected — NOOP can buzz it", which is true of the link and false of the
+    /// alarm. A real 5/MG owner (fw 50.42.1.0, after an iPhone reset) read that for days while the diagnosis
+    /// AND the fix sat in the strap log, hundreds of lines deep, where nobody looks.
+    @State private var strapWritesRefused = false
+    /// Whatever the BLE layer has OBSERVED about this bond (#78 / #747 / #1635 / the refused-write hint).
+    /// Preferred over anything this screen could assert, because it is closer to the evidence.
+    @State private var pairingHint: String?
+
     /// The persisted alarm, read straight from the same defaults keys `WakeBuzzAlarm` writes, so the
     /// Sleep header's filled/empty alarm glyph tracks this switch with no plumbing in between.
     @AppStorage(WakeBuzzAlarm.Key.enabled) private var alarmOn = false
@@ -83,6 +95,10 @@ private struct SleepAlarmSheetContent: View {
             ringer.reschedule()
         }
         .onReceive(live.$connected.removeDuplicates()) { strapConnected = $0 }
+        // Both flip at most a handful of times per session, so they cost nothing next to the 1–3 Hz stream
+        // this screen deliberately does not observe.
+        .onReceive(live.$strapWritesRefused.removeDuplicates()) { strapWritesRefused = $0 }
+        .onReceive(live.$pairingHint.removeDuplicates()) { pairingHint = $0 }
     }
 
     // MARK: - Time + on/off
@@ -137,24 +153,47 @@ private struct SleepAlarmSheetContent: View {
     /// doesn't work at all": nothing on this screen distinguished an armed working alarm from an armed
     /// one that had no way to reach the wrist. Stated as a live condition, not a promise, and never
     /// dressed up: "connected" says the buzz can be delivered now, nothing more.
+    ///
+    /// THREE states, not two. The boolean this row used to be could not express the case the user was
+    /// actually in — connected AND unable to receive anything — so it told them the opposite of the truth in
+    /// the most confident form the screen has. Which of the three applies is decided by the pure
+    /// `WakeBuzzAlarm.reach`, so the choice is pinned by a test rather than by a ternary here.
     @ViewBuilder
     private var reachRow: some View {
+        let reach = WakeBuzzAlarm.reach(strapConnected: strapConnected,
+                                        bondRefused: strapWritesRefused,
+                                        pairingHint: pairingHint)
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: strapConnected ? "checkmark.circle" : "exclamationmark.triangle")
-                .foregroundStyle(strapConnected ? StrandPalette.statusPositive : StrandPalette.statusWarning)
+            Image(systemName: reach == .canBuzz ? "checkmark.circle" : "exclamationmark.triangle")
+                .foregroundStyle(reach == .canBuzz ? StrandPalette.statusPositive : StrandPalette.statusWarning)
                 .accessibilityHidden(true)
-            // Two literal Texts rather than one ternary, so each string stays a plain
+            // Separate literal Texts rather than one ternary, so each string stays a plain
             // `LocalizedStringKey` the string catalog can pick up.
-            if strapConnected {
+            switch reach {
+            case .canBuzz:
                 Text("Strap connected — NOOP can buzz it.")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-            } else {
+            case .notConnected:
                 Text("Strap not connected. Nothing will buzz unless it's connected at your wake time — the backup notification is all you'd get.")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
+            case .refused(let guidance):
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Your strap is connected but NOT paired. It is refusing everything NOOP sends, so nothing will buzz until you pair it again.")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.statusWarning)
+                        .fixedSize(horizontal: false, vertical: true)
+                    // The BLE layer's own guidance, verbatim — it is not a `LocalizedStringKey`, and
+                    // deliberately so: re-typing it here as one would make a second copy of the text that
+                    // #78 already owns, which is how this repo ends up with two of everything.
+                    Text(verbatim: guidance)
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
@@ -227,6 +266,11 @@ private struct SleepAlarmSheetContent: View {
         case .some(.noStrap):
             deliveryNote("exclamationmark.triangle", StrandPalette.statusWarning,
                          Text("Nothing was sent — your strap isn't connected. NOOP buzzes it over Bluetooth, so it has to be connected first."))
+        case .some(.strapRefused):
+            // A DIFFERENT instruction from `.noStrap`, which is the whole reason it is a separate case:
+            // this strap is connected, it will stay connected, and waiting for it achieves nothing.
+            deliveryNote("exclamationmark.triangle", StrandPalette.statusWarning,
+                         Text("Nothing was sent — your strap is connected but refusing it. The pairing is gone from this phone: close the official WHOOP app, tap the band until the LEDs flash blue, forget the strap under iPhone Settings → Bluetooth if it's listed, then tap Connect in NOOP. Steps and sleep can't sync either until that's done."))
         case .some(.noSink):
             deliveryNote("exclamationmark.triangle", StrandPalette.statusWarning,
                          Text("NOOP couldn't send anything: the buzz isn't wired up in this build. Please report it — this one is our bug, not your strap."))

@@ -599,6 +599,22 @@ public final class LiveState: ObservableObject {
     /// the official WHOOP app. Surfaced as actionable pairing-mode guidance; cleared once the link bonds.
     @Published public var pairingHint: String? = nil
 
+    /// True when the strap is REJECTING NOOP's writes at the ATT layer ("Authentication is insufficient",
+    /// `cbAttError5`/`15`) — the phone-side encrypted bond is gone and the strap will not grant a new one.
+    ///
+    /// THE FACT THE APP USED TO HAVE AND NEVER PUBLISHED. `connected` was true, the command characteristic
+    /// was discovered, so `BLEManager.commandChannelReady` was true and every surface reported a working
+    /// link; each write then came back refused in `didWriteValueFor`, hundreds of lines later, in the strap
+    /// log only. A real 5/MG owner (fw 50.42.1.0, after an iPhone reset) spent days on "the strap never
+    /// buzzes", "no steps" and "no night data" with nothing in the UI naming the cause — all three are this
+    /// one flag, because a refused write also means the connect handshake never completes and the history
+    /// offload is never unblocked.
+    ///
+    /// Set from the `didWriteValueFor` ERROR path (never from having issued a write) and cleared by any
+    /// confirmed write that comes back WITHOUT an error — which on a 5/MG is the CLIENT_HELLO ack, so
+    /// re-pairing clears it by itself. Also cleared on connect/disconnect, so it can never outlive a link.
+    @Published public var strapWritesRefused: Bool = false
+
     /// Set when a connect attempt fails because the strap wiped its bond ("Peer removed pairing
     /// information") — a firmware update, or the official WHOOP app re-bonding it. macOS keeps re-presenting
     /// the now-stale pairing key, so reconnects loop on the same error with no recovery. Carries an

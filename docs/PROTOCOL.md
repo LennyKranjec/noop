@@ -424,6 +424,29 @@ public func frame(seq: UInt8, payload: [UInt8] = [0x00]) -> [UInt8] {
 | 122 | `STOP_HAPTICS` | `[0x00]` | stop an in-progress haptic |
 | 123 | `SELECT_WRIST` | — | set strap wrist |
 
+**One-shot "buzz the strap now" (#921, revised #2213).** `BLEManager.buzzStrapOnce()` is the single
+sequence behind every user-facing buzz (Live's button, the App Intent, the Sleep wake buzz), and it is
+**per-family** because the two families have different confirmed evidence:
+
+- **WHOOP 4.0 (harvard):** `RUN_HAPTICS_PATTERN` (79) `[2, 3, 0, 0, 0]` **then** `RUN_ALARM` (68) `[0x01]`,
+  both `.withResponse`. Unchanged — this pair is what #921 confirmed on-device, and a *bare* 79 is exactly
+  what a 4.0 was reported ignoring on the Siri-shortcut path.
+- **WHOOP 5.0/MG (puffin):** the maverick haptic **alone** (`send` remaps 79 to cmd `0x13` with the
+  `MaverickHaptics.notificationBuzz` body). The `RUN_ALARM` chaser is **no longer sent by default**, and is
+  available only with Settings → Experimental on.
+
+Why the 5/MG chaser was demoted: `RUN_ALARM` asks the strap to run its **stored** alarm, and a 5/MG's alarm
+register is normally empty (the firmware alarm is itself experimental there and unarmed). Running an empty
+alarm immediately after starting a haptic pattern is a plausible way to **abort** that pattern, which would
+make the pair buzz *less* than the pattern alone. That is a suspicion, not a finding — it was raised while
+diagnosing a silent 5/MG whose writes turned out never to have reached the strap at all (ATT
+`insufficient authentication`, see §the bond notes) — so it is settled the only way it can be: ship the
+hardware-confirmed half, and keep the chaser behind the toggle so the two can be compared on a wrist.
+
+Also note what a write log line can and cannot claim. `send` returns when `writeValue` is **queued**; the
+acknowledgement for a `.withResponse` write arrives later in `didWriteValueFor`, and it can arrive as a
+**failure**. A log line written at send time must therefore never say "acked".
+
 **5/MG raw-IMU sequence (hardware-verified):** command 106 accepting a write does not mean that the
 producer started. A bounded capture first sends `START_RAW_DATA` (81) `[0x01]`, then command 106 with
 the two-byte selector `[0x01, 0x01]`. Stop uses `STOP_RAW_DATA` (82) `[0x01]`, then command 106

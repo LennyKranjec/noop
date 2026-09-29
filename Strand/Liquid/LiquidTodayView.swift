@@ -3670,12 +3670,43 @@ private extension View {
 private struct LiquidSyncStatusRow: View {
     @EnvironmentObject var live: LiveState
     var body: some View {
-        if live.backfilling {
+        // #2213 FIRST, because it is the cause of everything else this row can say. A strap that refuses
+        // NOOP's writes never completes the connect handshake, so the history offload is never unblocked —
+        // and liquid Today is the DEFAULT Today on both platforms while being the one surface that rendered
+        // neither `pairingHint` nor `lastSyncError`. A reported 5/MG owner therefore had no screen anywhere
+        // naming why their steps and nights were missing; this row simply stayed absent.
+        if live.strapWritesRefused {
+            pairingRow
+        } else if live.backfilling {
             row(String(localized: "Strap history"), value: chunks, tone: StrandPalette.accent)
+        } else if let err = live.lastSyncError {
+            // …and the ordinary stalled-offload error, which classic Today has always shown here and this
+            // row silently dropped in the liquid rewrite.
+            row(String(localized: "Strap history"), value: err, tone: StrandPalette.statusWarning)
         } else if let ts = live.lastSyncedAt {
             row(String(localized: "Strap history"),
                 value: String(localized: "Synced \(relativeAgo(ts))"), tone: StrandPalette.textPrimary)
         }
+    }
+
+    /// The unpaired-strap row. Stacked rather than trailing-aligned like the others: this is two sentences of
+    /// guidance the user has to act on, not a status word, and squeezing it into the value column would clip
+    /// it. `verbatim` because the text is the BLE layer's own (#78 / #2213), not a second copy authored here.
+    @ViewBuilder
+    private var pairingRow: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Strap history").font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
+                Spacer()
+                Text("Not paired").font(StrandFont.subhead).foregroundStyle(StrandPalette.statusWarning)
+            }
+            Text(verbatim: live.pairingHint ?? BondRefusalGiveUp.writesRefusedHint())
+                .font(StrandFont.caption)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .accessibilityElement(children: .combine)
     }
 
     /// "Syncing…" alone reads as a spinner that might be stuck; the chunk count is the cheapest available
@@ -3688,10 +3719,18 @@ private struct LiquidSyncStatusRow: View {
     }
 
     private func row(_ label: String, value: String, tone: Color) -> some View {
-        HStack {
+        HStack(alignment: .top) {
             Text(label).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
             Spacer()
-            Text(value).font(StrandFont.subhead).foregroundStyle(tone)
+            // Wraps rather than truncates: the sync ERROR now comes through here (classic Today has always
+            // shown it, this row dropped it in the liquid rewrite) and those sentences are far longer than
+            // the "Synced 4m ago" this column was sized for. `verbatim` because `value` is already a resolved
+            // String — the localizable callers do their own `String(localized:)`, and a `Text(String)`
+            // initializer would re-interpret an error message as a localization key.
+            Text(verbatim: value)
+                .font(StrandFont.subhead).foregroundStyle(tone)
+                .multilineTextAlignment(.trailing)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .combine)
     }

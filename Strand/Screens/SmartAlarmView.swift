@@ -53,7 +53,6 @@ struct SmartAlarmView: View {
     @AppStorage("alarm.lastArmAt") private var lastArmAt: Double = 0
 
     /// What the STRAP has, as far as the arm path can tell. Never "armed" on an unverified guess.
-    private enum StrapArmState { case notSentYet, queued, armed }
     private var strapArmState: StrapArmState {
         guard lastArmAt > 0 else { return .notSentYet }
         return lastArmConnected ? .armed : .queued
@@ -284,37 +283,9 @@ struct SmartAlarmView: View {
         }
     }
 
-    /// WHETHER THE STRAP ACTUALLY HAS IT. The one line on this screen that is about the link rather than
-    /// the setting, bound to what `armStrapAlarm` recorded when it last ran — not to the toggle.
-    ///
-    /// Three states and no fourth: sent over a live link, sent over a dead one (the write was dropped and
-    /// `applySmartAlarm` re-issues it on the next connect), and never attempted. "Armed" is claimed only
-    /// in the first. One literal `Text` per state rather than one interpolated string, so each stays a
-    /// plain `LocalizedStringKey` the string catalog can pick up.
-    @ViewBuilder private var armStateRow: some View {
-        switch strapArmState {
-        case .armed:
-            armStateNote("checkmark.circle", StrandPalette.statusPositive,
-                         Text("Armed on the strap itself, so it can buzz at your wake time even if your phone is asleep or NOOP is closed."))
-        case .queued:
-            armStateNote("exclamationmark.triangle", StrandPalette.statusWarning,
-                         Text("Saved, but NOT on your strap yet — it wasn't connected when NOOP last sent this. NOOP re-sends automatically the next time your strap connects; until then this alarm can't fire."))
-        case .notSentYet:
-            armStateNote("exclamationmark.triangle", StrandPalette.statusWarning,
-                         Text("NOOP hasn't sent this to your strap yet. It goes out as soon as your strap connects — until then this alarm can't fire."))
-        }
-    }
-
-    private func armStateNote(_ symbol: String, _ tint: Color, _ text: Text) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: symbol).foregroundStyle(tint).accessibilityHidden(true)
-            text
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
+    /// WHETHER THE STRAP ACTUALLY HAS IT — see `StrapArmStateNote`, which owns both the copy and the
+    /// `LiveState` observation the fourth (#2213 refused-writes) state needs.
+    @ViewBuilder private var armStateRow: some View { StrapArmStateNote(state: strapArmState) }
 
     private var windDownCard: some View {
         // Rest-tinted when armed so the active state reads in the sleep world; neutral when off.
@@ -609,5 +580,62 @@ struct SmartAlarmView: View {
         case 7: return String(localized: "Sat")
         default: return "?"
         }
+    }
+}
+
+/// What the arm path last managed to do, as far as it can tell. File-scope rather than nested in the view
+/// so `StrapArmStateNote` — which owns the live-link observation — can take it.
+private enum StrapArmState { case notSentYet, queued, armed }
+
+/// WHETHER THE STRAP ACTUALLY HAS THE ALARM. The one line on this screen that is about the link rather than
+/// the setting, bound to what `armStrapAlarm` recorded when it last ran — not to the toggle.
+///
+/// Its own leaf so the `LiveState` observation this needs (#2213) does not sit on `SmartAlarmView`: LiveState
+/// publishes 1–3×/s while a strap streams, and a settings screen re-rendering at that rate is the jank
+/// `ModelReferenceEnvironment` exists to prevent. Everything this leaf draws is a couple of `Text`s.
+///
+/// FOUR states and no fifth: armed over a usable link, queued because the link was down, never attempted, and
+/// — the one #2213 adds — the strap connected and REFUSING everything NOOP writes. "Armed" is claimed only in
+/// the first. One literal `Text` per state rather than one interpolated string, so each stays a plain
+/// `LocalizedStringKey` the string catalog can pick up.
+///
+/// The fourth state exists because `.queued` lies about it. `armStrapAlarm` records `commandChannelReady`,
+/// which is now false for a refused strap as well as a disconnected one, so a refused arm landed on "it
+/// wasn't connected when NOOP last sent this … NOOP re-sends automatically the next time your strap
+/// connects" — a promise of self-healing for the one state that never heals on its own.
+private struct StrapArmStateNote: View {
+    @EnvironmentObject private var live: LiveState
+    let state: StrapArmState
+
+    var body: some View {
+        // Refusal outranks the recorded arm state: it is the CAUSE of that state, and it is the only one of
+        // the four the user has to do something about.
+        if live.strapWritesRefused {
+            note("exclamationmark.triangle", StrandPalette.statusWarning,
+                 Text("NOT on your strap. It's connected but refusing everything NOOP sends, because the pairing is gone from this phone. Close the official WHOOP app, tap the band until the LEDs flash blue, forget the strap under iPhone Settings → Bluetooth if it's listed, then tap Connect in NOOP."))
+        } else {
+            switch state {
+            case .armed:
+                note("checkmark.circle", StrandPalette.statusPositive,
+                     Text("Armed on the strap itself, so it can buzz at your wake time even if your phone is asleep or NOOP is closed."))
+            case .queued:
+                note("exclamationmark.triangle", StrandPalette.statusWarning,
+                     Text("Saved, but NOT on your strap yet — it wasn't connected when NOOP last sent this. NOOP re-sends automatically the next time your strap connects; until then this alarm can't fire."))
+            case .notSentYet:
+                note("exclamationmark.triangle", StrandPalette.statusWarning,
+                     Text("NOOP hasn't sent this to your strap yet. It goes out as soon as your strap connects — until then this alarm can't fire."))
+            }
+        }
+    }
+
+    private func note(_ symbol: String, _ tint: Color, _ text: Text) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: symbol).foregroundStyle(tint).accessibilityHidden(true)
+            text
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

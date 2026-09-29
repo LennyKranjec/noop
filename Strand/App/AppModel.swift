@@ -381,10 +381,16 @@ final class AppModel: ObservableObject {
         // …and tell it whether that buzz can actually LAND. `BLEManager.send` drops the write and returns
         // when the link is down, so without this the ringer could not tell a delivered volley from a
         // dropped one — which is how a wake buzz over an out-of-range strap showed "Stop" in the sheet for
-        // thirty seconds with nothing on the wire. `live.connected` is the closest fact available from
-        // outside BLEManager; `commandChannelReady` (which also requires the command characteristic) is
-        // strictly better and should replace this read once BLEManager exposes it.
+        // thirty seconds with nothing on the wire. `commandChannelReady` is the read to use — it requires the
+        // command characteristic as well as the link, and since #2213 also that the strap is ACCEPTING
+        // writes — not `live.connected`, which misses both.
         wakeBuzz.strapReady = { [weak self] in self?.ble.commandChannelReady ?? false }
+        // #2213: …and whether it is refusing them. `commandChannelReady` is false in BOTH cases now, so
+        // without this second bit a strap that is connected and rejecting every write at the ATT layer would
+        // be reported to the user as "your strap isn't connected" — the one instruction that cannot help,
+        // since the strap is connected and waiting changes nothing. Set from the write COMPLETION, never
+        // from having issued one.
+        wakeBuzz.bondRefused = { [weak self] in self?.live.strapWritesRefused ?? false }
 
         // Physical-input + wear hooks (fired live by FrameRouter).
         live.onDoubleTap = { [weak self] in self?.handleDoubleTap() }

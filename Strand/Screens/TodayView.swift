@@ -5948,16 +5948,32 @@ private struct BackfillFlagBridge: View {
 /// minute. Owns the `LiveState` observation (scroll-stutter isolation).
 private struct StrapSyncRow: View {
     @EnvironmentObject private var live: LiveState
+    /// #2213: the strap refusing NOOP's writes outranks every other sync story this row can tell, because it
+    /// is the CAUSE of them — a refused write means the connect handshake never completes, so `beginBackfill`
+    /// is never unblocked and no history is ever offloaded. A user in that state saw only "Not synced yet"
+    /// here, forever, with the diagnosis and the fix living in the strap log.
+    /// Falls back rather than going quiet: `pairingHint` is cleared by several BLE paths independently of
+    /// this flag, and "no hint" must not mean "no problem" on the one row that can name the cause.
+    private var pairingProblem: String? {
+        guard live.strapWritesRefused else { return nil }
+        return live.pairingHint ?? BondRefusalGiveUp.writesRefusedHint()
+    }
     var body: some View {
         if !live.backfilling {
             TimelineView(.periodic(from: .now, by: 60)) { context in
                 HStack(alignment: .top, spacing: 10) {
                     SourceBadge("Strap sync",
-                                tint: live.lastSyncError != nil ? StrandPalette.statusWarning
+                                tint: pairingProblem != nil || live.lastSyncError != nil ? StrandPalette.statusWarning
                                     : live.lastSyncedAt != nil ? StrandPalette.accent
                                     : StrandPalette.textTertiary)
                     Spacer()
-                    if let error = live.lastSyncError {
+                    if let hint = pairingProblem {
+                        Text(verbatim: hint)
+                            .font(StrandFont.captionNumber)
+                            .foregroundStyle(StrandPalette.statusWarning)
+                            .multilineTextAlignment(.trailing)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else if let error = live.lastSyncError {
                         Text(error)
                             .font(StrandFont.captionNumber)
                             .foregroundStyle(StrandPalette.statusWarning)

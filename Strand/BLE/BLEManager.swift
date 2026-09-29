@@ -189,6 +189,28 @@ struct BondRefusalGiveUp {
         "Bond epitaph: the strap [\(opaqueId)] refused the encrypted bond \(refusals)x in a row with no successful bond - giving up auto-reconnect to stop hammering it. It is almost certainly held by the official WHOOP app or a stale phone pairing. Free it (close the WHOOP app, put the strap in pairing mode, forget it in Bluetooth settings) then reconnect in NOOP."
     }
 
+    /// #78: THE pairing-mode + forget-device guidance, for a strap that is refusing the encrypted link.
+    ///
+    /// One copy, because there are now four places that need it — the bond-write refusal, the refused
+    /// COMMAND write (#2213), the Devices row and the alarm sheet — and it existed as two verbatim literals
+    /// (BLEManager's refusal branch and DevicesView's previews) before the third caller arrived. Pure, so
+    /// the text a user reads is pinned by a test rather than retyped per site. No em-dash (project rule).
+    static func pairingRefusedHint() -> String {
+        "NOOP can see your strap but it's refusing to pair - it's likely still bonded to the official WHOOP app, or your phone is holding an old pairing. To fix it: (1) fully close the WHOOP app, (2) on a 5.0/MG, tap the band repeatedly until the LEDs flash blue (pairing mode), (3) if your strap is listed under iPhone Settings → Bluetooth, tap it and choose Forget This Device, then reconnect in NOOP."
+    }
+
+    /// #2213: the hint for a link that is UP and CONNECTED but whose every write comes back refused at the
+    /// ATT layer ("Authentication is insufficient").
+    ///
+    /// Separate from [pairingRefusedHint] because the observation is different and the user's mental model
+    /// is the thing that has to be corrected: their strap says "connected" everywhere, so "it's refusing to
+    /// pair" reads as contradicting the screen. This names the contradiction first, then gives the same fix.
+    /// The consequences are stated because they are the symptoms the user actually reported: no buzz, no
+    /// steps, no night data. Pure. No em-dash.
+    static func writesRefusedHint() -> String {
+        "Your strap is connected but it is refusing everything NOOP sends: the encrypted pairing is gone from this phone and the strap will not grant a new one. Nothing can buzz it, no alarm can be armed, and no history (steps, sleep) can be offloaded until it is paired again. Fully close the official WHOOP app, tap the band until the LEDs flash blue (pairing mode), forget the strap under iPhone Settings → Bluetooth if it is listed there, then tap Connect in NOOP."
+    }
+
     /// #747: the honest user-facing hint shown when auto-reconnect pauses. Tells them WHY it stopped and how
     /// to get going again. Pure; no em-dash. Byte-identical to the Android twin.
     static func pausedHint() -> String {
@@ -993,9 +1015,24 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Read by `WakeBuzzRinger` (through `AppModel`) so a delivered buzz volley can be told apart from
     /// one `send` dropped on the floor: `live.connected` is a proxy that misses a missing command
     /// characteristic, which is exactly the window in which the alarm claimed success and buzzed nothing.
+    ///
+    /// #2213: it also requires the strap to be ACCEPTING writes. The three conditions above are all
+    /// phone-side — a link is up and a characteristic was discovered — and a strap whose encrypted bond has
+    /// gone answers every write with ATT "Authentication is insufficient" while all three stay true. A real
+    /// 5/MG owner therefore read "Strap connected — NOOP can buzz it" and "Buzz: one-shot fired … acked"
+    /// for days over a strap that received nothing. `state.strapWritesRefused` is set from the write
+    /// COMPLETION (`didWriteValueFor`'s error path), which is the only place the answer exists, so this
+    /// property now means what its name and its #613 comment always claimed.
     var commandChannelReady: Bool {
         state.connected && peripheral?.state == .connected && cmdCharacteristic != nil
+            && !state.strapWritesRefused
     }
+    /// #2213: consecutive confirmed writes this link has had refused with ATT insufficient
+    /// authentication/encryption, and whether the one-line diagnosis has already been written for this run.
+    /// A LONE refusal is the #74 transient reconnect race, so the diagnosis waits for the second — the same
+    /// rule the #78 pairing hint uses. Both reset on any clean confirmed write and per connection.
+    private var writeRefusals = 0
+    private var writeRefusalDiagnosed = false
     /// #730: a DISABLE_ALARM that `send` dropped because the link wasn't up. The connect-settle hook
     /// re-issues ONLY this case, so a user who turned the alarm off while disconnected still gets the
     /// strap disarmed — without making every connect emit a DISABLE_ALARM for the majority who never
@@ -1744,6 +1781,9 @@ public final class BLEManager: NSObject, ObservableObject {
             state.bonded = false
             state.encryptedBond = false
             state.pairingHint = nil
+            state.strapWritesRefused = false   // #2213
+            writeRefusals = 0
+            writeRefusalDiagnosed = false
             bondRefusalStreak = 0
         }
         // #747/#750 invariant: releasing a strap fully resets the give-up + pause (like disconnect()) so
@@ -5440,15 +5480,36 @@ public final class BLEManager: NSObject, ObservableObject {
     /// is a note for future refinement; the preset id=2 form is simpler and confirmed to buzz on-device.
     ///
     /// Haptic firing cannot be verified in the simulator (no strap motor). Test on-device only.
+    /// #2213 — TWO honesty fixes here, both about the word "acked".
+    ///
+    /// 1. NOTHING IS ACKED YET. `send` returns the instant `writeValue` is queued; the acknowledgement it
+    ///    asked for arrives later, in `didWriteValueFor`. This logged "acked" at write time, so a reported
+    ///    5/MG (fw 50.42.1.0) whose every write came back "Authentication is insufficient" has "Buzz:
+    ///    one-shot fired (… acked)" one line above two refusals, and the wake-buzz ringer reported `.sent`.
+    ///    The line now says what happened — the writes were ISSUED — and the refusal, when it comes, is
+    ///    logged against the bond by `didWriteValueFor` and flips `commandChannelReady` false.
+    /// 2. The belt-and-braces `runAlarm` is no longer sent to a 5/MG by default. RUN_ALARM asks the strap to
+    ///    run its STORED alarm; on a strap with an empty alarm register that may abort the haptic pattern
+    ///    started a moment earlier, which would make this sequence buzz LESS than the pattern alone. That is
+    ///    a suspicion, not a finding (it cannot be the cause of the reported silence — those writes never
+    ///    reached the strap at all), so it is resolved the only way it can be: the 5/MG default is now the
+    ///    hardware-confirmed maverick 0x13 pattern ALONE, and the extra RUN_ALARM is available behind the
+    ///    existing Experimental toggle for anyone who wants to compare the two on a wrist. The WHOOP 4.0
+    ///    sequence is UNCHANGED — pattern + RUN_ALARM is the combination #921 confirmed on that hardware,
+    ///    and a bare RUN_HAPTICS_PATTERN is exactly what a 4.0 was reported ignoring.
     func buzzStrapOnce() {
         send(.runHapticsPattern, payload: [2, 3, 0, 0, 0], writeType: .withResponse)  // patternId=2, 3 loops (5/MG: send() remaps to the maverick notify buzz)
         if selectedModel.deviceFamily == .whoop5 {
+            guard PuffinExperiment.isEnabled else {
+                log("Buzz: sent the 5/MG maverick buzz (awaiting the write confirmation; RUN_ALARM withheld - see Experimental)")
+                return
+            }
             send(.runAlarm, payload: AlarmPayload.runAlarmRev2(), writeType: .withResponse)   // REVISION_2 [0x02, alarmId]
-            log("Buzz: one-shot fired (5/MG maverick buzz + runAlarm rev2, acked)")
+            log("Buzz: sent the 5/MG maverick buzz + runAlarm rev2 (experimental; awaiting the write confirmations)")
             return
         }
         send(.runAlarm, payload: [0x01], writeType: .withResponse)
-        log("Buzz: one-shot fired (patternId=2 loops=3 + runAlarm, acked)")
+        log("Buzz: sent patternId=2 loops=3 + runAlarm (awaiting the write confirmations)")
     }
 
     /// Haptic Clock (#460): buzz the current wall-clock time out on the strap so the user can read it
@@ -5813,6 +5874,11 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // an ordinary `didConnect` publish must always read false (only the deliberate post-bond #52
         // handoff republish carries it true), so this clear has to precede the publish, not follow it.
         state.encryptedBond = false   // re-proved per connection at the genuine-bond site (#69)
+        // #2213: and so is the write verdict. A fresh link has refused nothing yet, and carrying a previous
+        // session's refusal in would report an unusable strap before a single write had been attempted.
+        state.strapWritesRefused = false
+        writeRefusals = 0
+        writeRefusalDiagnosed = false
         // Multi-WHOOP: publish the strap's stable BLE identity so the app can persist it onto the active
         // registry device (it observes this and calls registry.setPeripheralId). Additive observation
         // only — BLEManager stays decoupled from the store and the connect flow below is unchanged.
@@ -6048,6 +6114,9 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         bondedAt = nil   // cleared after the bond-loop detector above read it (#617)
         state.connected = false
         state.encryptedBond = false   // cleared with didBond; next session must re-prove the bond (#69)
+        state.strapWritesRefused = false  // #2213: a refusal belongs to the link that produced it
+        writeRefusals = 0
+        writeRefusalDiagnosed = false
         state.charging = nil          // a stale charging flag must not outlive the link
         state.batteryMv = nil         // #592: a stale pack voltage must not outlive the link
         state.strapFirmware = nil     // a stale firmware version must not outlive the link
@@ -6570,6 +6639,36 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             // This one change repairs the pairing hint (streak>=2), the #747 give-up (5) AND the #52
             // stale-pin handoff below for non-English devices, which all key off this same flag.
             let insufficient = BLEManager.isInsufficientAuthError(error)
+            // #2213: THE WRITE VERDICT. Every branch below this point is about the BOND HANDSHAKE and is
+            // gated on `!didBond` — so a strap that declared a bond and then refuses ordinary command
+            // writes (the #1635 false-bond shape, and exactly the reported 5/MG on fw 50.42.1.0) fell
+            // through all of them and left this one "Confirmed write failed" line as the app's only record.
+            // Meanwhile `commandChannelReady` stayed true, the buzz logged "acked", and the alarm sheet
+            // said "Strap connected — NOOP can buzz it". Recording the refusal HERE, before any bond
+            // branch, is what makes the verdict depend on the write's RESULT: it is read by
+            // `commandChannelReady` (so the wake buzz, the ringer and the alarm arm all report honestly)
+            // and by the Today / alarm-sheet surfaces (so the cause is named where the user looks).
+            // Cleared by the first confirmed write that comes back clean, which on a 5/MG is the
+            // CLIENT_HELLO ack — so re-pairing heals this with no extra path.
+            //
+            // The FLAG is set on the very first refusal, because one refused write is not an inference: that
+            // write did not land, and anything reporting it as delivered is lying. The loud DIAGNOSIS is held
+            // back to the second, because a lone refusal right after a known-good bond is the #74 transient
+            // reconnect race — the same reason the #78 pairing hint waits for streak 2.
+            if insufficient {
+                writeRefusals += 1
+                state.strapWritesRefused = true
+                if writeRefusals == 1 {
+                    log("Strap refused the write (\(BLEManager.bleErrorToken(error))) — the link is not encrypted for this command, so nothing landed. Retrying; if it persists the phone-side pairing is gone.")
+                } else if !writeRefusalDiagnosed {
+                    writeRefusalDiagnosed = true
+                    log("Strap REFUSED \(writeRefusals) writes in a row (\(BLEManager.bleErrorToken(error))). \(BondRefusalGiveUp.writesRefusedHint())")
+                    // Only fill the hint if nothing more specific already holds it: the #78 / #747 / #1635
+                    // branches below and at disconnect write a hint about the cause they observed, and this
+                    // must not stomp a diagnosis that is closer to the evidence.
+                    if state.pairingHint == nil { state.pairingHint = BondRefusalGiveUp.writesRefusedHint() }
+                }
+            }
             // Connection test mode: surface the failed-encrypt / "held by another central" hint as an
             // upfront tagged line (the strap is still bonded to the official WHOOP app or a stale OS
             // pairing, so the just-works bond is refused). Gated zero-cost; diagnostic only.
@@ -6597,7 +6696,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                     // counting silently; recordRefusal() below stays false (latched), so no epitaph spam.
                     log("WHOOP 5/MG: bond still refused during a paused-state probe (streak \(bondRefusalStreak)) - the give-up stays latched")
                 } else if bondRefusalStreak >= 2 {
-                    state.pairingHint = "NOOP can see your strap but it's refusing to pair - it's likely still bonded to the official WHOOP app, or your phone is holding an old pairing. To fix it: (1) fully close the WHOOP app, (2) on a 5.0/MG, tap the band repeatedly until the LEDs flash blue (pairing mode), (3) if your strap is listed under iPhone Settings → Bluetooth, tap it and choose Forget This Device, then reconnect in NOOP."
+                    state.pairingHint = BondRefusalGiveUp.pairingRefusedHint()
                     log("WHOOP 5/MG: bond refused \(bondRefusalStreak)× with no successful bond — the strap is refusing the encrypted link (WHOOP app holds it, or a stale iOS pairing). Surfacing pairing-mode + forget-device guidance (#78).")
                 } else {
                     log("WHOOP 5/MG: bond write refused (insufficient) — retrying once; will surface pairing-mode guidance if it persists (#78).")
@@ -6629,6 +6728,18 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
             }
             return
         }
+
+        // #2213: a write that came back CLEAN is the proof the strap is accepting them again, and it is the
+        // only evidence that exists — so the refusal latch is cleared here rather than on a timer or on a
+        // reconnect. On a 5/MG the first such completion is the CLIENT_HELLO ack, which means re-pairing
+        // heals the buzz, the alarm arm and the offload handshake without any recovery path of its own.
+        if state.strapWritesRefused {
+            state.strapWritesRefused = false
+            log("Strap accepted a write again — the link is usable; clearing the refused-write state.")
+            if state.pairingHint == BondRefusalGiveUp.writesRefusedHint() { state.pairingHint = nil }
+        }
+        writeRefusals = 0
+        writeRefusalDiagnosed = false
 
         // EXPERIMENTAL WHOOP 5.0/MG (issue #17): the CLIENT_HELLO is now a .withResponse write, so this
         // fires once the strap acks it — after just-works bonding if the link needed authenticating.

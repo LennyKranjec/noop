@@ -133,6 +133,64 @@ enum WakeBuzzAlarm {
         /// No buzz sink is wired at all (`WakeBuzzRinger.buzz` nil). An app-wiring bug rather than a
         /// strap condition — it must be visible instead of looking like a quiet strap.
         case noSink
+        /// The strap is CONNECTED and the command characteristic is there, and the strap is REFUSING every
+        /// write at the ATT layer ("Authentication is insufficient") — the encrypted pairing is gone from
+        /// this phone and the strap will not grant a new one (`LiveState.strapWritesRefused`).
+        ///
+        /// Its own case rather than folding into `.noStrap`, because the two are opposite user instructions.
+        /// `.noStrap` says "bring your strap back / wait for it to connect", which is precisely the wrong
+        /// advice here: the strap IS connected, it will stay connected, and waiting achieves nothing. A real
+        /// 5/MG owner (fw 50.42.1.0, after an iPhone reset) lost days to that difference — every surface said
+        /// connected, the buzz log said "acked", and the writes were being rejected the whole time.
+        case strapRefused
+    }
+
+    /// WHAT ONE VOLLEY WILL DO, decided before it is written. The whole point of this type existing is that
+    /// the answer cannot be read off the write itself — `BLEManager.send` drops a write it cannot deliver and
+    /// returns, and a write the strap REFUSES fails asynchronously in `didWriteValueFor` — so the ringer asks
+    /// first and reports that answer. Pure, so the precedence below is pinned by a test.
+    ///
+    /// PRECEDENCE, and why: a wiring bug first (it is ours, and it looks like a quiet strap otherwise), then
+    /// the refused bond, then reachability. Refusal outranks reachability because the two are not independent
+    /// facts about one link: `commandChannelReady` (which is what `strapReachable` carries) is itself false
+    /// while writes are refused, so checking reachability first would report every refused strap as simply
+    /// "not connected" — the exact wrong instruction, and the shape of the original bug.
+    static func verdict(hasSink: Bool, strapReachable: Bool, bondRefused: Bool) -> Delivery {
+        if !hasSink { return .noSink }
+        if bondRefused { return .strapRefused }
+        if !strapReachable { return .noStrap }
+        return .sent
+    }
+
+    /// CAN THIS ALARM REACH THE WRIST? The three states the alarm sheet's reach row has to distinguish, and
+    /// the guidance that goes with the one that needs it.
+    ///
+    /// The third case is the one that was missing. The sheet had a boolean — connected or not — so a strap
+    /// that was connected and refusing every write drew a green tick and "Strap connected — NOOP can buzz
+    /// it", which is technically true of the link and practically false of the alarm. The pairing diagnosis
+    /// and the fix existed only in the strap log, several hundred lines deep, which is not somewhere a user
+    /// looks.
+    ///
+    /// `pairingHint` is `LiveState.pairingHint` — whatever the BLE layer has actually OBSERVED about this
+    /// bond (#78's "held by the WHOOP app or a stale pairing", #747's paused hint, #1635's unanswered
+    /// handshake). It is preferred when present because it is closer to the evidence than anything this
+    /// function could assert; the fallback is used only when the refusal is all we know. Pure.
+    enum Reach: Equatable {
+        /// Connected and accepting writes. The only case that may claim the buzz can be delivered.
+        case canBuzz
+        /// No link. Honest and already handled: the alarm needs the strap back by the wake minute.
+        case notConnected
+        /// Connected, refusing writes. Carries the text the user must act on.
+        case refused(String)
+    }
+
+    static func reach(strapConnected: Bool, bondRefused: Bool, pairingHint: String?) -> Reach {
+        // Refusal first, for the same reason as `verdict`: a refused link reads as disconnected through
+        // `commandChannelReady`, and "your strap isn't connected" is the one thing we must not tell someone
+        // whose strap is sitting there connected.
+        if bondRefused { return .refused(pairingHint ?? BondRefusalGiveUp.writesRefusedHint()) }
+        if !strapConnected { return .notConnected }
+        return .canBuzz
     }
 
     /// Whether the BACKSTOP — the repeating local notification at the wake time — is registered with the
@@ -166,6 +224,8 @@ enum WakeBuzzAlarm {
             return "Wake buzz: buzzed the PHONE instead — the strap isn't connected. A phone haptic needs NOOP awake and isn't a wrist, so it is a fallback, not the alarm"
         case .noSink:
             return "Wake buzz: buzzed the PHONE instead — NOOP has no strap buzz wired in this build (app bug, not your strap)"
+        case .strapRefused:
+            return "Wake buzz: buzzed the PHONE instead — the strap is connected but refusing everything NOOP sends (the encrypted pairing is gone). Re-pair the strap and the wrist buzz comes back"
         }
     }
 
@@ -175,17 +235,26 @@ enum WakeBuzzAlarm {
     /// `sent` / `dropped` count VOLLEYS, not bytes: a 30 s ring at a 3 s cadence is ~10 of them, and a
     /// ring that started with the strap away and finished with it back reports both halves instead of
     /// collapsing to whichever end we happened to sample.
-    static func deliveryLogLine(sent: Int, dropped: Int, reason: String) -> String {
+    ///
+    /// `refusedBond` names the CAUSE of the drops rather than defaulting to the only one this line used to
+    /// know. "(strap not connected)" printed under a strap that was connected and refusing writes was the
+    /// log's own version of the bug this whole change is about — it sent the reader looking for a range or
+    /// battery problem that did not exist. Defaulted to false so every existing caller and the tests that
+    /// pin their text are unchanged.
+    static func deliveryLogLine(sent: Int, dropped: Int, reason: String, refusedBond: Bool = false) -> String {
+        let cause = refusedBond
+            ? "(the strap is connected but refusing NOOP's writes - it needs re-pairing)"
+            : "(strap not connected)"
         if sent == 0 && dropped == 0 {
             return "Wake buzz: stopped (\(reason)) — no volleys were attempted"
         }
         if sent == 0 {
-            return "Wake buzz: stopped (\(reason)) — NOTHING reached the strap, all \(dropped) volleys dropped (strap not connected)"
+            return "Wake buzz: stopped (\(reason)) — NOTHING reached the strap, all \(dropped) volleys dropped \(cause)"
         }
         if dropped == 0 {
             return "Wake buzz: stopped (\(reason)) — \(sent) volleys sent to the strap"
         }
-        return "Wake buzz: stopped (\(reason)) — \(sent) volleys sent, \(dropped) dropped (strap not connected)"
+        return "Wake buzz: stopped (\(reason)) — \(sent) volleys sent, \(dropped) dropped \(cause)"
     }
 
     // MARK: - Backup notification identifiers

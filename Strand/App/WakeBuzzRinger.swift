@@ -25,6 +25,15 @@ import UserNotifications
 /// every volley, `lastDelivery` carries the answer to the UI, and the strap log records the arm, each
 /// delivery transition and the per-ring tally — so a "it didn't buzz" report is decidable from the log
 /// instead of a guess.
+///
+/// `strapReady` ALONE WAS NOT ENOUGH, and #2213 is the field report that proved it. A WHOOP 5/MG on firmware
+/// 50.42.1.0, after an iPhone reset, was connected with its command characteristic discovered — so
+/// `commandChannelReady` was true and this object reported `.sent` — while the strap rejected every single
+/// write with ATT "Authentication is insufficient", because the encrypted pairing was gone from the phone and
+/// the strap would not grant a new one. The verdict now depends on the write's RESULT (`bondRefused`, fed from
+/// `didWriteValueFor`), and that state has its own `Delivery` case, because telling this user "your strap
+/// isn't connected" is worse than saying nothing: their strap is connected, it will stay connected, and the
+/// only thing that helps is re-pairing it.
 @MainActor
 final class WakeBuzzRinger: ObservableObject {
 
@@ -72,6 +81,19 @@ final class WakeBuzzRinger: ObservableObject {
     /// this type must not invent a failure it cannot observe any more than it may invent a success. In
     /// the app it is always wired, so the honest answer is the one the user sees.
     var strapReady: (() -> Bool)?
+    /// Whether the strap is REFUSING NOOP's writes at the ATT layer — connected, characteristic present, and
+    /// every write coming back "Authentication is insufficient" because the encrypted pairing is gone from
+    /// this phone. Wired by `AppModel` to `LiveState.strapWritesRefused`, which `BLEManager` sets from the
+    /// write COMPLETION.
+    ///
+    /// `strapReady` alone cannot carry this. It is a single boolean, so the best it could ever say is "no",
+    /// and "no" is rendered everywhere as "your strap isn't connected" — the one instruction that is actively
+    /// wrong for a strap that is connected and will stay connected. This is the second bit that makes the
+    /// difference reportable: `.strapRefused` instead of `.noStrap`, and a fix the user can act on.
+    ///
+    /// UNWIRED counts as NOT refused, the same direction as `strapReady`: a host that has told us nothing has
+    /// not told us there is a problem, and inventing a failure is the mirror image of inventing a success.
+    var bondRefused: (() -> Bool)?
     /// Best-effort "cut the motor now" (STOP_HAPTICS). A no-op on a 5/MG, whose send allowlist does not
     /// carry cmd 122 — stopping there simply means we send no further volleys and the last one ends.
     var cancelBuzz: (() -> Void)?
@@ -106,6 +128,10 @@ final class WakeBuzzRinger: ObservableObject {
     /// Volleys of the current ring that went out / were dropped, for the tally logged at stop.
     private var volleysSent = 0
     private var volleysDropped = 0
+    /// Whether ANY volley of the current ring was dropped because the strap was refusing writes, so the
+    /// tally line at stop can name that cause instead of the "(strap not connected)" it used to assume.
+    /// Sticky for the ring on purpose: a ring that was refused and then re-paired mid-window still happened.
+    private var ringHitRefusedBond = false
     /// The instant the last "armed" line was logged for, so `reschedule` — which runs on every foreground,
     /// every settings edit and every day rollover — logs an ARM only when the armed instant actually
     /// changes. Without this the strap log would carry one identical line per app resume.
@@ -177,9 +203,17 @@ final class WakeBuzzRinger: ObservableObject {
         // that: an alarm armed while the strap is away is the single most likely way this ends in silence.
         if loggedArmFor != target {
             loggedArmFor = target
-            let reach = (strapReady?() ?? true)
-                ? "strap connected"
-                : "strap NOT connected — it must be back by then or nothing will buzz"
+            // The arm note distinguishes the refused bond from a strap that is merely away, because the two
+            // need opposite action before the wake minute: one is "have the strap on and connected", the
+            // other is "re-pair it, waiting will not help".
+            let reach: String
+            switch WakeBuzzAlarm.reach(strapConnected: strapReady?() ?? true,
+                                       bondRefused: bondRefused?() ?? false,
+                                       pairingHint: nil) {
+            case .canBuzz:      reach = "strap connected"
+            case .notConnected: reach = "strap NOT connected — it must be back by then or nothing will buzz"
+            case .refused:      reach = "strap connected but REFUSING NOOP's writes — nothing will buzz until it is re-paired"
+            }
             log?("Wake buzz: armed for \(Self.logTime(target)) (\(reach))")
         }
         let timer = Timer(fire: target, interval: 0, repeats: false) { [weak self] _ in
@@ -247,6 +281,7 @@ final class WakeBuzzRinger: ObservableObject {
         ringStartedAt = now
         volleysSent = 0
         volleysDropped = 0
+        ringHitRefusedBond = false
         // A fresh attempt reports itself from scratch. Carrying the previous ring's outcome over would both
         // show a stale verdict in the sheet and suppress this ring's first log line (the per-transition
         // guards below compare against it), so the second failed morning would leave no trace at all.
@@ -286,6 +321,15 @@ final class WakeBuzzRinger: ObservableObject {
             log?("Wake buzz: test sent NOTHING — no buzz sink is wired in this build (app bug, not your strap)")
             firePhoneFallback(reason: .noSink)
             return .noSink
+        }
+        // The refused bond is its own refusal to pretend, and a louder one: the user is looking at a screen
+        // that says their strap is connected, so "it isn't connected" would read as the app contradicting
+        // itself and they would keep pressing Test.
+        if bondRefused?() ?? false {
+            lastDelivery = .strapRefused
+            log?("Wake buzz: test sent NOTHING — the strap is connected but refusing everything NOOP writes (the encrypted pairing is gone from this phone). Re-pair it and the wrist buzz comes back")
+            firePhoneFallback(reason: .strapRefused)
+            return .strapRefused
         }
         guard strapReady?() ?? true else {
             lastDelivery = .noStrap
@@ -337,32 +381,41 @@ final class WakeBuzzRinger: ObservableObject {
     /// loop for the 3 s cadence. Nothing in the app calls it outside `start` and the cadence timer.
     @discardableResult
     func deliverVolley() -> WakeBuzzAlarm.Delivery {
-        guard let buzz else {
+        // ONE decision, made by the pure `verdict` rather than by a chain of guards here, so the precedence
+        // between "refusing writes" and "not reachable" is pinned by a test instead of by statement order in
+        // a @MainActor class no test can reach without a run loop.
+        let outcome = WakeBuzzAlarm.verdict(hasSink: buzz != nil,
+                                            strapReachable: strapReady?() ?? true,
+                                            bondRefused: bondRefused?() ?? false)
+        switch outcome {
+        case .noSink:
             // A wiring bug, not a strap condition. Loud once per ring rather than silent.
             if lastDelivery != .some(.noSink) {
                 log?("Wake buzz: no buzz sink is wired — NOOP cannot buzz the strap at all (app bug, not your strap)")
             }
-            lastDelivery = .noSink
             volleysDropped += 1
-            // Nothing can reach the wrist — buzz the phone instead, once for this ring.
-            firePhoneFallback(reason: .noSink)
-            return .noSink
-        }
-        guard strapReady?() ?? true else {
+        case .strapRefused:
+            volleysDropped += 1
+            ringHitRefusedBond = true
+            // First refusal only, same reason as the drop line below.
+            if lastDelivery != .some(.strapRefused) {
+                log?("Wake buzz: volley NOT sent — the strap is connected but refusing everything NOOP writes (the encrypted pairing is gone from this phone). Re-pair the strap: close the WHOOP app, put the band in pairing mode, forget it in iPhone Settings → Bluetooth, then Connect in NOOP")
+            }
+        case .noStrap:
             volleysDropped += 1
             // First drop only: a 30 s ring is ~10 volleys and ten identical lines bury the useful ones.
             if lastDelivery != .some(.noStrap) {
                 log?("Wake buzz: volley NOT sent — the strap isn't connected, so the write would be dropped; still trying for the rest of the window")
             }
-            lastDelivery = .noStrap
-            firePhoneFallback(reason: .noStrap)
-            return .noStrap
+        case .sent:
+            buzz?()
+            volleysSent += 1
+            if lastDelivery != .some(.sent) { log?("Wake buzz: volley sent to the strap") }
         }
-        buzz()
-        volleysSent += 1
-        if lastDelivery != .some(.sent) { log?("Wake buzz: volley sent to the strap") }
-        lastDelivery = .sent
-        return .sent
+        lastDelivery = outcome
+        // Nothing could reach the wrist — buzz the phone instead, once for this ring.
+        if outcome != .sent { firePhoneFallback(reason: outcome) }
+        return outcome
     }
 
     /// Stop a ring in progress. Returns whether anything was actually ringing, so a caller can tell
@@ -376,7 +429,8 @@ final class WakeBuzzRinger: ObservableObject {
         ringStartedAt = nil
         if wasRinging {
             cancelBuzz?()
-            log?(WakeBuzzAlarm.deliveryLogLine(sent: volleysSent, dropped: volleysDropped, reason: reason))
+            log?(WakeBuzzAlarm.deliveryLogLine(sent: volleysSent, dropped: volleysDropped,
+                                               reason: reason, refusedBond: ringHitRefusedBond))
         }
         return wasRinging
     }
