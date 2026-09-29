@@ -51,7 +51,14 @@ struct CustomTaskSheet: View {
                     taskList
                 }
                 .padding(16)
+                // The spinner and the preview both arrive on the same `working` edge, and the task
+                // list below them used to snap down the height of both at once. One shared fade on
+                // the design-system's standard duration, so the list slides instead of jumping.
+                .animation(StrandMotion.fade, value: working)
             }
+            // A ScrollView does not lower the keyboard on a drag, and this one has the Send button,
+            // the preview and the whole task list underneath the composer.
+            .scrollDismissesKeyboard(.interactively)
             .background(StrandPalette.surfaceBase)
             .navigationTitle("Your tasks")
             #if os(iOS)

@@ -15,6 +15,10 @@ struct UpdatesInboxView: View {
     @EnvironmentObject var router: NavRouter
     let onClose: () -> Void
 
+    /// The changelog, opened by tapping a release row (see `handleTap`). Presented from THIS sheet
+    /// rather than routed, so the inbox is still behind it when it closes.
+    @State private var showWhatsNew = false
+
     private var unread: [UpdateItem] { updateStore.sortedItems.filter { !$0.read } }
     private var read: [UpdateItem] { updateStore.sortedItems.filter { $0.read } }
 
@@ -38,6 +42,12 @@ struct UpdatesInboxView: View {
         .noopSheetPresentation(largeFirst: true)
         #endif
         .background(StrandPalette.surfaceBase)
+        // AT THE ROOT OF THE CHAIN, deliberately: attached to the `if !items.isEmpty` footer branch it
+        // would be torn down the moment the last item cleared, which is how a presenter ends up never
+        // presenting. Nothing here depends on the list's contents.
+        .sheet(isPresented: $showWhatsNew) {
+            WhatsNewView(onClose: { showWhatsNew = false })
+        }
     }
 
     // MARK: Header
@@ -164,6 +174,20 @@ struct UpdatesInboxView: View {
     private func handleTap(_ item: UpdateItem) {
         StrandHaptic.selection.play()
         withAnimation(StrandMotion.interactive) { updateStore.markRead(item.id) }
+        // THE ROW THAT SAID "TAP TO READ WHAT'S NEW" DID NOT OPEN IT. A release item is seeded with no
+        // deep link (`UpdateStore.seedWhatsNewIfNeeded`) and its own copy instructs a tap, so the tap
+        // fell through the guard below and only marked the row read — while the notes themselves stayed
+        // clipped at two lines. Release rows now open the changelog the app already ships, which is the
+        // one place those notes live; the row's words are unchanged because they are now true.
+        //
+        // `.whatsNew` ONLY, not `.newVersion`: that one means "a release you do NOT have", and the
+        // bundled changelog describes the version you are already running — opening it there would
+        // answer a different question than the row asked. Those rows carry their instructions and the
+        // remote notes in their own text, so the row expands them instead (see `UpdateRow`).
+        if item.kind == .whatsNew {
+            showWhatsNew = true
+            return
+        }
         guard let key = item.deepLink, let dest = NavRouter.Destination(deepLinkKey: key) else { return }
         // Route via the shell, then close this sheet so the destination is visible.
         router.requestedDestination = dest
@@ -191,6 +215,24 @@ private struct UpdateRow: View {
     let onTap: () -> Void
     let onRestore: () -> Void
 
+    /// Whether this row's clipped message is showing in full. See `hasDestination`.
+    @State private var expanded = false
+
+    /// Whether a tap on this row has somewhere to go — a release row opens the changelog, a `.reading`
+    /// row routes by its deep link. Rows with neither used to SWALLOW the tap: the whole card is a tap
+    /// target with a press state and a VoiceOver button trait, and tapping it only marked it read while
+    /// its message stayed clipped at two lines. A `.newVersion` row composes the remote release notes
+    /// into that message, so the text the tap could not reach was the point of the row. Those rows now
+    /// expand instead, which is a real answer to the finger.
+    private var hasDestination: Bool {
+        item.kind == .whatsNew || item.deepLink != nil
+    }
+
+    /// Spelled out as a typed property rather than inlined as `expanded ? nil : 2`: `lineLimit` has
+    /// several overloads and a bare ternary against `nil` is exactly the expression that resolves in an
+    /// editor and not in a build.
+    private var messageLineLimit: Int? { expanded ? nil : 2 }
+
     var body: some View {
         NoopCard(tint: item.read ? nil : tint) {
             VStack(alignment: .leading, spacing: 10) {
@@ -209,7 +251,7 @@ private struct UpdateRow: View {
                         Text(item.message)
                             .font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.textSecondary)
-                            .lineLimit(2)
+                            .lineLimit(messageLineLimit)
                             .fixedSize(horizontal: false, vertical: true)
                         Text(relativeDate)
                             .font(StrandFont.footnote)
@@ -235,7 +277,11 @@ private struct UpdateRow: View {
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture { onTap() }
+        .onTapGesture {
+            onTap()
+            // Animated so the card grows into its full height instead of snapping the rows below it.
+            if !hasDestination { withAnimation(StrandMotion.fade) { expanded.toggle() } }
+        }
         .strandPressable()
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)

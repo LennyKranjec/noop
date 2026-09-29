@@ -337,7 +337,11 @@ struct StateWorkoutsSection: View {
             Image(systemName: "plus")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(StrandPalette.textSecondary)
-                .frame(width: 26, height: 26)
+                // 26pt was the smallest live target in this tile. 34 is the size every other icon-only
+                // button in the app uses (the Coach header trio, the water tile's discs), and it is what
+                // this compact section header can carry without pushing the rows down; a full 44 here
+                // would grow the header by 18pt for one glyph.
+                .frame(width: 34, height: 34)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -447,7 +451,12 @@ struct StateWorkoutsSection: View {
                 Image(systemName: "info.circle")
                     .font(.system(size: 15))
                     .foregroundStyle(StrandPalette.textTertiary)
-                    .frame(width: 28, height: 28)
+                    // 28pt WAS THE WHOLE REACH — the `.contentShape` sat inside the 28pt frame, so a
+                    // near-miss on either of these two fell to the row's start button and launched a
+                    // workout instead of explaining or removing one. The glyphs are unchanged; the reach
+                    // is the HIG minimum vertically and grows horizontally into space the flexible title
+                    // block gives back, so the row does not reflow.
+                    .frame(width: 36, height: 44)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -462,7 +471,7 @@ struct StateWorkoutsSection: View {
                 Image(systemName: "xmark")
                     .font(.system(size: 12, weight: .semibold))
                     .foregroundStyle(StrandPalette.textTertiary)
-                    .frame(width: 28, height: 28)
+                    .frame(width: 36, height: 44)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)

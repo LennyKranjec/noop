@@ -143,7 +143,11 @@ struct TodayStressTileView: View {
             .background(StrandPalette.surfaceRaised)
             .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
         }
-        .buttonStyle(.plain)
+        // Was `.plain`, which on a touchscreen is no feedback at all: a full-width card with an arrow
+        // on it that does not move under the finger reads as a picture until the next screen arrives.
+        // The shared press-down style (scale + hairline edge, Reduce-Motion aware), at this card's own
+        // radius so the edge traces the shape that is actually drawn.
+        .buttonStyle(StrandPressableButtonStyle(cornerRadius: NoopMetrics.cardRadius))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(Text("Today's stress, \(shown.map { String(format: "%.1f", $0) } ?? "no reading")"))
         // KEYED ON THE SCENE PHASE, so the loop is torn down when the app leaves the foreground and

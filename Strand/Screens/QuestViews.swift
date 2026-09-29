@@ -63,33 +63,109 @@ func nowMs() -> Int64 { Int64(Date().timeIntervalSince1970 * 1000) }
 
 // MARK: - The quests you are carrying
 //
-// A row of chips: what has been accepted and not yet finished.
+// A row of chips: the gear the day is running in, then what has been accepted and not yet finished.
 //
 // ONE LINE, HORIZONTALLY SCROLLED. The strip is a reminder, not a list view: it costs the screen its
-// vertical space, so it takes one row and no more, and it disappears entirely when nothing is active.
-// Tapping a chip opens the review sheet, which is where a quest can actually be declared finished.
+// vertical space, so it takes one row and no more, and the row disappears entirely when there is nothing
+// to say. Tapping a quest chip opens the review sheet, which is where a quest can actually be declared
+// finished — and that sheet hangs off the strip's ROOT, not off the row, because the row is what the
+// sheet's own actions make disappear. See the note on `body`.
+//
+// THE GEAR LEADS THE ROW. The wearer picked Steady, Push or Relentless in the morning flow, and every
+// target on the chips behind it was scaled by that choice — so the choice has to be visible next to
+// them, or the numbers look arbitrary. A day with NO choice shows no chip: `QuestModeStore` returns nil
+// for a morning the wearer was never asked, and a default would be the app claiming they picked one.
 
 struct QuestStripView: View {
     @ObservedObject private var store = QuestStore.shared
+    @ObservedObject private var modes = QuestModeStore.shared
     @State private var reviewing: Quest?
 
+    /// The quest day — the same key the quests carry and the morning flow recorded the choice under.
+    private var dayKey: String { DailyMissionStore.dayKey() }
+
+    /// The gear picked for today, or nil when the wearer was never asked.
+    private var mode: QuestDifficulty? { modes.mode(for: dayKey) }
+
+    // ONE PRESENTER, UNCONDITIONAL, AT THE ROOT.
+    //
+    // WHAT WAS WRONG. The review sheet hung off the `ScrollView` INSIDE `if there is something to draw`.
+    // Resolving the last active quest from that sheet — which is exactly what the sheet is for, and what
+    // its own `QuestAutoComplete.run` does when the goal is already met — empties the row, so on a day
+    // with no gear chip the whole branch was replaced and the presenter was torn down MID-REVIEW: the
+    // sheet vanished, or never appeared at all. A presenter has to outlive its own content.
+    //
+    // SO THE ROOT IS ALWAYS THERE and the conditional lives one level in. Deliberately a `VStack` and not
+    // a `Group`: a modifier on a Group is applied per CHILD, so an empty branch would leave the sheet
+    // attached to nothing — the wake-buzz sheet was moved off a Group for that exact reason. Empty, the
+    // VStack is zero-height, like the always-present leaves above this strip in Today's section list.
+    //
+    // AND THERE IS ONLY ONE. Neither the gear chip nor a quest chip presents anything of its own — a chip
+    // sets `reviewing` and nothing else — so there is no second sheet on this view for the last one to
+    // win over. The day's plan summary is not a sheet from here either: it is an overlay on the shell
+    // (`RootTabView` → `DiagnosticAlertView`), which no change to this row can tear down.
     var body: some View {
-        if !store.active.isEmpty {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(store.active, id: \.id) { quest in
-                        QuestChip(quest: quest) {
-                            SystemHaptics.play(.tap)
-                            reviewing = quest
-                        }
+        VStack(spacing: 0) {
+            if Self.hasContent(mode: mode, activeCount: store.active.count) { row }
+        }
+        .sheet(item: $reviewing) { quest in
+            QuestReviewSheet(quest: quest) { reviewing = nil }
+        }
+    }
+
+    /// Whether the strip has anything to DRAW.
+    ///
+    /// Pure, and deliberately NOT what decides whether the review presenter exists — see the note on
+    /// `body`. A day whose quests have all resolved keeps its gear chip (the wearer did pick a gear, and
+    /// that is worth saying); a day that was never asked and carries nothing draws nothing at all, rather
+    /// than an empty card.
+    static func hasContent(mode: QuestDifficulty?, activeCount: Int) -> Bool {
+        mode != nil || activeCount > 0
+    }
+
+    /// The row itself — one concrete view, so nothing about it can replace the presenter above it.
+    private var row: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                if let mode { GearChip(difficulty: mode) }
+                ForEach(store.active, id: \.id) { quest in
+                    QuestChip(quest: quest) {
+                        SystemHaptics.play(.tap)
+                        reviewing = quest
                     }
                 }
-                .padding(.horizontal, 2)
             }
-            .sheet(item: $reviewing) { quest in
-                QuestReviewSheet(quest: quest) { reviewing = nil }
-            }
+            .padding(.horizontal, 2)
         }
+    }
+}
+
+/// The gear the day is running in. Read-only: the choice belongs to the morning, and a chip that could
+/// silently re-roll the day's targets from Today would be a different feature.
+private struct GearChip: View {
+    let difficulty: QuestDifficulty
+
+    private var symbol: String {
+        switch difficulty {
+        case .steady: return "tortoise.fill"
+        case .push: return "figure.run"
+        case .relentless: return "flame.fill"
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(StrandPalette.accent)
+            Text(difficulty.title.uppercased())
+                .font(StrandFont.overline)
+                .foregroundStyle(StrandPalette.accent)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 4)
+        .background(StrandPalette.accent.opacity(0.14), in: Capsule())
+        .accessibilityLabel(Text("Today's gear: \(difficulty.title)"))
     }
 }
 

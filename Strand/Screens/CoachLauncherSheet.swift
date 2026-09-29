@@ -20,6 +20,7 @@ struct CoachLauncherSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var draft = ""
+    @FocusState private var composerFocused: Bool
 
     var body: some View {
         NavigationStack {
@@ -34,6 +35,11 @@ struct CoachLauncherSheet: View {
                 .padding(16)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            // PUTTING THE KEYBOARD AWAY, the same two ways the Coach screen does it: dragging the
+            // sheet's own content lowers it, and the keyboard bar below carries an explicit Done.
+            // Without either, focusing this composer left send-or-nothing as the only way out of a
+            // keyboard covering the suggestion list it was typed from.
+            .scrollDismissesKeyboard(.interactively)
             .background(StrandPalette.surfaceBase.ignoresSafeArea())
             .navigationTitle(Text("Coach"))
             #if os(iOS)
@@ -72,7 +78,9 @@ struct CoachLauncherSheet: View {
                     .background(FrostedCardSurface(cornerRadius: NoopMetrics.cardRadius))
                     .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            // These chips ARE the sheet: tapping one dismisses and hands the question over, so the
+            // only feedback `.plain` gave was the sheet vanishing. Shared press-down style.
+            .buttonStyle(StrandPressableButtonStyle(cornerRadius: NoopMetrics.cardRadius))
             .accessibilityLabel(Text("Suggested prompt: \(prompt)"))
         }
 
@@ -82,7 +90,22 @@ struct CoachLauncherSheet: View {
                 .lineLimit(1...3)
                 .padding(.horizontal, 12).padding(.vertical, 9)
                 .background(FrostedCardSurface(cornerRadius: NoopMetrics.cardRadius))
+                .focused($composerFocused)
                 .onSubmit { submitDraft() }
+                // iOS only: macOS has no software keyboard to dismiss, and `.keyboard` placement
+                // there would draw a bar for a keyboard that is never presented. Mirrors CoachView.
+                #if os(iOS)
+                .toolbar {
+                    ToolbarItemGroup(placement: .keyboard) {
+                        Spacer(minLength: 0)
+                        Button { composerFocused = false } label: {
+                            Label("Done", systemImage: "keyboard.chevron.compact.down")
+                                .labelStyle(.titleAndIcon)
+                        }
+                        .accessibilityLabel("Hide the keyboard")
+                    }
+                }
+                #endif
             Button {
                 submitDraft()
             } label: {
@@ -119,7 +142,7 @@ struct CoachLauncherSheet: View {
                 .background(FrostedCardSurface(cornerRadius: NoopMetrics.cardRadius))
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(StrandPressableButtonStyle(cornerRadius: NoopMetrics.cardRadius))
     }
 
     // MARK: Handoff

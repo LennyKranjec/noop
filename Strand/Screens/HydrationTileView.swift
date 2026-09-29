@@ -143,6 +143,12 @@ private struct WaterButton: View {
                 .foregroundStyle(StrandPalette.textPrimary)
                 .frame(width: 34, height: 34)
                 .background(StrandPalette.surfaceBase.opacity(0.55), in: Circle())
+                // THE DISC STAYS 34pt; THE REACH IS 44. These are the two most-tapped controls on
+                // Today and they sit 12pt apart over a tile that opens a screen when missed — so a
+                // near-miss used to log nothing and navigate instead. The tile has the height to
+                // spare, and the drawn circle is unchanged.
+                .frame(width: 44, height: 44)
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text(label))

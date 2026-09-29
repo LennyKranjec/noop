@@ -26,6 +26,9 @@ struct BedroomClimateTileView: View {
                 await RoomClimatePlan.refreshTypical(repo: repo)
                 await climate.refresh()
             }
+            // The outdoor curve the window advice compares the room with. Gated (not forced) — the sky
+            // does not move between two rebuilds of Today.
+            .task { await WeatherService.refresh() }
         }
     }
 
@@ -66,6 +69,11 @@ struct BedroomClimateTileView: View {
                     .font(StrandFont.footnote)
                     .foregroundStyle(ctx.isGood ? StrandPalette.textTertiary : StrandPalette.statusWarning)
                     .fixedSize(horizontal: false, vertical: true)
+                // THE WINDOWS. One line, and only when there is something to do with them: the room's
+                // temperature is the figure the wearer can change fastest, and whether opening the window
+                // helps depends on air this tile could not see until now. An absent or exhausted forecast
+                // draws nothing here — the room screen behind the tap says which.
+                windowLine(now: now)
                 Text("\(ctx.nextMode == .sleep ? "Sleep" : "Focus") window from \(ctx.nextStart.formatted(date: .omitted, time: .shortened))")
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
@@ -79,6 +87,24 @@ struct BedroomClimateTileView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(StrandPalette.surfaceRaised)
         .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
+    }
+
+    /// The window instruction, with the clock time and how long from now. Nothing at all when there is no
+    /// instruction — an abstention belongs on the screen that has room to say why, not on a tile.
+    @ViewBuilder
+    private func windowLine(now: Date) -> some View {
+        let advice = WindowAdvicePlan.advice(for: climate.latest, now: now)
+        if advice.isActionable {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Image(systemName: "wind")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(StrandPalette.accent)
+                Text(advice.actionLine(now: now))
+                    .font(StrandFont.footnote.weight(.semibold))
+                    .foregroundStyle(StrandPalette.accent)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     private func modeChip(_ mode: RoomClimateMode) -> some View {

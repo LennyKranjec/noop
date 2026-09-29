@@ -101,6 +101,24 @@ struct WeatherToday: Equatable, Codable {
         let code: Int?
         /// Chance of precipitation, percent.
         let rainChance: Int?
+        /// Relative humidity outside, percent.
+        let humidityPct: Int?
+        /// Dew point outside, °C — the figure that says whether opening a window would DAMP the room or
+        /// dry it. Relative humidity alone cannot: 90 % at 8 °C outside is drier air, in absolute terms,
+        /// than 50 % at 21 °C in. Read by `WindowVentilation`.
+        let dewPointC: Double?
+
+        /// The two humidity fields carry defaults so a call site written before they existed — and a
+        /// `WeatherToday` decoded from a cache written by an older build — still reads as it did.
+        init(hour: Int, temperatureC: Double?, code: Int?, rainChance: Int?,
+             humidityPct: Int? = nil, dewPointC: Double? = nil) {
+            self.hour = hour
+            self.temperatureC = temperatureC
+            self.code = code
+            self.rainChance = rainChance
+            self.humidityPct = humidityPct
+            self.dewPointC = dewPointC
+        }
     }
 
     /// The local calendar day the outlook is for, "yyyy-MM-dd". A forecast for yesterday is not sent.
@@ -223,7 +241,11 @@ enum WeatherService {
             "https://api.open-meteo.com/v1/forecast"
             + "?latitude=\(latitude)&longitude=\(longitude)"
             + "&current=temperature_2m,weather_code,uv_index"
-            + "&hourly=temperature_2m,weather_code,precipitation_probability"
+            // The two humidity fields are for the WINDOW ADVICE (`WindowVentilation`): the dew point is
+            // what decides whether an open window in the rain damps the room or dries it. Same request,
+            // same fixed place, no key — two more numbers in the response the coach simply ignores.
+            + "&hourly=temperature_2m,weather_code,precipitation_probability,"
+            + "relative_humidity_2m,dew_point_2m"
             + "&daily=uv_index_max,temperature_2m_max,temperature_2m_min,precipitation_probability_max,"
             + "precipitation_sum,sunrise,sunset&forecast_days=1&timezone=auto")
         else { return lastKnown }
@@ -289,6 +311,8 @@ enum WeatherService {
         let temps = numbers(hourly, "temperature_2m")
         let codes = numbers(hourly, "weather_code")
         let chances = numbers(hourly, "precipitation_probability")
+        let humidities = numbers(hourly, "relative_humidity_2m")
+        let dewPoints = numbers(hourly, "dew_point_2m")
         var hours: [WeatherToday.Hour] = []
         for (i, stamp) in stamps.enumerated() {
             guard let stamp = stamp as? String,
@@ -298,11 +322,15 @@ enum WeatherService {
             let temp: Double? = i < temps.count ? temps[i] : nil
             let code: Double? = i < codes.count ? codes[i] : nil
             let chance: Double? = i < chances.count ? chances[i] : nil
+            let humidity: Double? = i < humidities.count ? humidities[i] : nil
+            let dew: Double? = i < dewPoints.count ? dewPoints[i] : nil
             hours.append(WeatherToday.Hour(
                 hour: hour,
                 temperatureC: temp,
                 code: code.map { Int($0) },
-                rainChance: chance.map { Int($0.rounded()) }))
+                rainChance: chance.map { Int($0.rounded()) },
+                humidityPct: humidity.map { Int($0.rounded()) },
+                dewPointC: dew))
         }
 
         return WeatherToday(

@@ -63,6 +63,11 @@ struct RootTabView: View {
     @State private var morningPresentedAt = Date()
     @ObservedObject private var stressMonitor = LiveStressMonitor.shared
     @ObservedObject private var dayAlerts = DayAlerts.shared
+    /// The quest list, for the one card that closes a past day's chosen-difficulty plan. Observed rather
+    /// than read through the quest host: the host owns the per-quest pop-ups, and this is the day-level
+    /// summary that replaces four of them. Publishes only when a quest changes, so it costs nothing like
+    /// the live stores do.
+    @ObservedObject private var questStore = QuestStore.shared
     /// The full-screen stress alarm. Separate from the pill in the level strip, which follows the live
     /// reading alone — ignoring the screen does not hide the pill.
     @State private var showStressScreen = false
@@ -475,6 +480,29 @@ struct RootTabView: View {
             }
         }
         .animation(.easeOut(duration: 0.25), value: dayAlerts.optimum)
+        // YESTERDAY'S PLAN, CLOSED IN ONE CARD. The directives a difficulty choice issues do not each
+        // get a red card when they run out — four of them the morning after a Relentless day would read
+        // as four punishments for aiming high — so `QuestStore.sweepExpired` cancels them without cards
+        // and `QuestPlanReporter` summarises the day once: what was met, what fell short with the reading
+        // behind it, and what could not be measured at all. The same diagnostic look a failed directive
+        // uses, and one acknowledgement.
+        //
+        // NOT OVER THE MORNING FLOW OR A SHEET. The card is not urgent and the store holds it until it is
+        // dismissed, so gating the RENDER is enough — nothing is lost by drawing it a moment later.
+        .overlay {
+            if let report = questStore.planReport, !showMorning, !backgroundCovered {
+                DiagnosticAlertView(
+                    overline: "DAY CLOSED",
+                    symbol: "flag.checkered",
+                    title: report.headline,
+                    subtitle: report.subtitle,
+                    message: report.body,
+                    primary: ("UNDERSTOOD", { questStore.dismissPlanReport() }))
+                .transition(.opacity)
+                .task { SystemHaptics.play(.summon) }
+            }
+        }
+        .animation(.easeOut(duration: 0.25), value: questStore.planReport?.day)
         .onChange(of: stressAlert != nil) { _, high in
             if high { presentStressScreenIfDue() } else { showStressScreen = false }
         }

@@ -66,7 +66,8 @@ struct LiquidTodayView: View {
     /// shows that day's date, which is what makes the carry honest rather than a silent substitution.
     @State private var cloudIsCarried = false
     @State private var showBedroomSettings = false
-    @State private var showClimateHistory = false
+    // The room chip presents its own screen (`BedroomClimateChip`): a presenter on the button that
+    // triggers it, rather than a fifth flag read by a `.sheet` several modifiers out.
     @ObservedObject private var climate = BedroomClimate.shared
     /// NOOP's own Charge / Effort / Rest for the selected day, each 0–100. The hero's first choice.
     @State private var noopCharge: Double?
@@ -630,9 +631,6 @@ struct LiquidTodayView: View {
                 hostedCardsRaw: $hostedCardsRaw
             )
         }
-        .sheet(isPresented: $showClimateHistory) {
-            BedroomHistoryView()
-        }
         .sheet(isPresented: $showBedroomSettings) {
             NavigationStack { BedroomClimateSettingsView() }
         }
@@ -792,14 +790,17 @@ struct LiquidTodayView: View {
             // #today-layout: the hero + Start-session row moved OUT of the scene into the reorderable
             // section block below. The wordmark's bottom pad (10) + the section VStack's 12 spacing keeps
             // the default hero-under-wordmark gap at the original 22.
-            // THE ROOM, at a glance: the bedroom sensor's figures as a small chip under the date, which
-            // opens the room's history. Absent without a sensor, and then the wordmark keeps its gap.
+            // THE ROOM, at a glance: the bedroom sensor's figures and what to do with the windows, as a
+            // small chip under the date. It opens the room's own screen — through its OWN presenter, not
+            // through a flag here; see `BedroomClimateChip`. Absent without a sensor, and then the
+            // wordmark keeps its gap.
             if climate.isConfigured {
+                // No top pad any more: the chip carries a 44-point hit target around its capsule now
+                // (see `BedroomClimateChip`), which supplies the gap this row used to add.
                 HStack {
-                    BedroomClimateChip(onOpen: { showClimateHistory = true })
+                    BedroomClimateChip()
                     Spacer(minLength: 0)
                 }
-                .padding(.top, 8)
             }
             LiquidWordmark()
                 .padding(.top, climate.isConfigured ? 0 : 30)

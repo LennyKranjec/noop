@@ -84,9 +84,12 @@ private struct VitalTileView: View {
                 .foregroundStyle(StrandPalette.textTertiary)
                 .lineLimit(1)
             HStack(spacing: 2) {
-                Text("lvl \(score.map { Int($0.rounded()) } ?? 0)")
+                // A MISSING PART IS NOT A ZERO. This read `?? 0`, so a part with no score rendered
+                // "lvl 0" — a measured floor — directly under the headline figure that correctly
+                // abstained with "–". Same dash, same meaning, in both places.
+                Text(score.map { "lvl \(Int($0.rounded()))" } ?? "lvl –")
                     .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .foregroundStyle(score != nil ? StrandPalette.textSecondary : StrandPalette.textTertiary)
                 TrendArrow(now: score, then: previous)
             }
         }
@@ -100,7 +103,10 @@ private struct VitalTileView: View {
                 SystemHaptics.play(.tap)
                 onTap()
             } label: { tile }
-            .buttonStyle(.plain)
+            // The sleep tile is the door to the sleep screen; `.plain` gave the finger nothing back
+            // while it opened. Same press-down style as the rest of the card surfaces, at this tile's
+            // own radius.
+            .buttonStyle(StrandPressableButtonStyle(cornerRadius: NoopMetrics.cardRadius))
         } else {
             tile
         }

@@ -499,8 +499,18 @@ struct SmartAlarmView: View {
                         .foregroundStyle(selected ? StrandPalette.surfaceBase : StrandPalette.textSecondary)
                         .frame(width: 30, height: 30)
                         .background(selected ? StrandPalette.accent : StrandPalette.surfaceInset, in: Circle())
-                        .contentShape(Circle())
-                        .onTapGesture { behavior.smartAlarmWeekdays = Self.alarmToggledWeekday(dow, in: behavior.smartAlarmWeekdays) }
+                        // A 30pt circle is a 30pt target, and these decide which mornings the strap
+                        // buzzes. The dot keeps its size; the reach grows vertically only, so the
+                        // seven-across row cannot widen past a narrow phone.
+                        .frame(height: 44)
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            // Every other chip-shaped selector in the app answers the finger
+                            // (SegmentedPillControl, the hero rings, the journal scales); this one
+                            // was the silent exception.
+                            StrandHaptic.selection.play()
+                            behavior.smartAlarmWeekdays = Self.alarmToggledWeekday(dow, in: behavior.smartAlarmWeekdays)
+                        }
                         .accessibilityLabel(Self.weekdayName(dow))
                         .accessibilityAddTraits(selected ? .isSelected : [])
                 }

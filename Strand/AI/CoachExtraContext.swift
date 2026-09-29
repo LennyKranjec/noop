@@ -117,20 +117,11 @@ enum CoachExtraContext {
             Repository.localDayKey(Date().addingTimeInterval(-Double(back) * 86_400))
         }
 
-        // 1. The dream journal and the morning answers, last seven mornings.
-        let dreams = DreamJournalStore.shared.entries.prefix(7)
-        if !dreams.isEmpty {
-            var lines = ["DREAM JOURNAL AND MORNING ANSWERS (their own words and taps, newest first):"]
-            for entry in dreams {
-                var line = "  \(entry.day): "
-                let answers = DreamJournalStore.summary(entry)
-                line += answers.isEmpty ? "no answers" : answers.joined(separator: "; ")
-                let text = entry.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !text.isEmpty { line += ". Dream: \"" + String(text.prefix(280)) + "\"" }
-                lines.append(line)
-            }
-            sections.append(lines.joined(separator: "\n"))
-        }
+        // 1. THE DREAM JOURNAL IS LAST, not here. It used to be the FIRST section, in front of the
+        // journal, the water, the day, the quests and the level: several hundred characters of half-awake
+        // prose at the top of the block a small model reads once, which is exactly the crowding-out that
+        // makes it answer from the story instead of from the numbers. It is now built at the end of this
+        // function, capped, and labelled with the night it belongs to. See `CoachDreamContext`.
 
         // 2. The journal itself, entry by entry, last seven days.
         let floor = dayKey(6)
@@ -320,6 +311,15 @@ enum CoachExtraContext {
             home.append(line)
         }
         if !home.isEmpty { sections.append((["HOME:"] + home).joined(separator: "\n")) }
+
+        // 10. The dream journal and the morning's answers — AFTER every figure above, for the reason
+        // stated at section 1. Dated by the night that ended on the morning of the entry, capped per
+        // entry and in total, oldest text dropped first. See `CoachDreamContext`.
+        //
+        // RIDES THE SAME CONSENT AS EVERYTHING ELSE IN THIS FILE: this block is only reached from
+        // `buildFullContext()`, so with data access off no dream text is sent at all.
+        let dreams = CoachDreamContext.block(entries: DreamJournalStore.shared.entries)
+        if !dreams.isEmpty { sections.append(dreams) }
 
         return sections.joined(separator: "\n\n")
     }

@@ -108,9 +108,17 @@ final class QuestStore: ObservableObject {
         for quest in quests where quest.state == .active || quest.state == .offered {
             guard nowMs >= quest.checkableUntilMs() else { continue }
             setState(id: quest.id, state: .declined)
+            // THE DAY'S PLAN IS ONE OUTCOME, NOT N FAILURES. A wearer who picked Relentless and took two
+            // of its four directives would otherwise be handed four red cards the next morning, one at a
+            // time — four punishments for aiming high, which is the opposite of what the choice is for.
+            // A plan directive is still cancelled here exactly like any other; what it does NOT do is
+            // queue its own card. The day is summarised once instead, by `QuestPlanReporter`, in the
+            // three honest categories (met / short / not measured). Everything else keeps its own card.
+            //
             // Only a window that closed in the last day is news. A quest that ran out weeks ago — from
             // before quests could fail — is cancelled quietly rather than joining a queue of red cards.
-            if quest.state == .active, nowMs - quest.checkableUntilMs() < 24 * 3_600_000 {
+            if quest.state == .active, !QuestDayPlan.isPlanQuest(quest),
+               nowMs - quest.checkableUntilMs() < 24 * 3_600_000 {
                 failures.append(Completion(
                     quest: quest.with(state: .declined),
                     summary: quest.kind == .custom
@@ -124,6 +132,59 @@ final class QuestStore: ObservableObject {
     func dismissFailure() {
         if !failures.isEmpty { failures.removeFirst() }
     }
+
+    // MARK: - The day's plan, as it ended
+    //
+    // The one summary that replaces the N red cards a chosen-difficulty day would otherwise produce.
+    // Built by `QuestPlanReporter`, which is the only thing with the day's evidence to hand; this half
+    // owns showing it at most once and remembering that it did.
+
+    /// The summary waiting to be shown, or nil. One at a time, like every other card here.
+    @Published private(set) var planReport: QuestPlanDayReport?
+
+    /// Days whose plan has already been summarised — the persistent fire-once guard, so a relaunch does
+    /// not re-show the card. A LIST rather than a single day (the shape `DayAlerts` uses for its
+    /// once-a-day notice): a wearer who did not open the app for a week has several days to close, and
+    /// each of them must be closed exactly once.
+    private static let reportedKey = "system.questPlanReported.v1"
+
+    /// How many closed days are remembered. Well past the point a summary would still be news, and
+    /// bounded so the key cannot grow forever.
+    static let reportedKept = 30
+
+    /// Whether `day`'s plan has already been summarised.
+    func planDayReported(_ day: String) -> Bool { reportedDays().contains(day) }
+
+    /// Record `day` as closed WITHOUT showing anything. For a day the wearer was never asked about, and
+    /// for a day whose every directive was met — each of those already had its own completion card with
+    /// its XP on it, and a summary repeating them would be a second notice about the same good news.
+    func notePlanDayReported(_ day: String) {
+        var days = reportedDays()
+        guard !days.contains(day) else { return }
+        days.append(day)
+        days.sort()
+        if days.count > Self.reportedKept { days = Array(days.suffix(Self.reportedKept)) }
+        defaults.set(days, forKey: Self.reportedKey)
+    }
+
+    /// Show the day's summary, once. Returns whether it fired.
+    ///
+    /// CHECKED AND RECORDED IN ONE STEP, with nothing awaited between them, so two passes arriving
+    /// together cannot both present it — the shape the notification centre's check-then-record race was
+    /// fixed into. The guard is spent only on a card that is actually shown: a refused present leaves the
+    /// day open for the next pass.
+    @discardableResult
+    func presentPlanReport(_ report: QuestPlanDayReport) -> Bool {
+        guard planReport == nil, !planDayReported(report.day) else { return false }
+        notePlanDayReported(report.day)
+        planReport = report
+        return true
+    }
+
+    /// The summary has been seen.
+    func dismissPlanReport() { planReport = nil }
+
+    private func reportedDays() -> [String] { defaults.stringArray(forKey: Self.reportedKey) ?? [] }
 
     // MARK: - The wearer's own tasks
     //

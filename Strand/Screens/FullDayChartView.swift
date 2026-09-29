@@ -62,6 +62,9 @@ struct FullDayChartView: View {
     /// The visible window the chart's gestures mutate. nil → full day (the chart falls back to `dayBounds`).
     @State private var zoomDomain: ClosedRange<Date>? = nil
     @State private var loading = true
+    /// Whether the loading placeholder has waited long enough to be worth showing (see `loadingState`).
+    /// Reset when it leaves the tree so a later empty window gets the same grace period.
+    @State private var spinnerShown = false
     /// Set once the first series has landed; from then on `reload()` debounces (see there). The first
     /// load stays immediate so the chart's opening frame is unchanged.
     @State private var didLoadSeries = false
@@ -283,6 +286,19 @@ struct FullDayChartView: View {
                 .foregroundStyle(StrandPalette.textTertiary)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // A CACHED DAY READS IN A FRAME OR TWO, and a large spinner plus a sentence that appear and
+        // vanish inside 50 ms read as a glitch rather than as progress. The card's height is fixed at
+        // 280 either way, so this occupies its space from the start and only becomes VISIBLE once the
+        // wait is real — nothing moves when it does.
+        .opacity(spinnerShown ? 1 : 0)
+        .task {
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            // `try?` swallows the cancellation, so without this the flag would be set by the very
+            // load that finished early and cancelled the sleep.
+            guard !Task.isCancelled else { return }
+            spinnerShown = true
+        }
+        .onDisappear { spinnerShown = false }
     }
 
     /// Honest empty/dash state — a window the strap offloaded nothing for (a not-yet-synced stretch, an

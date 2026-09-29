@@ -517,10 +517,17 @@ final class AICoachEngine: ObservableObject {
         // The data context is typically ~2000-4000 chars depending on the user's data.
         // Use a conservative estimate of 3000 chars (750 tokens) when consent is on.
         let contextTokens = dataConsent ? 750 : 50
+        // The dream journal is a WHOLE BLOCK the flat figure above does not cover, and it is the one part
+        // of the context whose size the wearer controls by typing. Counted at its ceiling
+        // (`CoachDreamContext.maxPromptChars`) and only when data access is on and there is at least one
+        // entry — the same two conditions under which any of it is sent.
+        let dreamTokens = dataConsent && !DreamJournalStore.shared.entries.isEmpty
+            ? CoachDreamContext.maxPromptChars / 4
+            : 0
         // History tokens: sum of all message texts in the windowed history.
         let historyTokens = windowedMessages().reduce(0) { $0 + $1.text.count / 4 }
         let draftTokens = draft.count / 4
-        return systemPromptTokens + contextTokens + historyTokens + draftTokens
+        return systemPromptTokens + contextTokens + dreamTokens + historyTokens + draftTokens
     }
 
     /// Used in place of the metrics context when the user has NOT granted data access.

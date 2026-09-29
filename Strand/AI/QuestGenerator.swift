@@ -24,6 +24,34 @@ enum QuestGenerator {
     /// The model's answer, capped. Two short lines; anything longer is rambling.
     private static let maxAnswerChars = 260
 
+    /// Turn one of the day's chosen-difficulty directives into a quest, naming it with the coach.
+    ///
+    /// ISSUED ALREADY ACCEPTED. The wearer picked the day's gear in the morning flow, which IS the
+    /// choosing that makes a quest a quest — the same reasoning `QuestKind.custom` is issued active on.
+    /// Offering four of them one at a time through the pop-up would dribble the day's plan out over the
+    /// morning (`QuestStore.offered` shows one at a time) and ask the wearer to agree to a thing they
+    /// had already agreed to.
+    ///
+    /// It is still kind `.side`: the stored wire shape is a parity contract with the Kotlin twin, so a
+    /// mode quest is found by its id (`QuestDayPlan.isPlanQuest`) rather than by a new kind an older
+    /// build would not understand. Not `.custom`, because that kind carries a "Mark it done" button —
+    /// and a quest with a measured target must close on the data, never on the wearer's word.
+    static func fromPlan(_ target: QuestPlanTarget, coach: AICoachEngine, dayKey: String) async -> Quest {
+        let written = await write(coach: coach, reason: target.observation, directive: target.target)
+        return Quest(
+            id: target.id,
+            kind: .side,
+            title: written?.title ?? target.fallbackTitle,
+            taunt: written?.taunt ?? target.fallbackTaunt,
+            target: target.target,
+            rewards: target.rewards,
+            xp: target.xp,
+            state: .active,
+            dayKey: dayKey,
+            createdAtMs: nowMs(),
+            goal: target.goal)
+    }
+
     /// Turn `trigger` into a quest, naming it with the coach.
     static func fromTrigger(_ trigger: QuestTrigger, coach: AICoachEngine, dayKey: String) async -> Quest {
         let written = await write(
@@ -108,6 +136,10 @@ enum QuestIssuer {
 
     /// Raise whatever today has earned, if anything. Safe to call on every appearance of Today.
     static func issueIfDue(repo: Repository, coach: AICoachEngine) async {
+        // A PAST DAY'S PLAN IS CLOSED BEFORE A NEW ONE IS RAISED. Its directives were already cancelled
+        // by `QuestStore.sweepExpired` without cards of their own; this is where the day gets its one
+        // summary. Harmless on every other call — it returns at once when there is nothing to close.
+        await QuestPlanReporter.reportIfDue(repo: repo)
         let store = QuestStore.shared
         // Something is already waiting to be answered. Anything raised now would stack behind it and be
         // dismissed unread.
@@ -124,12 +156,191 @@ enum QuestIssuer {
         }
 
         // 2 · At most one side quest, and only for a condition not already on today's list.
+        //
+        // THE CHOSEN DIFFICULTY'S QUESTS DO NOT SPEND THE SIDE BUDGET. They are the day's plan, not the
+        // data noticing something, and a Relentless morning would otherwise fill `maxSidePerDay` before
+        // breakfast and silence the one trigger that matters — overreaching on an empty tank. So the
+        // budget is counted over the triggered quests only, while the CONDITION check below still sees
+        // the whole day: a trigger that asks for a metric the day's plan already asks for is not news.
         let days = repo.days
+        let triggered = existingToday.filter { !QuestDayPlan.isPlanQuest($0) }
         guard let trigger = QuestTriggers.next(
             today: days.last,
             recent: Array(days.suffix(14)),
-            existingToday: existingToday)
+            existingToday: triggered)
         else { return }
+        let planned = Set(existingToday.filter { QuestDayPlan.isPlanQuest($0) && $0.state != .declined }
+            .compactMap { $0.effectiveGoal?.metric })
+        if let metric = trigger.goal?.metric, planned.contains(metric) { return }
         store.upsert(await QuestGenerator.fromTrigger(trigger, coach: coach, dayKey: dayKey))
+    }
+
+    /// Issue the day's quests for a freshly picked difficulty, replacing whatever the last pick left.
+    ///
+    /// ORDER MATTERS: CHOOSE, THEN GENERATE. The morning flow runs before the day has any quests, so the
+    /// plan is written first and `issueIfDue` finds it already there. A pick made LATER in the day
+    /// replaces the plan quests it issued before — except the ones already completed, because that XP is
+    /// paid and a finished commitment is not something a new choice gets to un-finish.
+    ///
+    /// Each quest is named by the coach one at a time, exactly as `issueIfDue` names one, and appears as
+    /// it is named. A coach that cannot be reached returns at once and the written fallbacks are used, so
+    /// the day's plan is never delayed by its writer.
+    static func issuePlan(_ difficulty: QuestDifficulty, repo: Repository, coach: AICoachEngine,
+                          focus: LevelPart?, dayKey: String = DailyMissionStore.dayKey()) async {
+        let store = QuestStore.shared
+        let baseline = await QuestBaselineReader.read(repo: repo, day: dayKey)
+        let targets = QuestDayPlan.plan(baseline: baseline, difficulty: difficulty, focus: focus,
+                                        day: dayKey)
+
+        // Withdraw the previous pick's unfinished quests. `.declined` rather than deleted, so the store's
+        // own history rules apply and nothing re-raises them.
+        let keep = Set(targets.map(\.id))
+        let stale = store.forDay(dayKey).filter {
+            QuestDayPlan.isPlanQuest($0) && $0.state != .completed && !keep.contains($0.id)
+        }
+        for quest in stale {
+            store.setState(id: quest.id, state: .declined)
+        }
+
+        for target in targets {
+            // A quest this wearer already finished today keeps its completion; the new pick does not
+            // re-issue it under a fresh clock.
+            if store.forDay(dayKey).contains(where: { $0.id == target.id && $0.state == .completed }) {
+                continue
+            }
+            store.upsert(await QuestGenerator.fromPlan(target, coach: coach, dayKey: dayKey))
+        }
+    }
+}
+
+// MARK: - Closing a day's plan
+//
+// The chosen-difficulty directives do not each get a red card when they run out (see
+// `QuestStore.sweepExpired`). This is what replaces them: one summary per day, built from the day's own
+// evidence, shown once.
+//
+// IT NEEDS THE EVIDENCE, which is why it lives here and not in the store: `sweepExpired` runs off a
+// clock with no repository to hand, and a summary that said "not met" without saying how close would be
+// the same scolding in fewer words.
+
+@MainActor
+enum QuestPlanReporter {
+
+    /// Summarise the oldest past day whose plan has finished, if it has not been summarised already.
+    static func reportIfDue(repo: Repository, now: Date = Date()) async {
+        let store = QuestStore.shared
+        // NOT ON TOP OF ANOTHER CARD. A completion, a failure or an offer already owns that space, and
+        // this is not urgent — it waits for the next pass rather than stacking. Nothing is spent by
+        // waiting: the fire-once guard is only taken when a card is actually shown.
+        guard store.planReport == nil, store.offered == nil,
+              store.completions.isEmpty, store.failures.isEmpty else { return }
+
+        let today = DailyMissionStore.dayKey(now)
+        let plan = store.quests.filter { QuestDayPlan.isPlanQuest($0) && $0.dayKey < today }
+        // Oldest first, so a wearer who was away for a week closes those days in order.
+        guard let day = plan.map(\.dayKey).min(), !store.planDayReported(day) else { return }
+
+        let quests = plan.filter { $0.dayKey == day }.sorted { $0.createdAtMs < $1.createdAtMs }
+        // STILL RUNNING IS NOT AN OUTCOME. A sleep or bedtime directive stays checkable until noon the
+        // next day (`Quest.checkableUntilMs`), and summarising the day before that would call a night
+        // that has not been read yet a miss.
+        guard !quests.contains(where: { $0.state == .active || $0.state == .offered }) else { return }
+
+        // NO CHOICE, NO PLAN. A day the wearer was never asked about has nothing to summarise — closed
+        // silently so it is not looked at again.
+        guard let difficulty = QuestModeStore.shared.mode(for: day) else {
+            store.notePlanDayReported(day)
+            return
+        }
+
+        // ONE GATHER FOR THE DAY, the same read `QuestAutoComplete` closes quests with — so a line in the
+        // summary can never quote a different number from the one that decided the quest.
+        let evidence = await QuestAutoComplete.gather(repo: repo, day: day)
+        let report = QuestPlanDayReport(
+            day: day,
+            difficulty: difficulty,
+            lines: quests.map {
+                QuestPlanDayReport.line(target: $0.target, goal: $0.effectiveGoal,
+                                        completed: $0.state == .completed, evidence: evidence)
+            })
+        guard report.isWorthShowing else {
+            store.notePlanDayReported(day)
+            return
+        }
+        store.presentPlanReport(report)
+    }
+}
+
+// MARK: - The wearer's own numbers
+//
+// What every scaled target is measured from. One reader, so "their usual" means the same thing in every
+// directive the day issues.
+
+@MainActor
+enum QuestBaselineReader {
+
+    /// Read this wearer's own baselines for `day`.
+    ///
+    /// EVERY FIELD ABSTAINS ON ITS OWN. A metric without `QuestDayPlan.minBaselineDays` of this
+    /// wearer's own days stays nil and produces no directive — see `QuestBaseline`. Nothing here
+    /// substitutes a population default, and nothing here invents a day.
+    static func read(repo: Repository, day: String) async -> QuestBaseline {
+        var out = QuestBaseline()
+        let window = QuestDayPlan.baselineWindowDays
+        let days = repo.days.suffix(window + 1).filter { $0.day < day }
+
+        // STEPS — the median of the days that actually have a count. A nil step count is a day the
+        // sensor was not read, not a day with no steps, so it is left out rather than counted as zero.
+        out.medianSteps = QuestDayPlan.median(days.compactMap { $0.steps.map(Double.init) })
+
+        // SLEEP NEED — what the last analysis pass scored Rest with. Nil before any pass has run.
+        out.sleepNeedHours = AnalyticsEngine.Rest.engineNeedHours()
+
+        // BEDTIME — their own median onset, on the evening clock.
+        let timings = await repo.sleepTimingsByDay(days: window + 1)
+        out.medianSleepOnsetMinute = QuestDayPlan.medianOnsetMinute(
+            timings.filter { $0.key < day }.values.map(\.onsetMinute))
+
+        // TRAINING — the median length of the days they train on. Days with no session are excluded:
+        // the question is how long a session of theirs runs, not how often they have one.
+        let workouts = await repo.workoutRows(days: window + 1)
+        var trainingByDay: [String: Double] = [:]
+        for w in workouts {
+            let key = Repository.localDayKey(Date(timeIntervalSince1970: TimeInterval(w.startTs)))
+            guard key < day else { continue }
+            trainingByDay[key, default: 0] += (w.durationS ?? Double(max(0, w.endTs - w.startTs))) / 60
+        }
+        out.medianTrainingMinutes = QuestDayPlan.median(trainingByDay.values.filter { $0 > 0 })
+
+        // MEDITATION — the median length of their sessions, over the days that have one.
+        let meditation = await repo.meditationMinutesByDay(days: window + 1)
+        out.medianMeditationMinutes = QuestDayPlan.median(
+            meditation.filter { $0.key < day && $0.value > 0 }.values.map { $0 })
+
+        // WATER — the day's own goal, and only while the wearer tracks water at all. Tracking off means
+        // there is nothing to check a water directive against, and an uncheckable quest is not issued.
+        if HydrationStore.isEnabled {
+            let own = await repo.noopScores(day: day).effort
+            let merged = repo.days.first { $0.day == day }?.strain
+            let effort = own ?? merged
+            let sex = resolvedAppModel(nil)?.profile.sex ?? ""
+            out.hydrationGoalMl = Double(HydrationGoal.dailyGoalML(sex: sex, effort: effort))
+        }
+
+        // EFFORT — the day's recommended band, and ONLY when the day's strain is a figure this wearer's
+        // data actually produces. `QuestMetric.strain` is checked against WHOOP's own cloud strain and
+        // nothing stands in for it, so a band with no strain behind it would be a quest that can never
+        // close. Evidence: a cloud strain on any of the last few days.
+        if let band = await repo.todayEffortTarget()?.band {
+            var measurable = false
+            for recent in days.suffix(3) {
+                if await repo.whoopCloudDay(recent.day)?.strain != nil {
+                    measurable = true
+                    break
+                }
+            }
+            if measurable { out.effortBand21 = band }
+        }
+        return out
     }
 }

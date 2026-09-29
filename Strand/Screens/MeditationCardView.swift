@@ -20,7 +20,10 @@ import WhoopStore
 
 private let dayCircleSize: CGFloat = 26
 private let dayDotSize: CGFloat = 12
-private let playButtonSize: CGFloat = 40
+/// The start button's drawn diameter AND its reach — 44, the HIG minimum, rather than the 40 it was:
+/// this is the card's only primary action and four points is the whole difference between a tap that
+/// starts a session and one that lands on the card behind it.
+private let playButtonSize: CGFloat = 44
 private let meditationSport = "Meditation"
 
 struct MeditationCardView: View {

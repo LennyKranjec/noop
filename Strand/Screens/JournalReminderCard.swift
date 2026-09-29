@@ -87,7 +87,11 @@ struct JournalReminderCard: View {
                         let isLogged = logged.contains(key)
                         Color.clear
                             .frame(maxWidth: .infinity)
-                            .frame(height: 22)                    // taller invisible tap target
+                            // 22pt was already a deliberately "taller" target and still half the 44pt
+                            // minimum. 34 is the size the app's other icon-sized targets settled on, and
+                            // a bar is wide, so the height was the whole of what was short. The drawn
+                            // 10pt bar is unchanged — only the invisible reach around it grows.
+                            .frame(height: 34)
                             .overlay {
                                 RoundedRectangle(cornerRadius: 3)
                                     .fill(isLogged ? StrandPalette.accent : StrandPalette.textTertiary.opacity(0.22))

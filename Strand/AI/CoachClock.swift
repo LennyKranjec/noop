@@ -108,6 +108,9 @@ enum CoachDayFrame {
     "so far", not a final figure.
     - Rest / sleep hours, sleep stages, sleep efficiency, night HRV, night resting HR: the NIGHT THAT \
     ENDED on the morning of its date.
+    - A dream journal entry and the morning's answers about the night: the NIGHT THAT ENDED on the \
+    morning of its date, in the wearer's own words. Self-report, never a measurement, and never a plan \
+    for the day it is dated with.
     - Steps, water, meditation minutes, stress: totals for the named day — complete for a past day, \
     "so far" for today.
     - The level and its parts: FROZEN on the morning of its date from the night before and the previous \

@@ -13,6 +13,13 @@ import WhoopStore
 //   2. The night, as four-option questions (`DreamQuestions`).
 //   3. The daily brief: the level the day starts on, counted up; Rest and Charge; the night's key figures
 //      against yesterday's; and a written brief — light, and how to shape the day.
+//   4. The day's gear: Steady, Push or Relentless, which sets the day's quest targets
+//      (`QuestDifficulty`), with the level still on screen.
+//
+// THE BRIEF DOES NOT LET GO UNTIL THE NIGHT IS IN. Its continue control is gated on `MorningGate`:
+// the strap's backlog drained, the pass that scores the night finished, and today's level actually
+// written to the ledger. It says which of those it is waiting for, and after a bounded wait it opens
+// with an explicit note that the figures may still move. See `MorningGate.swift`.
 //
 // THE DAY'S LEVEL IS COMPUTED HERE. Opening the flow marks the day as begun (`LevelDayFreeze.beginDay`),
 // forces a fresh sync of strap and cloud, and reloads the level — so by the time the brief is on screen,
@@ -59,16 +66,25 @@ struct MorningFlowView: View {
     @State private var selection: Int?
 
     private var questions: [DreamQuestion] { DreamQuestions.all }
-    /// Dream, questions, brief.
-    private var total: Int { questions.count + 2 }
-    private var isBrief: Bool { step == total - 1 }
+    /// Dream, questions, brief, the day's gear.
+    private var total: Int { questions.count + 3 }
+    private var briefStep: Int { total - 2 }
+    private var isBrief: Bool { step == briefStep }
+    /// The last page: the three gears. NOT where the flow ends by itself — `onDone` runs when one is
+    /// picked, so the day always leaves here with a gear set or with the wearer having said "not today".
+    private var isChoice: Bool { step == total - 1 }
 
     var body: some View {
         ZStack {
             Diag.background.ignoresSafeArea()
-            if isBrief {
-                DailyBriefView(model: brief, levelBar: levelBar, onDone: onDone)
+            if isChoice {
+                DifficultyChoiceView(brief: brief, presentedAt: presentedAt, onDone: onDone)
                     .transition(.opacity)
+            } else if isBrief {
+                DailyBriefView(model: brief, levelBar: levelBar, presentedAt: presentedAt) {
+                    withAnimation(.easeOut(duration: 0.3)) { step = total - 1 }
+                }
+                .transition(.opacity)
             } else {
                 VStack(alignment: .leading, spacing: 0) {
                     topBar
@@ -89,6 +105,12 @@ struct MorningFlowView: View {
         .task {
             // The day begins now: today's level from here on, and the work that scores it starts at once.
             LevelDayFreeze.beginDay(now: presentedAt)
+            // A SYNC IS ASKED FOR, NOT MERELY WAITED ON. The last page will not hand the day over until
+            // an offload has COMPLETED since this moment (`MorningGate`), and the periodic floor is
+            // fifteen minutes wide — so the flow requests one itself, through the same rate-limited
+            // `.foreground` entry the app uses on every resume: floored at 90 s, unable to double-start,
+            // and a no-op when no strap is bonded.
+            resolvedAppModel(nil)?.ble.requestSync(.foreground)
             await brief.prepare(repo: repo, levelBar: levelBar, presentedAt: presentedAt)
         }
     }
@@ -224,7 +246,7 @@ struct MorningFlowView: View {
         let entry = DreamEntry(day: Repository.localDayKey(Date()), text: dream, answers: answers,
                                updatedAt: Date())
         let hasSomething = !dream.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !answers.isEmpty
-        withAnimation(.easeOut(duration: 0.3)) { step = total - 1 }
+        withAnimation(.easeOut(duration: 0.3)) { step = briefStep }
         Task {
             if hasSomething { await DreamJournalStore.shared.save(entry, repo: repo) }
             await brief.writeSummary(coach: coach, repo: repo, levelBar: levelBar,
@@ -456,7 +478,14 @@ final class DailyBriefModel: ObservableObject {
 struct DailyBriefView: View {
     @ObservedObject var model: DailyBriefModel
     @ObservedObject var levelBar: LevelBarModel
+    /// When the flow opened — the moment its forced sync started. The gate's freshness test is anchored
+    /// to it, not to when this page appeared. See `MorningGateInputs.flowOpenedAt`.
+    var presentedAt: Date = Date()
     let onDone: () -> Void
+
+    /// THE GATE. The brief is the last page of figures, and it does not hand the day over until the
+    /// night behind those figures is actually in. See `MorningGate.swift`.
+    @StateObject private var gate = MorningGateModel()
 
     var body: some View {
         VStack(spacing: 0) {
@@ -479,23 +508,78 @@ struct DailyBriefView: View {
                 .padding(.horizontal, 24)
                 .padding(.bottom, 16)
             }
-            Button {
-                SystemHaptics.play(.confirm)
-                onDone()
-            } label: {
-                Text("START THE DAY")
-                    .font(Diag.heavy(20))
-                    .tracking(1.2)
-                    .foregroundStyle(.white)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 64)
-                    .background(Diag.blue, in: Capsule())
-                    .shadow(color: Diag.blue.opacity(0.55), radius: 22, y: 6)
+            VStack(spacing: 12) {
+                if gate.stage != .ready { gateBlock }
+                continueButton
             }
-            .buttonStyle(.plain)
             .padding(.horizontal, 24)
             .padding(.bottom, 12)
         }
+        // The gate asks the brief whether today's level is resolved on every tick: the brief's own poll
+        // is what resolves it, and it can land while the gate is waiting. `noNight` counts as resolved —
+        // "last night wasn't recorded" is an answer, and no amount of waiting improves it.
+        .task {
+            await gate.start(flowOpenedAt: presentedAt) { [model] in
+                model.level != nil || model.noNight
+            }
+        }
+    }
+
+    /// WHAT IS HAPPENING AND WHY, while the wearer waits. Named states, the real failure when there is
+    /// one, and the only honest progress the protocol offers — a chunk count, never a percentage, because
+    /// the strap never says how much it is holding.
+    private var gateBlock: some View {
+        HStack(alignment: .top, spacing: 14) {
+            if gate.stage == .timedOut {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 20))
+                    .foregroundStyle(StrandPalette.statusWarning)
+                    .frame(width: 24)
+            } else {
+                ProgressView().tint(.white).frame(width: 24)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(gate.headline)
+                    .font(.system(size: 13, weight: .semibold))
+                    .tracking(0.6)
+                    .foregroundStyle(gate.stage == .timedOut ? StrandPalette.statusWarning : Diag.grey)
+                Text(gate.detail)
+                    .font(.system(size: 14))
+                    .foregroundStyle(Color(white: 0.85))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Diag.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
+            .strokeBorder(gate.stage == .timedOut ? StrandPalette.statusWarning.opacity(0.5) : Diag.cardBorder,
+                          lineWidth: 1))
+        .accessibilityElement(children: .combine)
+    }
+
+    /// CONTINUE ANYWAY IS NOT THE SAME BUTTON. A gate that ran out says so on the button itself, so the
+    /// wearer who goes on knows they are going on early rather than being told everything was fine.
+    private var continueButton: some View {
+        let enabled = gate.stage.allowsContinue
+        return Button {
+            guard enabled else { return }
+            SystemHaptics.play(.confirm)
+            onDone()
+        } label: {
+            Text(gate.stage == .timedOut ? "CONTINUE ANYWAY" : "SET TODAY'S GEAR")
+                .font(Diag.heavy(20))
+                .tracking(1.2)
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 64)
+                .background(Diag.blue.opacity(enabled ? 1 : 0.35), in: Capsule())
+                .shadow(color: Diag.blue.opacity(enabled ? 0.55 : 0), radius: 22, y: 6)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+        .accessibilityHint(Text(enabled ? "" : gate.detail))
     }
 
     private var levelBlock: some View {
@@ -641,5 +725,277 @@ struct DailyBriefView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Diag.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Diag.cardBorder, lineWidth: 1))
+    }
+}
+
+// MARK: - The day's gear
+//
+// The last page, and the only one where the wearer decides something about the day ahead rather than
+// reporting on the night behind it: three gears, and the day's quest targets follow from the choice.
+//
+// THE CHOICE SETS THE MULTIPLIER, NEVER THE NUMBER. "Relentless" does not mean fifteen thousand steps;
+// it means 1.35 × what this wearer's own median already is, the top of the band today's charge
+// recommends, their own sleep need. The whole table is `QuestDifficulty.Scale`, and the numbers each
+// card shows are the real targets, computed from the real baselines before the wearer commits — so the
+// choice is made against what it will actually ask for rather than against an adjective.
+//
+// A GEAR CANNOT INVENT A TARGET. Every card lists only the directives this wearer's data can actually
+// scale and check (`QuestBaselineReader`, `QuestDayPlan`); a metric with no baseline produces no
+// directive, and a card that can offer nothing says so instead of promising three of them.
+//
+// THE LEVEL STAYS ON SCREEN, as asked — and it is what orders the directives: the day leads with
+// whatever moves the level's weakest MEASURED part. An abstaining part is never called weak
+// (`QuestDayPlan.focus`), because a part with no data behind it is not a low score.
+
+struct DifficultyChoiceView: View {
+    @ObservedObject var brief: DailyBriefModel
+    var presentedAt: Date = Date()
+    let onDone: () -> Void
+
+    @EnvironmentObject private var repo: Repository
+    @EnvironmentObject private var coach: AICoachEngine
+
+    @State private var baseline: QuestBaseline?
+    @State private var loaded = false
+    @State private var selection: QuestDifficulty?
+
+    /// The quest day the choice is recorded for — the same key the quests themselves carry.
+    private var dayKey: String { DailyMissionStore.dayKey() }
+
+    /// TODAY's own written level, or nil. Read from the ledger like every other surface, and only when
+    /// the level day IS today: a stand-in from an earlier day is not this morning's number, and ordering
+    /// the day's directives by yesterday's weakest part would be aiming at the wrong thing.
+    private var breakdown: LevelBreakdown? {
+        let calendar = Calendar.current
+        let key = LevelWiring.key(from: LevelDayFreeze.levelDay(calendar: calendar), calendar: calendar)
+        guard key == LevelWiring.key(from: presentedAt, calendar: calendar) else { return nil }
+        return LevelLedger.shared.entry(key)?.breakdown
+    }
+
+    private var focus: LevelPart? { QuestDayPlan.focus(breakdown) }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("TODAY'S GEAR")
+                        .font(.system(size: 15, weight: .semibold))
+                        .tracking(0.6)
+                        .foregroundStyle(Diag.grey)
+                        .padding(.top, 28)
+                    levelStrip
+                    Text("How hard is today?")
+                        .font(Diag.display(34))
+                        .foregroundStyle(.white)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(lead)
+                        .font(.system(size: 14))
+                        .foregroundStyle(Diag.grey)
+                        .fixedSize(horizontal: false, vertical: true)
+                    VStack(spacing: 14) {
+                        ForEach(QuestDifficulty.allCases, id: \.rawValue) { difficulty in
+                            DifficultyCard(difficulty: difficulty,
+                                           targets: targets(difficulty),
+                                           loaded: loaded,
+                                           selected: selection == difficulty) {
+                                SystemHaptics.play(.select)
+                                withAnimation(.easeOut(duration: 0.15)) { selection = difficulty }
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 24)
+                .padding(.bottom, 16)
+            }
+            VStack(spacing: 10) {
+                confirmButton
+                // THE WAY OUT. A wearer who wants no directives today must be able to say so; a flow
+                // that cannot be left without accepting a commitment is a flow people force-quit.
+                Button {
+                    SystemHaptics.play(.tap)
+                    onDone()
+                } label: {
+                    Text("Not today")
+                        .font(.system(size: 15))
+                        .foregroundStyle(Diag.grey)
+                        .frame(maxWidth: .infinity, minHeight: 36)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.horizontal, 24)
+            .padding(.bottom, 12)
+        }
+        .task {
+            baseline = await QuestBaselineReader.read(repo: repo, day: dayKey)
+            loaded = true
+        }
+    }
+
+    /// What the targets are built from, and — when the level has one — which part the day leads with.
+    private var lead: String {
+        let common = "Every target below is scaled from your own numbers: your median steps, your sleep "
+            + "need, the effort band today's charge recommends."
+        guard let focus else { return common }
+        return common + " The day leads with \(Self.partName(focus)) — the measured part of your level "
+            + "with the most room in it."
+    }
+
+    /// The level, small, so it is in view while the choice is made — the same ledger figure the brief
+    /// showed, never a second reading of it.
+    private var levelStrip: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(brief.level.map { "\(Int($0.rounded()))" } ?? "–")
+                .font(Diag.display(54))
+                .foregroundStyle(.white)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("YOUR LEVEL TODAY")
+                    .font(.system(size: 12, weight: .semibold))
+                    .tracking(0.6)
+                    .foregroundStyle(Diag.grey)
+                if brief.level == nil {
+                    Text(brief.noNight ? "Last night wasn't recorded." : "Not set yet.")
+                        .font(.system(size: 13))
+                        .foregroundStyle(Diag.grey)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func targets(_ difficulty: QuestDifficulty) -> [QuestPlanTarget] {
+        guard let baseline else { return [] }
+        return QuestDayPlan.plan(baseline: baseline, difficulty: difficulty, focus: focus, day: dayKey)
+    }
+
+    private var confirmButton: some View {
+        let enabled = selection != nil
+        return Button {
+            guard let difficulty = selection else { return }
+            SystemHaptics.play(.confirm)
+            // CHOOSE, THEN GENERATE. The choice is recorded first so Today can name the day's gear the
+            // moment it draws, and the quests are issued from it — replacing whatever an earlier pick
+            // for the same day left behind (`QuestIssuer.issuePlan`).
+            QuestModeStore.shared.set(difficulty, for: dayKey)
+            // The issuing runs in a task of its OWN, not the view's: naming each quest is a round trip
+            // to the coach, and this view is about to go away. The same shape `finishEntry` uses for the
+            // dream it has just saved.
+            let repo = self.repo
+            let coach = self.coach
+            let focus = self.focus
+            let day = self.dayKey
+            Task { @MainActor in
+                await QuestIssuer.issuePlan(difficulty, repo: repo, coach: coach, focus: focus,
+                                            dayKey: day)
+            }
+            onDone()
+        } label: {
+            Text("LOCK IT IN")
+                .font(Diag.heavy(20))
+                .tracking(1.2)
+                .foregroundStyle(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 64)
+                .background(Diag.blue.opacity(enabled ? 1 : 0.35), in: Capsule())
+                .shadow(color: Diag.blue.opacity(enabled ? 0.55 : 0), radius: 22, y: 6)
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled)
+    }
+
+    /// The level part in the words the level's own surfaces use.
+    static func partName(_ part: LevelPart) -> String {
+        switch part {
+        case .sleep: return "sleep"
+        case .heart: return "heart"
+        case .lungs: return "lungs"
+        case .muscle: return "muscle"
+        case .focus: return "focus"
+        }
+    }
+}
+
+/// One gear: its name, what it costs, and the directives it would actually issue.
+private struct DifficultyCard: View {
+    let difficulty: QuestDifficulty
+    let targets: [QuestPlanTarget]
+    /// Whether the baselines have been read. Before that the card shows nothing rather than an empty
+    /// state — "no targets" and "not looked yet" are different things.
+    let loaded: Bool
+    let selected: Bool
+    let action: () -> Void
+
+    private var symbol: String {
+        switch difficulty {
+        case .steady: return "tortoise.fill"
+        case .push: return "figure.run"
+        case .relentless: return "flame.fill"
+        }
+    }
+
+    var body: some View {
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 18) {
+                    Image(systemName: symbol)
+                        .font(.system(size: 22, weight: .regular))
+                        .foregroundStyle(selected ? Diag.blue : Diag.icon)
+                        .frame(width: 36)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(difficulty.title)
+                            .font(Diag.heavy(20))
+                            .foregroundStyle(selected ? .white : Color(white: 0.9))
+                        Text(difficulty.blurb)
+                            .font(.system(size: 15))
+                            .foregroundStyle(Diag.grey)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 8)
+                    ZStack {
+                        Circle()
+                            .strokeBorder(selected ? Diag.blue : Color(white: 0.35), lineWidth: 2)
+                            .frame(width: 32, height: 32)
+                        if selected { Circle().fill(Diag.blue).frame(width: 16, height: 16) }
+                    }
+                }
+                if loaded { plan }
+            }
+            .padding(.horizontal, 22)
+            .padding(.vertical, 20)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(selected ? Diag.selectedFill : Diag.card,
+                        in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(selected ? Diag.blue : Diag.cardBorder, lineWidth: selected ? 1.5 : 1))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    @ViewBuilder
+    private var plan: some View {
+        if targets.isEmpty {
+            // HONEST, NOT EMPTY. A wearer with no history yet is told why there is nothing here rather
+            // than being handed targets off a population average.
+            Text("Nothing to scale a target from yet: a few more days of your own steps, sleep and "
+                 + "training, and this fills in.")
+                .font(.system(size: 13))
+                .foregroundStyle(Diag.grey)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.leading, 54)
+        } else {
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(targets, id: \.id) { target in
+                    HStack(alignment: .top, spacing: 8) {
+                        Text("·").foregroundStyle(Diag.grey)
+                        Text(target.target)
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color(white: 0.8))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .padding(.leading, 54)
+        }
     }
 }

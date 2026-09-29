@@ -58,6 +58,10 @@ struct RitualSheetView: View {
                 }
                 .padding(16)
             }
+            // The entry box is a TextEditor with the Save button and the three scales BELOW it, all of
+            // which the keyboard covers. A plain ScrollView does not lower the keyboard on a drag, so
+            // there was no way back to them without first leaving the sheet. Dragging now does it.
+            .scrollDismissesKeyboard(.interactively)
             .background(StrandPalette.surfaceBase)
             .navigationTitle(result.ritual.title)
             #if os(iOS)
@@ -187,6 +191,12 @@ struct RitualSheetView: View {
                                                      ? StrandPalette.surfaceBase
                                                      : StrandPalette.textTertiary)
                             )
+                            // A 26pt circle is a 26pt target — well under the 44pt minimum, five of
+                            // them in a row, and a mis-tap here SETS a reading rather than missing.
+                            // The dot keeps its size; only the reach grows, and only vertically, so
+                            // the row's width is unchanged and cannot clip on a narrow phone.
+                            .frame(height: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                 }
