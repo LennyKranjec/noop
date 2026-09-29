@@ -176,6 +176,9 @@ final class MorningGateTests: XCTestCase {
         var i = satisfied()
         i.flowOpenedAt = opened
         i.lastSyncedAt = opened.addingTimeInterval(45)
+        // The pass that scored the night necessarily follows that sync — a fixture where the sync is the
+        // newer of the two is the .analysing case, which its own test already covers.
+        i.analysisCompletedAt = opened.addingTimeInterval(60)
         i.waitingSince = opened.addingTimeInterval(300)
         i.now = opened.addingTimeInterval(310)
         XCTAssertFalse(MorningGate.syncOutstanding(i))
