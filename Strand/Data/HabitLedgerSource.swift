@@ -46,7 +46,8 @@ enum HabitLedgerSource {
 
         // 1. Journal. The row's day key IS the night key (an answer describes "the night and day leading
         //    into this morning"); evening logs from the Tonight sheet are written under tomorrow's key.
-        for row in await repo.journalEntries(days: lookbackDays) {
+        let journal = await repo.journalEntries(days: lookbackDays)
+        for row in journal {
             guard let id = HabitCatalog.journalHabitId(question: row.question) else { continue }
             let state: ObservationState?
             if row.numericValue != nil {
@@ -75,8 +76,9 @@ enum HabitLedgerSource {
         }
 
         // 3. Caffeine: the day's last intake → the night after that day.
-        for point in await repo.series(key: CaffeineDailySummary.lastMinuteKey, source: habitsSource,
-                                       days: lookbackDays) {
+        let caffeine = await repo.series(key: CaffeineDailySummary.lastMinuteKey, source: habitsSource,
+                                         days: lookbackDays)
+        for point in caffeine {
             guard let night = HabitNightKey.nightAfter(point.day),
                   let s = HabitRules.lateCaffeine(lastIntakeMinute: Int(point.value)) else { continue }
             obs.append(HabitObservation(nightKey: night, habit: HabitCatalog.lateCaffeineAuto, state: s,
@@ -103,7 +105,8 @@ enum HabitLedgerSource {
         }
 
         // 5. Bedroom climate over the first 90 min of the night (written only at ≥ 60 % coverage).
-        for point in await repo.series(key: BedroomNightSummary.tempKey, source: habitsSource, days: lookbackDays) {
+        let bedroom = await repo.series(key: BedroomNightSummary.tempKey, source: habitsSource, days: lookbackDays)
+        for point in bedroom {
             if let s = HabitRules.warmBedroom(meanC: point.value, slotCoverage: 1) {
                 obs.append(HabitObservation(nightKey: point.day, habit: HabitCatalog.warmBedroom, state: s,
                                             source: .climate))
@@ -115,7 +118,8 @@ enum HabitLedgerSource {
         for s in BreathSessionLog.shared.sessions {
             sessions.append((endEpochSec: Int64(s.startTs) + Int64(s.pacedMinutes * 60), minutes: s.pacedMinutes))
         }
-        for w in await repo.meditationSessions(days: lookbackDays) {
+        let meditations = await repo.meditationSessions(days: lookbackDays)
+        for w in meditations {
             let minutes = (w.durationS ?? Double(w.endTs - w.startTs)) / 60
             sessions.append((endEpochSec: Int64(w.endTs), minutes: minutes))
         }
@@ -134,7 +138,8 @@ enum HabitLedgerSource {
         }
 
         // 7. WiZ wind-down: 1 ran / 0 enabled-but-not-by-onset / no row when disabled.
-        for point in await repo.series(key: WizDailyRecord.key, source: habitsSource, days: lookbackDays) {
+        let wiz = await repo.series(key: WizDailyRecord.key, source: habitsSource, days: lookbackDays)
+        for point in wiz {
             guard let night = HabitNightKey.nightAfter(point.day),
                   let s = HabitRules.lightsDimmed(winddownRan: point.value) else { continue }
             obs.append(HabitObservation(nightKey: night, habit: HabitCatalog.lightsDimmed, state: s, source: .wiz))

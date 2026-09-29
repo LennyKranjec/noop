@@ -152,6 +152,41 @@ pentagon radar. *Package* means one implementation agent's unit of work (§8).
 >    above it; nothing the wearer hid is ever shown; movement between positions animates with the settle
 >    token (cross-fade under Reduce Motion) and never jumps while the wearer is scrolling. Owned by the TODAY
 >    package (P4) plus that new logic file; the SLEEP package supplies the evening sleep panel component.
+> 16. **Telos Lift — the in-app strength logger that replaces Alphaprogress (owner's direction, key 2.0
+>    feature).** When a strength workout starts, Telos opens its own logger inside the live workout (the HR,
+>    zones and effort keep running underneath):
+>    - **Programs** imported from the Alphaprog plan export (`Lower` → Lower A (Di) / Lower B (Fr); `Upper` →
+>      Upper A (Mo) / Upper B (Do); each exercise with equipment, target sets and target reps) and fully editable
+>      in the app afterwards: add/remove/reorder exercises, change equipment, sets, rep target, set type
+>      (working / warm-up / drop / failure), rest time per exercise. The owner's plan file ships as a test fixture;
+>      the import lives in Data Sources and in the logger's empty state.
+>    - **Per-set rows** like the reference screenshot: # · KG · WDH · e1RM, a check to complete the set; warm-up
+>      sets collapsible above; the previous session of the same day shown underneath ("Last time · Lower A (Di)");
+>      new rows prefilled from last time; weight and reps adjusted with steppers and a wheel/drop-down whose steps
+>      come from the wearer's own increments per machine (inferred from history, e.g. 2.5 kg or 8 kg plates).
+>    - **Rest timer** starts when a set is checked: default **2:30**, adjustable per exercise and on the fly (±15 s),
+>      shown as a large pill; at zero the **strap buzzes** (plus a phone haptic when the app is foreground), so the
+>      phone can stay in the pocket. Honest delivery rules from the strap-cue system apply.
+>    - **Progression proposal** per exercise before the first working set: the double-progression suggestion from
+>      `StrengthProgression` (+reps within the range, then one observed increment; hold on easy/low-Charge days per
+>      the week plan; deload when stalled per its rules), with an optional one-line coach note inside the token
+>      budget. Shown as a suggestion, never auto-applied.
+>    - **Finish** is always reachable in the header; it becomes the prominent primary action once every planned
+>      set is done. Finishing early asks once and records unfinished sets as not done (never as zero).
+>    - **Finish screen** (a full-screen moment, item 7): the session's star/count badge, workout count, duration,
+>      streak, exercises with their set count, PRs and e1RM change, **muscle groups with % change** in volume versus
+>      the previous comparable session (honest: "—" when there is no comparable session), achievements, and a
+>      share action — with a vivid celebration animation and a strap reward buzz for PRs.
+>    - Data: sets persist to the existing `liftSession`/`liftSet` tables so StrengthProgression, the muscle model,
+>      the Level's strength term and the coach all read one source; a session logged in Telos and the same session
+>      later imported from Alphaprog must not double count (dedupe by start time ± tolerance and day template).
+> 17. **Rewarding and punishing, vividly — within the performance budget (owner's direction).** Big rewards (a PR,
+>    a quest or goal completed, a debt cleared, the level settling above yesterday, a trial finishing) and
+>    penalties (the daily penalty card, a broken streak) get full-screen moments with lively but short animations
+>    (particles/liquid, ≤1.5 s, then rest; Reduce Motion → cross-fade) and a **strap buzz** from the vocabulary:
+>    a reward pattern and a heavier penalty pattern, counted in the strap-cue daily budget, never during sleep,
+>    never twice for one event. Everyday UI is more alive too — values count up when they change, cards settle
+>    in, charts draw in — but nothing animates without a data change, and nothing loops offscreen.
 > 8. **Haptic, organic feel (owner's direction for 2.0).** Define ONE haptic vocabulary in the design system
 >    (P1 owns `Haptics.swift`): named patterns — select (light tick), settle (soft), commit (rigid), success,
 >    warning, failure/penalty (a heavier two-beat), level-settle (a slow three-step rise), and a subtle
