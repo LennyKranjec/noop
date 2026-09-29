@@ -6,7 +6,10 @@
 //  kernel the day total uses (5/MG: `StepsCounter.stepsInWindow` ÷ `stepTicksPerStep`; 4.0:
 //  `StepsEstimateEngine.dayMotionIntensity` × k), so it is what the day total attributes to that walk.
 //  Apply feeds the existing calibration parameter (see `StepCalibrationWalks.swift`) and re-scores the recent
-//  days. Hidden with the × (or the Settings toggle); visible by default.
+//  days. Hidden with the × (or the Settings toggle) — and HIDDEN BY DEFAULT: this header has called the tile
+//  TEMPORARY since it landed, yet it shipped `visible = true`, so every install carried a debug affordance on
+//  the main screen, and because the dismissal lives in `@AppStorage` a reinstall silently brought it back. It
+//  is now opt-in through the Settings toggle that already exists (`StepCalibrationTileToggleRow`).
 //
 //  Motion data may reach the store only after an offload (a WHOOP 4.0 without a live motion stream), so a
 //  window whose data is not in yet reads "Waiting for strap data…" instead of a wrong number, and the tile
@@ -90,7 +93,10 @@ enum StepCalibrationReader {
 struct StepCalibrationTile: View {
     static let visibleKey = "stepCalibrationTile.visible"
 
-    @AppStorage(StepCalibrationTile.visibleKey) private var visible = true
+    /// Default OFF — see the file header. The Settings toggle is the way in.
+    @AppStorage(StepCalibrationTile.visibleKey) private var visible = Self.visibleDefault
+    /// One place for the default so the tile and its Settings toggle can never disagree about it.
+    static let visibleDefault = false
     @AppStorage("selectedWhoopModel") private var selectedWhoopModelRaw = WhoopModel.whoop4.rawValue
     @EnvironmentObject private var repo: Repository
     @EnvironmentObject private var profile: ProfileStore
@@ -300,7 +306,10 @@ struct StepCalibrationTile: View {
     /// The estimator parameter currently in force for `kind`.
     private func parameter(for kind: StepCalibrationKind) -> Double {
         switch kind {
-        case .counter: return profile.stepTicksPerStep
+        // NIL (never calibrated) is reported as 0, which `StepCalibrationMath.estimatedSteps` refuses — so
+        // the read-out falls into the honest "not calibrated yet" branch instead of printing raw counter
+        // ticks divided by the 1.0 default as though they were steps.
+        case .counter: return profile.stepTicksPerStepCalibration ?? 0
         // The engine mirrors whichever k is in force (manual or phone-fitted) into this field.
         case .motion:  return profile.stepsManualCoefficient > 0 ? profile.stepsManualCoefficient
                                                                   : profile.stepsCalibrationCoefficient
@@ -311,7 +320,11 @@ struct StepCalibrationTile: View {
         let kind = reading?.kind ?? calState.walks.last?.kind ?? fallbackKind
         switch kind {
         case .counter:
-            return String(format: "Now: %.2f counter ticks per step", profile.stepTicksPerStep)
+            // "Now: 1.00 counter ticks per step" was stated even when nobody had ever calibrated it: 1.00 is
+            // the raw pass-through default, not a measurement. The motion branch below has always said
+            // "not calibrated" in that situation; this one now does too.
+            guard let ticks = profile.stepTicksPerStepCalibration else { return "Now: not calibrated" }
+            return String(format: "Now: %.2f counter ticks per step", ticks)
         case .motion:
             let k = parameter(for: .motion)
             if k <= 0 { return "Now: not calibrated" }
@@ -399,7 +412,13 @@ struct StepCalibrationTile: View {
 
     private func reset() {
         let st = StepCalibrationState.load()
-        if let o = st.originalTicksPerStep { profile.stepTicksPerStep = o }
+        // Restoring the pre-calibration divisor must restore the UNCALIBRATED state when that is what it was:
+        // assigning 1.0 back through `stepTicksPerStep` would re-mark the profile calibrated to 1.0, which is
+        // the same lie the tile's footer used to tell.
+        if let o = st.originalTicksPerStep {
+            if o == ProfileStore.uncalibratedStepDivisor { profile.clearStepTicksPerStepCalibration() }
+            else { profile.stepTicksPerStep = o }
+        }
         if let o = st.originalManualK { profile.stepsManualCoefficient = o }
         StepCalibrationState().save()
         calState = StepCalibrationState()
@@ -448,7 +467,7 @@ struct StepCalibrationTile: View {
 
 /// Settings row to bring the tile back after it was hidden with its ×.
 struct StepCalibrationTileToggleRow: View {
-    @AppStorage(StepCalibrationTile.visibleKey) private var visible = true
+    @AppStorage(StepCalibrationTile.visibleKey) private var visible = StepCalibrationTile.visibleDefault
 
     var body: some View {
         Toggle(isOn: $visible) {

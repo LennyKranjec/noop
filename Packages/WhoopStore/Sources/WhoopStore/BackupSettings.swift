@@ -46,6 +46,21 @@ public enum BackupSettings {
     /// user built and expects to keep across a restore; it is a JSON `[String]` (rides the String kind).
     /// The hosted cards' POSITION (the `addedCards` section slot in `today.sectionOrder`) is not carried,
     /// so on restore the set + internal order return but the section sits at its default position.
+    ///
+    /// SCORING PARAMETERS ARE PART OF THE CONTRACT (the accuracy audit's item 3). The whitelist originally
+    /// carried the wearer's body metrics and the display prefs and nothing else, so a restore silently
+    /// changed the RECIPE while claiming to restore the data: `profile.stepTicksPerStep` reverted to raw
+    /// tick pass-through (every step figure on every screen moved), the fitted Effort→WHOOP curve
+    /// (`effort.whoopCalibration.v1` + its `.recipe` tag) reverted to the linear ×0.21 (an Effort of 60 that
+    /// read 16.1 read 12.6 after the restore), the Rest need/consistency the last analysis pass scored with
+    /// reverted to the 8 h / neutral defaults, the Banister-vs-Edwards Effort choice reverted to Edwards
+    /// (which re-scores every day in the window against a different recipe), and both manual
+    /// baseline-recalibration epochs were lost so the baselines re-anchored. These are per-PERSON and
+    /// stable, exactly the whitelist's own admission test. Step calibration is per-STRAP, which is why it
+    /// was excluded — but a restore is overwhelmingly onto the same strap, and reverting it moves a
+    /// displayed number, which is worse than carrying it. Two kinds need a bridge to stay inside the
+    /// Int/Double/String contract (see `dataAsStringKeys` / `boolAsIntKeys`): the calibration blob travels
+    /// as its UTF-8 JSON text, and the Banister toggle as 0/1.
     public static let whitelist: [String: Kind] = [
         "profile.age": .int,
         "profile.sex": .string,
@@ -67,7 +82,26 @@ public enum BackupSettings {
         // SCOPE: NAMES only — the wire carries no kind/group, so a numeric custom behaviour restores as a
         // plain .bool toggle (identical on both platforms; historical entries keep their DB numericValue).
         "journal.customBehaviors": .string,
+        // ── Scoring parameters ───────────────────────────────────────────────────────────────────────
+        "profile.stepTicksPerStep": .double,
+        "effort.whoopCalibration.v1": .string,      // JSON text (see dataAsStringKeys)
+        "effort.whoopCalibration.recipe": .int,
+        "noopBanisterEffort": .int,                 // 0/1 (see boolAsIntKeys)
+        "noop.rest.engineNeedHours": .double,
+        "noop.rest.engineConsistency": .double,
+        "noop.hrvBaselineEpoch": .double,
+        "noop.recoveryBaselineEpoch": .double,
     ]
+
+    /// Whitelisted keys whose UserDefaults value is `Data` but which travel as `.string` (its UTF-8 text).
+    /// The wire stays Int/Double/String, and the bridge lives here rather than in the app so Android's codec
+    /// mirrors one rule. Only the Effort→WHOOP calibration needs it: the fit is a small JSON object.
+    public static let dataAsStringKeys: Set<String> = ["effort.whoopCalibration.v1"]
+
+    /// Whitelisted keys stored as `Bool` that travel as `.int` 0/1. `coerce` deliberately REFUSES a JSON
+    /// boolean for a numeric kind (so `true` can never become age 1), so a toggle has to be mapped
+    /// explicitly on both sides of the boundary.
+    public static let boolAsIntKeys: Set<String> = ["noopBanisterEffort"]
 
     /// Canonical JSON key → this platform's UserDefaults key. Identity everywhere except
     /// `profile.hrMax`, which UserDefaults stores as `profile.hrMaxOverride` (see `ProfileStore.K`).
@@ -86,6 +120,16 @@ public enum BackupSettings {
         "effort.scale": "effort.scale",
         "dayCycle.mode": "noop.dayCycleMode",
         "today.hostedCards": "today.hostedCards",
+        // Scoring parameters. Identity: these canonical names ARE the UserDefaults keys, and Android's
+        // SharedPreferences uses the same strings, so the contract needs no per-platform rename.
+        "profile.stepTicksPerStep": "profile.stepTicksPerStep",
+        "effort.whoopCalibration.v1": "effort.whoopCalibration.v1",
+        "effort.whoopCalibration.recipe": "effort.whoopCalibration.recipe",
+        "noopBanisterEffort": "noopBanisterEffort",
+        "noop.rest.engineNeedHours": "noop.rest.engineNeedHours",
+        "noop.rest.engineConsistency": "noop.rest.engineConsistency",
+        "noop.hrvBaselineEpoch": "noop.hrvBaselineEpoch",
+        "noop.recoveryBaselineEpoch": "noop.recoveryBaselineEpoch",
     ]
 
     // MARK: - Snapshot / apply (UserDefaults boundary)
@@ -98,9 +142,17 @@ public enum BackupSettings {
         var out: [String: Any] = [:]
         for (canonical, kind) in whitelist {
             guard let storageKey = appleDefaultsKey[canonical],
-                  let raw = defaults.object(forKey: storageKey),
-                  let coerced = coerce(raw, to: kind) else { continue }
-            out[canonical] = coerced
+                  let raw = defaults.object(forKey: storageKey) else { continue }
+            if dataAsStringKeys.contains(canonical) {
+                // Data → its UTF-8 text. Non-UTF-8 bytes are dropped, never guessed at.
+                guard let data = raw as? Data, let text = String(data: data, encoding: .utf8) else { continue }
+                out[canonical] = text
+            } else if boolAsIntKeys.contains(canonical) {
+                guard let flag = raw as? Bool else { continue }
+                out[canonical] = flag ? 1 : 0
+            } else if let coerced = coerce(raw, to: kind) {
+                out[canonical] = coerced
+            }
         }
         return out
     }
@@ -114,7 +166,17 @@ public enum BackupSettings {
             guard let raw = values[canonical],
                   let coerced = coerce(raw, to: kind),
                   let storageKey = appleDefaultsKey[canonical] else { continue }
-            defaults.set(coerced, forKey: storageKey)
+            // Mirror of `snapshot`'s bridges: the JSON text goes back in as `Data`, the 0/1 as `Bool`, so
+            // the live readers (`JSONDecoder`, `UserDefaults.bool`) see the types they expect.
+            if dataAsStringKeys.contains(canonical) {
+                guard let text = coerced as? String, let data = text.data(using: .utf8) else { continue }
+                defaults.set(data, forKey: storageKey)
+            } else if boolAsIntKeys.contains(canonical) {
+                guard let n = coerced as? Int else { continue }
+                defaults.set(n != 0, forKey: storageKey)
+            } else {
+                defaults.set(coerced, forKey: storageKey)
+            }
         }
         // #146: the whitelist carries an Int `profile.age`, not a Date, so a restore can only bring an
         // age. Clear any stale `profile.dateOfBirth` on this device whenever an age is applied, so

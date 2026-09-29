@@ -68,6 +68,12 @@ public enum VO2MaxEstimator {
         public let method: Method
         /// How many sessions the submaximal median was taken over (0 for the HR-ratio fallback).
         public let sessions: Int
+        /// Public so the app layer's banking gate can be unit-tested against a constructed estimate.
+        public init(vo2max: Double, method: Method, sessions: Int) {
+            self.vo2max = vo2max
+            self.method = method
+            self.sessions = sessions
+        }
     }
 
     /// The effort band where HR reserve tracks VO₂ reserve well enough to extrapolate from.
@@ -100,13 +106,24 @@ public enum VO2MaxEstimator {
         guard hrrBand.contains(hrr) else { return nil }
         let vo2max = 3.5 + (cost - 3.5) / hrr
         // A human range; anything outside it is a mis-logged distance or a broken HR trace.
-        return (15...90).contains(vo2max) ? vo2max : nil
+        return plausible.contains(vo2max) ? vo2max : nil
     }
 
+    /// The human range every estimate here must land in; outside it the inputs are wrong, not the wearer.
+    public static let plausible: ClosedRange<Double> = 15...90
+
     /// Uth 2004.
+    ///
+    /// PLAUSIBILITY-CLAMPED like its two siblings (`fromSession`, `activityModel`). The ratio form has no
+    /// interior limit at all: 15.3 · HRmax / RHR is monotone in a single measured number, so a low resting
+    /// HR walks the answer straight off the scale — a waking RHR of 26 bpm passes the `> 25` guard and
+    /// yields 111, and 30 bpm yields 76.5 for someone who has recorded no exercise whatsoever. Both sibling
+    /// estimators refuse a result outside `plausible`; this one banked it. Same refusal here, so an
+    /// implausible figure abstains (nil) instead of being presented as a measurement.
     public static func hrRatio(restingHr: Double, hrMax: Double) -> Double? {
         guard restingHr > 25, hrMax > restingHr else { return nil }
-        return 15.3 * hrMax / restingHr
+        let v = 15.3 * hrMax / restingHr
+        return plausible.contains(v) ? v : nil
     }
 
     /// A week of training as the HUNT activity index reads it: training days per week, minutes per
@@ -131,7 +148,7 @@ public enum VO2MaxEstimator {
                                                          highIntensityFraction: week.highIntensityFraction)
         let v = FitnessAgeEngine.estimateVO2max(age: age, sex: sex, waistCm: waistCm,
                                                 restingHR: restingHr, paIndex: pai)
-        return (15...90).contains(v) ? v : nil
+        return plausible.contains(v) ? v : nil
     }
 
     /// The estimate as of `now`: runs blended with the zone model, whichever of them exists, else the

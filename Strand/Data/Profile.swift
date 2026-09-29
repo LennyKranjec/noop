@@ -27,6 +27,9 @@ final class ProfileStore: ObservableObject {
     /// of silently going stale until the user remembers to bump a number. `age` is derived from this.
     @Published var dateOfBirth: Date {
         didSet {
+            // An assignment is the wearer answering (the Settings / onboarding DatePicker binds straight
+            // to this), so the unknown state ends here and not before.
+            dateOfBirthIsSet = true
             d.set(dateOfBirth, forKey: K.dateOfBirth)
             // Mirror the DERIVED age under the legacy `profile.age` key so the `.noopbak` backup
             // whitelist (which carries an Int age, not a Date) keeps exporting a correct value with no
@@ -35,6 +38,12 @@ final class ProfileStore: ObservableObject {
             d.set(age, forKey: K.legacyAge)
         }
     }
+    /// Whether ``dateOfBirth`` is the wearer's ANSWER rather than the picker's seed. False on a profile that
+    /// has never been asked (a fresh install, a `.noopbak` restore that carried no age), and `age` then
+    /// reports 0 — the repo-wide "unknown" for age, which `StrainScorer.effortHRmax`, the Fitness Age
+    /// readiness gate and `AnalyticsEngine`'s `profile.age > 0` guard all already honour. Not persisted on
+    /// its own: it IS "a stored date of birth (or legacy age) exists".
+    @Published private(set) var dateOfBirthIsSet: Bool
     @Published var sex: String { didSet { d.set(sex, forKey: K.sex) } }          // "male" | "female" | "nonbinary"
     @Published var weightKg: Double { didSet { d.set(weightKg, forKey: K.weight) } }
     @Published var heightCm: Double { didSet { d.set(heightCm, forKey: K.height) } }
@@ -66,8 +75,48 @@ final class ProfileStore: ObservableObject {
             let bounded = Self.clampStepScale(stepTicksPerStep)
             if bounded != stepTicksPerStep { stepTicksPerStep = bounded; return }
             d.set(bounded, forKey: K.stepScale)
+            // Any assignment is a CALIBRATION: it comes from the walk tile's Apply, the Settings stepper,
+            // or a restore of a value one of those produced. Only the absence of a stored value means
+            // "never calibrated" — see `stepTicksPerStepCalibration`.
+            if stepTicksPerStepCalibration != bounded { stepTicksPerStepCalibration = bounded }
         }
     }
+
+    /// The step divisor AS EVIDENCE: the calibrated ticks-per-step, or **nil when it has never been
+    /// calibrated on this install**.
+    ///
+    /// `stepTicksPerStep` above cannot express that. It defaults to 1.0, which is raw tick pass-through,
+    /// and the counter day total is `ticks ÷ divisor` — so on a strap whose motion counter overcounts (a
+    /// WHOOP 5/MG runs up to ~24× per this file's own note) an uncalibrated profile turned 8 000 real steps
+    /// into 192 000 and Today rendered it as a MEASURED count: no "est." marker, no confidence, no
+    /// calibrate affordance, and (unlike the 4.0 estimate path, which clamps at
+    /// `StepsEstimateEngine.maxDailySteps`) no upper bound at all. The compute layer keeps dividing by 1.0
+    /// when this is nil — behaviour unchanged, no day is rescored — but every PRESENTATION surface asks
+    /// this, not the divisor, so an uncalibrated total is shown as the estimate it is.
+    @Published private(set) var stepTicksPerStepCalibration: Double? {
+        didSet {
+            if let v = stepTicksPerStepCalibration { d.set(v, forKey: K.stepScale) }
+            else { d.removeObject(forKey: K.stepScale) }
+        }
+    }
+
+    /// Whether the @57 counter divisor has ever been calibrated (walk tile or Settings). False = the day
+    /// total is raw ticks and must be presented as an estimate.
+    var stepCounterCalibrated: Bool { stepTicksPerStepCalibration != nil }
+
+    /// Forget the counter calibration — back to the honest "not calibrated" state (raw pass-through for
+    /// compute, "est." everywhere it is shown). Used by the walk tile's Reset when there was nothing to
+    /// restore.
+    func clearStepTicksPerStepCalibration() {
+        // Assign through the published divisor first so observers repaint (its `didSet` re-marks the
+        // profile calibrated), then clear — this line is the authoritative one and removes the key.
+        stepTicksPerStep = Self.uncalibratedStepDivisor
+        stepTicksPerStepCalibration = nil
+    }
+
+    /// What the compute layer divides by when no calibration exists: 1.0, i.e. raw ticks straight through.
+    /// Named so the "this is not a measurement" reasoning has somewhere to live.
+    static let uncalibratedStepDivisor: Double = 1.0
 
     // ── Steps ESTIMATE calibration (WHOOP 4.0; StepsEstimateEngine) ─────────────────────────────
     // Written by IntelligenceEngine each analytics pass from the auto-fit against phone steps, and
@@ -172,24 +221,41 @@ final class ProfileStore: ObservableObject {
         // #146 age migration. `dateOfBirth` is authoritative whenever it exists, so age advances on
         // its own. A pre-#146 install — or a `.noopbak` restore, which writes only the legacy Int age
         // and clears any stale DOB (see `BackupSettings.apply`) — has no DOB yet, so derive one from
-        // the stored age. Nothing stored → the age-30 default. Deliberately NO equality heuristic: a
+        // the stored age. Nothing stored → UNKNOWN (see below). Deliberately NO equality heuristic: a
         // present DOB is never second-guessed against the mirrored age (doing so would re-freeze age
         // every birthday, the exact staleness #146 fixes).
+        //
+        // NOTHING STORED MEANS UNKNOWN, AND IS NOT WRITTEN DOWN. This used to seed the age-30 date of
+        // birth AND persist it, so an install that had never been asked for an age was indistinguishable
+        // from a wearer who had answered "30" — there was no "age unknown" state at all. The cost is not
+        // cosmetic: a 45-year-old reinstalling was scored against Tanaka(30) = 187 instead of 176.5, so at
+        // 130 bpm they sat in Edwards zone 2 instead of zone 3 for the whole day's integral, and every
+        // HRmax-derived figure (Effort, VO₂max, fitness age, calories, the displayed zone table) inherited
+        // it. It also made `AnalyticsEngine`'s `age: profile.age > 0 ? profile.age : nil` guard dead code
+        // by construction. `dateOfBirth` keeps a non-optional seed so the Settings/onboarding DatePicker
+        // still has something to show, but `dateOfBirthIsSet` says whether it means anything, `age`
+        // answers 0 while it does not, and NOTHING is persisted until the wearer supplies it.
+        let storedDOB = d.object(forKey: K.dateOfBirth) as? Date
+        let legacyAge = d.object(forKey: K.legacyAge) as? Int
         let resolvedDOB: Date
-        if let dob = d.object(forKey: K.dateOfBirth) as? Date {
+        if let dob = storedDOB {
             resolvedDOB = dob
-        } else if let legacyAge = d.object(forKey: K.legacyAge) as? Int {
+        } else if let legacyAge {
             resolvedDOB = Self.dateOfBirth(forAge: legacyAge)
         } else {
-            resolvedDOB = Self.dateOfBirth(forAge: 30)
+            resolvedDOB = Self.dateOfBirth(forAge: Self.unsetAgeSeed)
         }
         dateOfBirth = resolvedDOB
-        // `didSet` doesn't fire for the initial assignment inside `init`, so persist the resolved DOB
-        // and its mirrored age explicitly — otherwise a migrated/derived DOB never reaches storage
-        // until the user next edits it. Written from the LOCAL (not `self.dateOfBirth`, which Swift
-        // forbids reading before every stored property is initialized).
-        d.set(resolvedDOB, forKey: K.dateOfBirth)
-        d.set(Self.years(from: resolvedDOB, to: Date()), forKey: K.legacyAge)
+        dateOfBirthIsSet = storedDOB != nil || legacyAge != nil
+        // `didSet` doesn't fire for the initial assignment inside `init`, so persist a MIGRATED DOB (an
+        // install that only had the legacy Int age) explicitly — otherwise the derived DOB never reaches
+        // storage until the user next edits it. A never-answered profile writes nothing at all. Written
+        // from the LOCALS (not `self.dateOfBirth`, which Swift forbids reading before every stored
+        // property is initialized).
+        if storedDOB == nil, legacyAge != nil {
+            d.set(resolvedDOB, forKey: K.dateOfBirth)
+            d.set(Self.years(from: resolvedDOB, to: Date()), forKey: K.legacyAge)
+        }
         sex = d.string(forKey: K.sex) ?? "male"
         weightKg = d.object(forKey: K.weight) as? Double ?? 75
         heightCm = d.object(forKey: K.height) as? Double ?? 178
@@ -198,7 +264,13 @@ final class ProfileStore: ObservableObject {
         let storedThresholds = d.string(forKey: K.hrZoneThresholds)?
             .split(separator: ",").compactMap { Int($0) } ?? []
         hrZoneThresholds = Self.validZoneThresholds(storedThresholds) ? storedThresholds : []
-        stepTicksPerStep = min(max(d.object(forKey: K.stepScale) as? Double ?? 1.0, 0.5), 30.0)
+        // ABSENT KEY = never calibrated. The divisor the compute layer uses stays 1.0 (raw pass-through,
+        // no day is rescored); `stepTicksPerStepCalibration` carries the nil that every presentation
+        // surface reads. `didSet` doesn't fire in `init`, so nothing is persisted here — which is the
+        // point: storing 1.0 would make "never calibrated" look like "calibrated to 1.0".
+        let storedStepScale = (d.object(forKey: K.stepScale) as? Double).map(Self.clampStepScale)
+        stepTicksPerStep = storedStepScale ?? Self.uncalibratedStepDivisor
+        stepTicksPerStepCalibration = storedStepScale
         stepsCalibrationCoefficient = d.object(forKey: K.stepsCoeff) as? Double ?? 0
         stepsCalibrationSampleDays = d.object(forKey: K.stepsSampleDays) as? Int ?? 0
         stepsCalibrationConfidence = d.object(forKey: K.stepsConfidence) as? Double ?? 0
@@ -261,9 +333,18 @@ final class ProfileStore: ObservableObject {
     var stepsManualOverride: Double? { stepsManualCoefficient > 0 ? stepsManualCoefficient : nil }
 
     /// Current age in whole years, derived from `dateOfBirth` (#146) rather than a number the user has
-    /// to remember to update. Every existing caller (HR zones, calories, Fitness/Body Age) reads this
-    /// unchanged.
-    var age: Int { Self.years(from: dateOfBirth, to: Date()) }
+    /// to remember to update — or **0 when the wearer has never supplied one** (`dateOfBirthIsSet` false).
+    /// Every existing caller (HR zones, calories, Fitness/Body Age) reads this unchanged; 0 is the value
+    /// their `age > 0` guards were already written against, so they abstain instead of scoring a 45-year-old
+    /// against a substituted 30.
+    var age: Int { dateOfBirthIsSet ? Self.years(from: dateOfBirth, to: Date()) : 0 }
+
+    /// Age as evidence: nil when unknown. Prefer this at any call site that can abstain.
+    var ageOrNil: Int? { dateOfBirthIsSet ? age : nil }
+
+    /// The date of birth the picker is SEEDED with before the wearer answers. A seed, never a measurement:
+    /// `dateOfBirthIsSet` is what tells the two apart.
+    static let unsetAgeSeed = 30
 
     /// Whole years elapsed `from`→`to` (floor — a birthday not yet reached this year doesn't count).
     nonisolated static func years(from: Date, to: Date) -> Int {
@@ -282,8 +363,19 @@ final class ProfileStore: ObservableObject {
         dateOfBirth(forAge: 100)...dateOfBirth(forAge: 13)
     }
 
-    /// Tanaka estimate unless overridden.
+    /// Tanaka estimate unless overridden. NOTE: with no override and no answered age this still evaluates
+    /// the formula at age 0 (208 bpm) — read ``effortHRmax`` instead wherever the caller can abstain.
     var hrMax: Int { hrMaxOverride > 0 ? hrMaxOverride : Int((208 - 0.7 * Double(age)).rounded()) }
+
+    /// The HRmax Effort is scored against AS EVIDENCE: the Settings override, else Tanaka from an ANSWERED
+    /// age, else **nil**. One resolution for every path (`StrainScorer.effortHRmax`), and the one that is
+    /// honest about an unknown age: `age` is 0 until the wearer supplies a date of birth, and the shared
+    /// resolver returns nil for age ≤ 0 rather than scoring against a substituted default. Every stored and
+    /// live Effort path already routes through that resolver, so they abstain together.
+    var effortHRmax: Double? {
+        StrainScorer.effortHRmax(overrideBpm: hrMaxOverride > 0 ? Double(hrMaxOverride) : nil,
+                                 age: Double(age))
+    }
 
     /// Personalized zone starts after enforcing the same five-value invariant as `HRZones`.
     var customHRZoneLowerBounds: [Double]? {
@@ -354,6 +446,12 @@ final class ProfileStore: ObservableObject {
                                                now: nowTs)
         learnedZoneHRmaxAt = nowTs
         if learnedZoneHRmax != learned.bpm { learnedZoneHRmax = learned.bpm }
+        // HONOUR THE `.fallback` TAG. `HRZones.zoneRestingHR` reports the documented 60 bpm SUBSTITUTE
+        // tagged `.fallback` when nothing was measured. Storing that made a made-up number a learned input
+        // — it rode into the persisted zone inputs and the displayed zone table, and it also overwrote a
+        // genuinely measured value from an earlier refresh whenever a later one happened to read nothing.
+        // A fallback is a read-time placeholder (see `zoneRestingHR`), never an input.
+        guard restingHR.source != .fallback else { return }
         if zoneRestingHRInput != restingHR { zoneRestingHRInput = restingHR }
     }
 

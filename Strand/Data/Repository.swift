@@ -777,6 +777,22 @@ final class Repository: ObservableObject {
         guard let newest = days.last(where: { $0.respRateBpm != nil && $0.day < todayKey }) else { return nil }
         return newest.day >= Baselines.cutoffKey(todayKey: todayKey) ? newest : nil
     }
+
+    /// The newest point of a DERIVED, occasionally-banked series, refused once it is older than `carryDays`
+    /// relative to `todayKey` — the same bound `lastRespDay` puts on a carried vital, for the same reason.
+    ///
+    /// Fitness Age, VO₂max and Vitality are keyed to the week's Saturday and are re-banked by every
+    /// analysis pass that has the inputs, so the freshest point is at most a week old while the wearer is
+    /// wearing the strap. Their Today tiles took `.last?.value` with no date test at all, so a value banked
+    /// once — one Saturday with enough nights, then a fortnight of no wear or no workouts — kept rendering
+    /// as the current figure indefinitely. Past the cutoff there is no current figure, so the tile reads
+    /// "—". Pure + `nonisolated`: `points` need only be sorted oldest→newest, and `yyyy-MM-dd` compares
+    /// chronologically as a string (`Baselines.cutoffKey` does the calendar half in UTC).
+    nonisolated static func carriedSeriesValue(_ points: [(day: String, value: Double)],
+                                               todayKey: String,
+                                               carryDays: Int = Baselines.vitalCarryDays) -> Double? {
+        Baselines.freshestCarried(points, todayKey: todayKey, carryDays: carryDays)?.value
+    }
     /// The trailing 7 CALENDAR days ending today (for the week strip), oldest→newest , not the last 7
     /// stored rows, which on a stale import were old data. ISO yyyy-MM-dd compares chronologically.
     var week: [DailyMetric] {
@@ -815,19 +831,31 @@ final class Repository: ObservableObject {
     /// The hour the LOGICAL day rolls (04:00 local). Between midnight and this hour, "Today" stays put.
     nonisolated static let logicalDayRolloverHour = 4
 
-    /// The LOGICAL local day for `now` , the calendar date of `now - rolloverHour hours`. Rolls at
-    /// 04:00 local rather than midnight, so the small hours after midnight still resolve to the prior
-    /// calendar date's row instead of an empty new-calendar-day row (#144). Pure + injectable so the
-    /// boundary is testable (23:59 → same day, 01:00 → previous day, 04:01 → new day). Presentation-only:
-    /// used solely to pick which stored row is Today and to anchor the Today HR-trend window start; stored
-    /// row keys are never rewritten.
-    static func logicalDay(_ now: Date, rolloverHour: Int = logicalDayRolloverHour) -> Date {
-        now.addingTimeInterval(-Double(rolloverHour) * 3_600)
+    /// The LOGICAL local day for `now` — midnight of the civil date "Today" refers to. Rolls at 04:00
+    /// local rather than midnight, so the small hours after midnight still resolve to the prior calendar
+    /// date's row instead of an empty new-calendar-day row (#144). Pure + injectable so the boundary is
+    /// testable (23:59 → same day, 01:00 → previous day, 04:01 → new day). Presentation-only: used solely
+    /// to pick which stored row is Today and to anchor the Today HR-trend window start; stored row keys
+    /// are never rewritten.
+    ///
+    /// WALL CLOCK, NOT ABSOLUTE TIME. This used to subtract four hours of *elapsed* time
+    /// (`now.addingTimeInterval(-4 * 3600)`) to shift a CIVIL day, which is the §4.8 UTC-vs-local class of
+    /// bug: on a spring-forward date the local day is 23 hours long, so 04:30 local minus four absolute
+    /// hours lands at 23:30 the PREVIOUS evening and "today" silently resolved to yesterday's row for the
+    /// whole 04:00–05:00 window. The rollover is a statement about the clock on the wall, so it is decided
+    /// from the wall-clock hour and the shift is done with calendar day arithmetic — the same thing
+    /// `LocalDayWindows` (analytics) does, and what `Repository.week` already did.
+    static func logicalDay(_ now: Date, rolloverHour: Int = logicalDayRolloverHour,
+                           calendar: Calendar = .current) -> Date {
+        let midnight = calendar.startOfDay(for: now)
+        guard calendar.component(.hour, from: now) < rolloverHour else { return midnight }
+        return calendar.date(byAdding: .day, value: -1, to: midnight) ?? midnight
     }
 
     /// `yyyy-MM-dd` key for the logical day of `now` (see `logicalDay`).
-    static func logicalDayKey(_ now: Date, rolloverHour: Int = logicalDayRolloverHour) -> String {
-        localDayKey(logicalDay(now, rolloverHour: rolloverHour))
+    static func logicalDayKey(_ now: Date, rolloverHour: Int = logicalDayRolloverHour,
+                              calendar: Calendar = .current) -> String {
+        localDayKey(logicalDay(now, rolloverHour: rolloverHour, calendar: calendar))
     }
 
     /// Start of the logical day (its real calendar midnight) for `now`, in `calendar`'s zone , the anchor
@@ -835,7 +863,26 @@ final class Repository: ObservableObject {
     /// new calendar midnight while we're still showing yesterday's logical day in the small hours (#144).
     static func logicalDayStart(_ now: Date, calendar: Calendar = .current,
                                 rolloverHour: Int = logicalDayRolloverHour) -> Date {
-        calendar.startOfDay(for: logicalDay(now, rolloverHour: rolloverHour))
+        // `logicalDay` already returns that day's local midnight; `startOfDay` is kept so an injected
+        // calendar in another zone still normalizes.
+        calendar.startOfDay(for: logicalDay(now, rolloverHour: rolloverHour, calendar: calendar))
+    }
+
+    /// The `yyyy-MM-dd` key `count` CIVIL days before `now`'s local date, by calendar arithmetic.
+    ///
+    /// Same §4.8 class as `logicalDay` above: `now.addingTimeInterval(-Double(n) * 86_400)` assumes every
+    /// local day is exactly 86 400 s, so a window spanning a DST transition covered n−1 or n+1 dates.
+    /// `Repository.week` already used calendar arithmetic; the recent-day windows below now do too.
+    nonisolated static func dayKeyOffset(_ now: Date, days: Int, calendar: Calendar = .current) -> String {
+        let shifted = calendar.date(byAdding: .day, value: -days, to: now) ?? now
+        guard calendar.timeZone != dayKeyFormatter.timeZone else { return localDayKey(shifted) }
+        // Only an INJECTED calendar (a test pinning a zone with a known DST transition) takes this path;
+        // `.current` formats through the shared `localDayKey` exactly as before.
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = calendar.timeZone
+        return f.string(from: shifted)
     }
 
     /// In-flight open, so concurrent first-callers share ONE open instead of each opening their own.
@@ -962,6 +1009,15 @@ final class Repository: ObservableObject {
     /// skips the reload when nothing has changed since it last loaded. `-1` = never loaded this launch, so the
     /// first load (seq 0) always runs. Not @Published (pure load-bookkeeping, never drives the UI).
     var todayHistoryWideLoadedSeq = -1
+    /// The LOGICAL day key (`logicalDayKey`, 04:00 rollover) the history-wide set was last loaded for.
+    ///
+    /// The seq alone is not a sufficient key. `refreshSeq` only advances when a refresh published new data,
+    /// so a strap that was not synced overnight leaves it unchanged across the rollover — and the snapshot
+    /// holds today-scoped scalars (`stressToday`, `fitnessAgeToday`, `vo2maxToday`, `vitalityToday`). App
+    /// backgrounded at 23:00 and reopened at 05:10 therefore restored YESTERDAY's figures and rendered them
+    /// as today's. Both siblings already carry this guard (`insightsLoadedDayKey`,
+    /// `todayDayScopedLoadedDayKey`); this one lacked it. `""` = never loaded this launch. Not @Published.
+    var todayHistoryWideLoadedDayKey = ""
     /// #849: the last history-wide snapshot Today built, so a re-mount can RESTORE it (in-memory, no queries)
     /// instead of re-running the heavy reload. Paired with `todayHistoryWideLoadedSeq`. Not @Published.
     var todayHistoryWideCache: TodayHistoryWideCache?
@@ -1242,10 +1298,28 @@ final class Repository: ObservableObject {
             wakingRHRs = byDay.keys.sorted().compactMap { byDay[$0] }
         }
         let rhr = HRZones.zoneRestingHR(sleepRestingHRs: sleepRHRs, wakingRestingHRs: wakingRHRs)
+        // HONESTY GATE. This runs at the end of EVERY refresh, including the very first one on a fresh
+        // install, where `days` is still empty: `zoneRestingHR([], [])` then returns the documented
+        // substitute (`defaultZoneRestingHR`, 60 bpm) tagged `.fallback`, and publishing it wrote a
+        // SUBSTITUTED number into `ProfileStore.zoneRestingHRInput` — i.e. into storage and into the
+        // displayed zone table — indistinguishable from a measured resting HR. A fallback is not evidence,
+        // so there is nothing to publish: with no measurement `ProfileStore` keeps `zoneRestingHRInput` nil
+        // and its `zoneRestingHR` reports the 60 bpm placeholder as `.fallback` at READ time, which is
+        // where the tag can still be honoured. Publishing resumes the moment either half is real.
+        guard shouldPublishZoneInputs(observedHRmax: observed, restingHRSource: rhr.source) else { return }
         var info: [String: Any] = [HRZoneInputsKey.restingHR: rhr.bpm,
                                    HRZoneInputsKey.restingHRSource: rhr.source.rawValue]
         if let observed { info[HRZoneInputsKey.observedHRmax] = observed }
         NotificationCenter.default.post(name: .noopHRZoneInputsDidUpdate, object: nil, userInfo: info)
+    }
+
+    /// Whether `publishHRZoneInputs` has anything DERIVED to publish: a real measured resting HR, or an
+    /// observed HRmax to feed the learned ceiling. A `.fallback` resting HR with no observed peak means the
+    /// pass derived nothing at all — the substituted 60 bpm is a read-time placeholder, never a stored
+    /// input. Pure + `nonisolated` so the gate is unit-testable without a store or a refresh.
+    nonisolated static func shouldPublishZoneInputs(observedHRmax: Double?,
+                                                    restingHRSource: HRZones.RestingHRSource) -> Bool {
+        restingHRSource != .fallback || observedHRmax != nil
     }
 
     /// Per-source coverage counts for the Freshness Pipeline card. Pure over the rows already read.
@@ -1612,7 +1686,18 @@ final class Repository: ObservableObject {
     /// can outrank the app's own calculation there. Where the wearer asks for the app's own figures,
     /// that is the wrong answer, so this asks the computed lane and nothing else.
     /// The key NOOP's own training-based VO₂max is banked under, per day, on the computed source.
-    static let noopVo2Key = "vo2max_noop"
+    ///
+    /// ONE KEY (§4.10). This used to be its own `"vo2max_noop"` series while `IntelligenceEngine` banked a
+    /// SECOND, differently-gated estimate under `"vo2max_est"` — different resting-HR window, different
+    /// HRmax, different gate — and the two were read by different screens: the Level screen and the coach
+    /// took `vo2max_noop`, the Health tab's Fitness Age card, Today's VO₂max tile, Liquid Today and the
+    /// metric explorer all took `vo2max_est`. Two numbers for the same wearer on the same day, each
+    /// labelled "VO₂max". `VO2MaxEstimator.estimate` already subsumes the other one (it BLENDS the HUNT /
+    /// Nes activity model with the run-based figure and returns the activity model alone when there are no
+    /// usable sessions), so this path banks under the catalog's single key and every reader converges.
+    /// `vo2max_est` is also the key the provenance store records an estimator identity for, which is where
+    /// the method now lands instead of being discarded.
+    static let noopVo2Key = "vo2max_est"
     private static let noopVo2DayKey = "vo2max.noop.bankedDay"
     /// When the estimate was last ATTEMPTED, banked or not.
     ///
@@ -1667,6 +1752,12 @@ final class Repository: ObservableObject {
             let sleep: Double? = d.restingHr.map { Double($0) }
             return (daytime: wakingByDay[d.day], sleep: sleep)
         }
+        // MINIMUM EVIDENCE. `WakingRestingHR.typical` is happy with a single day, so on day one a lone
+        // night's resting HR became "the wearer's resting HR" and — through Uth, which is monotone in it —
+        // a banked VO₂max off one night and zero workouts. The same bar the other VO₂max path already
+        // clears is applied here: `FitnessAgeEngine.minCoverageDays` days in the trailing week that
+        // actually carry a resting-HR measurement. Below it there is no resting HR to estimate from.
+        guard Self.hasEnoughRestingHrDays(wakingDays) else { return }
         guard let rhr = WakingRestingHR.typical(wakingDays) else { return }
         let workouts = await workoutRows(days: 365)
         // F7: HRmax from the wearer's own per-workout PEAKS. `estimateHRmax` needs a dense HR history
@@ -1722,12 +1813,39 @@ final class Repository: ObservableObject {
 
         guard hrMax > 0,
               let estimate = VO2MaxEstimator.estimate(sessions: sessions, restingHr: rhr, hrMax: hrMax,
-                                                      activityModel: activityModel)
+                                                      activityModel: activityModel),
+              Self.isBankableVo2Max(estimate)
         else { return }
-        _ = try? await store.upsertMetricSeries(
-            [MetricPoint(day: today, key: Self.noopVo2Key, value: estimate.vo2max)],
+        // The METHOD is banked with the value. It used to be dropped on the floor, so a figure that came
+        // from nothing but a heart-rate ratio was indistinguishable on screen from one measured over five
+        // runs. `vo2max_est`'s provenance row is exactly where that belongs (the Health card reads it and
+        // shows an honest "unknown" for a tag it does not recognise, never an inferred one).
+        let provenance = [ScoreInputProvenanceRow(day: today, key: Self.noopVo2Key,
+                                                  sourceId: estimate.method.rawValue)]
+        try? await store.persistMetricSeriesWithProvenance(
+            points: [MetricPoint(day: today, key: Self.noopVo2Key, value: estimate.vo2max)],
+            provenance: provenance,
             deviceId: computedDeviceId)
         UserDefaults.standard.set(today, forKey: Self.noopVo2DayKey)
+    }
+
+    /// Whether a trailing-week resting-HR window carries enough measured days to estimate a resting HR
+    /// from. Pure + `nonisolated` so the gate is unit-testable without a store.
+    nonisolated static func hasEnoughRestingHrDays(_ days: [(daytime: Double?, sleep: Double?)],
+                                                   minDays: Int = FitnessAgeEngine.minCoverageDays) -> Bool {
+        days.filter { $0.daytime != nil || $0.sleep != nil }.count >= minDays
+    }
+
+    /// Whether an estimate is evidence worth BANKING as the wearer's VO₂max.
+    ///
+    /// `.hrRatio` is Uth 2004 — `15.3 · HRmax / RHR` — and by construction it carries `sessions == 0`: it is
+    /// what `VO2MaxEstimator` returns when there is no usable run or walk AND no activity model, i.e. when
+    /// nothing about this wearer's exercise has been measured at all. Persisting it produced the reported
+    /// day-one figure (age 40, one night, sleep RHR 44 → 55.1 on the Level screen) from two numbers that say
+    /// nothing about aerobic capacity. The other methods each rest on measured sessions or the activity
+    /// index, so they bank. Pure + `nonisolated` for the test.
+    nonisolated static func isBankableVo2Max(_ e: VO2MaxEstimator.Estimate) -> Bool {
+        !(e.method == .hrRatio && e.sessions == 0)
     }
 
     func noopScores(day: String) async -> (charge: Double?, effort: Double?, rest: Double?) {
@@ -1748,7 +1866,9 @@ final class Repository: ObservableObject {
     func noopRecentDays(days n: Int = 7) async -> [(day: String, charge: Double?, effort: Double?, rest: Double?)] {
         guard let store = await ensureStore() else { return [] }
         let now = Date()
-        let from = Self.localDayKey(now.addingTimeInterval(-Double(n - 1) * 86_400))
+        // §4.8: CIVIL days, not n−1 × 86 400 s of absolute time (that spanned 6 or 8 dates across a DST
+        // transition, so the Effort↔WHOOP calibration silently fitted a window one day short or long).
+        let from = Self.dayKeyOffset(now, days: n - 1)
         let to = Self.localDayKey(now)
         let rows = await unionComputedDailyMetrics(store: store, from: from, to: to)
         var rest: [String: Double] = [:]
@@ -1766,7 +1886,8 @@ final class Repository: ObservableObject {
     func whoopRecentDays(days n: Int = 7) async -> [(day: String, recovery: Double?, strain: Double?, sleep: Double?)] {
         guard let store = await ensureStore() else { return [] }
         let now = Date()
-        let from = Self.localDayKey(now.addingTimeInterval(-Double(n - 1) * 86_400))
+        // §4.8: CIVIL days (see `noopRecentDays`), so the paired window is the same length on both lanes.
+        let from = Self.dayKeyOffset(now, days: n - 1)
         let to = Self.localDayKey(now)
         let rows = (try? await store.dailyMetrics(deviceId: WhoopCloudSync.sourceId, from: from, to: to)) ?? []
         let sleep = Dictionary(((try? await store.metricSeries(deviceId: WhoopCloudSync.sourceId,

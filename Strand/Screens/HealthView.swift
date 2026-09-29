@@ -255,8 +255,11 @@ private struct HeartRateSection: View {
 
     /// HR as a fraction of HR-max (0…1).
     private func hrFraction(_ hr: Int?) -> Double {
-        guard let hr = hr, profile.hrMax > 0 else { return 0 }
-        return min(max(Double(hr) / Double(profile.hrMax), 0), 1)
+        // `effortHRmax`, not `hrMax`: with no override and no answered date of birth the age formula still
+        // evaluates (208 bpm at age 0), so the old guard could never fire and the % Max read-out was a
+        // fraction of a number nobody supplied. nil = no HRmax to measure against.
+        guard let hr = hr, let maxHR = profile.effortHRmax, maxHR > 0 else { return 0 }
+        return min(max(Double(hr) / maxHR, 0), 1)
     }
 
     /// Current zone 1…5 from %HR-max (WHOOP/Karvonen-style bands: 50/60/70/80/90).
@@ -323,7 +326,8 @@ private struct HeartRateSection: View {
                 ChartFooter([
                     ("Zone", hasLiveHR ? "Z\(zone)" : "—"),
                     ("% Max", hasLiveHR ? "\(Int((fraction * 100).rounded()))%" : "—"),
-                    ("Max HR", "\(profile.hrMax)"),
+                    // "—" rather than the age-0 formula value when no age or override has been given.
+                    ("Max HR", profile.effortHRmax.map { "\(Int($0.rounded()))" } ?? "—"),
                     ("State", hasLiveHR ? String(localized: "STREAMING") : String(localized: "IDLE")),
                 ])
             }

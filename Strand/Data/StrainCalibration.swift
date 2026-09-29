@@ -29,7 +29,8 @@ enum StrainCalibration {
 
     static let storageKey = "effort.whoopCalibration.v1"
     static let refreshedDayKey = "effort.whoopCalibration.refreshedDay"
-    /// E4: the `strainRecipeVersion` the stored calibration was fitted against. Absent (0) = pre-E4.
+    /// E4: the `strainRecipeIdentity` (recipe shape + Effort method) the stored calibration was fitted
+    /// against. Absent (0) = pre-E4; a bare `2` = pre-method-aware, which no identity matches.
     static let recipeKey = "effort.whoopCalibration.recipe"
     /// E4: "<rescore flag key>|r<recipe>" of the last fit made AFTER the full-history rescore. When it does
     /// not match the current one, the next refresh with the rescore done refits at once, not tomorrow.
@@ -40,6 +41,30 @@ enum StrainCalibration {
     ///   1 — O6: Edwards zones on %HRmax.
     ///   2 — E1: the day integral pays zone 1 only while moving; E3: Banister sedentary floor 0.10 → 0.04.
     static let strainRecipeVersion = 2
+
+    /// What is actually PERSISTED and compared: the recipe shape above **plus the Effort METHOD** it was
+    /// fitted under, as `version * 10 + (banister ? 1 : 0)`.
+    ///
+    /// The version alone did not distinguish Edwards from Banister, on the stated grounds that both map a
+    /// theoretical maximum day to 100 so they share an axis. That is true only of the axis ENDS: the two
+    /// recipes disagree violently in between, because Edwards pays nothing below 50 % HRR while Banister
+    /// integrates from the sedentary floor up — a 24 h day held at 5 % HRR scores 0 under Edwards and about
+    /// 45 under Banister. So a curve fitted on one method is simply the wrong curve for the other, and
+    /// toggling the pref (or reinstalling, which resets it to Edwards) kept recipe 2 and went on applying
+    /// it. Folding the method in makes that a recipe mismatch, which the existing gates already handle
+    /// correctly: `decodeIfCurrent` falls back to the honest linear mapping, and `fitMarker` makes the next
+    /// refresh refit at once instead of tomorrow.
+    ///
+    /// Existing stored calibrations carry a bare `2`, which matches no identity, so they refit on the first
+    /// refresh after the rescore flag is up — the same path a version bump has always taken.
+    static var strainRecipeIdentity: Int {
+        recipeIdentity(version: strainRecipeVersion, method: PuffinExperiment.effortMethod)
+    }
+
+    /// Pure form of ``strainRecipeIdentity`` so the encoding is testable without touching defaults.
+    static func recipeIdentity(version: Int, method: StrainScorer.Method) -> Int {
+        version * 10 + (method == .banister ? 1 : 0)
+    }
     /// How far back paired days are looked for. Long enough to collect ≥ 10 pairs for an occasional
     /// WHOOP-cloud user; short enough that an old scoring recipe ages out of the fit.
     static let lookbackDays = 120
@@ -69,7 +94,7 @@ enum StrainCalibration {
         lock.unlock()
         if let calibration, let data = try? JSONEncoder().encode(calibration) {
             UserDefaults.standard.set(data, forKey: storageKey)
-            UserDefaults.standard.set(strainRecipeVersion, forKey: recipeKey)
+            UserDefaults.standard.set(strainRecipeIdentity, forKey: recipeKey)
         } else {
             UserDefaults.standard.removeObject(forKey: storageKey)
             UserDefaults.standard.removeObject(forKey: recipeKey)
@@ -125,7 +150,7 @@ enum StrainCalibration {
     /// The marker a post-rescore fit leaves behind: which rescore it followed and which recipe it fitted.
     /// A bumped rescore key (a new full-history pass) or a bumped recipe both make it stale, so both refit.
     static func fitMarker(rescoreFlagKey: String) -> String {
-        "\(rescoreFlagKey)|r\(strainRecipeVersion)"
+        "\(rescoreFlagKey)|r\(strainRecipeIdentity)"
     }
 
     /// E4's refit rule, pure so it is testable without defaults or a store.
@@ -154,8 +179,11 @@ enum StrainCalibration {
 
     /// The stored calibration only when it was fitted against the CURRENT recipe (E4); nil otherwise, which
     /// is the linear fallback. Pure, so the recipe gate is testable without resetting the in-memory copy.
-    static func decodeIfCurrent(_ data: Data?, recipe: Int) -> EffortStrainCalibration? {
-        guard recipe == strainRecipeVersion else { return nil }
+    /// `currentIdentity` is injectable so the gate stays PURE for tests (the default reads the live Effort
+    /// method through `strainRecipeIdentity`).
+    static func decodeIfCurrent(_ data: Data?, recipe: Int,
+                                currentIdentity: Int = strainRecipeIdentity) -> EffortStrainCalibration? {
+        guard recipe == currentIdentity else { return nil }
         return decode(data)
     }
 

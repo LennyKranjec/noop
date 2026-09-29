@@ -1739,7 +1739,8 @@ struct LiquidTodayView: View {
             ktile(String(localized: "Respiratory"), icon: keyMetricIcon(metric), resp.map { String(format: "%.1f", locale: AppLanguage.activeLocale, $0) } ?? "—", "rpm", StrandPalette.accent, fracOver(resp, 24), key: "resp_rate", sparkCutoff: sparkCutoff)
         case .steps:
             ktile(String(localized: "Steps"), icon: keyMetricIcon(metric), stepsText, "", StrandPalette.chargeColor,
-                  fracOver(stepCount, 10000), key: stepsDetailKey, detailMetric: stepsDetailMetric, sparkCutoff: sparkCutoff)
+                  fracOver(stepCount, 10000), key: stepsDetailKey, detailMetric: stepsDetailMetric,
+                  caption: stepsCaption, sparkCutoff: sparkCutoff)
         case .weight:
             ktile(String(localized: "Weight"), icon: keyMetricIcon(metric), "—", "", StrandPalette.metricAmber, nil, key: "weight", sparkCutoff: sparkCutoff)
         case .calories:
@@ -2386,9 +2387,13 @@ struct LiquidTodayView: View {
         stress = await Task.detached(priority: .utility) {
             StressModel(days: daysSnapshot, stored: storedStress)?.score
         }.value
-        fitnessAge = (await fitA).last?.value   // history-wide latest banked (not day-scoped)
-        vo2max = (await vo2A).last?.value        // #1391: latest banked VO₂max estimate
-        vitality = (await vitA).last?.value
+        // History-wide latest banked (not day-scoped) but STALENESS-BOUNDED, exactly as the classic Today
+        // tiles are: the newest point of a weekly series is only the current figure while it is still
+        // inside the carry window, otherwise the card would render a weeks-old value as today's.
+        let carryDay = Repository.logicalDayKey(Date())
+        fitnessAge = Repository.carriedSeriesValue(await fitA, todayKey: carryDay)
+        vo2max = Repository.carriedSeriesValue(await vo2A, todayKey: carryDay)   // #1391
+        vitality = Repository.carriedSeriesValue(await vitA, todayKey: carryDay)
         // Steps is a DAILY metric, so key it to the SELECTED day (like restScore above), not the history-wide
         // latest. Without this, swiping to a past day with no strap step count showed today's estimate (the
         // `.last` value) instead of that day's. Mirrors the classic Today's stepsEstByDay[selectedDayKey].
@@ -2554,8 +2559,27 @@ struct LiquidTodayView: View {
 
     // Measured strap count ?: imported Apple Health count ?: motion estimate — the same precedence the
     // detail routing follows below, so the tapped-through source always matches the number shown (#377).
-    private var stepCount: Double? {
-        displayDay?.steps.map(Double.init) ?? importedStepsDay.map(Double.init) ?? stepsEst
+    /// Which step figure this day gets and whether it may be shown as a MEASUREMENT — the SAME shared
+    /// resolution the classic Today tile uses (§4.7: one concern, every call path). The strap's @57 counter
+    /// total is `ticks ÷ stepTicksPerStep`, and that divisor is 1.0 until someone calibrates it, so an
+    /// uncalibrated counter is an estimate and both paths are clamped to `StepsEstimateEngine.maxDailySteps`.
+    private var stepsSource: TodayView.StepsTileSource? {
+        TodayView.stepsTileSource(strapCounter: displayDay?.steps,
+                                  counterCalibrated: profile.stepCounterCalibrated,
+                                  phoneSameDay: importedStepsDay,
+                                  motionEstimate: stepsEst.map { Int($0.rounded()) })
+    }
+
+    private var stepCount: Double? { stepsSource.map { Double($0.steps) } }
+
+    /// The honesty caption under the steps tile: nothing for a measured count, the shared "est. · not
+    /// calibrated" line for a raw counter total, a bare "est." for the motion estimate.
+    private var stepsCaption: String? {
+        switch stepsSource {
+        case .measured, nil: return nil
+        case .uncalibratedCounter: return TodayView.uncalibratedCounterCaption
+        case .motionEstimate: return String(localized: "est.")
+        }
     }
 
     private var stepsDetailMetric: MetricDescriptor? {

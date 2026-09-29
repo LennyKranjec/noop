@@ -2877,10 +2877,13 @@ struct TodayView: View {
             // #843/#813, same-day real count only (strap @57 or same-day phone import); never the latest
             // imported row or the sparkline tail (both went stale). Else fall through to the estimate.
             let appleStepsForDay = appleDays.last(where: { $0.day == selectedDayKey })?.steps
-            let real = (d?.steps).map { intString(Double($0)) }
-                ?? appleStepsForDay.map { intString(Double($0)) }
-            let est = stepsEstByDay[selectedDayKey].map { intString(Double($0)) }
-            return real ?? est ?? "—"
+            // The SAME resolution the Steps key-metric tile uses (clamped, and honest about an uncalibrated
+            // counter): two sites printing the steps figure must not disagree about which source won.
+            return Self.stepsTileSource(strapCounter: d?.steps,
+                                        counterCalibrated: profile.stepCounterCalibrated,
+                                        phoneSameDay: appleStepsForDay,
+                                        motionEstimate: stepsEstByDay[selectedDayKey])
+                .map { intString(Double($0.steps)) } ?? "—"
         case .calories:
             return withUnit(caloriesValue(appleDays.last))
         case .stress:
@@ -4208,29 +4211,36 @@ struct TodayView: View {
             // is the most-recent value, not this day's): both froze the tile on an old import. Otherwise
             // fall through to the on-device estimate ("est."). Mirrors Android stepsForDay (#276/#150).
             let appleStepsForDay = appleDays.last(where: { $0.day == selectedDayKey })?.steps
-            let realSteps: String? = (d?.steps).map { intString(Double($0)) }
-                ?? appleStepsForDay.map { intString(Double($0)) }
             let estSteps = stepsEstByDay[selectedDayKey]
-            // H6, only an ESTIMATED day (no real strap/phone count, so the on-device estimate filled in)
-            // gets the calibration entry; a real measured count needs no calibration.
-            let isEstimated = realSteps == nil && estSteps != nil
+            // The counter total is only a MEASUREMENT once its divisor has been calibrated; see
+            // `stepsTileSource`. Both paths are clamped here, not just the estimate one.
+            let stepsSource = Self.stepsTileSource(strapCounter: d?.steps,
+                                                   counterCalibrated: profile.stepCounterCalibrated,
+                                                   phoneSameDay: appleStepsForDay,
+                                                   motionEstimate: estSteps)
+            let realSteps: String? = (stepsSource?.isMeasured == true)
+                ? stepsSource.map { intString(Double($0.steps)) } : nil
+            // H6, only an ESTIMATED day (no measured strap/phone count) gets the calibration entry; a real
+            // measured count needs no calibration.
+            let isEstimated = stepsSource != nil && stepsSource?.isMeasured == false
             // #589, when the tile would be BLANK on a strap that estimates steps (a WHOOP 4.0 sends no
             // step count) explain WHY rather than a bare "—", and still expose the ⚙︎ so the user can reach
             // the sheet to set a manual coefficient. #1491: this used to require calibration state to
             // already exist, which excluded every 4.0 owner who had not calibrated yet — see
             // `stepsPipelineActive`.
-            let needsCalibration = realSteps == nil && estSteps == nil
+            let needsCalibration = stepsSource == nil
                 && stepsPipelineActive(hasDayData: d != nil)
+            // An estimated day reads "est." plus the calibration STATUS (k / days / confidence) so a
+            // frozen-looking estimate self-explains (#760/#792); an uncalibrated COUNTER says so in the same
+            // shape; a not-yet-calibrated day says how many more phone-counted days are needed (so a blank
+            // tile is never silently unexplained, #589). Resolved in a method, not inline: this is a
+            // `@ViewBuilder` body, where a bare `switch` would be read as a view.
+            let stepsTileCaption = stepsCaption(for: stepsSource, needsCalibration: needsCalibration)
             StatTile(
                 label: "Steps",
-                value: realSteps ?? estSteps.map { intString(Double($0)) } ?? "—",
-                // An estimated day reads "est." plus the calibration STATUS (k / days / confidence) so a
-                // frozen-looking estimate self-explains (#760/#792); a not-yet-calibrated day says how many
-                // more phone-counted days are needed (so a blank tile is never silently unexplained, #589).
-                caption: realSteps != nil ? String(localized: "today")
-                    : (estSteps != nil ? stepsEstimateCaption
-                       : (needsCalibration ? stepsCalibrationCaption : String(localized: "today"))),
-                accent: (realSteps != nil || estSteps != nil) ? StrandPalette.metricCyan : StrandPalette.textPrimary,
+                value: stepsSource.map { intString(Double($0.steps)) } ?? "—",
+                caption: stepsTileCaption,
+                accent: stepsSource != nil ? StrandPalette.metricCyan : StrandPalette.textPrimary,
                 sparkline: sparks["steps"],
                 sparkColor: StrandPalette.metricCyan,
                 // H6, an estimated (or awaiting-calibration) steps tile carries a small ⚙︎ that opens the
@@ -4628,6 +4638,88 @@ struct TodayView: View {
                                      sampleDays: profile.stepsCalibrationSampleDays)
     }
 
+    // MARK: - Steps: what may be presented as a measurement
+
+    /// Where a day's step figure came from, and therefore how honestly it may be shown.
+    ///
+    /// The 5/MG counter path used to be treated as measured unconditionally. It is `@57 counter ticks ÷
+    /// ProfileStore.stepTicksPerStep`, and that divisor defaults to 1.0 — raw tick pass-through — so before
+    /// anyone has calibrated it the tile rendered raw motion ticks as a step COUNT: no "est." marker, no
+    /// confidence, no calibrate affordance, and (unlike the motion-estimate path, which clamps at
+    /// `StepsEstimateEngine.maxDailySteps`) no upper bound at all. On a strap overcounting ~24× per step,
+    /// 8 000 real steps read 192 000 as a measurement. An uncalibrated divisor is not a calibration, so the
+    /// total it produces is an estimate and is presented as one.
+    enum StepsTileSource: Equatable {
+        /// A measured count: the strap counter with a CALIBRATED divisor, or the phone's own same-day total.
+        case measured(Int)
+        /// The strap counter with no divisor calibration — raw ticks. An estimate with nothing fitted.
+        case uncalibratedCounter(Int)
+        /// The WHOOP 4.0 motion estimate (`steps_est`), which carries the engine's own confidence.
+        case motionEstimate(Int)
+
+        var steps: Int {
+            switch self {
+            case let .measured(n), let .uncalibratedCounter(n), let .motionEstimate(n): return n
+            }
+        }
+        /// True only for a figure the app may print without an "est." marker.
+        var isMeasured: Bool { if case .measured = self { return true }; return false }
+    }
+
+    /// Resolve which step figure a day gets and what it is. Pure, so the honesty matrix is unit-testable.
+    ///
+    /// Precedence: a CALIBRATED strap counter, then the phone's own same-day count, then the uncalibrated
+    /// counter, then the motion estimate. The phone now outranks an uncalibrated counter deliberately — a
+    /// real measurement beats an unfitted one — while a calibrated counter still wins, as before.
+    /// Every branch is clamped to `StepsEstimateEngine.maxDailySteps`: the clamp existed on the estimate
+    /// path only, which is why the counter path could render a six-figure day.
+    static func stepsTileSource(strapCounter: Int?, counterCalibrated: Bool,
+                                phoneSameDay: Int?, motionEstimate: Int?) -> StepsTileSource? {
+        if let strap = strapCounter, counterCalibrated { return .measured(clampDaySteps(strap)) }
+        if let phone = phoneSameDay { return .measured(clampDaySteps(phone)) }
+        if let strap = strapCounter { return .uncalibratedCounter(clampDaySteps(strap)) }
+        if let est = motionEstimate { return .motionEstimate(clampDaySteps(est)) }
+        return nil
+    }
+
+    /// Whether the history-wide snapshot may be served instead of re-running the ~40 reads.
+    ///
+    /// THREE conditions, not one. The data state (`refreshSeq`) says nothing about the clock, and the
+    /// snapshot holds today-scoped scalars, so it also has to be keyed to the LOGICAL day it was built for
+    /// and bounded by its own age — the pairing `loadDayScoped` already uses. Seq-only matching meant a
+    /// strap that was not synced overnight (nothing to publish, so no seq bump) served yesterday's stress /
+    /// fitness age / VO₂max / vitality as today's after the 04:00 rollover: backgrounded at 23:00, reopened
+    /// at 05:10. Pure + static so the gate is unit-testable without a view or a store.
+    static func historyWideCacheHit(loadedSeq: Int, currentSeq: Int,
+                                    loadedDayKey: String, currentDayKey: String,
+                                    bankedAt: Date, now: Date = Date()) -> Bool {
+        loadedSeq == currentSeq
+            && loadedDayKey == currentDayKey
+            && now.timeIntervalSince(bankedAt) < todayCacheMaxAge
+    }
+
+    /// The single daily-steps sanity clamp, applied to BOTH step paths (`StepsEstimateEngine.maxDailySteps`).
+    static func clampDaySteps(_ steps: Int) -> Int {
+        min(max(0, steps), StepsEstimateEngine.maxDailySteps)
+    }
+
+    /// The caption for an uncalibrated counter total: the same "est." + confidence shape the motion estimate
+    /// uses, naming the actual blocker. There is no fit behind raw ticks, so the tier is the lowest one.
+    static var uncalibratedCounterCaption: String {
+        String(localized: "est. · not calibrated · \(StepsEstimateEngine.ConfidenceTier.low.word)")
+    }
+
+    /// The Steps tile caption for a resolved source. A method rather than an inline switch because the tile
+    /// is built inside a `@ViewBuilder`, where a bare `switch` is read as a view.
+    private func stepsCaption(for source: StepsTileSource?, needsCalibration: Bool) -> String? {
+        switch source {
+        case .measured: return String(localized: "today")
+        case .uncalibratedCounter: return Self.uncalibratedCounterCaption
+        case .motionEstimate: return stepsEstimateCaption
+        case nil: return needsCalibration ? stepsCalibrationCaption : String(localized: "today")
+        }
+    }
+
     /// #1816: the pure decision behind `stepsCalibrationCaption`, extracted so it can be unit-tested
     /// without a live view. Returns nil once a coefficient exists (a blank day is just a quiet one,
     /// not a missing input). Returns "No motion synced yet" when the strap has banked no motion —
@@ -4695,6 +4787,9 @@ struct TodayView: View {
         // long-lived `repo` (not @State), so it survives the re-mount that resets `loadedHistoryWideOnce`.
         // The day-scoped reads above ALWAYS run, so a day-switch / return still repaints instantly.
         let currentSeq = repo.refreshSeq
+        // The snapshot below holds TODAY-scoped scalars (stress / fitness age / VO₂max / vitality), so the
+        // logical day it was built for is part of its key — see `Repository.todayHistoryWideLoadedDayKey`.
+        let currentHistoryDayKey = Repository.logicalDayKey(Date())
         // #849 no-op guard: have we ALREADY run the history-wide pass for this exact data state? If so the
         // dashboard data is unchanged, so a bare re-mount must NOT re-run the ~40 reads + per-workout strap-HR
         // pass. A TabView/module switch (and the post-import re-mount) tears down TodayView's `@State`, so we
@@ -4702,7 +4797,15 @@ struct TodayView: View {
         // rather than re-querying, otherwise the dashboard would flash empty. This wins over the
         // first-load-this-mount path below, which would otherwise treat the re-mount as a cold launch and
         // reload identical data. If the cache is somehow absent (defensive), fall through and reload.
-        if repo.todayHistoryWideLoadedSeq == currentSeq, let cached = repo.todayHistoryWideCache {
+        // #rollover: the day key and the snapshot's age are BOTH part of the hit condition, exactly as the
+        // day-scoped twin below gates a today snapshot. A strap that was not synced overnight never bumps
+        // `refreshSeq`, so seq-only matching served yesterday's `stressToday` / `fitnessAgeToday` /
+        // `vo2maxToday` / `vitalityToday` as today's after the 04:00 rollover.
+        if let cached = repo.todayHistoryWideCache,
+           Self.historyWideCacheHit(loadedSeq: repo.todayHistoryWideLoadedSeq, currentSeq: currentSeq,
+                                    loadedDayKey: repo.todayHistoryWideLoadedDayKey,
+                                    currentDayKey: currentHistoryDayKey,
+                                    bankedAt: cached.bankedAt) {
             restoreHistoryWide(cached)
             // #989: hydration is excluded from the snapshot (a drink logged since would be stale), so a
             // restore re-reads it live, one cheap row.
@@ -4721,8 +4824,10 @@ struct TodayView: View {
         if !backfillActivelyWriting || !loadedHistoryWideOnce {
             await loadHistoryWide()
             loadedHistoryWideOnce = true
-            // Record the seq we just loaded so a later re-mount with unchanged data short-circuits above.
+            // Record the (seq, logical day) we just loaded so a later re-mount with unchanged data
+            // short-circuits above — and a re-mount after the rollover does not.
             repo.todayHistoryWideLoadedSeq = currentSeq
+            repo.todayHistoryWideLoadedDayKey = currentHistoryDayKey
         }
         announceNewDaysIfNeeded()
     }
@@ -4822,7 +4927,9 @@ struct TodayView: View {
         // so a strap-only WHOOP 5/MG user gets a steps trend without Apple Health. Falls back to the
         // Apple Health series above when the strap supplied no steps (#276). This synchronous overwrite
         // must run AFTER sparks["steps"] is assigned from the Apple-Health read above (unchanged order).
-        let strapSteps = repo.days.suffix(14).compactMap { $0.steps.map(Double.init) }
+        // Clamped like the tile: an uncalibrated counter can bank an impossible day, and one 192 000-step
+        // point rescales the whole sparkline so every real day next to it reads flat.
+        let strapSteps = repo.days.suffix(14).compactMap { $0.steps.map { Double(Self.clampDaySteps($0)) } }
         if !strapSteps.isEmpty { sparks["steps"] = strapSteps }
         sparks["weight"]      = await weightSpark
         sparks["active_kcal"] = await activeKcalSpark
@@ -4872,9 +4979,14 @@ struct TodayView: View {
         // page on a day with no banked stress row. nil (no usable signal) keeps the honest "Calibrating"
         // placeholder, matching StressView's empty state. Fitness age / Vitality keep their merged reads.
         stressToday = StressModel(days: repo.days, stored: await stressStoredA)?.score
-        fitnessAgeToday = (await fitnessAgeSeriesA).last?.value
-        vo2maxToday = (await vo2maxSeriesA).last?.value   // #1391: latest banked VO₂max estimate
-        vitalityToday = (await vitalitySeriesA).last?.value
+        // STALENESS-BOUNDED, like every other carried figure on this screen (`lastRespDay`). These three
+        // are banked to the week's Saturday and re-banked by each analysis pass that has the inputs, so
+        // `.last?.value` with no date test showed the newest point FOREVER: one VO₂max banked on day 3 then
+        // two workout-free weeks and the tile still read the day-3 figure as the current one.
+        let carryDay = Repository.logicalDayKey(Date())
+        fitnessAgeToday = Repository.carriedSeriesValue(await fitnessAgeSeriesA, todayKey: carryDay)
+        vo2maxToday = Repository.carriedSeriesValue(await vo2maxSeriesA, todayKey: carryDay)
+        vitalityToday = Repository.carriedSeriesValue(await vitalitySeriesA, todayKey: carryDay)
         // Hydration card (opt-in): today's stored total + the sex/Effort goal. Only loaded when the
         // feature is on, so a disabled feature does zero work and the card stays hidden.
         await reloadHydration()
@@ -4902,7 +5014,8 @@ struct TodayView: View {
             stressToday: stressToday,
             fitnessAgeToday: fitnessAgeToday,
             vo2maxToday: vo2maxToday,
-            vitalityToday: vitalityToday
+            vitalityToday: vitalityToday,
+            bankedAt: Date()
         )
     }
 
@@ -5002,7 +5115,7 @@ struct TodayView: View {
     /// restored HR curve / live Effort against the 1Hz stream. Rapid sidebar switching (the measured #932
     /// hitch) sits comfortably inside it, and even a genuine load runs up to ~30s behind live anyway (the
     /// Collector flush cadence), so two minutes of cache is the same order of freshness the screen had.
-    private static let todayCacheMaxAge: TimeInterval = 120
+    static let todayCacheMaxAge: TimeInterval = 120
 
     private func loadDayScoped() async {
         // #932: same-state re-mount → restore the prior day-scoped snapshot (no store queries). The exact
@@ -5616,6 +5729,11 @@ struct TodayHistoryWideCache {
     let fitnessAgeToday: Double?
     let vo2maxToday: Double?
     let vitalityToday: Double?
+    /// When the snapshot was banked. The four `*Today` scalars above are TODAY-scoped, so a hit is both
+    /// day-keyed (`Repository.todayHistoryWideLoadedDayKey`) and age-gated on this (`todayCacheMaxAge`) —
+    /// the same pairing `TodayDayScopedCache` uses, and for the same reason: a day that is still forming
+    /// does not stay valid just because nothing new was synced.
+    let bankedAt: Date
     // Hydration total/goal intentionally absent (#989): mutations don't bump refreshSeq, so a cached
     // value could restore stale. TodayView re-reads hydration live on restore instead.
 }
