@@ -17,10 +17,19 @@ final class VO2MaxPlausibilityTests: XCTestCase {
         XCTAssertNil(VO2MaxEstimator.hrRatio(restingHr: 26, hrMax: hrMax))
     }
 
-    /// The low end too: a very high resting HR drives it under the human floor.
-    func testHrRatioRefusesAnImplausiblyLowResult() {
-        // 15.3 * 120 / 200 = 9.18
-        XCTAssertNil(VO2MaxEstimator.hrRatio(restingHr: 200, hrMax: 220))
+    /// The LOWER bound is unreachable here, and that is worth pinning rather than faking.
+    ///
+    /// `15.3 · HRmax / RHR` is below 15 only when `HRmax / RHR < 0.98`, i.e. only when HRmax is BELOW the
+    /// resting HR — which the guard above already refuses. So the clamp's floor can never fire on this
+    /// estimator, and the smallest value it can return is just over 15.3. The first version of this test
+    /// asserted nil for `(200, 220)` from a comment that had divided by 120 instead of 220; the estimator
+    /// was right to return 16.83. Kept as a boundary test so the floor is not "fixed" into rejecting real
+    /// low-fitness readings.
+    func testHrRatioFloorIsStructurallyUnreachableSoALowReadingStillEstimates() throws {
+        let v = try XCTUnwrap(VO2MaxEstimator.hrRatio(restingHr: 200, hrMax: 220))
+        XCTAssertEqual(v, 15.3 * 220 / 200, accuracy: 1e-9)
+        XCTAssertTrue(VO2MaxEstimator.plausible.contains(v))
+        XCTAssertGreaterThan(v, VO2MaxEstimator.plausible.lowerBound)
     }
 
     /// A plausible pair still estimates, byte-for-byte as before.

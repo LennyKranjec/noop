@@ -1306,7 +1306,8 @@ final class Repository: ObservableObject {
         // so there is nothing to publish: with no measurement `ProfileStore` keeps `zoneRestingHRInput` nil
         // and its `zoneRestingHR` reports the 60 bpm placeholder as `.fallback` at READ time, which is
         // where the tag can still be honoured. Publishing resumes the moment either half is real.
-        guard shouldPublishZoneInputs(observedHRmax: observed, restingHRSource: rhr.source) else { return }
+        guard Repository.shouldPublishZoneInputs(observedHRmax: observed, restingHRSource: rhr.source)
+        else { return }
         var info: [String: Any] = [HRZoneInputsKey.restingHR: rhr.bpm,
                                    HRZoneInputsKey.restingHRSource: rhr.source.rawValue]
         if let observed { info[HRZoneInputsKey.observedHRmax] = observed }
