@@ -200,7 +200,7 @@ extension QuestPlanTarget {
         switch goal.metric {
         case .steps: return "Ground Covered"
         case .sleepHours: return "Hours Owed"
-        case .bedtimeBy: return "Lights Out"
+        case .bedtimeBy, .bedtimeEarlier: return "Lights Out"
         case .workoutMinutes: return "Time Under Load"
         case .strain: return "Matched Effort"
         case .meditationMinutes: return "Nervous System Maintenance"
@@ -213,7 +213,8 @@ extension QuestPlanTarget {
         switch goal.metric {
         case .steps: return "You set the gear. The step counter is holding you to it."
         case .sleepHours: return "You chose the number. Now go and be unconscious for it."
-        case .bedtimeBy: return "A deadline you set yourself. Those are the ones people miss."
+        case .bedtimeBy, .bedtimeEarlier:
+            return "A deadline you set yourself. Those are the ones people miss."
         case .workoutMinutes: return "Minutes, logged. Intentions do not appear in the data."
         case .strain: return "Today's own band, nothing past it. Ambition within reason."
         case .meditationMinutes: return "Sitting still is the hardest thing you will do today."
