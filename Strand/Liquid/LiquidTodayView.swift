@@ -3094,6 +3094,18 @@ private struct LiquidLiveHR: View {
     @State private var samples: [Double] = []
     @State private var beat = false
     private let maxSamples = 90   // ~1.5 min of 1 Hz live HR, enough to read the shape
+    /// The 1 Hz sampling clock for the trace — the same fix HealthView's hero already carries (#941),
+    /// which this card never got. The buffer used to append only when `live.heartRate` CHANGED, and BOTH
+    /// HR publishers are change-guarded (`FrameRouter`'s `state.heartRate != hr`, `BLEManager`'s
+    /// standard-profile twin), so a steady heart rate banked ZERO points: the trace stalled and then
+    /// lurched a whole burst of columns the moment the bpm moved, which is the "odd cadence" report. The
+    /// x axis is sample INDEX, so banking the current reading once a second is what makes the comment
+    /// above ("1 Hz and contiguous by construction") true rather than aspirational.
+    ///
+    /// `@State`, not a `let`: a `let` publisher is rebuilt every time Today re-renders this card, which
+    /// resets the tick phase (the footgun `QuestCountdownView` documents). Held in state it is created
+    /// once per view identity.
+    @State private var sampleTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
 
     private var isLive: Bool { live.connected && samples.count >= 2 }
     private var series: [Double] { isLive ? samples : fallback }
@@ -3173,13 +3185,23 @@ private struct LiquidLiveHR: View {
                     .padding(.vertical, 24)
             }
         }
+        // Seed on appear so the card never waits for the next event to show a shape.
         .onAppear { if samples.isEmpty, let hr = live.heartRate, hr > 0 { samples = [Double(hr)] } }
-        .onChangeCompat(of: live.heartRate) { hr in
-            guard let hr, hr > 0 else { return }
-            samples.append(Double(hr))
-            if samples.count > maxSamples { samples.removeFirst(samples.count - maxSamples) }
-            beat.toggle()
-        }
+        // ONE appender, on the clock. A genuine bpm change still reaches the big number instantly (it
+        // reads `live.heartRate` directly); the trace picks it up on the next tick, ≤ 1 s and one column
+        // away, and a held reading now advances the line instead of freezing it.
+        .onReceive(sampleTimer) { _ in bankLiveSample() }
+        // A dropped link must not leave the last trace on screen as though it were still streaming.
+        .onChangeCompat(of: live.connected) { isConnected in if !isConnected { samples = [] } }
+    }
+
+    /// Bank the reading the strap is currently holding. Invents nothing: it is the same value every other
+    /// surface reads straight off `live.heartRate`, re-sampled because the publisher only fires on change.
+    private func bankLiveSample() {
+        guard live.connected, let hr = live.heartRate, hr > 0 else { return }
+        samples.append(Double(hr))
+        if samples.count > maxSamples { samples.removeFirst(samples.count - maxSamples) }
+        beat.toggle()
     }
 
     private func stat(_ label: String, _ v: Double?) -> some View {

@@ -982,7 +982,10 @@ public final class BLEManager: NSObject, ObservableObject {
     /// persisted `alarm.lastArmConnected` diagnostic key off THIS, not merely a non-nil
     /// `connectedPeripheralUUID`, so an arm attempted before characteristic discovery finishes (e.g. mid
     /// state-restoration) is reported "queued" — matching whether `send()` dropped it — not a false "armed".
-    private var commandChannelReady: Bool {
+    /// Read by `WakeBuzzRinger` (through `AppModel`) so a delivered buzz volley can be told apart from
+    /// one `send` dropped on the floor: `live.connected` is a proxy that misses a missing command
+    /// characteristic, which is exactly the window in which the alarm claimed success and buzzed nothing.
+    var commandChannelReady: Bool {
         state.connected && peripheral?.state == .connected && cmdCharacteristic != nil
     }
     /// #730: a DISABLE_ALARM that `send` dropped because the link wasn't up. The connect-settle hook
@@ -1607,22 +1610,10 @@ public final class BLEManager: NSObject, ObservableObject {
         // Connection test mode: stamp when this connect attempt began so didConnect can report the connect
         // latency. A plain Date() assignment, no behaviour change; only read behind the .connection gate.
         connectAttemptStartedAt = Date()
-        selectedModel = model
-        // Battery "~X days left" fallback (#713): a 5/MG runs far longer than a 4.0, so point the estimator's
-        // rated-life fallback at the connected family. The Today badge reads state.batteryEstimate (which uses
-        // state.batteryRatedHours); without this it always assumed WHOOP 4.0 (108h).
-        state.batteryRatedHours = model.deviceFamily == .whoop5
-            ? BatteryEstimator.ratedLifeHoursWhoop5 : BatteryEstimator.ratedLifeHoursWhoop4
-        // Frame the inbound stream for the chosen family (WHOOP 4.0 CRC8 vs WHOOP 5.0 CRC16/puffin)
-        // and tell the router which decoder to use. Fresh per connection so no stale bytes carry over.
-        reassembler = Reassembler(family: model.deviceFamily)
-        router.family = model.deviceFamily
-        router.deviceId = deviceId   // #1706: attribute this connection's alarm readback
-        // Live 5/MG persistence: point the Collector's decode at the selected family and install the
-        // identity clock ref for a 5/MG (its live timestamps are already real unix). WHOOP 4.0 keeps
-        // the GET_CLOCK correlation flow untouched. Re-applied after bootstrapStore builds the
-        // collector so whichever runs last wins.
-        configureCollectorFamily()
+        // `model` here is an INTENT (usually `WhoopModel.persisted`), not a proof — on a fresh install it
+        // is the `.whoop4` default whatever the strap actually is. It is not persisted, and
+        // `didDiscoverServices` replaces it with the family the peripheral's own GATT proves.
+        applySelectedModel(model, reason: "connect intent", persist: false, rearmPipeline: true)
         guard central.state == .poweredOn else {
             log("Bluetooth not powered on (state=\(central.state.rawValue)); cannot scan yet")
             return
@@ -1646,7 +1637,21 @@ public final class BLEManager: NSObject, ObservableObject {
         // exactly as before. #52: this drop is what abandoned a strap that bonds fine when the pin was
         // STALE — `readoptWorkingStrap()` repoints the pin to the live-bonding strap first, so after a
         // handoff this loop drops the dead strap and attaches to the working one instead of vice-versa.
-        let existing = central.retrieveConnectedPeripherals(withServices: [model.scanService])
+        //
+        // Retrieved for BOTH WHOOP families, not just `model`'s, because `model` is only an intent. A
+        // bonded strap that iOS is already holding does NOT advertise, so a scan can never find it — and a
+        // scan is the only path that rotates families. With the `model.scanService` filter, a fresh install
+        // (`WhoopModel.persisted` == `.whoop4`) facing an already-bonded 5/MG found nothing here AND
+        // nothing in the scan, so the fallback rotation flip-flopped between families with the strap
+        // sitting right there. Both families are tried, `didDiscoverServices` resolves which one it
+        // actually is, and the `selectedModel`-first ordering below keeps the single-strap outcome
+        // identical to before whenever the guess happens to be right.
+        let sameFamily = central.retrieveConnectedPeripherals(withServices: [model.scanService])
+        let otherFamily = central.retrieveConnectedPeripherals(
+            withServices: [model.fallbackScanModel.scanService])
+        let existing = sameFamily + otherFamily.filter { p in
+            !sameFamily.contains(where: { $0.identifier == p.identifier })
+        }
         if preferredPeripheralUUID != nil {
             for other in existing where !isPreferredPeripheral(other) {
                 log("Dropping non-active WHOOP connection \(other.identifier) — not the selected strap")
@@ -1654,7 +1659,7 @@ public final class BLEManager: NSObject, ObservableObject {
             }
         }
         if let p = existing.first(where: { isPreferredPeripheral($0) }) {
-            log("Found existing \(model.displayName) connection \(p.identifier) — attaching")
+            log("Found existing WHOOP connection \(p.identifier) — attaching (family resolves from its GATT)")
             preparePeripheral(p)
             // Attach OUR OWN session even when CoreBluetooth reports the strap .connected. On Apple
             // platforms an LE link is shared system-wide, so a strap held by the WHOOP app, a prior NOOP
@@ -1758,6 +1763,13 @@ public final class BLEManager: NSObject, ObservableObject {
         state.connected = false
         state.bonded = false
         state.encryptedBond = false
+        // The user's override, adopted NOW rather than at the next connect. Every caller (the Live strap
+        // picker, `prepareForPresentScan` via `AppModel.presentWhoopScan`) writes `selectedWhoopModel`
+        // BEFORE calling this, so `.persisted` is exactly the family they just picked. Without this the
+        // engine kept the previous family until something reconnected, and `isWhoop5`/`isWhoop4` — which
+        // gate 5/MG-only UI — disagreed with the picker the user was looking at.
+        applySelectedModel(.persisted, reason: "user picked the strap family",
+                           persist: false, rearmPipeline: true)
     }
 
     /// Idle the engine before presenting an Add-a-WHOOP scan — but ONLY when we're not already
@@ -2372,6 +2384,101 @@ public final class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    /// THE SINGLE OWNER of "which WHOOP family is this session talking to".
+    ///
+    /// Every path that chooses, learns or changes the family funnels through here — the user's Connect
+    /// and every system reconnect (`connectCore`), a scan and its family-rotation fallback
+    /// (`startScan`), CoreBluetooth state restoration (`willRestoreState`), the GATT resolution in
+    /// `didDiscoverServices`, the live-stream backstop in `didUpdateValueFor`, and the strap picker
+    /// (`prepareForModelSwitch`) — so `selectedModel` and the four things that decode for it can never
+    /// disagree.
+    ///
+    /// They used to. `didDiscoverServices` wrote ONLY the `selectedWhoopModel` preference, for the NEXT
+    /// launch, and left the running session on whatever family it had guessed: the `Reassembler`, the
+    /// `FrameRouter`, the `Collector` and (via `beginBackfill`) the `Backfiller` all kept the wrong
+    /// framing until the app was relaunched. On a fresh install `WhoopModel.persisted` is `.whoop4`, so
+    /// a restored/adopted WHOOP 5/MG hit exactly that: live HR kept working over plain 0x2A37 while the
+    /// entire historical offload — and with it steps — produced nothing.
+    ///
+    /// `persist` distinguishes a family we merely INTEND to talk to from one the strap has PROVED:
+    /// only proved families are written to the preference the next launch trusts, so a wrong guess can
+    /// never make itself sticky.
+    ///
+    /// `rearmPipeline` is true for a fresh link (connect/scan/restore — the framing must start clean,
+    /// exactly as before) and false for a mid-link resolution, where rebuilding the reassembler would
+    /// throw away a partially-received frame for nothing when the family did not actually change.
+    private func applySelectedModel(_ model: WhoopModel,
+                                    reason: String,
+                                    persist: Bool,
+                                    rearmPipeline: Bool) {
+        let changed = selectedModel.deviceFamily != model.deviceFamily
+        selectedModel = model
+        // Battery "~X days left" fallback (#713): a 5/MG runs far longer than a 4.0, so point the
+        // estimator's rated-life fallback at the connected family. The Today badge reads
+        // state.batteryEstimate (which uses state.batteryRatedHours); without this it always assumed
+        // WHOOP 4.0 (108h).
+        state.batteryRatedHours = model.deviceFamily == .whoop5
+            ? BatteryEstimator.ratedLifeHoursWhoop5 : BatteryEstimator.ratedLifeHoursWhoop4
+        if changed || rearmPipeline {
+            // Frame the inbound stream for this family (WHOOP 4.0 CRC8 vs WHOOP 5.0 CRC16/puffin) and
+            // tell the router which decoder to use. Fresh, so no stale bytes carry over.
+            reassembler = Reassembler(family: model.deviceFamily)
+            router.family = model.deviceFamily
+            router.deviceId = deviceId   // #1706: AFTER the family — its didSet clears the id
+            // Live persistence: point the Collector's decode at this family and install the identity
+            // clock ref for a 5/MG (its live timestamps are already real unix). Re-applied after
+            // bootstrapStore builds the collector so whichever runs last wins.
+            configureCollectorFamily()
+            familyMismatch.reset()
+        }
+        if persist { persistSelectedModel(model) }
+        if changed {
+            log("Family → \(model.displayName) (\(reason)) — re-armed reassembler/router/collector"
+                + (persist ? "; persisted for the next launch" : "; NOT persisted (an intent, not a proof)"))
+            // An offload begun under the previous family captured it at `begin()` and would keep
+            // decoding with it. Nothing is lost by ending the session here — unacked records stay in
+            // the strap's flash and re-offload — and the next one begins with the right family.
+            if backfilling { exitBackfilling(reason: "family changed to \(model.displayName)") }
+        } else if rearmPipeline {
+            log("Family = \(model.displayName) (\(reason))")
+        }
+    }
+
+    /// Persist the WHOOP family we are actually talking to, so the next launch scans the right service —
+    /// what makes a one-time fallback rotation stick (PR#195) — and, on a genuine family switch, untick the
+    /// 5/MG-only probes so none carries over to a strap that cannot support it.
+    ///
+    /// Compares `deviceFamily`, not the raw value: if MG ever splits from plain 5.0 into its own case the
+    /// two would share `.whoop5`, and a raw-value compare would then reset on a same-family switch. Mirrors
+    /// the Kotlin `persistSelectedModel` service compare.
+    private func persistSelectedModel(_ model: WhoopModel) {
+        let previous = UserDefaults.standard.string(forKey: "selectedWhoopModel")
+        UserDefaults.standard.set(model.rawValue, forKey: "selectedWhoopModel")
+        guard let previous,
+              let previousModel = WhoopModel(rawValue: previous),
+              previousModel.deviceFamily != model.deviceFamily else { return }
+        PuffinExperiment.resetFiveMGGatedProbes()
+        log("Strap family switched (\(previous) → \(model.rawValue)) — reset 5/MG-only experimental toggles to off.")
+    }
+
+    /// The live-stream backstop: which family the notify characteristics we are actually receiving on
+    /// prove the strap to be. Per connection — cleared whenever the pipeline is re-armed.
+    private var familyMismatch = FamilyMismatchDetector()
+
+    /// Classify one notify characteristic for `FamilyMismatchDetector`. Lives here, not in
+    /// `FamilyResolution.swift`, because this class owns the characteristic UUIDs and is `@MainActor`
+    /// while that file is deliberately nonisolated — so the constants are never duplicated and never
+    /// drift. Everything outside the two families' proprietary notify characteristics — 0x2A37, 0x2A19,
+    /// the DIS strings, and anything unmapped — proves nothing, because every WHOOP exposes it.
+    private func notifySource(of uuid: CBUUID) -> ProprietaryNotifySource {
+        if uuid == BLEManager.cmdNotifyChar || uuid == BLEManager.eventNotifyChar
+            || uuid == BLEManager.dataNotifyChar {
+            return .whoop4
+        }
+        if BLEManager.whoop5NotifyChars.contains(uuid) { return .whoop5 }
+        return .standardProfile
+    }
+
     /// Refresh the battery reading on demand. Source is FAMILY-SPECIFIC (#77): on a WHOOP 4.0 the
     /// standard 0x2A19 characteristic is a STUB that reports a constant 100 — the real charge only
     /// comes from the proprietary GET_BATTERY_LEVEL command (COMMAND_RESPONSE, u16/10). Reading both
@@ -2503,6 +2610,11 @@ public final class BLEManager: NSObject, ObservableObject {
     }
 
     private func drainBackfillFrames() async {
+        // `backfillDraining` gates `routeBackfillFrame` from starting a second drain, so if it is ever left
+        // set the offload silently stops: every later frame is appended to `backfillFrameQueue` and nothing
+        // ever consumes it, for the rest of the connection. Cleared in `defer` rather than at the bottom so
+        // no future early return can strand it — the same sticky-flag shape that has wedged sync here before.
+        defer { backfillDraining = false }
         while !backfillFrameQueue.isEmpty {
             let count = min(Self.backfillDrainBatchSize, backfillFrameQueue.count)
             let batch = Array(backfillFrameQueue.prefix(count))
@@ -2521,7 +2633,6 @@ public final class BLEManager: NSObject, ObservableObject {
                 await Task.yield()
             }
         }
-        backfillDraining = false
     }
 
     /// Called after every Backfiller.ingest completes. If the Backfiller has consumed all
@@ -4708,9 +4819,33 @@ public final class BLEManager: NSObject, ObservableObject {
         resetCharacteristics()
     }
 
+    /// Discover BOTH WHOOP families' proprietary services, never only the one we currently believe in.
+    ///
+    /// This asked for `selectedModel.scanService` alone, and that single word is what made a wrong family
+    /// guess unrecoverable rather than merely wrong. A 5/MG adopted while `selectedModel` was `.whoop4`
+    /// (the fresh-install default of `WhoopModel.persisted`, taken by state restoration, the targeted pin
+    /// connect and a standing reconnect — none of which scan, so none of which rotate families) was asked
+    /// only for the 4.0 service it does not have. So:
+    ///
+    ///   - `fd4b0001` was never discovered → no puffin command characteristic → no CLIENT_HELLO → no
+    ///     encrypted session → NO historical offload at all, which is where steps come from;
+    ///   - `didDiscoverServices` never saw `fd4b0001` either → the family resolution there could not
+    ///     fire → the preference was never corrected → the next launch made the same wrong guess, for
+    ///     ever. The "it self-heals on a later launch via the scan-fallback rotation" story only holds
+    ///     for a strap that is DISCOVERED by a scan; a restored or pinned peripheral never is.
+    ///   - `state.bonded` is only latched for a streaming 5/MG (`didUpdateValueFor`, 0x2A37), so the UI
+    ///     sat on "Connecting…" and no keep-alive/liveness watchdog ever started;
+    ///   - `keepAliveFire`'s bounce fuse is 120 s for `.whoop4` and 600 s for `.whoop5` precisely because
+    ///     the 5/MG standard-HR profile lulls for minutes at rest (#580/#1414), so a 5/MG believed to be
+    ///     a 4.0 gets its link bounced every ~2 min — live HR in bursts.
+    ///
+    /// Asking for a service the strap does not expose costs nothing: CoreBluetooth simply does not return
+    /// it, and `didDiscoverServices` switches on what came back. So the cheap, guess-free fix is to ask
+    /// for both and let the peripheral answer.
     private func discoverPrimaryServices(on p: CBPeripheral) {
         p.discoverServices([
-            selectedModel.scanService, BLEManager.heartRateService, BLEManager.batteryService,
+            BLEManager.customService, BLEManager.whoop5Service,
+            BLEManager.heartRateService, BLEManager.batteryService,
             BLEManager.disService,
         ])
     }
@@ -4743,11 +4878,9 @@ public final class BLEManager: NSObject, ObservableObject {
     private func startScan(for model: WhoopModel, allowFallback: Bool) {
         advertisementLogged = false
         cancelScanFallback()
-        selectedModel = model
-        reassembler = Reassembler(family: model.deviceFamily)
-        router.family = model.deviceFamily
-        router.deviceId = deviceId   // #1706: attribute this connection's alarm readback
-        configureCollectorFamily()
+        // A scan target is an intent, not a proof — the rotation below deliberately tries the other
+        // family. `didDiscover` persists whichever one actually advertised.
+        applySelectedModel(model, reason: "scan target", persist: false, rearmPipeline: true)
         central.stopScan()
         log("Scanning for \(model.displayName)…")
         let diagnosticServices = [model.scanService] + WhoopGattServiceFamily.unsupportedServiceUUIDStrings
@@ -6092,11 +6225,12 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // WHOOP 5/MG would decode its puffin notify frames with the default .whoop4 framing (different
         // length offset + constant), producing corrupt/empty data for the whole unattended session until
         // the user manually taps connect.
-        selectedModel = .persisted
-        reassembler = Reassembler(family: selectedModel.deviceFamily)
-        router.family = selectedModel.deviceFamily
-        router.deviceId = deviceId   // #1706: attribute this connection's alarm readback
-        configureCollectorFamily()
+        //
+        // Still only an INTENT, and on a fresh install `.persisted` is `.whoop4` whatever the strap is —
+        // which is precisely the restore-path hole. It is not persisted back, and the
+        // `discoverPrimaryServices` below now asks for BOTH families' services so the resolution in
+        // `didDiscoverServices` corrects it within this session.
+        applySelectedModel(.persisted, reason: "state restoration", persist: false, rearmPipeline: true)
         // Collection only runs post-bond, so a restored link was already bonded;
         // seed those flags now. `didWriteValueFor` won't re-fire on its own.
         state.bonded = true
@@ -6145,23 +6279,6 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
 
 // MARK: - CBPeripheralDelegate
 extension BLEManager: @preconcurrency CBPeripheralDelegate {
-    /// Persist the WHOOP family we are actually talking to, so the next launch scans the right service —
-    /// what makes a one-time fallback rotation stick (PR#195) — and, on a genuine family switch, untick the
-    /// 5/MG-only probes so none carries over to a strap that cannot support it.
-    ///
-    /// Compares `deviceFamily`, not the raw value: if MG ever splits from plain 5.0 into its own case the
-    /// two would share `.whoop5`, and a raw-value compare would then reset on a same-family switch. Mirrors
-    /// the Kotlin `persistSelectedModel` service compare.
-    private func persistSelectedModel(_ model: WhoopModel) {
-        let previous = UserDefaults.standard.string(forKey: "selectedWhoopModel")
-        UserDefaults.standard.set(model.rawValue, forKey: "selectedWhoopModel")
-        guard let previous,
-              let previousModel = WhoopModel(rawValue: previous),
-              previousModel.deviceFamily != model.deviceFamily else { return }
-        PuffinExperiment.resetFiveMGGatedProbes()
-        log("Strap family switched (\(previous) → \(model.rawValue)) — reset 5/MG-only experimental toggles to off.")
-    }
-
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {
         if let error {
             log("Service discovery failed: \(error.localizedDescription)")
@@ -6169,20 +6286,38 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         }
         guard let services = peripheral.services else { return }
         log("Services discovered: \(services.map { $0.uuid.uuidString }.joined(separator: ", "))")
-        // Record the family from the services the strap ACTUALLY exposes, not just from a scan. The adopt
-        // paths in connectCore (`retrieveConnectedPeripherals` / `retrievePeripherals`) reach didConnect
-        // WITHOUT ever passing through didDiscover, so a strap attached that way never persisted its family
-        // and the next launch scanned the wrong service until the fallback rotation recovered. This is the
-        // Apple analogue of the Android fix in WhoopBleClient's connect-time family resolution. Checked
-        // once here rather than inside the loop so a strap exposing both services can't thrash the pref.
-        if services.contains(where: { $0.uuid == BLEManager.whoop5Service }) {
-            persistSelectedModel(.whoop5mg)
-        } else if services.contains(where: { $0.uuid == BLEManager.customService }) {
-            persistSelectedModel(.whoop4)
+        // THE family resolution. The strap's own GATT tree is the proof, and this callback is the first
+        // moment it exists — before any characteristic is discovered, before CLIENT_HELLO, before a single
+        // frame arrives. The adopt paths in connectCore (`retrieveConnectedPeripherals` /
+        // `retrievePeripherals`), a standing reconnect and CoreBluetooth state restoration all reach
+        // didConnect WITHOUT ever passing through didDiscover, so this is the ONLY place those learn what
+        // they are talking to. Apple analogue of the Android fix in WhoopBleClient's connect-time family
+        // resolution.
+        //
+        // This used to call `persistSelectedModel` — which writes the PREFERENCE and nothing else, so the
+        // running session kept decoding with the family it had guessed and only a relaunch could recover.
+        // `applySelectedModel` re-arms `selectedModel` + reassembler + router + collector together, so a
+        // wrong initial guess self-corrects inside this session, before any data is decoded.
+        //
+        // Resolved once here rather than inside the loop below so a strap exposing both services cannot
+        // thrash the decision. `nil` means the peripheral exposes NEITHER proprietary service: we do not
+        // guess, we say so, and the pipeline keeps whatever it had.
+        if let resolved = resolvedModel(fromDiscoveredServices: services.map(\.uuid)) {
+            applySelectedModel(resolved, reason: "GATT services", persist: true, rearmPipeline: false)
+        } else {
+            log("Family unresolved: this peripheral exposes neither \(BLEManager.customService.uuidString) "
+                + "nor \(BLEManager.whoop5Service.uuidString) — staying on \(selectedModel.displayName) and "
+                + "NOT guessing. Nothing proprietary can be sent or decoded on this link.")
         }
+        // Only the RESOLVED family's proprietary service has its characteristics discovered. We now ask
+        // for both services above — that is what makes the resolution possible at all — but a strap that
+        // exposed both (a legacy-compat 5/MG, say) must not have BOTH proprietary paths opened: the 4.0
+        // branch of `didDiscoverCharacteristicsFor` fires the confirmed-write bonding trick the moment it
+        // sees `61080002`, and a 5/MG needs CLIENT_HELLO instead. One family's session per link.
+        let proprietaryFamily = selectedModel.deviceFamily
         for s in services {
             switch s.uuid {
-            case BLEManager.customService:
+            case BLEManager.customService where proprietaryFamily == .whoop4:
                 peripheral.discoverCharacteristics(
                     [BLEManager.cmdWriteChar, BLEManager.cmdNotifyChar,
                      BLEManager.eventNotifyChar, BLEManager.dataNotifyChar], for: s)
@@ -6196,7 +6331,7 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
                 // source for its firmware at all.
                 peripheral.discoverCharacteristics(
                     BLEManager.disChars.map { $0 }, for: s)
-            case BLEManager.whoop5Service:
+            case BLEManager.whoop5Service where proprietaryFamily == .whoop5:
                 // EXPERIMENTAL WHOOP 5.0/MG path: discover the puffin command + notify characteristics
                 // so we can send CLIENT_HELLO and receive frames. Live HR/battery still arrive over the
                 // standard 0x2A37/0x2A19 profiles (discovered alongside this); this custom path is
@@ -6832,6 +6967,27 @@ extension BLEManager: @preconcurrency CBPeripheralDelegate {
         inboundFrames += 1
         inboundBytes += bytes.count
         if characteristic.uuid == BLEManager.cmdNotifyChar { cmdChannelFrames += 1 }
+
+        // Live-stream backstop for the family decision (belt to `didDiscoverServices`' braces). The
+        // characteristic a frame arrives on is proof, not a guess: `fd4b0003/4/5/7` exist only on a 5/MG
+        // and `61080003/4/5` only on a 4.0, while the standard HR/battery/DIS profiles — which BOTH
+        // families expose — attest to nothing and are ignored. If the proprietary stream contradicts the
+        // family we are decoding with, re-arm from the frames rather than waiting for a relaunch. Reached
+        // only by a path that somehow got a live proprietary subscription without resolving from GATT; it
+        // is deliberately cheap enough to run unconditionally so such a path cannot hide.
+        if let corrected = familyMismatch.note(source: notifySource(of: characteristic.uuid),
+                                               current: selectedModel.deviceFamily) {
+            let model: WhoopModel = corrected == .whoop5 ? .whoop5mg : .whoop4
+            log("Family mismatch: \(FamilyMismatchDetector.threshold) frames arrived on the "
+                + "\(model.displayName) proprietary characteristics while decoding as "
+                + "\(selectedModel.displayName) — re-arming from the frames (\(characteristic.uuid.uuidString))")
+            applySelectedModel(model, reason: "live frames on \(characteristic.uuid.uuidString)",
+                               persist: true, rearmPipeline: true)
+            // The pipeline was just re-armed, so THIS notification's bytes belong to a reassembler that no
+            // longer exists. Drop them: the strap's next frame starts the new window cleanly, and feeding a
+            // fragment framed for the other family into it would only inject a bogus length.
+            return
+        }
 
         switch characteristic.uuid {
         case BLEManager.heartRateChar:

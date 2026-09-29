@@ -256,6 +256,24 @@ final class AppModel: ObservableObject {
     /// Every screen should show THIS, not the raw per-beat value (which swings with HRV).
     @Published var bpm: Int?
     private var hrWindow: [(t: Date, v: Double)] = []
+    /// The 1 Hz re-sample of the HELD live reading, armed for as long as one is present.
+    ///
+    /// The window behind `bpm` is pruned against the WALL CLOCK but was only ever fed by the two HR
+    /// sinks — and both HR publishers are change-guarded (`FrameRouter`'s `state.heartRate != hr`,
+    /// `BLEManager`'s standard-profile twin; the realtime stream usually reports `rr_count=0`, so the
+    /// R-R sink cannot be relied on to tick either). On a steady bpm nothing was fed at all, so the
+    /// "~10 s median" was in fact a median over CHANGES: it held while the wearer's bpm held, then the
+    /// aged-out window refilled from almost nothing and the number moved in one step. That is the
+    /// "updates in strange bursts / an odd cadence" report, and it is the same root cause the zone cue
+    /// already needed `zoneCueTimer` for (see `evaluateZoneGuidance`).
+    ///
+    /// The tick invents nothing: it re-folds the reading `live` is ALREADY showing on every surface that
+    /// reads `live.heartRate` directly, which is what the strap's realtime stream keeps reporting while
+    /// the guard suppresses the republish. It stops the moment that reading is gone (`resetSmoothing`).
+    private var hrTickTimer: Timer?
+    /// How often the held reading is re-folded. One second: the cadence of the live feed itself, and the
+    /// same tick `zoneCueTimer` runs on.
+    static let hrSmoothingTick: TimeInterval = 1
     private var hrCancellables = Set<AnyCancellable>()
     /// Drives the READ spine off the registry's active device (#814 HIGH-1). A Devices-screen
     /// switch/remove/re-add calls `registry.setActive` DIRECTLY (not through `registerDevice`), so without
@@ -340,6 +358,13 @@ final class AppModel: ObservableObject {
         wakeBuzz.buzz = { [weak self] in self?.buzzStrapOnce() }
         wakeBuzz.cancelBuzz = { [weak self] in self?.stopHaptics() }
         wakeBuzz.log = { [live] line in live.append(log: line) }
+        // …and tell it whether that buzz can actually LAND. `BLEManager.send` drops the write and returns
+        // when the link is down, so without this the ringer could not tell a delivered volley from a
+        // dropped one — which is how a wake buzz over an out-of-range strap showed "Stop" in the sheet for
+        // thirty seconds with nothing on the wire. `live.connected` is the closest fact available from
+        // outside BLEManager; `commandChannelReady` (which also requires the command characteristic) is
+        // strictly better and should replace this read once BLEManager exposes it.
+        wakeBuzz.strapReady = { [weak self] in self?.ble.commandChannelReady ?? false }
 
         // Physical-input + wear hooks (fired live by FrameRouter).
         live.onDoubleTap = { [weak self] in self?.handleDoubleTap() }
@@ -857,14 +882,7 @@ final class AppModel: ObservableObject {
     /// R-R batch that just arrived — non-nil only from the `rr` sink — so the stress detector takes each
     /// batch exactly once.
     private func ingestHR(heartRate: Int?, rr: [Int], freshRR: [Int]?) {
-        var inst: Double?
-        if let hr = heartRate, hr >= 30, hr <= 220 {
-            inst = Double(hr)
-        } else if let last = rr.last, last > 0 {
-            let v = 60_000.0 / Double(last)
-            if v >= 30, v <= 220 { inst = v }
-        }
-        guard let inst else {
+        guard let inst = Self.instantHR(heartRate: heartRate, rr: rr) else {
             // #39: when the live source is gone (disconnect blanks heartRate AND rr), drop the stale
             // median so screens that now prefer `bpm` fall through to "," instead of freezing on the
             // last value. Mirrors Android (_bpm = null on disconnect). A transient out-of-range sample
@@ -872,19 +890,86 @@ final class AppModel: ObservableObject {
             if heartRate == nil && rr.isEmpty { resetSmoothing() }
             return
         }
-        let now = Date()
-        hrWindow.append((now, inst))
-        hrWindow.removeAll { now.timeIntervalSince($0.t) > 10 }   // ~10s window
-        if hrWindow.count > 40 { hrWindow.removeFirst(hrWindow.count - 40) }
-        let vals = hrWindow.map(\.v).sorted()
-        // live perf: only republish when the SMOOTHED value actually changes. ingestHR fires on every
-        // heartRate AND rr update (~1–3 Hz), but the median is stable across most of them , an
-        // unconditional assign re-renders every bpm observer (Live, menu bar, widgets) for nothing.
-        let smoothed = vals.isEmpty ? nil : Int(vals[vals.count / 2].rounded())
-        if bpm != smoothed { bpm = smoothed }
+        foldSmoothing(inst)
+        // A reading is present, so the clock that keeps the window a TIME window must be running.
+        // Armed here (rather than only at connect) so every entry into a live feed re-establishes it.
+        armHRTick()
         captureWorkoutSample()
         evaluateZoneGuidance()
         if let freshRR { evaluateStress(freshRR: freshRR) }
+    }
+
+    /// The instantaneous reading a packet carries: the strap's reported HR, else 60000/R-R, else nothing.
+    /// Clamped to a plausible 30–220 (rejects 0 / garbage spikes). Pure — `LiveHRSmoothingTests` pins it.
+    static func instantHR(heartRate: Int?, rr: [Int]) -> Double? {
+        if let hr = heartRate, hr >= 30, hr <= 220 { return Double(hr) }
+        if let last = rr.last, last > 0 {
+            let v = 60_000.0 / Double(last)
+            if v >= 30, v <= 220 { return v }
+        }
+        return nil
+    }
+
+    /// Fold one reading into the ~10 s window and republish the median when it actually moved.
+    ///
+    /// The window stays ~10 s DELIBERATELY: a readout wants a stable number, and the faster value the
+    /// zone cue needs is taken separately (`zoneCueBPM` / `zoneCueSmoothingSeconds`) rather than by
+    /// shortening this. What changed is only that the window is now fed on a clock as well as on events,
+    /// so "median over the last ten seconds" is what it computes at rest too.
+    private func foldSmoothing(_ inst: Double, now: Date = Date()) {
+        let folded = Self.fold(window: hrWindow, inst: inst, now: now)
+        hrWindow = folded.window
+        // live perf: only republish when the SMOOTHED value actually changes. This runs on every
+        // heartRate/rr update AND on the 1 Hz tick, and the median is stable across most of them , an
+        // unconditional assign re-renders every bpm observer (Live, menu bar, widgets) for nothing.
+        if bpm != folded.bpm { bpm = folded.bpm }
+    }
+
+    /// The trailing window (s) the displayed median is taken over. See `foldSmoothing` on why it stays
+    /// where it is; `zoneCueSmoothingSeconds` is the faster read the cue uses instead.
+    static let hrSmoothingSeconds: TimeInterval = 10
+    /// Hard cap on the window, so a burst-mode feed can't grow it without bound.
+    static let hrSmoothingMaxSamples = 40
+
+    /// `window` with `inst` folded in at `now`, aged samples dropped, and the median it publishes.
+    /// Pure, so the smoothing's behaviour under a change-guarded feed is pinnable without a strap.
+    static func fold(window: [(t: Date, v: Double)], inst: Double,
+                     now: Date) -> (window: [(t: Date, v: Double)], bpm: Int?) {
+        var next = window
+        next.append((now, inst))
+        next.removeAll { now.timeIntervalSince($0.t) > hrSmoothingSeconds }
+        if next.count > hrSmoothingMaxSamples { next.removeFirst(next.count - hrSmoothingMaxSamples) }
+        let vals = next.map(\.v).sorted()
+        return (next, vals.isEmpty ? nil : Int(vals[vals.count / 2].rounded()))
+    }
+
+    /// Arm the 1 Hz re-sample of the held reading if it isn't already. Idempotent.
+    private func armHRTick() {
+        guard hrTickTimer == nil else { return }
+        // `.common` mode so scrolling a live screen can't pause the cadence; the `Task { @MainActor }`
+        // hop is the same shape `armZoneCueTimer` uses for this @MainActor model.
+        let timer = Timer(timeInterval: Self.hrSmoothingTick, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.tickSmoothing() }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        hrTickTimer = timer
+    }
+
+    /// Re-fold the reading `live` currently holds, so the window slides on the clock rather than on bpm
+    /// changes. Carries NOTHING forward once the reading is gone: it disarms itself and lets
+    /// `resetSmoothing` blank the number, exactly as the disconnect path already did.
+    private func tickSmoothing() {
+        guard let inst = Self.instantHR(heartRate: live.heartRate, rr: live.rr) else {
+            hrTickTimer?.invalidate()
+            hrTickTimer = nil
+            return
+        }
+        foldSmoothing(inst)
+        // Same two followers as the event path: one banked workout sample per second (which is what
+        // `captureWorkoutSample` documents, and what a change-guarded feed could not deliver at a steady
+        // effort), and the zone decision. Both are idempotent within a second.
+        captureWorkoutSample()
+        evaluateZoneGuidance()
     }
 
     // MARK: - Manual workout tracking
@@ -1333,9 +1418,22 @@ final class AppModel: ObservableObject {
     /// Called on Live-tab entry / manual Start HR (see `startRealtimeHR`), NOT on the 30s keep-alive
     /// re-arm , so steady-state smoothing is untouched. Fixes #46 (HR jumped to a stale ~100 on
     /// reopen, then "slowly came back down" as fresh low samples refilled the window).
+    ///
+    /// The 1 Hz re-sample is RE-ARMED here rather than torn down, whenever a reading is still present.
+    /// Live-tab entry / Start-workout both come through here, and on a change-guarded feed the next HR
+    /// event can be tens of seconds away — leaving the pump off would have blanked the hero for that
+    /// whole stretch. Re-armed, the next tick (≤ 1 s) refills the window from the CURRENT reading, which
+    /// is what #46 asked for. With no reading at all (the disconnect path) the pump is dropped, so no
+    /// flag or timer survives the failure path.
     func resetSmoothing() {
         hrWindow.removeAll()
         bpm = nil
+        if Self.instantHR(heartRate: live.heartRate, rr: live.rr) != nil {
+            armHRTick()
+        } else {
+            hrTickTimer?.invalidate()
+            hrTickTimer = nil
+        }
     }
 
     /// The unit-tested `StressOnsetDetector` decides whether to offer a 60-s guided breath. On a fresh,

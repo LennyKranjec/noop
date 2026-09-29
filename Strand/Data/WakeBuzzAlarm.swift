@@ -112,6 +112,48 @@ enum WakeBuzzAlarm {
         tapAt >= ringStartedAt && !shouldAutoStop(startedAt: ringStartedAt, now: tapAt)
     }
 
+    // MARK: - What a volley actually did
+
+    /// The OUTCOME of one buzz volley — what reached the strap, not what we asked for.
+    ///
+    /// This exists because the ring used to be unfalsifiable. `WakeBuzzRinger.start` set `isRinging`,
+    /// logged "ringing", called its buzz closure and returned; the closure runs
+    /// `BLEManager.buzzStrapOnce` → `send`, and `send` DROPS the write and returns when the link is not
+    /// up (`state.connected` false, the peripheral not `.connected`, or no command characteristic). So a
+    /// wake buzz with the strap out of range produced a sheet showing "Stop" for thirty seconds, a
+    /// "ringing" log line, and zero bytes on the wire — a confident success for something that did not
+    /// happen. The ringer now carries the outcome back, the sheet states it, and the strap log records it.
+    enum Delivery: Equatable {
+        /// A volley was written to a connected strap. NOT a promise the motor turned — the write is
+        /// acknowledged by the link, and whether the firmware honours the pattern is a hardware fact
+        /// only a wrist can confirm. It IS a promise that the bytes left the phone.
+        case sent
+        /// Nothing was written: no strap link, so `send` would have dropped it. The one the user needs.
+        case noStrap
+        /// No buzz sink is wired at all (`WakeBuzzRinger.buzz` nil). An app-wiring bug rather than a
+        /// strap condition — it must be visible instead of looking like a quiet strap.
+        case noSink
+    }
+
+    /// The strap-log line for one ring's delivery tally. Kept here, pure, so what the log claims is
+    /// pinned by a test rather than assembled inline at a call site.
+    ///
+    /// `sent` / `dropped` count VOLLEYS, not bytes: a 30 s ring at a 3 s cadence is ~10 of them, and a
+    /// ring that started with the strap away and finished with it back reports both halves instead of
+    /// collapsing to whichever end we happened to sample.
+    static func deliveryLogLine(sent: Int, dropped: Int, reason: String) -> String {
+        if sent == 0 && dropped == 0 {
+            return "Wake buzz: stopped (\(reason)) — no volleys were attempted"
+        }
+        if sent == 0 {
+            return "Wake buzz: stopped (\(reason)) — NOTHING reached the strap, all \(dropped) volleys dropped (strap not connected)"
+        }
+        if dropped == 0 {
+            return "Wake buzz: stopped (\(reason)) — \(sent) volleys sent to the strap"
+        }
+        return "Wake buzz: stopped (\(reason)) — \(sent) volleys sent, \(dropped) dropped (strap not connected)"
+    }
+
     // MARK: - Backup notification identifiers
 
     /// Stable id + category for the backstop notification `WakeBuzzRinger` schedules. Kept distinct

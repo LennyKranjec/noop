@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import StrandDesign
 
 // SleepAlarmSheet.swift — the Sleep tab's wake buzz.
@@ -19,13 +20,27 @@ struct SleepAlarmSheet: View {
     var body: some View {
         // Same contract an `@EnvironmentObject var model: AppModel` carried: a host that injected
         // neither the ref nor a live AppModel could not have shown the Sleep tab this opens from.
-        SleepAlarmSheetContent(ringer: requireAppModel(modelRef).wakeBuzz)
+        // Explicit `return` so this stays a plain function body rather than a result-builder one — the
+        // `let` is a binding, not a view.
+        let model = requireAppModel(modelRef)
+        return SleepAlarmSheetContent(ringer: model.wakeBuzz, live: model.live)
     }
 }
 
 private struct SleepAlarmSheetContent: View {
     @Environment(\.dismiss) private var dismiss
     @ObservedObject var ringer: WakeBuzzRinger
+
+    /// The live link, held WITHOUT observing it — `LiveState` publishes 1–3×/s while a strap streams, and
+    /// this sheet carries a wheel picker (the whole reason it observes the ringer and not the model). Only
+    /// the one flag this screen needs is pulled off it, into `@State`, via `.onReceive` — the documented
+    /// idiom in `ModelReferenceEnvironment`.
+    let live: LiveState
+
+    /// Whether the strap is connected RIGHT NOW. This alarm is sent by the phone over BLE, so this is the
+    /// difference between an alarm that can fire and one that cannot, and the user could previously not see
+    /// it anywhere on this screen.
+    @State private var strapConnected = false
 
     /// The persisted alarm, read straight from the same defaults keys `WakeBuzzAlarm` writes, so the
     /// Sleep header's filled/empty alarm glyph tracks this switch with no plumbing in between.
@@ -67,6 +82,7 @@ private struct SleepAlarmSheetContent: View {
             // only place the user can check the alarm is really armed.
             ringer.reschedule()
         }
+        .onReceive(live.$connected.removeDuplicates()) { strapConnected = $0 }
     }
 
     // MARK: - Time + on/off
@@ -92,6 +108,8 @@ private struct SleepAlarmSheetContent: View {
 
                 if alarmOn {
                     Divider().overlay(StrandPalette.hairline)
+                    reachRow
+                    Divider().overlay(StrandPalette.hairline)
                     Text("Wake time").strandOverline()
                     timeWheel
                 }
@@ -112,6 +130,33 @@ private struct SleepAlarmSheetContent: View {
         guard let next = ringer.nextFire else { return String(localized: "Not scheduled yet") }
         let c = Calendar.current.dateComponents([.hour, .minute], from: next)
         return String(localized: "Next buzz \(WakeBuzzAlarm.timeLabel((c.hour ?? 0) * 60 + (c.minute ?? 0)))")
+    }
+
+    /// CAN THIS ALARM ACTUALLY FIRE? The alarm is buzzed by the phone over Bluetooth, so a disconnected
+    /// strap means silence — and that was invisible here, which is the whole shape of "the vibration
+    /// doesn't work at all": nothing on this screen distinguished an armed working alarm from an armed
+    /// one that had no way to reach the wrist. Stated as a live condition, not a promise, and never
+    /// dressed up: "connected" says the buzz can be delivered now, nothing more.
+    @ViewBuilder
+    private var reachRow: some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: strapConnected ? "checkmark.circle" : "exclamationmark.triangle")
+                .foregroundStyle(strapConnected ? StrandPalette.statusPositive : StrandPalette.statusWarning)
+                .accessibilityHidden(true)
+            // Two literal Texts rather than one ternary, so each string stays a plain
+            // `LocalizedStringKey` the string catalog can pick up.
+            if strapConnected {
+                Text("Strap connected — NOOP can buzz it.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Strap not connected. Nothing will buzz unless it's connected at your wake time — the backup notification is all you'd get.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
 
     /// A fixed wheel of quarter-hour slots rather than a free `DatePicker` — the alarm only has 96
@@ -153,11 +198,45 @@ private struct SleepAlarmSheetContent: View {
                 }
                 .buttonStyle(NoopButtonStyle(ringer.isRinging ? .destructive : .secondary, fullWidth: true))
 
+                deliveryRow
+
                 Text("Your strap buzzes every few seconds. Double-tap the strap to stop it, tap Stop here, or leave it — it stops by itself after about half a minute.")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    /// What the last Test / alarm actually DID. The Test button is the one path the user can trigger while
+    /// watching their wrist, so it has to report — pressing it and getting silence used to leave them with
+    /// no way to tell a dropped write from a strap that took the command and didn't buzz, which are two
+    /// completely different problems. Nothing is claimed beyond what the app can observe: `.sent` means the
+    /// bytes left the phone, and says so, because whether the motor turned is a fact only a wrist has.
+    @ViewBuilder
+    private var deliveryRow: some View {
+        switch ringer.lastDelivery {
+        case .none:
+            EmptyView()   // nothing tried yet — the absence of a claim, not a claim of success
+        case .some(.sent):
+            deliveryNote("checkmark.circle", StrandPalette.statusPositive,
+                         Text("Buzz sent to your strap. If your wrist felt nothing, the strap took the command but didn't vibrate."))
+        case .some(.noStrap):
+            deliveryNote("exclamationmark.triangle", StrandPalette.statusWarning,
+                         Text("Nothing was sent — your strap isn't connected. NOOP buzzes it over Bluetooth, so it has to be connected first."))
+        case .some(.noSink):
+            deliveryNote("exclamationmark.triangle", StrandPalette.statusWarning,
+                         Text("NOOP couldn't send anything: the buzz isn't wired up in this build. Please report it — this one is our bug, not your strap."))
+        }
+    }
+
+    private func deliveryNote(_ symbol: String, _ tint: Color, _ text: Text) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: symbol).foregroundStyle(tint).accessibilityHidden(true)
+            text
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -178,6 +257,10 @@ private struct SleepAlarmSheetContent: View {
                     Text("Your strap has to be connected and NOOP still running — it usually is, because the strap keeps it awake in the background. If you force-quit NOOP you only get the backup notification, and a sideloaded app can't sound a guaranteed wake, so Focus or silent mode can mute that too. Keep your phone's Clock alarm for anything you truly can't miss.")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text("Your strap can also hold an alarm in its own clock (More → Alarms), which buzzes once with NOOP closed. On a WHOOP 5/MG that one is still unconfirmed and needs the Experimental toggle, so it isn't armed for you here.")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
