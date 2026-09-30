@@ -232,6 +232,10 @@ struct RootTabView: View {
             && !motionState.poseStill(reduceMotion)
     }
 
+    /// Bumped to play the Focus item's pulse (three beats, then still): when the reminder may move again
+    /// (it appears, the app comes forward, a motion gate lifts) and on each tab switch while it may. The
+    /// pulse used to repeat indefinitely — an all-day animation on every screen.
+    @State private var meditationPulseKick = 0
     /// Re-read whether today's meditation is outstanding.
     ///
     /// `days: 4` is the SAME window `QuestAutoComplete.gather` reads, so this joins that memoised workout
@@ -360,7 +364,7 @@ struct RootTabView: View {
             TelosTabItem(tag: 2, title: "Focus", systemImage: "figure.mind.and.body",
                          a11yLabel: meditationA11yLabel,
                          showsMark: meditationDue,
-                         pulsing: meditationPulsing),
+                         pulseTrigger: meditationPulseKick),
             TelosTabItem(tag: 3, title: "System", systemImage: coachWorking ? "circle.dotted" : "sparkles",
                          bounceTrigger: coachFinishedElsewhere),
             TelosTabItem(tag: 4, title: "More", systemImage: "ellipsis"),
@@ -375,6 +379,9 @@ struct RootTabView: View {
             || quickAction != nil || showDevices || routedPillar != nil || showLevelTimeline
             || showGoals || showLiftPlan
     }
+
+    /// Whether the level strip stands aside: on the Home tab, whose hero already shows the level.
+    private var levelStripHidden: Bool { selectedTab == 0 }
 
     private func reselectTab(_ tag: Int) {
         Task { await repo.refresh() }
@@ -423,18 +430,18 @@ struct RootTabView: View {
         TabView(selection: nativeTabSelection) {
             // HOME is the day you are in (the reference's house). Its hero belongs to Today itself
             // (LiquidTodayView); the shell only hosts it.
-            tab(todayTabRoot, "Home", "house", path: $tabPaths[0], scrollSignal: scrollTop[0]).tag(0)
+            tab(todayTabRoot, "Home", "house", tag: 0, path: $tabPaths[0], scrollSignal: scrollTop[0]).tag(0)
             // BIOMETRICS: the Health/Trends screen, renamed to the reference's word. Sleep is reached from it
             // and from its own More row.
-            tab(TrendsView(), "Biometrics", "waveform.path.ecg", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
+            tab(TrendsView(), "Biometrics", "waveform.path.ecg", tag: 1, path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
             // FOCUS STAYS (coordinator decision 3 — not swapped for Habits). Its "today's meditation is still
             // open" mark and pulse are drawn by the floating bar (`tabBarItems`), with the same VoiceOver label.
-            tab(MindfulnessView(), "Focus", "figure.mind.and.body",
+            tab(MindfulnessView(), "Focus", "figure.mind.and.body", tag: 2,
                 path: $tabPaths[2], scrollSignal: scrollTop[2],
                 a11yLabel: meditationA11yLabel)
                 .tag(2)
             // SYSTEM (the coach). Its working glyph and finished-elsewhere pop live on the floating bar.
-            tab(CoachView(), "System", coachWorking ? "circle.dotted" : "sparkles",
+            tab(CoachView(), "System", coachWorking ? "circle.dotted" : "sparkles", tag: 3,
                 path: $tabPaths[3], scrollSignal: scrollTop[3])
                 .tag(3)
             moreTab(path: $tabPaths[4], scrollSignal: scrollTop[4]).tag(4)
@@ -451,6 +458,11 @@ struct RootTabView: View {
         // the clock sat on the trend chips, the battery sat on the levers, and the notch cut the top off
         // the pentagon. The strip's own FILL still bleeds up behind the status bar (see the background
         // inside the view) so there is no seam; only the content is inset.
+        //
+        // NOT ON HOME (owner: "don't show the level twice on Today — I prefer it on the left"). The Home
+        // hero's LEVEL block carries the level and opens the same timeline; Home's stress tile carries the
+        // live stress. HIDDEN rather than removed: taking the strip out of the tree on every switch to Home
+        // would reset its radar's state and replay the once-per-launch count-up on the way back.
         .overlay(alignment: .top) {
             LevelOverlayBarView(
                 trend: levelBar.trend,
@@ -459,7 +471,9 @@ struct RootTabView: View {
                 stressAlert: stressAlert,
                 onStressAlert: { quickAction = .breathe }
             )
-            .allowsHitTesting(true)
+            .opacity(levelStripHidden ? 0 : 1)
+            .allowsHitTesting(!levelStripHidden)
+            .accessibilityHidden(levelStripHidden)
         }
         // THE FLOATING TAB BAR. Over the content, which scrolls beneath it (every tab's safe area is inset
         // by the bar's height, so nothing ends up hidden under it). Steps aside for the keyboard, as the
@@ -496,6 +510,13 @@ struct RootTabView: View {
         .onChangeCompat(of: coachWorking) { working in
             // Only on the falling edge, and only when they are not already reading the answer.
             if !working, selectedTab != 3 { coachFinishedElsewhere += 1 }
+        }
+        // The Focus reminder's bounded pulse (see `meditationPulseKick`).
+        .onChangeCompat(of: meditationPulsing) { pulsing in
+            if pulsing { meditationPulseKick &+= 1 }
+        }
+        .onChangeCompat(of: selectedTab) { _ in
+            if meditationPulsing { meditationPulseKick &+= 1 }
         }
         .sheet(isPresented: $showLevelTimeline) {
             LevelTimelineSheetView(model: levelBar, repo: repo)
@@ -669,7 +690,9 @@ struct RootTabView: View {
             if phase == .active { presentMorningIfDue() }
         }
         .sheet(item: $quickAction) { action in
-            QuickActionHost(initial: action) { quickActionDestination($0) }
+            QuickActionHost(initial: action, onPicked: { if $0 == .strength { startStrengthWorkout() } }) {
+                quickActionDestination($0)
+            }
         }
         // Live's "Manage devices" affordance (and any future cross-screen link to Devices) routes here:
         // present the Devices manager in its own nav stack, the same way the quick-action screens do.
@@ -834,7 +857,24 @@ struct RootTabView: View {
             quickScreen(InsightsView())
         case .breathe:
             quickScreen(BreathingView())
+        case .strength:
+            // `startStrengthWorkout` ran on the pick, so the workout exists: open the in-exercise screen directly
+            // (the Lift logger heads it). No workout (no model) → the Workouts screen, never an empty tracker.
+            if let model = resolvedAppModel(appModelRef), model.activeWorkout != nil {
+                LiveWorkoutView(onClose: { quickAction = nil })
+            } else {
+                quickScreen(WorkoutsView())
+            }
         }
+    }
+
+    /// The quick-action "Strength workout" row: start a Strength workout — the same `startWorkout` the workout
+    /// picker calls — so the Telos Lift logger opens on today's day by its own rule. A workout already running is
+    /// never replaced; the destination then simply shows it.
+    private func startStrengthWorkout() {
+        guard let model = resolvedAppModel(appModelRef), model.activeWorkout == nil else { return }
+        model.startWorkout(sport: LiftSessionRecorder.liftStartSport)
+        RecentSportsPrefs.recordSelection(LiftSessionRecorder.liftStartSport)
     }
 
     /// Wraps a routed quick-action screen in its own nav stack so it has a title bar + the
@@ -880,7 +920,7 @@ struct RootTabView: View {
 
     /// - Parameter a11yLabel: what VoiceOver reads instead of `title`, for an item whose state the visible
     ///   label cannot carry (the Focus tab's "meditation still open" badge). `nil` = read the title.
-    private func tab<V: View>(_ view: V, _ title: LocalizedStringKey, _ icon: String,
+    private func tab<V: View>(_ view: V, _ title: LocalizedStringKey, _ icon: String, tag: Int,
                               path: Binding<NavigationPath>, scrollSignal: Int,
                               a11yLabel: LocalizedStringKey? = nil) -> some View {
         // Each primary tab gets its OWN NavigationStack so the in-content NavigationLinks (e.g. the Today
@@ -896,9 +936,10 @@ struct RootTabView: View {
                 // THE STRIP'S OWN ROOM. Inset HERE, on the tab's content, not on the TabView: each tab
                 // is its own NavigationStack and lays its content out inside that, so an inset applied
                 // to the TabView never reached the screen's scroll view — which is why the level bar
-                // sat on top of every tab's heading.
+                // sat on top of every tab's heading. NONE on Home (tag 0), where the strip is hidden
+                // (`levelStripHidden`) and the hero moves up into the room it used to take.
                 .safeAreaInset(edge: .top, spacing: 0) {
-                    Color.clear.frame(height: levelBarHeight)
+                    Color.clear.frame(height: tag == 0 ? 0 : levelBarHeight)
                 }
                 .background(StrandPalette.surfaceBase.ignoresSafeArea())
                 .toolbar(.hidden, for: .navigationBar)
@@ -917,6 +958,12 @@ struct RootTabView: View {
         // Drive this tab's root scroll-to-top on an at-root re-tap (#198 follow-up); read by ScreenScaffold
         // / LiquidTodayView inside. Only THIS tab's token changes on its reselect, so the others don't scroll.
         .environment(\.scrollToTopSignal, scrollSignal)
+        // A tap that is not a NavigationLink (Today's rings and tiles, Biometrics' sleep tile) pushes
+        // through this onto THIS tab's path — an `isPresented` push is invisible to the path, so the
+        // reselect found it empty and scrolled instead of returning to the root (owner: Sleep → Home).
+        .environment(\.tabRoutePush, TabRoutePushAction(tab: tag) { route in
+            tabPaths[tag].append(route)
+        })
         // ONE SHAPE, whatever `a11yLabel` is. The modifier is applied UNCONDITIONALLY and only its
         // ARGUMENT varies — the rule this file already states for `noopTabBarAutoHide`: a runtime
         // condition that selects between `_ConditionalContent` branches changes the view's identity, and
@@ -1215,7 +1262,8 @@ private struct MoreRowLabel: View {
 /// The destinations the centre FAB can present. `.menu` is the action sheet itself; the rest
 /// route to existing screens. `Identifiable` so it drives `.sheet(item:)`.
 private enum QuickAction: Int, Identifiable {
-    case menu, live, workout, journal, breathe
+    // `.strength` (Telos Lift) is appended so the existing raw values stay put.
+    case menu, live, workout, journal, breathe, strength
     var id: Int { rawValue }
 }
 
@@ -1230,12 +1278,17 @@ private struct QuickActionHost<Destination: View>: View {
     @State private var current: QuickAction
     @State private var detent: PresentationDetent
     let destination: (QuickAction) -> Destination
+    /// Runs on a pick BEFORE the swap (the Strength row starts its workout here, so the destination opens on it).
+    let onPicked: (QuickAction) -> Void
 
-    private static var menuDetent: PresentationDetent { .height(344) }
+    // Five rows (the Strength row carries a subtitle line).
+    private static var menuDetent: PresentationDetent { .height(420) }
 
-    init(initial: QuickAction, @ViewBuilder destination: @escaping (QuickAction) -> Destination) {
+    init(initial: QuickAction, onPicked: @escaping (QuickAction) -> Void = { _ in },
+         @ViewBuilder destination: @escaping (QuickAction) -> Destination) {
         _current = State(initialValue: initial)
         _detent = State(initialValue: initial == .menu ? Self.menuDetent : .large)
+        self.onPicked = onPicked
         self.destination = destination
     }
 
@@ -1243,6 +1296,7 @@ private struct QuickActionHost<Destination: View>: View {
         Group {
             if current == .menu {
                 QuickActionSheet { picked in
+                    onPicked(picked)
                     withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.36)) {
                         detent = .large
                         current = picked
@@ -1281,6 +1335,10 @@ private struct QuickActionSheet: View {
                 .padding(.bottom, 10)
 
             VStack(spacing: 8) {
+                // Telos Lift's own door, first: starts a Strength workout straight into the logger (the plan's
+                // day picked by the logger's rule, per-set rows, rest timer, Finish).
+                row("Strength workout", subtitle: "Telos Lift · your plan, sets and rest timer",
+                    icon: "dumbbell.fill", tint: StrandPalette.effortColor) { onPick(.strength) }
                 row("Live HR", icon: "waveform.path.ecg", tint: StrandPalette.metricRose) { onPick(.live) }
                 row("Start workout", icon: "figure.run", tint: StrandPalette.effortColor) { onPick(.workout) }
                 row("Log journal", icon: "square.and.pencil", tint: StrandPalette.accent) { onPick(.journal) }
@@ -1296,7 +1354,8 @@ private struct QuickActionSheet: View {
     }
 
     /// One flat action row: hued line-icon tile + title, inset surface, hairline border.
-    private func row(_ title: LocalizedStringKey, icon: String, tint: Color, action: @escaping () -> Void) -> some View {
+    private func row(_ title: LocalizedStringKey, subtitle: LocalizedStringKey? = nil, icon: String, tint: Color,
+                     action: @escaping () -> Void) -> some View {
         Button(action: action) {
             HStack(spacing: 13) {
                 Image(systemName: icon)
@@ -1304,9 +1363,18 @@ private struct QuickActionSheet: View {
                     .foregroundStyle(tint)
                     .frame(width: 38, height: 38)
                     .background(RoundedRectangle(cornerRadius: 11, style: .continuous).fill(StrandPalette.surfaceInset))
-                Text(title)
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.textPrimary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    if let subtitle {
+                        Text(subtitle)
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                }
                 Spacer()
                 Image(systemName: "chevron.right")
                     .font(.system(size: 13, weight: .semibold))

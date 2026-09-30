@@ -88,6 +88,9 @@ final class CoachVoiceInput: ObservableObject {
         // Speech auth first; mic auth piggybacks on the same prompt flow but is a separate grant.
         SFSpeechRecognizer.requestAuthorization { speechStatus in
             Task { @MainActor in
+                // `authorization` is read from the Speech framework, not published, so the mic button
+                // would keep drawing the pre-answer state until something unrelated redrew it. Say so.
+                self.objectWillChange.send()
                 if speechStatus != .authorized {
                     completion(self.mapSpeech(speechStatus))
                     return
@@ -96,6 +99,7 @@ final class CoachVoiceInput: ObservableObject {
                 // so the user sees one consolidated prompt and the button state is correct before
                 // the first tap.
                 self.requestMicPermission { micGranted in
+                    self.objectWillChange.send()
                     completion(micGranted ? .authorized : .denied)
                 }
             }

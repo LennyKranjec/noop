@@ -148,7 +148,10 @@ struct MorningFlowView: View {
     let onDone: () -> Void
 
     @EnvironmentObject private var repo: Repository
-    @EnvironmentObject private var coach: AICoachEngine
+    /// NOT observed: the coach publishes on every streamed chunk, and this view only calls it from
+    /// actions. Observing it re-rendered the whole view per chunk while any generation ran.
+    @Environment(\.coachEngine) private var coachRef
+    private var coach: AICoachEngine { requireCoach(coachRef) }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @StateObject private var brief = DailyBriefModel()
@@ -905,7 +908,10 @@ struct DifficultyChoiceView: View {
     var total: Int = 1
 
     @EnvironmentObject private var repo: Repository
-    @EnvironmentObject private var coach: AICoachEngine
+    /// NOT observed: the coach publishes on every streamed chunk, and this view only calls it from
+    /// actions. Observing it re-rendered the whole view per chunk while any generation ran.
+    @Environment(\.coachEngine) private var coachRef
+    private var coach: AICoachEngine { requireCoach(coachRef) }
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var baseline: QuestBaseline?

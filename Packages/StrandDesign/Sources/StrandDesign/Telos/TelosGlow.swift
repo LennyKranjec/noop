@@ -1,30 +1,29 @@
 import SwiftUI
 
-// MARK: - TelosGlow — the cheap bioluminescence primitives (docs/DESIGN_V2.md "VISUAL DIRECTION")
+// MARK: - TelosGlow — the retired glow primitives, now clinical and flat (docs/DESIGN_V2.md decision 19)
 //
-// The look is shining light on a near-black ground — but the owner reports lag, so every primitive
-// here is the CHEAP way to that look (binding performance rules):
+// Decision 19 (owner, 2026-09-30): "Remove the greenish or yellowish glimmer … professional, like a
+// biological optimization system … not some childish gameplay." No glimmer, shimmer, sparkle, halo or
+// neon anywhere; colour is for data. The type and modifier NAMES below are kept only so the many call
+// sites stay source-compatible — what they draw is now restrained:
 //
-//   • `TelosRadialGlow`        — a pre-composited radial gradient. No blur, no shadow.
-//   • `.telosLuminousStroke`   — a crisp core stroke over ONE wider faint halo stroke. No blur.
-//   • `.telosGlowingPill`      — the glowing capsule (window-advice pill, selected tab): tinted fill,
-//                                gradient hairline and ONE small shadow on a small static element.
-//   • `TelosParticleField`     — the dotted particle field, drawn in a single `Canvas` (one layer,
-//                                rendered asynchronously), ≤ 30 fps ONLY while visible, and a still
-//                                frame when paused: offscreen, behind a sheet (`noopBackgroundCovered`),
-//                                under Reduce Motion / Low Power / "Reduce motion in NOOP"
-//                                (`NoopMotionState.poseStill`), or when the caller passes
-//                                `animated: false`. Positions are seeded (deterministic), so a still
-//                                frame is the same frame every time.
+//   • `TelosRadialGlow`        — a NO-OP (a clear, layout-neutral fill). No colour cast of any kind.
+//   • `.telosLuminousStroke`   — ONE crisp stroke. The wider halo stroke is gone.
+//   • `.telosGlowingPill`      — a FLAT selected pill: a subtle neutral fill + a 1 pt hairline in the
+//                                caller's colour. No gradient edge, no shadow.
+//   • `TelosParticleField`     — a STATIC, very faint neutral grey-teal dot texture (≤ 4 % opacity) for
+//                                background depth only. No drift, no twinkle, no clock; the caller's
+//                                colour is ignored so no hue ever glimmers.
 //   • `TelosWordmark`          — "T E L O S" + "BIOLOGICAL OPTIMIZATION ENGINE".
 //
-// The INS package builds the organic blob and the thin luminous rings on top of these. Every flourish
-// call site still names its cost (§2.1 rule 8).
+// Cost (§2.1 rule 8): shapes and one static Canvas only — nothing here animates.
 
 // MARK: - Radial glow
 
-/// A soft radial glow: `color` at `intensity` in the centre, fading to clear at `radius`. Place it
-/// behind a luminous element (`.background(TelosRadialGlow(...))`). Static, one gradient fill.
+/// RETIRED (decision 19): formerly a coloured radial glow behind a luminous element. It now draws
+/// nothing — a clear, hit-test-transparent fill that takes the same (greedy) space the gradient did, so
+/// every existing `.background(TelosRadialGlow(...))` / `ZStack` call site keeps its layout. The
+/// parameters are accepted and ignored.
 public struct TelosRadialGlow: View {
     private let color: Color
     private let intensity: Double
@@ -37,30 +36,21 @@ public struct TelosRadialGlow: View {
     }
 
     public var body: some View {
-        RadialGradient(
-            colors: [color.opacity(intensity), color.opacity(intensity * 0.35), Color.clear],
-            center: .center,
-            startRadius: 0,
-            endRadius: radius
-        )
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
+        Color.clear
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 
 // MARK: - Luminous stroke
 
 public extension Shape {
-    /// A luminous line: the crisp core stroke drawn over ONE wider, faint halo stroke of the same colour
-    /// (no blur, no shadow) — the thin glowing rings and orbit lines of the reference.
+    /// A crisp thin line in `color` (decision 19: the former wider halo stroke is removed). The name
+    /// and the `haloOpacity` parameter are kept for source compatibility; `haloOpacity` is ignored.
     func telosLuminousStroke(_ color: Color,
                              lineWidth: CGFloat = TelosStroke.data,
                              haloOpacity: Double = 0.22) -> some View {
-        ZStack {
-            self.stroke(color.opacity(haloOpacity),
-                        style: StrokeStyle(lineWidth: lineWidth * 3, lineCap: .round, lineJoin: .round))
-            self.stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
-        }
+        self.stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
     }
 }
 
@@ -73,32 +63,23 @@ private struct TelosGlowingPill: ViewModifier {
 
     func body(content: Content) -> some View {
         let shape = Capsule(style: .continuous)
-        let edge = LinearGradient(
-            colors: [color.opacity(isActive ? 0.9 : 0.35), color.opacity(isActive ? 0.25 : 0.10)],
-            startPoint: .topLeading,
-            endPoint: .bottomTrailing
-        )
-        let pill = content
+        // Flat (decision 19): a subtle NEUTRAL fill; the caller's colour appears only as the 1 pt
+        // hairline of the selected state. No gradient edge, no shadow, no tinted wash.
+        return content
             .padding(.horizontal, padded ? TelosSpace.l : 0)
             .padding(.vertical, padded ? TelosSpace.s : 0)
             .frame(minHeight: TelosSpace.hitTarget)
-            .background(shape.fill(color.opacity(isActive ? TelosOpacity.fill : TelosOpacity.whisper)))
-            .overlay(shape.strokeBorder(edge, lineWidth: TelosStroke.line))
-        return Group {
-            if isActive {
-                // Cost: ONE shadow on one small static capsule; never on a card, never in a list.
-                pill.shadow(color: color.opacity(0.35), radius: 8, x: 0, y: 0)
-            } else {
-                pill
-            }
-        }
+            .background(shape.fill(isActive ? TelosColor.glassRaised : TelosColor.glassFill))
+            .overlay(shape.strokeBorder(isActive ? color.opacity(TelosOpacity.border) : TelosColor.line,
+                                        lineWidth: TelosStroke.line))
     }
 }
 
 public extension View {
-    /// The glowing pill (the window-advice pill, the selected tab): a capsule tinted with `color`, a
-    /// gradient hairline bright at the top-leading edge and — when `isActive` — one soft glow. 44 pt
-    /// minimum height. `padded: false` when the caller already sizes the content.
+    /// The selected pill (the window-advice pill, the selected tab) — FLAT since decision 19: a subtle
+    /// neutral fill and a 1 pt hairline (in `color` when `isActive`, the neutral line otherwise). No glow,
+    /// no shadow. 44 pt minimum height. `padded: false` when the caller already sizes the content. The
+    /// legacy name is kept for source compatibility.
     func telosGlowingPill(_ color: Color = TelosColor.mint, isActive: Bool = true, padded: Bool = true) -> some View {
         modifier(TelosGlowingPill(color: color, isActive: isActive, padded: padded))
     }
@@ -136,39 +117,32 @@ struct TelosSeededRandom {
     }
 }
 
-/// A dotted particle field drawn into ONE `Canvas`. Deterministic positions; a slow drift of a few
-/// points while visible and animated, at ≤ 30 fps; otherwise a still frame.
+/// A STATIC, very faint dot texture drawn into ONE `Canvas` — background depth only (decision 19).
+/// Deterministic positions, no drift, no twinkle, no clock. Every dot is the neutral grey-teal
+/// `dotColor` at ≤ `maxDotOpacity` (4 %); the caller's `color` is ignored so no hue ever glimmers.
 ///
-/// Cost (§2.1 rule 8): one Canvas layer, `count` (≤ 400) tiny ellipses per frame; the clock runs ONLY
-/// while the view is on screen, not covered by a sheet, `animated` is true and
-/// `NoopMotionState.poseStill` is false. Everything else shows the same still frame.
+/// Cost (§2.1 rule 8): one Canvas layer, `count` (≤ 400) tiny ellipses, drawn once per layout.
 public struct TelosParticleField: View {
-    private let color: Color
-    private let particles: [TelosParticle]
-    private let animated: Bool
-    private let drift: CGFloat
+    /// The one dot colour: a neutral grey-teal (the tertiary ink), never an accent or a glow.
+    public static let dotColor = TelosColor.textTertiary
+    /// The brightest any dot may be drawn (seeded alphas are scaled into 0…this).
+    public static let maxDotOpacity: Double = 0.04
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.noopBackgroundCovered) private var covered
-    @ObservedObject private var motion = NoopMotionState.shared
-    @State private var visible = false
+    private let particles: [TelosParticle]
 
     /// - Parameters:
-    ///   - color: the dot colour (defaults to the bioluminescent green).
+    ///   - color: IGNORED since decision 19 (kept for source compatibility).
     ///   - count: number of dots (clamped to 0…400).
     ///   - seed: positions are a pure function of this.
     ///   - sizes: dot diameter range in points.
-    ///   - drift: how far (pt) a dot wanders while animating.
-    ///   - animated: false = always the still frame.
+    ///   - drift: IGNORED (the texture is static).
+    ///   - animated: IGNORED (the texture is static).
     public init(color: Color = TelosColor.mint,
                 count: Int = 140,
                 seed: UInt64 = 0x7E105,
                 sizes: ClosedRange<Double> = 0.8...2.2,
                 drift: CGFloat = 3,
                 animated: Bool = true) {
-        self.color = color
-        self.animated = animated
-        self.drift = drift
         self.particles = TelosParticleField.makeParticles(count: count, seed: seed, sizes: sizes)
     }
 
@@ -189,37 +163,29 @@ public struct TelosParticleField: View {
         return out
     }
 
-    private var paused: Bool {
-        !animated || !visible || covered || motion.poseStill(reduceMotion)
-    }
-
     public var body: some View {
-        let isPaused = paused
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: isPaused)) { timeline in
-            let t: Double = isPaused ? 0 : timeline.date.timeIntervalSinceReferenceDate
-            Canvas(rendersAsynchronously: true) { context, size in
-                TelosParticleField.draw(particles, context: context, size: size, time: t,
-                                        color: color, drift: drift)
-            }
+        let dots = particles
+        return Canvas(rendersAsynchronously: true) { context, size in
+            TelosParticleField.draw(dots, context: context, size: size)
         }
-        .onAppear { visible = true }
-        .onDisappear { visible = false }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
 
-    static func draw(_ particles: [TelosParticle], context: GraphicsContext, size: CGSize,
-                     time: Double, color: Color, drift: CGFloat) {
+    /// The opacity a dot with seeded `alpha` (0.18…0.80) is drawn at: scaled into 0…`maxDotOpacity`.
+    static func dotOpacity(_ alpha: Double) -> Double {
+        guard alpha.isFinite else { return 0 }
+        return min(max(alpha / 0.8, 0), 1) * maxDotOpacity
+    }
+
+    static func draw(_ particles: [TelosParticle], context: GraphicsContext, size: CGSize) {
         guard size.width > 0, size.height > 0 else { return }
         for p in particles {
-            let angle = p.phase + time * p.speed
-            let dx = CGFloat(cos(angle)) * drift
-            let dy = CGFloat(sin(angle * 0.7)) * drift
             let d = CGFloat(p.size)
-            let rect = CGRect(x: CGFloat(p.x) * size.width + dx - d / 2,
-                              y: CGFloat(p.y) * size.height + dy - d / 2,
+            let rect = CGRect(x: CGFloat(p.x) * size.width - d / 2,
+                              y: CGFloat(p.y) * size.height - d / 2,
                               width: d, height: d)
-            context.fill(Path(ellipseIn: rect), with: .color(color.opacity(p.alpha)))
+            context.fill(Path(ellipseIn: rect), with: .color(dotColor.opacity(dotOpacity(p.alpha))))
         }
     }
 }

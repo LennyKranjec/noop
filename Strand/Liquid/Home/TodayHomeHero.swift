@@ -8,9 +8,10 @@ import StrandAnalytics
 //
 // Pieces, top to bottom (the header row and the trio / strip / mission live in LiquidTodayView,
 // TodayTrioHeroView and StateTileViews):
-//   • `HomeLevelOrbRow`       — LEVEL block · the life orb · today's quest-progress ring.
+//   • `HomeLevelOrbRow`       — LEVEL block · the life orb (tap → `OrbExplainerSheet`, what shapes it)
+//                               · today's quest-progress ring.
 //   • `HomeContextPillRow`    — "☼ Today · date | temperature | humidity".
-//   • `HomeWindowAdvicePill`  — the glowing window-advice pill with dotted light trails.
+//   • `HomeWindowAdvicePill`  — the window-advice pill, ONLY while there is a window instruction.
 //   • `HomeVitalsStrip`       — the glass strip of three compact metrics.
 //
 // NARROW OBSERVATION (§2.1 rule 5). Each leaf observes only the store it draws: the Level row the
@@ -18,11 +19,13 @@ import StrandAnalytics
 // reading (`BedroomClimate.$latest`, de-duplicated).
 // Nothing here observes AppModel, LiveState or Repository — the slow per-day figures come in as values.
 //
-// COST (§2.1 rule 8): ONE frame clock on the whole screen — the orb's, `.whileVisible` (owner direction),
-// ≤ 30 fps, paused offscreen / under a sheet / Reduce Motion / Low Power, and absent entirely for the
-// neutral orb. Everything else is static shapes; rings animate only when their value changes. The window
-// pill re-evaluates once a minute (a `.periodic` label clock, not a frame clock). No material, no blur, one
-// small shadow on the active pill.
+// COST (§2.1 rule 8): idle Today runs NO frame clock. The orb's clock is a `.burst(seconds: 8)` after
+// appear and after each value change, ≤ 20 fps, and each frame only moves transforms (the orb's canvases
+// are drawn once per data change); then one still frame. Paused offscreen / under a sheet (its own
+// explainer included) / Reduce Motion / Low Power, and absent entirely for the neutral orb. Everything
+// else is static shapes; rings animate only when their value changes. The window advice is re-checked
+// once a minute (a Combine timer in `HomeWindowAdviceTicker`, not a frame clock). No material, no blur,
+// no glow, no shadow (decision 19: clinical, not a toy).
 
 // MARK: - The orb's per-day feed
 
@@ -50,6 +53,12 @@ struct HomeLevelOrbRow: View {
 
     @ObservedObject private var levelBar = LevelBarModel.shared
     @Environment(\.dynamicTypeSize) private var typeSize
+    /// A sheet over the tab (set by the shell) — combined with the explainer's own below.
+    @Environment(\.noopBackgroundCovered) private var covered
+    /// "What shapes your orb", opened by tapping the orb.
+    @State private var showExplainer = false
+    /// The explainer's "Level timeline" link: the timeline opens once the explainer has gone.
+    @State private var openTimelineAfterExplainer = false
 
     private static let orbSide: CGFloat = 214
     private static let ringSide: CGFloat = 100
@@ -94,20 +103,38 @@ struct HomeLevelOrbRow: View {
         // Deduplicated by the tick inside the model: the shell asks for the same tick, so this is a no-op
         // on iOS and the only trigger on a host (macOS) whose shell never asks.
         .task(id: refreshTick) { await levelBar.refresh(repo: repo, tick: refreshTick) }
+        .sheet(isPresented: $showExplainer, onDismiss: {
+            // The timeline is the shell's sheet: it opens only once this one has gone.
+            if openTimelineAfterExplainer {
+                openTimelineAfterExplainer = false
+                onOpenLevel()
+            }
+        }) {
+            OrbExplainerSheet(inputs: inputs, breakdown: breakdown, pending: pending,
+                              onOpenTimeline: {
+                                  openTimelineAfterExplainer = true
+                                  showExplainer = false
+                              })
+        }
     }
 
-    /// Cost: TelosOrb — one async Canvas, ≤ 30 fps only while visible (see the file header).
+    /// The orb as a button: tap → what shapes it and how it has grown (`OrbExplainerSheet`).
+    ///
+    /// Cost: TelosOrb — drawn once per data change; an 8 s burst clock (≤ 20 fps, transforms only) after
+    /// appear and after each value change, then a still frame. No glow behind it (decision 19).
     private func orb(_ inputs: TelosOrbInputs) -> some View {
-        // The glow the orb sits in: one pre-composited radial gradient, no blur. Brighter with today's
-        // Charge (0.10 → 0.30), the dim floor without one.
-        let glow: Double = inputs.charge.map { (c: Double) -> Double in
-            let clamped: Double = min(max(c, 0), 100)
-            return 0.10 + 0.20 * clamped / 100
-        } ?? 0.10
-        return ZStack {
-            TelosRadialGlow(color: TelosColor.glow, intensity: glow, radius: Self.orbSide * 0.62)
-            TelosOrb(inputs: inputs, tint: .green, style: .hero, clock: .whileVisible)
+        Button {
+            TelosHaptics.play(.select)
+            showExplainer = true
+        } label: {
+            TelosOrb(inputs: inputs, tint: .green, style: .hero, clock: .burst(seconds: 8))
+                // The orb itself takes no touches; this circle is the button's hit area.
+                .background(Color.clear.contentShape(Circle()))
         }
+        .buttonStyle(.plain)
+        // Stills under its own explainer too (the shell's covered flag only knows the shell's sheets).
+        .environment(\.noopBackgroundCovered, covered || showExplainer)
+        .accessibilityLabel(Text("Your orb — opens what shapes it"))
     }
 }
 
@@ -342,53 +369,36 @@ struct HomeContextPillRow: View {
 // MARK: - The window-advice pill
 
 /// "Open now · shut 10:35 ›" — the room's window advice (`WindowAdvicePlan`, the same advice the old room
-/// chip carried), as the reference's glowing pill with dotted light trails. It glows only when there is
-/// something to do; otherwise it is a quiet pill that says so. Tap → the room screen. Without a sensor it
-/// is a quiet "Set up a room sensor" pill that opens the sensor setup.
+/// chip carried). Tap → the room screen.
+///
+/// ONLY WHILE THERE IS SOMETHING TO DO (owner direction): with no room sensor, or with advice that has no
+/// window instruction right now, NOTHING renders — no placeholder pill, no "set up a sensor" pill (the
+/// sensor setup lives in Settings / the room screen). A clinical capsule, no glow (decision 19).
 struct HomeWindowAdvicePill: View {
+    /// Kept for the call site; the hero no longer offers the sensor setup (see above).
     let onSetUp: () -> Void
 
-    /// The last room reading, de-duplicated (see `HomeContextPillRow`).
-    @State private var room: ClimateReading?
+    @StateObject private var ticker = HomeWindowAdviceTicker()
     @State private var showRoom = false
 
     var body: some View {
-        HStack(spacing: TelosSpace.s) {
-            HomeDottedTrail(leading: true)
-            // Read, not observed: it changes only in the sensor setup, and a reading follows it.
-            if BedroomClimate.shared.isConfigured {
-                Button { showRoom = true } label: {
-                    // Once a minute: the advice counts down and flips at its boundary without a new reading.
-                    // A `.periodic` label clock, not a frame clock.
-                    TimelineView(.periodic(from: Date(), by: 60)) { timeline in
-                        face(now: timeline.date)
-                    }
-                }
-                .buttonStyle(.plain)
-                .sheet(isPresented: $showRoom) { BedroomHistoryView() }
-            } else {
-                Button(action: onSetUp) {
-                    pill(text: String(localized: "Set up a room sensor"), active: false)
-                }
-                .buttonStyle(.plain)
+        // No instruction -> no view at all (an empty optional), so the hero's stack keeps no gap for it.
+        if let instruction = ticker.instruction {
+            Button { showRoom = true } label: {
+                pill(text: instruction.phrase)
             }
-            HomeDottedTrail(leading: false)
-        }
-        .onReceive(BedroomClimate.shared.$latest.removeDuplicates()) { room = $0 }
-    }
-
-    private func face(now: Date) -> some View {
-        let advice = WindowAdvicePlan.advice(for: room, now: now)
-        let phrase = advice.chipPhrase(now: now)
-        return pill(text: phrase ?? String(localized: "No window action now"), active: phrase != nil)
-            .accessibilityLabel(Text(advice.actionLine(now: now)))
+            .buttonStyle(.plain)
+            .accessibilityLabel(Text(instruction.actionLine))
             .accessibilityHint(Text("Opens the room screen"))
+            .sheet(isPresented: $showRoom) { BedroomHistoryView() }
+        }
     }
 
-    private func pill(text: String, active: Bool) -> some View {
+    private func pill(text: String) -> some View {
         HStack(spacing: TelosSpace.s) {
             Image(systemName: "wind")
                 .font(TelosType.glyphRow)
+                .accessibilityHidden(true)
             Text(verbatim: text)
                 .font(TelosType.subhead.weight(.semibold))
                 .lineLimit(1)
@@ -396,35 +406,57 @@ struct HomeWindowAdvicePill: View {
             Spacer(minLength: TelosSpace.s)
             Image(systemName: "chevron.right")
                 .font(TelosType.glyphChevron)
+                .accessibilityHidden(true)
         }
-        .foregroundStyle(active ? TelosColor.mint : TelosColor.textSecondary)
-        .frame(maxWidth: .infinity)
-        // Cost: the active pill carries ONE small shadow (a static capsule, never in a list).
-        .telosGlowingPill(TelosColor.mint, isActive: active)
+        .foregroundStyle(TelosColor.textPrimary)
+        .padding(.horizontal, TelosSpace.l)
+        .frame(maxWidth: .infinity, minHeight: TelosSpace.hitTarget)
+        .background(NoopPanelSurface(cornerRadius: TelosSpace.hitTarget / 2))
+        .contentShape(Capsule())
     }
 }
 
-/// The dotted light trail either side of the window pill: static dots fading toward the pill.
-private struct HomeDottedTrail: View {
-    let leading: Bool
-
-    var body: some View {
-        HomeTrailLine()
-            .stroke(style: StrokeStyle(lineWidth: 2, lineCap: .round, dash: [0.1, 5]))
-            .foregroundStyle(LinearGradient(colors: [TelosColor.mint.opacity(0), TelosColor.mint.opacity(0.7)],
-                                            startPoint: leading ? .leading : .trailing,
-                                            endPoint: leading ? .trailing : .leading))
-            .frame(width: 22, height: 2)
-            .accessibilityHidden(true)
+/// Today's window instruction, or nil. Owns the pill's two inputs so the pill can render NOTHING without
+/// losing them: the room reading (a de-duplicated publisher, so the sensor's other publishes never wake
+/// it) and a once-a-minute re-check (the advice counts down and flips at its boundaries without a new
+/// reading). Publishes only when the instruction itself changes.
+@MainActor
+final class HomeWindowAdviceTicker: ObservableObject {
+    struct Instruction: Equatable {
+        let phrase: String
+        let actionLine: String
     }
-}
 
-private struct HomeTrailLine: Shape {
-    func path(in rect: CGRect) -> Path {
-        var p = Path()
-        p.move(to: CGPoint(x: rect.minX, y: rect.midY))
-        p.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
-        return p
+    @Published private(set) var instruction: Instruction?
+    private var room: ClimateReading?
+    private var subscriptions: [AnyCancellable] = []
+
+    init() {
+        room = BedroomClimate.shared.latest
+        evaluate()
+        subscriptions.append(BedroomClimate.shared.$latest
+            .removeDuplicates()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] reading in
+                self?.room = reading
+                self?.evaluate()
+            })
+        subscriptions.append(Timer.publish(every: 60, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in self?.evaluate() })
+    }
+
+    private func evaluate() {
+        var next: Instruction? = nil
+        // Read, not observed: it changes only in the sensor setup, and a reading follows it.
+        if BedroomClimate.shared.isConfigured {
+            let now = Date()
+            let advice = WindowAdvicePlan.advice(for: room, now: now)
+            if let phrase = advice.chipPhrase(now: now) {
+                next = Instruction(phrase: phrase, actionLine: advice.actionLine(now: now))
+            }
+        }
+        if next != instruction { instruction = next }
     }
 }
 

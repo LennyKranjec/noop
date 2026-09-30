@@ -3,7 +3,7 @@ import SwiftUI
 import StrandDesign
 
 // TelosTabBar.swift — the floating faux-glass tab bar of the reference (`docs/design-ref/telos-v2-today.jpg`):
-// Home · Biometrics · Focus · System · More, the selected item lit by the glowing pill.
+// Home · Biometrics · Focus · System · More, the selected item on a flat tinted pill.
 //
 // IT FULLY REPLACES THE SYSTEM BAR, which the shell hides (`.toolbar(.hidden, for: .tabBar)`) — so every job
 // the platform bar did is done here, explicitly:
@@ -20,10 +20,12 @@ import StrandDesign
 //     exactly this kind of bar.
 //
 // COST (§2.1 rule 8): static. Faux glass = an opaque-enough ground fill + the translucent glass fill + the
-// gradient hairline + the top glow — no material, no blur. ONE shadow on the bar (a small static chrome
-// element) and the glowing pill's own one small shadow: two of the three allowed on screen. The Focus pulse
-// and the System bounce are the platform's symbol effects (nothing of ours loops); the pulse runs only while
-// the caller says it may (`pulsing` is false in the background, under Reduce Motion / Low Power / quiet
+// hairline — no material, no blur, no glow (decision 19). ONE shadow on the bar (a small static chrome
+// element); the selected pill is flat. The Focus pulse
+// and the System bounce are the platform's symbol effects, and NEITHER LOOPS: the pulse runs three beats
+// each time the caller bumps `pulseTrigger` — it used to repeat for as long as the day's meditation was
+// open, an all-day animation on every screen. The caller only bumps it when motion is allowed (never in
+// the background, under Reduce Motion / Low Power / quiet
 // motion, and while Focus is the open tab).
 
 enum TelosTabBarMetrics {
@@ -48,8 +50,9 @@ struct TelosTabItem: Identifiable {
     var a11yLabel: LocalizedStringKey? = nil
     /// Draw the attention mark ("!") in the icon's corner.
     var showsMark: Bool = false
-    /// Breathe the symbol (the platform `.pulse`) while true.
-    var pulsing: Bool = false
+    /// Pulse the symbol (the platform `.pulse`, three beats) each time this changes. Bounded on purpose:
+    /// an indefinite pulse kept the bar animating all day.
+    var pulseTrigger: Int = 0
     /// Bounce the symbol once each time this changes (the System item's finished-elsewhere pop).
     var bounceTrigger: Int = 0
 
@@ -76,11 +79,10 @@ struct TelosTabBar: View {
         .frame(height: TelosTabBarMetrics.height)
         .background {
             // Faux glass over live content: the ground at 94 % keeps the labels legible over whatever
-            // scrolls beneath (there is no blur to do that job), the glass fill + top glow give it the
-            // reference's lift, the gradient hairline its luminous edge.
+            // scrolls beneath (there is no blur to do that job), the glass fill gives it its lift and the
+            // hairline its edge. NO TOP GLOW (decision 19: a clinical look, no glow or halo).
             shape.fill(TelosColor.canvasDeep.opacity(0.94))
                 .overlay(shape.fill(TelosColor.glassFill))
-                .overlay(shape.fill(TelosColor.glassTopGlow))
                 .overlay(shape.strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line))
                 .telosElevation(.raised)
         }
@@ -115,7 +117,7 @@ private struct TelosTabButton: View {
             ZStack(alignment: .topTrailing) {
                 Image(systemName: item.systemImage)
                     .font(.system(size: 19, weight: isSelected ? .semibold : .regular))
-                    .symbolEffect(.pulse, options: .repeating, isActive: item.pulsing)
+                    .symbolEffect(.pulse, options: .repeat(3), value: item.pulseTrigger)
                     .symbolEffect(.bounce, value: item.bounceTrigger)
                     .frame(height: 22)
                 if item.showsMark {
@@ -132,8 +134,13 @@ private struct TelosTabButton: View {
         .padding(.vertical, TelosSpace.xs)
 
         if isSelected {
-            // The glowing pill of the reference. `padded: false`: the item already sizes itself.
-            content.telosGlowingPill(TelosColor.mint, isActive: true, padded: false)
+            // A FLAT pill (decision 19: no glow, no halo): the tinted capsule and a plain hairline — the
+            // glowing pill's shape without its shadow or its gradient edge. The item already sizes itself.
+            let pill = Capsule(style: .continuous)
+            content
+                .frame(minHeight: TelosSpace.hitTarget)
+                .background(pill.fill(TelosColor.mint.opacity(TelosOpacity.fill)))
+                .overlay(pill.strokeBorder(TelosColor.mint.opacity(0.45), lineWidth: TelosStroke.line))
         } else {
             content.frame(minHeight: TelosSpace.hitTarget)
         }

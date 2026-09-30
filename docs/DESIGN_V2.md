@@ -238,6 +238,14 @@ pentagon radar. *Package* means one implementation agent's unit of work (§8).
 >    heart rate (slowed visually); glow follows Charge; the orbiting dots' speed follows effort vs target. A
 >    calibrating/building level renders as a sparser, dimmer "assembling" orb; absent inputs give a neutral dim
 >    still orb — never a fabricated state. Transitions animate only when a value changes; performance rules apply.
+> 19. **Professional, clinical-grade restraint (owner, 2026-09-30 — overrides the "vivid"/"shining lights" parts of
+>    items 17 and the VISUAL DIRECTION where they conflict).** "Remove the greenish or yellowish glimmer. Keep it
+>    professional, like a biological optimization system which statistically improves me — also through the UI —
+>    not some childish gameplay." So: no glimmer, shimmer, sparkles, glints, confetti or particle bursts; no gold/
+>    yellow celebratory glows; no neon halos around cards, pills or numbers. Colour is for data (a part's hue, a
+>    state), not decoration. Moments are calm, factual cards (what happened, the numbers, what it means), with a
+>    restrained haptic; the strap buzz stays. The organic orb stays as the one living visual, soft and matte.
+>    Typography, spacing, thin rings and data carry the design. Nothing on screen should read as a game.
 > 8. **Haptic, organic feel (owner's direction for 2.0).** Define ONE haptic vocabulary in the design system
 >    (P1 owns `Haptics.swift`): named patterns — select (light tick), settle (soft), commit (rigid), success,
 >    warning, failure/penalty (a heavier two-beat), level-settle (a slow three-step rise), and a subtle

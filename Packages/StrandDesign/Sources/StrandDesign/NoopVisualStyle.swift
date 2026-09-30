@@ -7,8 +7,8 @@ import SwiftUI
 // text with no call-site edit. No name was removed or renamed. New and rewritten code uses `TelosColor` /
 // `TelosSpace` / `TelosRadius` / `TelosStroke` / `TelosOpacity` / `TelosElevation` directly.
 //
-// V2 cards are FAUX GLASS (docs/DESIGN_V2.md "VISUAL DIRECTION"): a translucent fill, a 1 pt luminous
-// gradient hairline and a faint top glow — no material, no blur, no shadow on anything in a scroll view.
+// V2 cards are FAUX GLASS (docs/DESIGN_V2.md "VISUAL DIRECTION"): a translucent fill and a 1 pt NEUTRAL
+// hairline — no top glow (decision 19), no material, no blur, no shadow on anything in a scroll view.
 // The old gradient/rim tokens stay compiled and resolve to that look.
 
 public enum NoopVisualStyle {
@@ -63,8 +63,8 @@ public enum NoopVisualStyle {
     /// Border opacity for a hue-tinted chip surface. 0.30 → 0.32.
     public static let chipBorderOpacity: Double = TelosOpacity.border
 
-    /// The rim every old call site strokes = the V2 luminous glass hairline (bright top-leading → dim
-    /// bottom-trailing). Stored once rather than rebuilt per access.
+    /// The rim every old call site strokes = the V2 neutral glass hairline (decision 19: no luminous
+    /// green-white edge). Stored once rather than rebuilt per access.
     public static let rimGradient = TelosColor.glassEdge
 }
 
@@ -150,22 +150,22 @@ public extension View {
 }
 
 /// The shared card/panel surface, V2 — "futuristic transparent glass" (VISUAL DIRECTION): a translucent
-/// `glassFill` (~8 % white over the dark ground), a 1 pt LUMINOUS gradient hairline (`glassEdge`, bright
-/// top-leading → dim bottom-trailing) and a faint inner glow along the top edge. It is FAUX glass: no
-/// material, no blur, no shadow — three static shape fills, so a scroll view full of cards costs nothing
-/// per frame. `elevated: true` (popovers, floating chrome — never a card in a scroll view) adds the one
+/// `glassFill` (~8 % white over the dark ground) and a 1 pt NEUTRAL hairline (`glassEdge`). Decision 19
+/// removed the coloured top-edge glow: a card carries data, not light. It is FAUX glass: no material, no
+/// blur, no shadow — two static shape fills, so a scroll view full of cards costs nothing per frame.
+/// `elevated: true` (popovers, floating chrome — never a card in a scroll view) adds the one
 /// `TelosElevation.raised` shadow.
 ///
-/// `tint` colours the top inner glow (metric identity as light, not a coloured tile). `surfaceOpacity`
-/// multiplies the FILL (the card-transparency setting); the luminous edge always stays drawn.
+/// `tint` is accepted for source compatibility and no longer paints anything (it used to colour the top
+/// glow). `surfaceOpacity` multiplies the FILL (the card-transparency setting); the edge always stays drawn.
 public struct NoopPanelSurface: View {
     public var tint: Color?
     public var cornerRadius: CGFloat
     public var elevated: Bool
     public var surfaceOpacity: Double
 
-    /// Opacity of a tint's top glow.
-    static let tintGlowOpacity: Double = 0.12
+    /// Opacity of a tint's top glow — 0: the top glow is retired (decision 19).
+    static let tintGlowOpacity: Double = 0
 
     public init(
         tint: Color? = nil,
@@ -187,21 +187,11 @@ public struct NoopPanelSurface: View {
         }
     }
 
-    /// The top inner glow: the house green whisper, or the tint's.
-    private var topGlow: LinearGradient {
-        if let tint {
-            return LinearGradient(colors: [tint.opacity(NoopPanelSurface.tintGlowOpacity), Color.clear],
-                                  startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.35))
-        }
-        return TelosColor.glassTopGlow
-    }
-
     private var core: some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         let fillOpacity: Double = min(max(surfaceOpacity, 0), 1)
         return shape
             .fill(TelosColor.glassFill.opacity(fillOpacity))
-            .overlay(shape.fill(topGlow))
             .overlay(shape.strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line))
     }
 }

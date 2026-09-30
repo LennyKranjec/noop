@@ -19,10 +19,13 @@ struct StartWorkoutSheet: View {
     private let heading: String
     private let explainer: String
     private let actionVerb: String
+    /// Whether the Telos Lift card heads the list (live starts only — the merge-name prompt passes false).
+    private let showsLift: Bool
 
-    init(title: String? = nil, subtitle: String? = nil, actionVerb: String? = nil,
+    init(title: String? = nil, subtitle: String? = nil, actionVerb: String? = nil, showsLift: Bool = true,
          onStart: @escaping (_ sport: String) -> Void) {
         self.onStart = onStart
+        self.showsLift = showsLift
         self.heading = title ?? String(localized: "Choose a workout")
         self.explainer = subtitle
             ?? String(localized: "Pick an activity to begin recording heart rate, effort, peak, and average.")
@@ -31,7 +34,7 @@ struct StartWorkoutSheet: View {
 
     var body: some View {
         WorkoutSelectionScreen(heading: heading, explainer: explainer, actionVerb: actionVerb,
-                               onStart: onStart)
+                               onStart: onStart, showsLift: showsLift)
     }
 }
 
@@ -42,6 +45,7 @@ struct WorkoutSelectionScreen: View {
     let explainer: String
     let actionVerb: String
     let onStart: (_ sport: String) -> Void
+    var showsLift: Bool = true
 
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
@@ -59,6 +63,13 @@ struct WorkoutSelectionScreen: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: NoopMetrics.space5) {
                     headerCopy
+                    #if os(iOS)
+                    // TELOS LIFT (decision 16): the strength logger's own door, above the catalogue — today's day
+                    // of the plan, the other days as chips, or import / freehand when there is no plan.
+                    if showsLift && trimmedQuery.isEmpty {
+                        TelosLiftStartCard(onStart: startLift)
+                    }
+                    #endif
                     WorkoutSearchField(query: $query, isFocused: $searchFocused)
                         .padding(.top, NoopMetrics.space1)
 
@@ -159,6 +170,19 @@ struct WorkoutSelectionScreen: View {
         .padding(.vertical, NoopMetrics.space8)
         .accessibilityElement(children: .combine)
     }
+
+    #if os(iOS)
+    /// Start the Strength workout with `preference` (a day of the plan, or freehand) waiting for the logger.
+    /// A workout already running is never replaced (`startWorkout` refuses), so the preference is only left
+    /// when this tap really starts one — and it expires on its own either way.
+    @MainActor
+    private func startLift(_ preference: LiftSessionRecorder.StartPreference) {
+        if AppModel.shared?.activeWorkout == nil {
+            LiftSessionRecorder.shared.preferStart(preference)
+        }
+        select(LiftSessionRecorder.liftStartSport)
+    }
+    #endif
 
     private func select(_ name: String) {
         searchFocused = false

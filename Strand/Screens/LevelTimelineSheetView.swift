@@ -67,7 +67,10 @@ struct LevelTimelineSheetView: View {
     @ObservedObject var model: LevelBarModel
     let repo: Repository
 
-    @EnvironmentObject private var coach: AICoachEngine
+    /// NOT observed: the coach publishes on every streamed chunk, and this view only calls it from
+    /// actions. Observing it re-rendered the whole view per chunk while any generation ran.
+    @Environment(\.coachEngine) private var coachRef
+    private var coach: AICoachEngine { requireCoach(coachRef) }
     /// The app model, NOT observed (it publishes 1–3×/s while streaming): only the projection refresh needs it.
     @Environment(\.appModelRef) private var appModelRef
     /// The look-ahead projections, for the "in 8 weeks" line. Publishes only when a refresh lands.

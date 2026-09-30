@@ -2,10 +2,10 @@ import SwiftUI
 
 // MARK: - BevelGauge — the open 240° gauge primitive, Telos 2.0 luminous look
 //
-// TELOS 2.0 (INS): same geometry and public API; the material is now the bioluminescent instrument —
-// a thin track in the gauge's own hue, ONE faint halo stroke under a thinner crisp ramp arc (no blur,
-// no shadow, no frosted disc), a luminous tip dot, and light numerals. The arc still animates only via
-// the caller's `animatedFraction` (callers settle it on a value change). Idle cost: zero.
+// TELOS 2.0 (INS), restrained per decision 19: same geometry and public API; a thin track in the
+// gauge's own hue and ONE crisp ramp arc — no halo stroke, no glowing tip, no tinted inner disc, no blur,
+// no shadow — and light numerals. The arc still animates only via the caller's `animatedFraction`
+// (callers settle it on a value change). Idle cost: zero.
 //
 // Original notes (geometry unchanged):
 // The shared instrument behind RecoveryRing and StrainGauge: a 240° open gauge with
@@ -78,7 +78,7 @@ public struct BevelGauge: View {
     private var endAngle: Angle { .degrees(150 + arcSpanDegrees) }
 
     private var gradient: Gradient { Gradient(stops: stops) }
-    /// The luminous core arc is thinner than the footprint `lineWidth` (the halo fills the rest).
+    /// The crisp arc is thinner than the footprint `lineWidth`.
     private var coreWidth: CGFloat { max(2, lineWidth * 0.55) }
 
     public var body: some View {
@@ -99,71 +99,28 @@ public struct BevelGauge: View {
         .frame(width: diameter, height: diameter)
     }
 
-    /// The non-animating backdrop: frosted disc behind the arc + the faint full-span track "well".
+    /// The non-animating backdrop: the faint full-span track "well" (no tinted inner disc — decision 19).
     private var staticBackdrop: some View {
-        ZStack {
-            innerDisc
-            // Thin full-span track in the gauge's own hue.
-            arcShape(to: 1.0)
-                .stroke(tipColor.opacity(TelosOpacity.fill),
-                        style: StrokeStyle(lineWidth: coreWidth, lineCap: .round))
-        }
+        // Thin full-span track in the gauge's own hue.
+        arcShape(to: 1.0)
+            .stroke(tipColor.opacity(TelosOpacity.fill),
+                    style: StrokeStyle(lineWidth: coreWidth, lineCap: .round))
     }
 
-    /// The live layer: the filled gradient arc + its clean end-cap dot (both driven by animatedFraction).
+    /// The live layer: ONE crisp ramp arc driven by `animatedFraction` — no halo, no glowing tip.
     private var animatedArc: some View {
-        ZStack {
-            // Halo: one wider faint stroke of the same arc (the glow, no blur).
-            arcShape(to: animatedFraction)
-                .stroke(tipColor.opacity(0.20),
-                        style: StrokeStyle(lineWidth: lineWidth * 1.3, lineCap: .round))
-            // The luminous ramp arc.
-            arcShape(to: animatedFraction)
-                .stroke(
-                    AngularGradient(gradient: gradient, center: .center,
-                                    startAngle: startAngle, endAngle: endAngle),
-                    style: StrokeStyle(lineWidth: coreWidth, lineCap: .round)
-                )
-
-            // Clean end-cap dot at the arc tip.
-            if animatedFraction > 0.001 { endCap }
-        }
-    }
-
-    // A faint pre-composited glow in the gauge's hue behind the read-out (no blur, no frosted rim).
-    private var innerDisc: some View {
-        Circle()
-            .fill(
-                RadialGradient(
-                    colors: [tipColor.opacity(0.10), tipColor.opacity(0.03), Color.clear],
-                    center: .center, startRadius: 0, endRadius: diameter * 0.42
-                )
+        arcShape(to: animatedFraction)
+            .stroke(
+                AngularGradient(gradient: gradient, center: .center,
+                                startAngle: startAngle, endAngle: endAngle),
+                style: StrokeStyle(lineWidth: coreWidth, lineCap: .round)
             )
-            .padding(lineWidth * 1.4)
     }
 
     // Design Reset (WHOOP): NO outer bloom. Fill-contrast carries the arc edge, so the ring reads as a
     // clean, crisp Material instrument rather than a skeuomorphic glow. `bloomActive` stays in the
-    // signature (callers still pass it) but no longer renders. The track + disc now live in
-    // `staticBackdrop` and the filled arc + tip in `animatedArc` (see `body`).
-
-    private var endCap: some View {
-        GeometryReader { geo in
-            let radius = (min(geo.size.width, geo.size.height) - lineWidth) / 2
-            let center = CGPoint(x: geo.size.width / 2, y: geo.size.height / 2)
-            let tipAngle = startAngle.radians + (arcSpanDegrees * .pi / 180) * animatedFraction
-            let pt = CGPoint(x: center.x + radius * cos(tipAngle),
-                             y: center.y + radius * sin(tipAngle))
-            // Luminous tip: a faint wide dot in the hue under a small bright core — no shadow, no blur.
-            ZStack {
-                Circle().fill(tipColor.opacity(0.30))
-                    .frame(width: lineWidth * 1.3, height: lineWidth * 1.3)
-                Circle().fill(TelosColor.textPrimary.opacity(0.92))
-                    .frame(width: coreWidth * 0.7, height: coreWidth * 0.7)
-            }
-            .position(pt)
-        }
-    }
+    // signature (callers still pass it) but no longer renders. The track lives in `staticBackdrop` and
+    // the filled arc in `animatedArc` (see `body`); the glowing end-cap tip is gone (decision 19).
 
     private var centerLabel: some View {
         VStack(spacing: 2) {

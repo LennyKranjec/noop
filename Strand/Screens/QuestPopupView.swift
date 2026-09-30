@@ -82,7 +82,10 @@ struct QuestPopupView: View {
     @State private var hapticsOn = SystemHaptics.enabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    @EnvironmentObject private var coach: AICoachEngine
+    /// NOT observed: the coach publishes on every streamed chunk, and this view only calls it from
+    /// actions. Observing it re-rendered the whole view per chunk while any generation ran.
+    @Environment(\.coachEngine) private var coachRef
+    private var coach: AICoachEngine { requireCoach(coachRef) }
     @EnvironmentObject private var router: NavRouter
 
     private var full: String { quest.taunt }
@@ -144,6 +147,7 @@ struct QuestPopupView: View {
             Button {
                 TelosHaptics.play(.select)
                 coach.surfaceQuest(title: quest.title, target: quest.target, taunt: quest.taunt)
+                QuestOfferParking.shared.parkedOfferId = quest.id
                 router.openCoach()
             } label: {
                 Label("Ask about this", systemImage: "sparkles")
@@ -276,8 +280,19 @@ private struct TypedLine: View {
 // One place that decides whether a pop-up is on screen, so the shell can present it over every tab
 // without each tab knowing about quests.
 
+/// An offer the wearer is ASKING THE COACH about. The quest stays offered (asking is not deciding), but its
+/// card must not sit over the chat that answers the question — the owner could not reach the chat behind it.
+/// It is parked while the Coach is on screen and comes back the moment the wearer leaves the Coach.
+@MainActor
+final class QuestOfferParking: ObservableObject {
+    static let shared = QuestOfferParking()
+    @Published var parkedOfferId: String?
+    @Published var coachVisible = false
+}
+
 struct QuestHostModifier: ViewModifier {
     @ObservedObject private var store = QuestStore.shared
+    @ObservedObject private var parking = QuestOfferParking.shared
     @Environment(\.scenePhase) private var scenePhase
 
     func body(content: Content) -> some View {
@@ -292,7 +307,8 @@ struct QuestHostModifier: ViewModifier {
                 QuestFailedPopupView(failure: failure) { store.dismissFailure() }
                     .id("failed-" + failure.id)
                     .transition(.opacity)
-            } else if let quest = store.offered {
+            } else if let quest = store.offered,
+                      !(parking.coachVisible && parking.parkedOfferId == quest.id) {
                 QuestPopupView(
                     quest: quest,
                     onAccept: { store.setState(id: quest.id, state: .active) },

@@ -107,13 +107,15 @@ private func liquidSkyRender(_ base: GraphicsContext, _ size: CGSize, hour: Doub
                 .init(color: S.mid, location: 0.5),
                 .init(color: S.hor, location: 0.9)]),
                                    startPoint: CGPoint(x: 0, y: 0), endPoint: CGPoint(x: 0, y: h)))
-    // The faint green-teal vignette glow at the top (pre-composited radial — no blur).
-    let glowCentre = CGPoint(x: w * 0.5, y: h * 0.14)
-    let glowRadius = max(w, h) * 0.75
+    // A faint NEUTRAL lift at the top (pre-composited radial — no blur). It was a green-teal glow;
+    // decision 19 (a clinical look, no glow or halo) keeps the depth and drops the hue.
+    let liftCentre = CGPoint(x: w * 0.5, y: h * 0.14)
+    let liftRadius = max(w, h) * 0.75
+    let liftInk: Color = light ? .black : .white
     ctx.fill(Path(CGRect(x: 0, y: 0, width: w, height: h)),
-             with: .radialGradient(Gradient(colors: [TelosColor.glow.opacity(light ? 0.05 : 0.09),
-                                                     TelosColor.glow.opacity(light ? 0.015 : 0.03), .clear]),
-                                   center: glowCentre, startRadius: 0, endRadius: glowRadius))
+             with: .radialGradient(Gradient(colors: [liftInk.opacity(light ? 0.02 : 0.035),
+                                                     liftInk.opacity(light ? 0.006 : 0.012), .clear]),
+                                   center: liftCentre, startRadius: 0, endRadius: liftRadius))
     // Dusk / dawn: a whisper of warmth low down.
     if S.warm > 0.01 {
         ctx.fill(Path(CGRect(x: 0, y: h * 0.55, width: w, height: h * 0.45)),
@@ -121,23 +123,15 @@ private func liquidSkyRender(_ base: GraphicsContext, _ size: CGSize, hour: Doub
                                                          TelosColor.amber.opacity(S.warm * (light ? 0.04 : 0.06))]),
                                        startPoint: CGPoint(x: 0, y: h * 0.55), endPoint: CGPoint(x: 0, y: h)))
     }
-    // The dotted depth field (dark only): faint always, brighter stars at night. Two paths, two fills.
+    // The dotted depth field (dark only): one faint, even texture. No brighter night "stars" any more —
+    // decision 19 (no sparkle); the dots are depth, not decoration. One path, one fill.
     if !light {
         var field = Path()
-        var stars = Path()
         for d in liquidSkyDots {
             let sz = 0.5 + d.z * 1.1
-            let rect = CGRect(x: d.x * w, y: d.y * h, width: sz, height: sz)
-            if d.star && S.stars > 0.05 {
-                stars.addEllipse(in: rect.insetBy(dx: -0.3, dy: -0.3))
-            } else {
-                field.addEllipse(in: rect)
-            }
+            field.addEllipse(in: CGRect(x: d.x * w, y: d.y * h, width: sz, height: sz))
         }
         ctx.fill(field, with: .color(liquidSkyDotInk.opacity(0.12)))
-        if S.stars > 0.05 {
-            ctx.fill(stars, with: .color(liquidSkyDotInk.opacity(min(0.35, 0.10 + 0.25 * S.stars))))
-        }
     }
     // Settle into the page canvas (the token, resolved for the current scheme) — no hard seam.
     ctx.fill(Path(CGRect(x: 0, y: h * 0.45, width: w, height: h * 0.55)),

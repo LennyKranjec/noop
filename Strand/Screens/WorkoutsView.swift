@@ -317,7 +317,7 @@ struct WorkoutsView: View {
         .workoutSelectionCover(item: $mergeSportPrompt) { target in
             StartWorkoutSheet(title: String(localized: "Name the merged session"),
                               subtitle: String(localized: "These sessions have no sport label yet. Pick one for the merged session."),
-                              actionVerb: String(localized: "Merge")) { name in
+                              actionVerb: String(localized: "Merge"), showsLift: false) { name in
                 performMerge(target.rows, sport: name)
             }
         }

@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import StrandDesign
 import StrandAnalytics
 import WhoopStore
@@ -36,7 +37,13 @@ private let meditationSport = "Meditation"
 
 struct MeditationCardView: View {
     @EnvironmentObject var repo: Repository
-    @EnvironmentObject var model: AppModel
+    /// NOT observed: AppModel publishes `bpm` ~1 Hz while a strap streams, and this card (the Focus tab's
+    /// lead: two Canvases, the calendar grid, the bar field) needs ONE bit of it — whether a session is
+    /// running — kept in `running`, fed by a de-duplicated publisher. Observing the model re-rendered the
+    /// whole card every second.
+    @Environment(\.appModelRef) private var appModelRef
+    private var model: AppModel { requireAppModel(appModelRef) }
+    @State private var running = false
 
     @State private var showLiveWorkout = false
     @State private var practice: MeditationPractice?
@@ -72,6 +79,10 @@ struct MeditationCardView: View {
             }
         }
         .task(id: repo.refreshSeq) { await reload() }
+        // Replays the current value on subscribe, which seeds `running` on appear.
+        .onReceive(runningPublisher) { now in
+            if running != now { running = now }
+        }
         .sheet(isPresented: $showLiveWorkout) {
             LiveWorkoutView(onClose: {
                 showLiveWorkout = false
@@ -80,6 +91,12 @@ struct MeditationCardView: View {
             .environmentObject(model)
             .environmentObject(model.live)
         }
+    }
+
+    /// Whether a workout (a meditation is one) is running, as a de-duplicated stream.
+    private var runningPublisher: AnyPublisher<Bool, Never> {
+        guard let model = resolvedAppModel(appModelRef) else { return Empty().eraseToAnyPublisher() }
+        return model.$activeWorkout.map { $0 != nil }.removeDuplicates().eraseToAnyPublisher()
     }
 
     // MARK: - 1 · Header: the 28-day ring, the total, the play button
@@ -136,7 +153,6 @@ struct MeditationCardView: View {
     /// Starts a Meditation activity and opens the in-exercise screen — or, when a session is already
     /// running, just reopens it rather than starting a second one.
     private var playButton: some View {
-        let running = model.activeWorkout != nil
         return Button {
             TelosHaptics.play(.commit)
             if !running { model.startWorkout(sport: meditationSport) }

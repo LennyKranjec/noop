@@ -35,6 +35,48 @@ enum TabRoute: Hashable {
     case health
     case hydration
     case coupled
+    /// The Habits hub (Liquid Today's entry beside the quest strip). A route so the push rides the path.
+    case habits
+    /// Compare and Look ahead, from Biometrics' "Go deeper" list.
+    case compare
+    case lookAhead
+}
+
+// MARK: - Pushing a route onto the enclosing tab's path
+//
+// THE REASON THIS EXISTS: a tap that is not a `NavigationLink` (a ring, a tile's `onOpen`, a mission's
+// `navigate`) used to push through `navigationDestination(isPresented:)`, and an `isPresented` push is
+// NOT on the tab's `NavigationPath`. Re-tapping Home from the Sleep screen a ring opened therefore found
+// an EMPTY path, took the "already at root" branch (scroll to top) and left the wearer on Sleep. The iOS
+// tab shell injects this action on every tab stack that registers `tabRouteDestinations()`, so those taps
+// append a VALUE to the path instead and the reselect pops them like any other push. Nil everywhere else
+// (macOS, sheets, previews): callers then keep their `isPresented` fallback.
+
+/// Appends a `TabRoute` to the enclosing tab's `NavigationPath`.
+///
+/// EQUATABLE ON THE TAB, not on the closure: the shell rebuilds this value on every one of its body
+/// passes, and a non-equatable environment value would count as changed each time and re-evaluate every
+/// reader (Today, Biometrics) along with the shell. The closure writes through `@State` storage, so an
+/// older copy of it appends to the same, current path.
+struct TabRoutePushAction: Equatable {
+    let tab: Int
+    let push: (TabRoute) -> Void
+
+    func callAsFunction(_ route: TabRoute) { push(route) }
+
+    static func == (lhs: TabRoutePushAction, rhs: TabRoutePushAction) -> Bool { lhs.tab == rhs.tab }
+}
+
+private struct TabRoutePushKey: EnvironmentKey {
+    static let defaultValue: TabRoutePushAction? = nil
+}
+
+extension EnvironmentValues {
+    /// The enclosing tab's path push, or nil outside the iOS tab shell's stacks.
+    var tabRoutePush: TabRoutePushAction? {
+        get { self[TabRoutePushKey.self] }
+        set { self[TabRoutePushKey.self] = newValue }
+    }
 }
 
 extension View {
@@ -85,6 +127,11 @@ extension View {
         case .health: HealthView()
         case .hydration: HydrationView()
         case .coupled: CoupledView()
+        // Reads `AppModel` as an environment object; every host that pushes this route (the iOS tab
+        // stacks) sits under the app root's injection.
+        case .habits: HabitsHubView()
+        case .compare: CompareView()
+        case .lookAhead: LookAheadDestination()
         }
     }
 }

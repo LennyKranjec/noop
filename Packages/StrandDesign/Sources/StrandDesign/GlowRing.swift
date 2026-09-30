@@ -3,8 +3,9 @@ import SwiftUI
 // MARK: - GlowRing — the thin luminous score ring (Telos 2.0, docs/DESIGN_V2.md §5.6 "Ring")
 //
 // The legacy initialiser (fraction / value / format / color / diameter / lineWidth) now draws the
-// Telos luminous look: a track in the metric hue at 16 %, ONE faint halo stroke under a crisp core arc
-// (no blur, no shadow), a luminous tip dot, and a light centre numeral. Watch-safe (plain shapes).
+// Telos instrument look (decision 19 — clinical restraint): a track in the metric hue at 16 %, ONE crisp
+// thin arc in the metric hue (no halo, no glowing tip, no blur, no shadow) and a light centre numeral.
+// Watch-safe (plain shapes). The type keeps its legacy name for source compatibility.
 //
 // `fraction` is still clamped to 0…1 here, because every existing caller passes a bounded 0–100 score
 // already divided by its maximum. An UNBOUNDED value (the Level) must use `TelosRing`, which draws the
@@ -24,7 +25,7 @@ public struct GlowRing: View {
     /// The arc colour (the metric identity hue).
     public var color: Color
     public var diameter: CGFloat
-    /// The ring's footprint width. The luminous core arc is drawn thinner inside it (halo + core).
+    /// The ring's footprint width. The crisp arc is drawn thinner inside it.
     public var lineWidth: CGFloat
 
     public init(fraction: Double, value: Double, format: @escaping (Double) -> String,
@@ -57,15 +58,9 @@ public struct GlowRing: View {
         ZStack {
             Circle()
                 .stroke(color.opacity(TelosOpacity.fill), lineWidth: coreWidth)
-            // Halo: one wider faint stroke of the same arc — the glow without a blur.
+            // One crisp arc in the metric hue — no halo stroke, no glowing tip (decision 19).
             GlowRingArc(fraction: clamped)
-                .stroke(color.opacity(0.22), style: StrokeStyle(lineWidth: lineWidth * 1.5, lineCap: .round))
-            GlowRingArc(fraction: clamped)
-                .stroke(AngularGradient(colors: [color.opacity(0.6), color], center: .center,
-                                        startAngle: .degrees(-90), endAngle: .degrees(270)),
-                        style: StrokeStyle(lineWidth: coreWidth, lineCap: .round))
-            GlowRingTipDot(fraction: clamped, diameter: coreWidth * 0.8)
-                .fill(TelosColor.textPrimary.opacity(0.9))
+                .stroke(color, style: StrokeStyle(lineWidth: coreWidth, lineCap: .round))
 
             Text(format(value))
                 .font(Self.centerFont(diameter: diameter))
@@ -99,22 +94,3 @@ private struct GlowRingArc: Shape {
     }
 }
 
-/// The luminous tip at the arc's end.
-private struct GlowRingTipDot: Shape {
-    var fraction: Double
-    let diameter: CGFloat
-    var animatableData: Double {
-        get { fraction }
-        set { fraction = newValue }
-    }
-
-    func path(in rect: CGRect) -> Path {
-        var p = Path()
-        guard fraction > 0.004 else { return p }
-        let r = min(rect.width, rect.height) / 2
-        let a = (-90 + 360 * min(max(fraction, 0), 1)) * Double.pi / 180
-        let x = rect.midX + r * CGFloat(cos(a)), y = rect.midY + r * CGFloat(sin(a))
-        p.addEllipse(in: CGRect(x: x - diameter / 2, y: y - diameter / 2, width: diameter, height: diameter))
-        return p
-    }
-}

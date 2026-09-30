@@ -9,7 +9,7 @@ import SwiftUI
 // Lift finish screen. Routine browsing stays in cards.
 //
 // THIS FILE is the design-system half: the value type (`TelosMoment`), the tokens (`TelosMomentStyle`),
-// the one reusable layout (`TelosMomentView`) and the entrance effects (`TelosMomentBurst`). The
+// the one reusable layout (`TelosMomentView`) and the (retired, no-op) `TelosMomentBurst`. The
 // PRESENTER is not here — FRAME owns a single `TelosMomentPresenter` hosted once at the app root with a
 // priority queue (one at a time, never stacked, deduped per `id`, suppressed while a workout / the
 // morning flow / another sheet is up). No screen attaches its own `.fullScreenCover` for a moment.
@@ -18,16 +18,16 @@ import SwiftUI
 // Expanded `diagnostic` register) · optional detail · the EXACT figures (label + `numeralL` value +
 // unit; costs in `critical`; a figure may COUNT from its old value to its new one once, on entrance) ·
 // an optional accessory slot (gear chips, the Lift finish screen's exercise list) · one primary action.
-// Behind it, a full-bleed backdrop on the bioluminescent ground whose LIQUID FILL encodes the moment's
-// number, a whisper of the particle field, and the entrance effect.
+// Behind it, a plain full-bleed backdrop (the register's ground) whose LIQUID FILL encodes the moment's
+// number. No particles, no tone wash (only a penalty keeps the flat `criticalWash` — a state), no glow.
 //
-// ENTRANCES (decision 17 — vivid, short, then REST; nothing loops):
-//   • `.standard`     content `screen` fade + 12 pt rise; the fill rises with `flow`.     ≈ 1.2 s
-//   • `.celebration`  + a burst of luminous particles out from the centre, fading.         ≤ 1.4 s
-//   • `.penalty`      + a critical flash that ebbs and red embers falling, fading.         ≤ 1.4 s
-//   Reduce Motion / Low Power / "Reduce motion in NOOP": a cross-fade only — no burst, no rise, the
-//   fill posed at its value, figures shown at their final value. The moment's phone haptic plays ONCE on
-//   entrance (keyed on the id); the strap cue (`strapCue`) is requested by the presenter, not here.
+// DECISION 19 (owner, 2026-09-30 — clinical restraint, overrides decision 17's "vivid"): a moment is a
+// calm, factual card — what happened, the numbers, one line of meaning, the buttons. EVERY entrance
+// (`.standard`, `.celebration`, `.penalty` — the enum is kept for source compatibility and the haptic /
+// strap mapping) is the same: content `screen` fade + 12 pt rise, the fill rises with `flow`. ≈ 1.2 s,
+// then rest. No burst, no confetti, no embers, no flash. Reduce Motion: a cross-fade only, the fill posed
+// at its value, figures shown at their final value. The moment's phone haptic plays ONCE on entrance
+// (keyed on the id); the strap cue (`strapCue`) is requested by the presenter, not here.
 //
 // Dismissal never traps: the close control (one tap), a swipe down (the wearer's own drag followed 1:1
 // with a gentle `release` snap-back), and the VoiceOver escape gesture all call `onDismiss`.
@@ -312,14 +312,24 @@ public enum TelosMomentStyle {
     public static let dismissPredictedDistance: CGFloat = 220
     /// Standard entrance budget (content + fill), after which nothing moves.
     public static let settleBudget: Double = TelosMotion.settleBudget
-    /// Celebration / penalty burst length — the longest a moment animates (decision 17: ≤ 1.5 s).
+    /// The longest a moment may animate (decision 17: ≤ 1.5 s). The burst itself is retired
+    /// (decision 19); the budget stays as the ceiling for any entrance.
     public static let burstDuration: Double = 1.4
-    /// Particles in a burst (one Canvas).
-    public static let celebrationParticles: Int = 72
-    public static let penaltyParticles: Int = 48
-    /// The penalty flash: `critical` at this opacity ebbing to 0 over `penaltyFlashDuration`.
-    public static let penaltyFlashOpacity: Double = 0.18
+    /// RETIRED with the burst (decision 19) — nothing draws particles. Kept for source compatibility.
+    public static let celebrationParticles: Int = 0
+    public static let penaltyParticles: Int = 0
+    /// RETIRED (decision 19): no full-screen critical flash on a penalty. Kept for source compatibility.
+    public static let penaltyFlashOpacity: Double = 0
     public static let penaltyFlashDuration: Double = 0.6
+
+    /// The liquid's colour for a tone: the data hue, except `neutral` and `gold`, whose liquid is a
+    /// neutral grey (decision 19: no decorative green, and gold only ever as a small flat text mark).
+    public static func liquidColor(_ tone: TelosMoment.Tone) -> Color {
+        switch tone {
+        case .neutral, .gold: return TelosColor.textTertiary
+        default:              return tone.color
+        }
+    }
     /// A counting figure's run (the `countUp` budget).
     public static let countDuration: Double = TelosMotion.countUpMaxDuration
 
@@ -349,9 +359,9 @@ public enum TelosMomentStyle {
 
 // MARK: - Backdrop
 
-/// Full-bleed backdrop: register base, the ground's depth, a whisper of the tone, a still particle field
-/// and the liquid rising to `shownFraction` (animated by the caller). `targetFraction` places the 100 %
-/// hairline.
+/// Full-bleed backdrop: register base, the ground's depth, the flat `criticalWash` for a critical tone
+/// only, and the liquid rising to `shownFraction` (animated by the caller). `targetFraction` places the
+/// 100 % hairline. No particles, no decorative tone wash (decision 19).
 struct TelosMomentBackdrop: View {
     let tone: TelosMoment.Tone
     let register: TelosMoment.Register
@@ -367,21 +377,18 @@ struct TelosMomentBackdrop: View {
                     TelosColor.groundGradient
                 }
                 if tone == .critical {
+                    // A state (a penalty), not decoration: the flat critical wash.
                     TelosColor.criticalWash
-                } else {
-                    tone.color.opacity(TelosMomentStyle.washOpacity)
                 }
-                // Cost: a still dot field (animated: false) — one Canvas draw, no clock.
-                TelosParticleField(color: tone.color, count: 90, seed: 0x3E7E, animated: false)
-                    .opacity(0.5)
                 // No value → no liquid (never a fill fed from a default).
                 if let fraction = shownFraction {
+                    let liquid = TelosMomentStyle.liquidColor(tone)
                     Rectangle()
-                        .fill(tone.color.opacity(TelosMomentStyle.liquidOpacity))
+                        .fill(liquid.opacity(TelosMomentStyle.liquidOpacity))
                         .frame(height: height * TelosMomentStyle.levels(fraction: fraction).level)
                         .overlay(alignment: .top) {
                             Rectangle()
-                                .fill(tone.color.opacity(TelosMomentStyle.meniscusOpacity))
+                                .fill(liquid.opacity(TelosMomentStyle.meniscusOpacity))
                                 .frame(height: TelosStroke.line)
                         }
                 }
@@ -406,93 +413,27 @@ struct TelosMomentBackdrop: View {
     }
 }
 
-// MARK: - Entrance burst (celebration / penalty)
+// MARK: - Entrance burst (RETIRED — decision 19)
 
-/// The short entrance effect: luminous particles bursting out (celebration) or red embers falling
-/// (penalty), drawn in ONE Canvas.
-///
-/// Cost (§2.1 rule 8): a ≤ 30 fps clock for `TelosMomentStyle.burstDuration` (1.4 s) from appear, then
-/// `finished` pauses it for good — the view then draws nothing. It never starts when
-/// `NoopMotionState.poseStill` is set (Reduce Motion / Low Power / "Reduce motion in NOOP") or while a
-/// sheet covers it (`noopBackgroundCovered`).
+/// RETIRED (decision 19: no particle bursts, confetti or embers). Formerly luminous particles bursting
+/// out (celebration) or red embers falling (penalty). It now draws NOTHING — a clear, hit-test-transparent
+/// view — and runs no clock. The type, `Style` and initialiser are kept so call sites stay
+/// source-compatible; new code should simply not use it.
 public struct TelosMomentBurst: View {
     public enum Style: Sendable {
         case celebration
         case penalty
     }
 
-    private let style: Style
-    private let color: Color
-    private let particles: [TelosParticle]
+    /// Whether this retired effect draws anything. Always false (decision 19); pinned by a test.
+    public static let drawsAnything = false
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.noopBackgroundCovered) private var covered
-    @ObservedObject private var motion = NoopMotionState.shared
-    @State private var start: Date? = nil
-    @State private var finished = false
-
-    public init(style: Style, color: Color) {
-        self.style = style
-        self.color = color
-        let count = style == .celebration ? TelosMomentStyle.celebrationParticles : TelosMomentStyle.penaltyParticles
-        self.particles = TelosParticleField.makeParticles(count: count, seed: style == .celebration ? 0xB1057 : 0xE3B35,
-                                                          sizes: 1.5...4.0)
-    }
-
-    private var suppressed: Bool { motion.poseStill(reduceMotion) || covered }
+    public init(style: Style, color: Color) {}
 
     public var body: some View {
-        Group {
-            if suppressed || finished {
-                Color.clear
-            } else {
-                TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: finished)) { timeline in
-                    let elapsed: Double = start.map { timeline.date.timeIntervalSince($0) } ?? 0
-                    let progress = TelosMomentStyle.burstProgress(elapsed: elapsed)
-                    Canvas(rendersAsynchronously: true) { context, size in
-                        TelosMomentBurst.draw(particles, style: style, progress: progress,
-                                              context: context, size: size, color: color)
-                    }
-                }
-            }
-        }
-        .onAppear {
-            guard start == nil else { return }
-            start = Date()
-        }
-        .task {
-            try? await Task.sleep(nanoseconds: UInt64(TelosMomentStyle.burstDuration * 1_000_000_000))
-            finished = true
-        }
-        .allowsHitTesting(false)
-        .accessibilityHidden(true)
-    }
-
-    static func draw(_ particles: [TelosParticle], style: Style, progress: Double,
-                     context: GraphicsContext, size: CGSize, color: Color) {
-        guard size.width > 0, size.height > 0, progress < 1 else { return }
-        let fade = 1 - progress
-        let origin = CGPoint(x: size.width * 0.5, y: size.height * 0.4)
-        let reach = Double(max(size.width, size.height)) * 0.55
-        for p in particles {
-            let d = CGFloat(p.size)
-            let point: CGPoint
-            switch style {
-            case .celebration:
-                // Out from the centre along the particle's own angle, each at its own speed.
-                let angle = p.phase
-                let distance = reach * progress * (0.35 + p.speed)
-                point = CGPoint(x: origin.x + CGFloat(cos(angle) * distance),
-                                y: origin.y + CGFloat(sin(angle) * distance))
-            case .penalty:
-                // Embers falling from the top edge, drifting a little sideways.
-                let fall = Double(size.height) * progress * (0.4 + p.speed)
-                point = CGPoint(x: CGFloat(p.x) * size.width + CGFloat(sin(p.phase) * 12 * progress),
-                                y: CGFloat(p.y * 0.3) * size.height + CGFloat(fall))
-            }
-            let rect = CGRect(x: point.x - d / 2, y: point.y - d / 2, width: d, height: d)
-            context.fill(Path(ellipseIn: rect), with: .color(color.opacity(p.alpha * fade)))
-        }
+        Color.clear
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 
@@ -573,7 +514,6 @@ public struct TelosMomentView<Accessory: View>: View {
     @Environment(\.colorScheme) private var colorSchemeFallback
     @State private var entered = false
     @State private var shownFraction: Double? = nil
-    @State private var flash: Double = 0
     @State private var dragOffset: CGFloat = 0
 
     public init(moment: TelosMoment,
@@ -587,9 +527,6 @@ public struct TelosMomentView<Accessory: View>: View {
         // The first frame already has the liquid at 0 (not absent), so the entrance GROWS it from the
         // floor instead of inserting it at full height. nil stays nil: no value, no liquid.
         self._shownFraction = State(initialValue: moment.fill == nil ? nil : 0)
-        // A penalty arrives with the critical flash already up, so the first frame shows it and the
-        // entrance only has to let it ebb (setting and animating it in one update would coalesce).
-        self._flash = State(initialValue: moment.entrance == .penalty ? TelosMomentStyle.penaltyFlashOpacity : 0)
     }
 
     public var body: some View {
@@ -598,12 +535,7 @@ public struct TelosMomentView<Accessory: View>: View {
                                 register: moment.register,
                                 shownFraction: shownFraction,
                                 targetFraction: moment.fill)
-            TelosColor.critical
-                .opacity(flash)
-                .ignoresSafeArea()
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-            burst
+            // No burst, no critical flash (decision 19): the card simply fades / rises in.
             content
                 .opacity(entered ? 1 : 0)
                 .offset(y: (entered || reduceMotion) ? 0 : TelosMomentStyle.entranceRise)
@@ -615,17 +547,6 @@ public struct TelosMomentView<Accessory: View>: View {
         .accessibilityElement(children: .contain)
         .accessibilityAddTraits(.isModal)
         .accessibilityAction(.escape) { onDismiss() }
-    }
-
-    @ViewBuilder private var burst: some View {
-        switch moment.entrance {
-        case .standard:
-            EmptyView()
-        case .celebration:
-            TelosMomentBurst(style: .celebration, color: moment.tone.color)
-        case .penalty:
-            TelosMomentBurst(style: .penalty, color: TelosColor.critical)
-        }
     }
 
     private var isDiagnostic: Bool { moment.register == .diagnostic }
@@ -758,18 +679,12 @@ public struct TelosMomentView<Accessory: View>: View {
         if reduceMotion {
             // A cross-fade only.
             shownFraction = moment.fill
-            withAnimation(TelosMotion.fade) {
-                entered = true
-                flash = 0
-            }
+            withAnimation(TelosMotion.fade) { entered = true }
             return
         }
         withAnimation(TelosMotion.screen) { entered = true }
         if let target = moment.fill {
             withAnimation(TelosMotion.flow) { shownFraction = target }
-        }
-        if moment.entrance == .penalty {
-            withAnimation(.easeOut(duration: TelosMomentStyle.penaltyFlashDuration)) { flash = 0 }
         }
     }
 }

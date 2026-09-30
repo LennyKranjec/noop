@@ -287,7 +287,10 @@ struct QuestReviewSheet: View {
     let onClose: () -> Void
 
     @ObservedObject private var store = QuestStore.shared
-    @EnvironmentObject private var coach: AICoachEngine
+    /// NOT observed: the coach publishes on every streamed chunk, and this view only calls it from
+    /// actions. Observing it re-rendered the whole view per chunk while any generation ran.
+    @Environment(\.coachEngine) private var coachRef
+    private var coach: AICoachEngine { requireCoach(coachRef) }
     @EnvironmentObject private var router: NavRouter
 
     /// How much of the taunt has been typed. See `TypewriterText`.

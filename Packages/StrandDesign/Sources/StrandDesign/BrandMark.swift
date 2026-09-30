@@ -2,8 +2,8 @@ import SwiftUI
 
 // MARK: - BrandMark — the Telos logo mark (Telos 2.0 bioluminescent re-skin; API unchanged)
 //
-// TELOS 2.0 (INS): a near-black disc with a faint green depth glow and the luminous glass hairline, a
-// thin luminous open ring (halo + core stroke, no blur) and a glowing core dot. Static; no clock.
+// TELOS 2.0 (INS), restrained per decision 19: a near-black disc with the neutral glass hairline, a thin
+// crisp open ring in the accent (no halo) and a flat core dot (no glow). Static; no clock.
 //
 // Original notes:
 // The app's identity glyph, rendered natively for use as a hero on onboarding,
@@ -61,23 +61,16 @@ public struct BrandMark: View {
 
     // MARK: Ground disc
 
-    /// The near-black bioluminescent ground with a faint green depth glow and the luminous glass
-    /// hairline (bright top-leading). Pre-composited gradients only — no blur, no shadow.
+    /// The near-black ground with the neutral glass hairline. Flat — no depth glow (decision 19).
     private var groundDisc: some View {
         Circle()
             .fill(TelosColor.canvas)
-            .overlay(
-                Circle().fill(
-                    RadialGradient(colors: [TelosColor.glow.opacity(0.18), Color.clear],
-                                   center: .center, startRadius: 0, endRadius: size * 0.5)
-                )
-            )
             .overlay(Circle().strokeBorder(TelosColor.glassEdge, lineWidth: rimWidth))
     }
 
     // MARK: Luminous open ring
 
-    /// The open ~80% arc: one wide faint halo stroke under the crisp core stroke (`telosLuminousStroke`).
+    /// The open ~80% arc: one crisp stroke (`telosLuminousStroke` no longer draws a halo).
     private var luminousRing: some View {
         RecoveryArc(
             startAngle: startAngle,
@@ -91,14 +84,10 @@ public struct BrandMark: View {
 
     // MARK: Core
 
-    /// The "on-device core" — a glowing dot at the exact centre: a faint wide dot under a bright core.
+    /// The "on-device core" — a flat dot at the exact centre (no glow halo, decision 19).
     private var core: some View {
-        ZStack {
-            Circle().fill(TelosColor.mint.opacity(0.28))
-                .frame(width: coreDiameter * 1.9, height: coreDiameter * 1.9)
-            Circle().fill(TelosColor.textPrimary)
-                .frame(width: coreDiameter, height: coreDiameter)
-        }
+        Circle().fill(TelosColor.textPrimary)
+            .frame(width: coreDiameter, height: coreDiameter)
     }
 }
 

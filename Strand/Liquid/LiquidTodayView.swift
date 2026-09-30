@@ -107,7 +107,8 @@ struct LiquidTodayView: View {
     @State private var dailyMission: String?
     /// The three flames. Empty until the first read, which is also the empty state the strip draws.
     @State private var streaks: [Streak] = []
-    /// A ring tap's destination, pushed as a value so a re-tap of the Today tab can pop it.
+    /// A ring / tile tap's destination OUTSIDE the iOS tab shell (macOS, a sheet host). Inside the shell
+    /// `openRoute` appends to the tab's path instead, so a re-tap of Home can pop it.
     @State private var heroTap: TabRoute?
     /// The sky, on the hero's footer. Seeded from the last known reading so the row is not empty for the
     /// duration of a request.
@@ -381,6 +382,16 @@ struct LiquidTodayView: View {
     /// Scroll-to-top on an at-root Today re-tap (#198 follow-up); default 0 so macOS/other contexts stay inert.
     @Environment(\.scrollToTopSignal) private var scrollToTopSignal
     private static let topAnchorID = "liquidToday.top"
+    /// The Home tab's path push (iOS tab shell only). Nil on macOS / in a sheet, where `heroTap` and
+    /// `showHabitsHub` keep pushing through their `isPresented` destinations.
+    @Environment(\.tabRoutePush) private var tabRoutePush
+
+    /// Open a route from a tap that is not a `NavigationLink`. ON THE TAB'S PATH when the shell offers one:
+    /// an `isPresented` push is invisible to the path, so re-tapping Home from the screen it opened found
+    /// the path empty and scrolled instead of returning home.
+    private func openRoute(_ route: TabRoute) {
+        if let tabRoutePush { tabRoutePush(route) } else { heroTap = route }
+    }
 
     var body: some View {
         // HOW OFTEN THIS ACTUALLY RUNS, when the Display & Performance test mode is on — and nothing at
@@ -923,13 +934,13 @@ struct LiquidTodayView: View {
         // one has been written (no empty card).
         case .dailyMission:
             if selectedDayOffset == 0, let mission = dailyMission {
-                StateMissionCard(mission: mission, navigate: { heroTap = $0 })
+                StateMissionCard(mission: mission, navigate: { openRoute($0) })
             }
         // Today's stress, live, directly above the energy bar.
         case .stressEnergy:
             if selectedDayOffset == 0 {
                 TodayStressTileView(dailyFallback: stress,
-                                    onOpen: { heroTap = .stress },
+                                    onOpen: { openRoute(.stress) },
                                     // HEALTH_V2 H1 hand-off: a tap opens the full-screen stress diagnostic
                                     // (BREATHE / IGNORE), which the shell hosts.
                                     onDiagnostic: { LiveStressMonitor.shared.openDiagnostic() },
@@ -939,14 +950,14 @@ struct LiquidTodayView: View {
                     Task { await WidgetSnapshot.publishTodayStress(level, at: at) }
                     #endif
                 })
-                EnergyTileView(balance: energy, onOpen: { heroTap = .stress })
+                EnergyTileView(balance: energy, onOpen: { openRoute(.stress) })
             }
         // The water tile and, beside it, the bedroom tile (it draws nothing until a sensor is set up).
         case .hydrationNutrition:
             if selectedDayOffset == 0 {
                 HydrationTileView(
                     refreshKey: repo.nutritionSeq,
-                    onOpen: { heroTap = .hydration })
+                    onOpen: { openRoute(.hydration) })
                 BedroomClimateTileView(onOpen: { showBedroomSettings = true })
             }
         case .yourCards: yourCardsSection
@@ -963,7 +974,7 @@ struct LiquidTodayView: View {
     private var habitsHubEntry: some View {
         Button {
             TelosHaptics.play(.select)
-            showHabitsHub = true
+            if let tabRoutePush { tabRoutePush(.habits) } else { showHabitsHub = true }
         } label: {
             HStack(spacing: TelosSpace.s) {
                 Image(systemName: "flask")
@@ -1042,9 +1053,9 @@ struct LiquidTodayView: View {
             carriedFrom: heroIsCarried ? heroDateLabel : nil,
             onTapScore: { index in
                 switch index {
-                case 0: heroTap = .sleep
+                case 0: openRoute(.sleep)
                 case 1: guideSection = .charge
-                default: heroTap = .metric(HeroRingMetric.effort)
+                default: openRoute(.metric(HeroRingMetric.effort))
                 }
             }
         )
@@ -1220,10 +1231,14 @@ struct LiquidTodayView: View {
     private var heroDateLabel: String {
         let key = (cloudIsCarried ? cloudDay?.day : nil) ?? selectedDayKey
         guard let date = WhoopCloudApi.localDayDate(key) else { return key }
+        return Self.heroDateFormatter.string(from: date)
+    }
+    /// Built once: a `DateFormatter` is expensive to create, and this label is read in `body`.
+    private static let heroDateFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "d MMM"
-        return f.string(from: date)
-    }
+        return f
+    }()
 
     // MARK: - Heart rate
 
@@ -1724,7 +1739,7 @@ struct LiquidTodayView: View {
                                     StateRecommendationRow(
                                         recommendation: StateActionMapper.recommendation(for: deficit),
                                         tint: deficitTint(deficit.severity),
-                                        navigate: { heroTap = $0 })
+                                        navigate: { openRoute($0) })
                                 }
                             }
                             .padding(.top, 2)
@@ -1770,7 +1785,7 @@ struct LiquidTodayView: View {
                     }
                 }
             }
-            .modifier(StateTilePresentationHost(navigate: { heroTap = $0 }))
+            .modifier(StateTilePresentationHost(navigate: { openRoute($0) }))
         }
     }
 
@@ -2079,13 +2094,15 @@ struct LiquidTodayView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(minHeight: keyMetricsDetailed ? 154 : 116, alignment: .topLeading)
         .background(NoopPanelSurface(tint: tint, cornerRadius: 18, surfaceOpacity: cardOpacity))
-        // #430 parity: tap -> the metric's trend detail (the same Explore dossier its MetricRow pushes,
-        // closure-based NavigationLink per #38). A metric with no catalog entry stays inert.
+        // #430 parity: tap -> the metric's trend detail (the same Explore dossier its MetricRow pushes).
+        // A VALUE push pinned to the exact (key, source) — a closure link off the Today root bypasses the
+        // tab's path, so re-tapping Home from the detail could not pop back. A metric with no catalog
+        // entry stays inert.
         return Group {
             if let metric = detailMetric ?? key.flatMap({ key in
                 Self.metricCatalogByKey[key]
             }) {
-                NavigationLink { MetricDetailView(metric: metric) } label: { tile }
+                NavigationLink(value: TabRoute.metricSourced(key: metric.key, source: metric.source)) { tile }
                     .buttonStyle(.plain)
             } else {
                 tile
@@ -2131,7 +2148,7 @@ struct LiquidTodayView: View {
     /// Today's mission, whole and still, under the STATE card.
     /// Tappable: routes to the action its goal names (see `StateMissionNote`).
     private func missionNote(_ mission: String) -> some View {
-        StateMissionNote(mission: mission, navigate: { heroTap = $0 })
+        StateMissionNote(mission: mission, navigate: { openRoute($0) })
             .padding(.horizontal, 4)
     }
 
@@ -3323,8 +3340,20 @@ private struct LiquidLiveHR: View {
     var fallbackSegments: [String] = []
     var animated: Bool
 
-    @EnvironmentObject private var live: LiveState
+    /// NOT observed: `LiveState` publishes on every R-R packet, gravity frame, frame-type change and — during
+    /// a history offload — every chunk, and this card needs two of its fields. Observing it re-drew the
+    /// trace (a Canvas plus the min/avg/max scan) at the strap's frame rate, dozens of times a second
+    /// during a backfill. `connected` and `heartRate` are mirrored from de-duplicated publishers instead;
+    /// the 1 Hz sample clock below is the card's only other driver.
+    @Environment(\.appModelRef) private var appModelRef
+    @State private var connected = false
+    @State private var heartRate: Int?
     @State private var samples: [Double] = []
+    /// On screen. The Home tab stays alive behind the other tabs (and under a pushed screen), and this
+    /// card's clock kept banking — and re-rendering the card — every second nobody could see it.
+    @State private var visible = false
+    /// When the card went out of sight, so the trace can tell a glance away from a real absence.
+    @State private var hiddenAt: Date?
     @State private var beat = false
     private let maxSamples = 90   // ~1.5 min of 1 Hz live HR, enough to read the shape
     /// The 1 Hz sampling clock for the trace — the same fix HealthView's hero already carries (#941),
@@ -3340,17 +3369,28 @@ private struct LiquidLiveHR: View {
     /// once per view identity.
     @State private var sampleTimer = Timer.publish(every: 1.0, on: .main, in: .common).autoconnect()
 
-    private var isLive: Bool { live.connected && samples.count >= 2 }
+    private var liveRef: LiveState? { resolvedAppModel(appModelRef)?.live }
+    /// Both replay their current value on subscription, which seeds the mirrors on appear.
+    private var connectedPublisher: AnyPublisher<Bool, Never> {
+        guard let live = liveRef else { return Empty().eraseToAnyPublisher() }
+        return live.$connected.removeDuplicates().eraseToAnyPublisher()
+    }
+    private var heartRatePublisher: AnyPublisher<Int?, Never> {
+        guard let live = liveRef else { return Empty().eraseToAnyPublisher() }
+        return live.$heartRate.removeDuplicates().eraseToAnyPublisher()
+    }
+
+    private var isLive: Bool { connected && samples.count >= 2 }
     private var series: [Double] { isLive ? samples : fallback }
     private var bigBpm: Int? {
-        if let hr = live.heartRate, hr > 0, live.connected { return hr }
+        if let hr = heartRate, hr > 0, connected { return hr }
         if let last = fallback.last { return Int(last.rounded()) }
         return nil
     }
     private var subtitle: String {
         if isLive { return String(localized: "Live · beat by beat") }
         if fallback.count >= 2 { return String(localized: "5-minute average · since midnight") }
-        return live.connected ? String(localized: "Waiting for the strap") : String(localized: "Strap not connected")
+        return connected ? String(localized: "Waiting for the strap") : String(localized: "Strap not connected")
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -3409,7 +3449,7 @@ private struct LiquidLiveHR: View {
                     stat(String(localized: "Max"), series.max())
                 }
             } else {
-                Text(live.connected
+                Text(connected
                      ? String(localized: "Waiting for a live heartbeat…")
                      : String(localized: "Connect your strap to see live heart rate"))
                     .font(StrandFont.caption)
@@ -3419,19 +3459,43 @@ private struct LiquidLiveHR: View {
             }
         }
         // Seed on appear so the card never waits for the next event to show a shape.
-        .onAppear { if samples.isEmpty, let hr = live.heartRate, hr > 0 { samples = [Double(hr)] } }
+        .onAppear {
+            visible = true
+            // Away long enough to have missed samples: start the trace again rather than splice the two
+            // stretches together as though the time between them had been recorded (the x axis is sample
+            // index, so a splice would draw a continuous line across the gap, #2082).
+            if let hiddenAt, Date().timeIntervalSince(hiddenAt) > 2 { samples = [] }
+            hiddenAt = nil
+            // Read straight off the store: the mirrors below may not have received their replay yet.
+            if let live = liveRef {
+                connected = live.connected
+                heartRate = live.heartRate
+            }
+            if samples.isEmpty, let hr = heartRate, hr > 0 { samples = [Double(hr)] }
+        }
+        .onDisappear {
+            visible = false
+            hiddenAt = Date()
+        }
+        // Mirrored only while on screen; `onAppear` re-reads both, so nothing is missed on the way back.
+        .onReceive(connectedPublisher) { value in
+            if visible, connected != value { connected = value }
+        }
+        .onReceive(heartRatePublisher) { value in
+            if visible, heartRate != value { heartRate = value }
+        }
         // ONE appender, on the clock. A genuine bpm change still reaches the big number instantly (it
         // reads `live.heartRate` directly); the trace picks it up on the next tick, ≤ 1 s and one column
         // away, and a held reading now advances the line instead of freezing it.
         .onReceive(sampleTimer) { _ in bankLiveSample() }
         // A dropped link must not leave the last trace on screen as though it were still streaming.
-        .onChangeCompat(of: live.connected) { isConnected in if !isConnected { samples = [] } }
+        .onChangeCompat(of: connected) { isConnected in if !isConnected { samples = [] } }
     }
 
     /// Bank the reading the strap is currently holding. Invents nothing: it is the same value every other
     /// surface reads straight off `live.heartRate`, re-sampled because the publisher only fires on change.
     private func bankLiveSample() {
-        guard live.connected, let hr = live.heartRate, hr > 0 else { return }
+        guard visible, connected, let hr = heartRate, hr > 0 else { return }
         samples.append(Double(hr))
         if samples.count > maxSamples { samples.removeFirst(samples.count - maxSamples) }
         beat.toggle()

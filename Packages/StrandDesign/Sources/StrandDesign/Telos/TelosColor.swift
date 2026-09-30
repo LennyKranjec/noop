@@ -5,8 +5,14 @@ import SwiftUI
 // THE LOOK: organic, bioluminescent, alien. A near-black ground with a faint green-teal depth
 // (`canvas` → `canvasDeep`), luminous accents (bioluminescent green, teal, effort blue, pale rest blue,
 // violet / magenta for mind and sleep, amber / orange for fuel, sun-yellow warning), "futuristic
-// transparent glass" tiles (a translucent white fill + a luminous gradient hairline + a faint top glow).
+// transparent glass" tiles (a translucent white fill + a NEUTRAL subtle hairline).
 // The app is DARK-FIRST; light mode keeps the same hues deepened on a pale ground so text still passes.
+//
+// DECISION 19 (owner, 2026-09-30 — clinical restraint): colour is for DATA (a part's hue, a state), never
+// decoration. So the glass hairline is a neutral grey-white (no green-white "luminous" edge), the top
+// glow (`glassGlow` / `glassTopGlow`) is fully transparent, and `glow` is a neutral grey-teal — no green
+// or yellow cast is ever painted as light. `bestGold` is only a small flat text / mark colour for a
+// personal best, never a glow, wash or fill.
 //
 // ONE SOURCE OF TRUTH FOR EVERY V2 COLOUR. Each token is declared twice, deliberately:
 //   • `TelosColor.Spec.<token>` — the hex PAIR (dark / light) as plain strings. A dynamic SwiftUI
@@ -17,8 +23,8 @@ import SwiftUI
 //     `NoopVisualStyle` names are aliases of these, never a second copy of a hex.
 //
 // Usage rules:
-//   • Cards are GLASS: `glassFill` over the ground + the `glassEdge` hairline (bright top-leading) + a
-//     `glassGlow` at the top edge (see `NoopPanelSurface`). `surface` / `surfaceRaised` are the OPAQUE
+//   • Cards are GLASS: `glassFill` over the ground + the neutral `glassEdge` hairline (see
+//     `NoopPanelSurface`). `glassGlow` / `glassTopGlow` are retired (transparent). `surface` / `surfaceRaised` are the OPAQUE
 //     equivalents for places that must not be see-through (sheets, the tab-bar fallback, popovers).
 //   • The accent (`TelosColor.accent`, default = the bioluminescent `mint`) is chrome: links, toggles,
 //     selection, focus, the primary button, the glowing pill, the live dot.
@@ -57,12 +63,14 @@ public enum TelosColor {
         public static let glassFill     = Pair(dark: "#FFFFFF14", light: "#FFFFFFE0")
         /// A raised glass layer (selected segment, popover inner card): white at ~12 %.
         public static let glassRaised   = Pair(dark: "#FFFFFF1F", light: "#FFFFFFF5")
-        /// The luminous top-leading end of the glass hairline (a green-white at 40 %).
-        public static let glassEdgeHigh = Pair(dark: "#BFFFE666", light: "#FFFFFFFF")
+        /// The top-leading end of the glass hairline — a NEUTRAL white at ~12 % (dark) / ink at ~10 %
+        /// (light). Decision 19: no green-white luminous edge.
+        public static let glassEdgeHigh = Pair(dark: "#FFFFFF1F", light: "#0B12141A")
         /// The dim bottom-trailing end of the glass hairline.
         public static let glassEdgeLow  = Pair(dark: "#FFFFFF0D", light: "#0B121424")
-        /// The faint inner glow at a glass tile's top edge (bioluminescent green at 8 % / 4 %).
-        public static let glassGlow     = Pair(dark: "#3CF0A014", light: "#3CF0A00A")
+        /// RETIRED (decision 19): formerly a green inner glow at a glass tile's top edge. Fully
+        /// transparent now, so every remaining reader (widgets, the tab bar) paints nothing.
+        public static let glassGlow     = Pair(dark: "#FFFFFF00", light: "#FFFFFF00")
 
         // Opaque surfaces (the glass look's solid equivalents)
         public static let surface       = Pair(dark: "#131A1B", light: "#FFFFFF")
@@ -89,8 +97,9 @@ public enum TelosColor {
         public static let mintPressed = Pair(dark: "#7CF7C2", light: "#05603F")
         /// mint @ 0.16 (0x29 = 41/255).
         public static let mintMuted   = Pair(dark: "#3CF0A029", light: "#067A5229")
-        /// The glow colour under luminous green elements (the reference's #2BD98B).
-        public static let glow        = Pair(dark: "#2BD98B", light: "#0E8A57")
+        /// Formerly the green glow under luminous elements (#2BD98B). Decision 19: a NEUTRAL grey-teal
+        /// (the tertiary ink), so any remaining depth wash that reads it has no green cast.
+        public static let glow        = Pair(dark: "#8C9C99", light: "#5C6B68")
         public static let onAccent    = Pair(dark: "#03140C", light: "#FFFFFF")
 
         // Status
@@ -128,7 +137,8 @@ public enum TelosColor {
         public static let muscleInk  = Pair(dark: "#FF8A3D", light: "#AA4914")
         public static let focus      = Pair(dark: "#8B5CFF", light: "#6A3FE0")
         public static let focusInk   = Pair(dark: "#A583FF", light: "#6A3FE0")
-        /// "The only gold" — personal bests only.
+        /// "The only gold" — personal bests only, and only as a small FLAT text / mark colour (decision
+        /// 19): never a glow, halo, wash, gradient or large fill.
         public static let bestGold   = Pair(dark: "#E5B84B", light: "#8A6608")
 
         // Diagnostic register (dark-only screens: morning flow, full-screen alerts, moments)
@@ -165,16 +175,17 @@ public enum TelosColor {
     public static let onDarkSecondary = Color(hex: Spec.onDarkSecondary.dark)
     public static let onDarkTertiary  = Color(hex: Spec.onDarkTertiary.dark)
 
-    /// The luminous glass hairline: bright top-leading → dim bottom-trailing. Stored once.
+    /// The glass hairline: a neutral, subtle edge (≈ 12 % → 5 % white on dark). Stored once.
     public static let glassEdge = LinearGradient(
         colors: [glassEdgeHigh, glassEdgeLow],
         startPoint: .topLeading,
         endPoint: .bottomTrailing
     )
 
-    /// The faint inner glow along a glass tile's top edge (fades out by ~35 % of the height). Stored once.
+    /// RETIRED (decision 19): formerly the faint green inner glow along a glass tile's top edge. Now a
+    /// fully transparent gradient (kept for source compatibility). Stored once.
     public static let glassTopGlow = LinearGradient(
-        colors: [glassGlow, Color.clear],
+        colors: [Color.clear, Color.clear],
         startPoint: .top,
         endPoint: UnitPoint(x: 0.5, y: 0.35)
     )
@@ -192,7 +203,7 @@ public enum TelosColor {
     public static let mint        = Color(telos: Spec.mint)
     public static let mintPressed = Color(telos: Spec.mintPressed)
     public static let mintMuted   = Color(telos: Spec.mintMuted)
-    /// The glow under luminous green elements.
+    /// Formerly the green glow; now a neutral grey-teal (decision 19). Prefer not to paint glows at all.
     public static let glow        = Color(telos: Spec.glow)
     /// Text / glyphs ON an accent fill (the primary button label).
     public static let onAccent    = Color(telos: Spec.onAccent)

@@ -5,8 +5,8 @@ import StrandAnalytics
 // HomeHeroMapping.swift — the pure half of Today's Telos hero (DESIGN_V2 VISUAL DIRECTION, decision 18).
 //
 // Everything the hero PRINTS or FEEDS INTO THE ORB that needs a decision lives here, so it can be tested
-// without a view (`StrandTests/HomeHeroMappingTests`). Every function abstains (nil) on a missing input —
-// nothing here substitutes a default for a measurement.
+// without a view (`StrandTests/OrbExplainerMappingTests` pins the orb legend and its history). Every
+// function abstains (nil) on a missing input — nothing here substitutes a default for a measurement.
 
 enum HomeHeroMapping {
 
@@ -118,6 +118,234 @@ enum HomeHeroMapping {
     static func effortRatio(effort: Double?, target: Double?) -> Double? {
         guard let effort, let target, effort.isFinite, target.isFinite, target > 0 else { return nil }
         return max(0, effort) / target
+    }
+
+    // MARK: - The orb explainer ("What shapes your orb")
+
+    /// One line of the orb's legend: a visual channel, the input it reads, TODAY's value (nil = absent,
+    /// drawn "—") and, in plain words, what it means — or why it is absent. The values are the SAME
+    /// numbers the orb was built from (`TelosOrbInputs` + the Level breakdown), never re-derived.
+    struct OrbLegendRow: Equatable, Identifiable {
+        let id: String
+        /// SF Symbol for the row.
+        let glyph: String
+        /// Tints the row with that part's colour (the lobe rows); nil = the house accent.
+        let part: TelosOrbPart?
+        let title: String
+        /// Today's value, formatted; nil = not measured (the row prints "—").
+        let value: String?
+        /// What the channel means, or the reason it is absent.
+        let detail: String
+    }
+
+    /// The part's written name, in the wearer's language.
+    static func orbPartName(_ part: TelosOrbPart) -> String {
+        switch part {
+        case .sleep: return String(localized: "Sleep")
+        case .heart: return String(localized: "Heart")
+        case .lungs: return String(localized: "Lungs")
+        case .muscle: return String(localized: "Muscle")
+        case .focus: return String(localized: "Focus")
+        }
+    }
+
+    /// The part's glyph (the same symbols the Level radar uses).
+    static func orbPartGlyph(_ part: TelosOrbPart) -> String {
+        switch part {
+        case .sleep: return "moon.fill"
+        case .heart: return "heart.fill"
+        case .lungs: return "wind"
+        case .muscle: return "figure.strengthtraining.traditional"
+        case .focus: return "bolt.fill"
+        }
+    }
+
+    /// The legend, top to bottom: size (Level) · one lobe per part · surface (stress) · pulse (resting HR)
+    /// · glow (Charge) · orbit speed (Effort ÷ target) · assembling (how settled the Level is).
+    /// `pending` = the Level shown is a stand-in until today's night is in.
+    static func orbLegend(inputs: TelosOrbInputs, breakdown: LevelBreakdown?, pending: Bool) -> [OrbLegendRow] {
+        func finite(_ v: Double?) -> Double? {
+            guard let v, v.isFinite else { return nil }
+            return v
+        }
+        var rows: [OrbLegendRow] = []
+
+        // Size ← Level (unbounded).
+        let level = finite(inputs.level)
+        rows.append(OrbLegendRow(
+            id: "size", glyph: "circle.dashed", part: nil, title: String(localized: "Size"),
+            value: level.map { String(localized: "Level \(TelosFormat.integer($0))") },
+            detail: level == nil
+                ? String(localized: "No Level yet, so the orb rests at a neutral size.")
+                : String(localized: "Grows with your Level and fills in with more dots. There is no limit: past 100 a dotted shell appears around it.")))
+
+        // One lobe per part ← that part's score and share of the Level.
+        let shares = breakdown.map { partShares($0.components) } ?? [:]
+        let total = shares.values.reduce(0, +)
+        for part in TelosOrbPart.allCases {
+            let name = orbPartName(part)
+            let component = breakdown?.components.first(where: { $0.part.rawValue == part.rawValue })
+            let score = finite(component?.score)
+            if let score, let share = shares[part], total > 0 {
+                let percent = Int((share / total * 100).rounded())
+                rows.append(OrbLegendRow(
+                    id: "lobe.\(part.rawValue)", glyph: orbPartGlyph(part), part: part,
+                    title: String(localized: "\(name) lobe"),
+                    value: String(localized: "\(name) part \(TelosFormat.integer(score))"),
+                    detail: String(localized: "\(percent) % of your Level. The bigger its share, the bigger this organ.")))
+            } else {
+                rows.append(OrbLegendRow(
+                    id: "lobe.\(part.rawValue)", glyph: orbPartGlyph(part), part: part,
+                    title: String(localized: "\(name) lobe"), value: nil,
+                    detail: String(localized: "No \(name.lowercased()) score in this Level, so there is no lobe for it.")))
+            }
+        }
+
+        // Surface ← stress (0–3).
+        let stress = finite(inputs.stress)
+        rows.append(OrbLegendRow(
+            id: "surface", glyph: "water.waves", part: nil, title: String(localized: "Surface calm"),
+            value: stress.map { s in
+                let word = StressBand(score: s).word.lowercased()
+                let figure = String(format: "%.1f", s)
+                return String(localized: "Stress \(word) (\(figure) of 3)")
+            },
+            detail: stress == nil
+                ? String(localized: "No stress reading today, so the surface rests calm.")
+                : String(localized: "Calm keeps the membrane smooth; stress ripples it and makes it sway more.")))
+
+        // Pulse ← resting heart rate.
+        let bpm: Double? = finite(inputs.heartRateBpm).flatMap { $0 > 0 ? $0 : nil }
+        let pulseDetail: String
+        if let bpm {
+            let seconds = String(format: "%.1f", TelosOrbAppearance.pulseSlowdown * 60 / bpm)
+            pulseDetail = String(localized: "It breathes once every \(seconds) s: your resting heartbeat, slowed six times.")
+        } else {
+            pulseDetail = String(localized: "No resting heart rate yet, so it breathes at a slow neutral pace.")
+        }
+        rows.append(OrbLegendRow(
+            id: "pulse", glyph: "waveform.path.ecg", part: nil, title: String(localized: "Pulse"),
+            value: bpm.map { String(localized: "Resting HR \(TelosFormat.integer($0))") },
+            detail: pulseDetail))
+
+        // Glow ← today's Charge.
+        let charge = finite(inputs.charge)
+        rows.append(OrbLegendRow(
+            id: "glow", glyph: "sun.max", part: nil, title: String(localized: "Glow"),
+            value: charge.map { String(localized: "Charge \(TelosFormat.integer($0))") },
+            detail: charge == nil
+                ? String(localized: "Charge not measured today, so the glow stays dim.")
+                : String(localized: "The higher your Charge, the brighter the orb and its dots.")))
+
+        // Orbit speed ← Effort ÷ target (unbounded).
+        let effort = finite(inputs.effortRatio)
+        rows.append(OrbLegendRow(
+            id: "orbit", glyph: "circle.circle", part: nil, title: String(localized: "Orbit speed"),
+            value: effort.map { String(localized: "Effort \(TelosFormat.integer(max(0, $0) * 100)) % of target") },
+            detail: effort == nil
+                ? String(localized: "No effort or no target today, so the orbit dots drift at a resting pace.")
+                : String(localized: "The dots on the orbits travel faster the more of today's target you have done, and keep speeding up past 100 %.")))
+
+        // Assembling ← how settled the Level is.
+        let assemblyValue: String?
+        let assemblyDetail: String
+        if level == nil {
+            assemblyValue = nil
+            assemblyDetail = String(localized: "No Level to settle yet.")
+        } else {
+            switch inputs.confidence {
+            case .solid:
+                assemblyValue = String(localized: "Settled")
+                assemblyDetail = String(localized: "This Level is final, so every dot sits on the membrane.")
+            case .building:
+                if pending {
+                    assemblyValue = String(localized: "Waiting for today's night")
+                    assemblyDetail = String(localized: "Your last scored day stands in until today's night is in: the membrane is faint and some dots are still drifting in.")
+                } else {
+                    let covered = breakdown.map { "\($0.coveragePercent) %" } ?? TelosType.absent
+                    assemblyValue = String(localized: "Part of the formula missing")
+                    assemblyDetail = String(localized: "Only \(covered) of the Level's formula had data: the membrane is faint and some dots are still drifting in.")
+                }
+            case .calibrating:
+                assemblyValue = String(localized: "Level still calibrating")
+                assemblyDetail = String(localized: "The membrane is faint and dots are still drifting in until your Level settles.")
+            }
+        }
+        rows.append(OrbLegendRow(id: "assembly", glyph: "sparkles", part: nil,
+                                 title: String(localized: "Assembling"), value: assemblyValue, detail: assemblyDetail))
+        return rows
+    }
+
+    // MARK: - The orb's history
+
+    /// One STORED day of the Level, as the orb can draw it (Level + part shares — the other channels are
+    /// not stored per day, so a past orb shows only these).
+    struct OrbHistoryDay: Equatable {
+        let day: String
+        let level: Double
+        let partShares: [TelosOrbPart: Double]
+        /// Written partly (a thin night) or from part of the formula — drawn as still assembling.
+        let provisional: Bool
+    }
+
+    /// A past orb to show: the stored day nearest `daysBack` days before the end day, or nil when nothing
+    /// is stored within the tolerance — never a made-up day.
+    struct OrbSnapshot: Equatable, Identifiable {
+        var id: Int { daysBack }
+        let daysBack: Int
+        let entry: OrbHistoryDay?
+    }
+
+    /// Whole days from `from` to `to` (day keys), or nil when either does not parse.
+    static func dayDistance(from: String, to: String, calendar: Calendar) -> Int? {
+        guard let a = LevelWiring.date(from: from, calendar: calendar),
+              let b = LevelWiring.date(from: to, calendar: calendar) else { return nil }
+        return calendar.dateComponents([.day], from: calendar.startOfDay(for: a),
+                                       to: calendar.startOfDay(for: b)).day
+    }
+
+    /// For each offset, the stored day nearest to `endDay − offset` within ±`tolerance` days (on a tie,
+    /// the earlier one). Honest: a gap in the history is a nil, not a neighbour from further away.
+    static func orbSnapshots(history: [OrbHistoryDay], endDay: String, daysBack: [Int], tolerance: Int = 7,
+                             calendar: Calendar = .current) -> [OrbSnapshot] {
+        var placed: [(entry: OrbHistoryDay, back: Int)] = []
+        for entry in history {
+            if let back = dayDistance(from: entry.day, to: endDay, calendar: calendar) {
+                placed.append((entry, back))
+            }
+        }
+        return daysBack.map { offset in
+            var best: (entry: OrbHistoryDay, back: Int)? = nil
+            for candidate in placed where abs(candidate.back - offset) <= tolerance {
+                guard let current = best else {
+                    best = candidate
+                    continue
+                }
+                let dc = abs(candidate.back - offset), db = abs(current.back - offset)
+                if dc < db || (dc == db && candidate.back > current.back) { best = candidate }
+            }
+            return OrbSnapshot(daysBack: offset, entry: best?.entry)
+        }
+    }
+
+    /// A point of the development chart: `index` = days since the window's first day.
+    struct OrbChartPoint: Equatable {
+        let index: Int
+        let level: Double
+    }
+
+    /// The stored Levels inside the last `span` days ending on `endDay`, oldest first, placed by their
+    /// real date (a gap stays a gap). Non-finite levels are dropped.
+    static func orbChartPoints(history: [OrbHistoryDay], endDay: String, span: Int,
+                               calendar: Calendar = .current) -> [OrbChartPoint] {
+        let width = max(span, 1)
+        var out: [OrbChartPoint] = []
+        for entry in history where entry.level.isFinite {
+            guard let back = dayDistance(from: entry.day, to: endDay, calendar: calendar),
+                  back >= 0, back < width else { continue }
+            out.append(OrbChartPoint(index: width - 1 - back, level: entry.level))
+        }
+        return out.sorted { $0.index < $1.index }
     }
 
     // MARK: - Mission card

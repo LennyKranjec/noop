@@ -158,14 +158,22 @@ private struct WaterButton: View {
 
 /// The liquid.
 ///
-/// THE MOVEMENT IS THE POINT, and a single sine is what made the Android version read as a cardboard
-/// cut-out sliding back and forth. Each sheet sums several components at unrelated wavelengths and
-/// speeds, so no two crests line up the same way twice and the surface never visibly repeats. Layers are
-/// drawn back to front, each deeper, slower and darker than the one in front — a far surface moves less
-/// across your field of view than a near one, and that difference is what the eye reads as depth.
+/// CALM AND PHYSICAL (owner, 2.0: a professional look, nothing playful). The surface moves the way water
+/// in a box does: its first two SLOSHING MODES — a standing wave that tilts the surface about the middle
+/// (cos πx/L) and a smaller one with a node at each quarter (cos 2πx/L) — each ringing down under damping,
+/// while the level itself springs to its new height with one soft overshoot. No glint, no travelling
+/// sparkle, no idle loop. Layers are drawn back to front, each deeper, fainter and a beat behind the one in
+/// front, which is what the eye reads as depth.
 ///
-/// STILL WHEN THE APP IS ASKED TO BE STILL. Reduce Motion, battery saver and quiet-motion all stop it,
-/// and a stopped wave is a flat waterline rather than a frozen crest.
+/// WHEN IT MOVES. For `motionDuration` after the tile appears (including coming back to Home, or back from a
+/// pushed screen) and after the amount changes, at ≤ 30 fps; then it rests on a posed still frame that is
+/// exactly where the motion ended — the rest surface is the same static ripple the motion decays onto, so
+/// the hand-off has no snap. Nothing runs while the tile is scrolled away, covered, or the app is asked to
+/// hold still (Reduce Motion, Low Power, quiet motion): a change then simply lands, on a flat waterline.
+///
+/// WHY IT DID NOT MOVE BEFORE. The clock ran only inside the shared 1.2 s settle window, which opens on a
+/// value CHANGE and never on appear — so arriving on Home showed a still tile — and inside it the level
+/// itself jumped while only a 4 pt wobble moved, which read as a flicker rather than water.
 private struct WaterFill: View {
     let fraction: Double
 
@@ -173,96 +181,161 @@ private struct WaterFill: View {
     @Environment(\.noopBackgroundCovered) private var covered
     @ObservedObject private var motion = NoopMotionState.shared
 
-    private var still: Bool { motion.poseStill(reduceMotion) }
     /// Scrolled fully out of view (iOS 18 / macOS 15+; always false before) — the frame loop stands down.
     @State private var offscreen = false
-    /// TELOS 2.0 (§2.1 rule 1, "one orb clock on Today"): the water moves only while a new level SETTLES
-    /// (≤ 1.2 s after a logged drink changes `fraction`), then rests on its still frame. It used to run a
-    /// 30 fps loop for as long as the tile was on screen.
-    @State private var settling = false
-    /// Cost: one Canvas, ≤ 30 fps, only inside the settle window; paused by poseStill / covered / offscreen.
-    private var live: Bool { settling && !still && !covered && !offscreen }
+    /// The motion in progress; nil = at rest (no clock).
+    @State private var settle: WaterSettle?
+    /// Bumped per settle, so only the newest settle's timer ends the motion.
+    @State private var settleGeneration = 0
+    /// The level the last settle was heading for — where the water visibly is when nothing is moving.
+    @State private var restingLevel: Double?
+
+    /// How long a settle draws. Both damped terms are under a tenth of a point by then.
+    private static let motionDuration: Double = 2.6
+
+    private var still: Bool { motion.poseStill(reduceMotion) }
+    private var clamped: Double { fraction.isFinite ? min(max(fraction, 0), 1) : 0 }
+    /// Cost: one Canvas, ≤ 30 fps, only while a settle runs; paused by poseStill / covered / offscreen.
+    private var live: Bool { settle != nil && !still && !covered && !offscreen }
 
     /// The water's own blue. Deeper than the palette's cyan and with a lift at the surface, because a
     /// flat fill reads as a coloured rectangle — the gradient is what makes it read as a body of liquid
     /// with a top to it.
-    private var deep: Color { Color(.sRGB, red: 0.06, green: 0.36, blue: 0.62, opacity: 1) }
-    private var bright: Color { Color(.sRGB, red: 0.30, green: 0.71, blue: 0.96, opacity: 1) }
+    private static let deep = Color(.sRGB, red: 0.06, green: 0.36, blue: 0.62, opacity: 1)
+    private static let bright = Color(.sRGB, red: 0.30, green: 0.71, blue: 0.96, opacity: 1)
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !live)) { timeline in
+        let isLive = live
+        let current = settle
+        let level = clamped
+        let ripple = !still
+        TimelineView(.animation(minimumInterval: TelosFrameGate.minimumInterval, paused: !isLive)) { timeline in
+            let elapsed: Double? = isLive ? current.map { timeline.date.timeIntervalSince($0.start) } : nil
             Canvas { context, size in
-                let t = live ? timeline.date.timeIntervalSinceReferenceDate : 0
-                let clamped = min(max(fraction, 0), 1)
-                let surfaceY = size.height * (1 - clamped)
-                let amplitude = still ? 0 : size.height * 0.03
-
-                // THE MEASURE LINES, behind the water and across the whole tile. Dashed rather than
-                // solid: a solid rule at a quarter of the tile reads as a target, and there is no
-                // hydration target being drawn here — these are a scale to judge the level against,
-                // which is exactly what a dashed rule says and a solid one does not.
-                for share in [0.25, 0.5, 0.75] {
-                    var rule = Path()
-                    let y = size.height * (1 - share)
-                    rule.move(to: CGPoint(x: 0, y: y))
-                    rule.addLine(to: CGPoint(x: size.width, y: y))
-                    context.stroke(rule, with: .color(StrandPalette.hairlineStrong),
-                                   style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
-                }
-
-                func sheet(depth: Double, speed: Double, offset: Double, opacity: Double, wobble: Double) {
-                    let swell = amplitude * 0.45 * sin(t * 0.23 * speed + offset)
-                    var path = Path()
-                    path.move(to: CGPoint(x: 0, y: size.height))
-                    let steps = 48
-                    var crest = size.height
-                    for i in 0...steps {
-                        let x = size.width * Double(i) / Double(steps)
-                        let phase = x / size.width * .pi * 2
-                        let y = surfaceY + depth + swell
-                            + amplitude * wobble * sin(phase * 1.0 + t * 0.9 * speed + offset)
-                            + amplitude * wobble * 0.5 * sin(phase * 2.3 + t * 1.4 * speed)
-                            + amplitude * wobble * 0.25 * sin(phase * 3.7 - t * 0.7 * speed)
-                        crest = Swift.min(crest, y)
-                        path.addLine(to: CGPoint(x: x, y: y))
-                    }
-                    path.addLine(to: CGPoint(x: size.width, y: size.height))
-                    path.closeSubpath()
-                    // Lit at the surface, dark at the bottom — the gradient runs from the highest crest
-                    // this sheet reaches to the floor of the tile, so the sheen stays ON the water as the
-                    // level rises rather than sitting at a fixed height.
-                    context.fill(path, with: .linearGradient(
-                        Gradient(colors: [bright.opacity(opacity * 1.15), deep.opacity(opacity)]),
-                        startPoint: CGPoint(x: 0, y: crest),
-                        endPoint: CGPoint(x: 0, y: size.height)))
-                }
-
-                // Back to front: deeper, slower, fainter behind.
-                sheet(depth: 6, speed: 0.6, offset: 1.7, opacity: 0.38, wobble: 0.6)
-                sheet(depth: 3, speed: 0.85, offset: 0.6, opacity: 0.52, wobble: 0.8)
-                sheet(depth: 0, speed: 1.0, offset: 0.0, opacity: 0.72, wobble: 1.0)
-
-                // THE GLINT along the waterline. One bright hairline on the front sheet's crest, which
-                // is the whole difference between "blue shape" and "wet".
-                if clamped > 0.02 {
-                    var glint = Path()
-                    let steps = 48
-                    for i in 0...steps {
-                        let x = size.width * Double(i) / Double(steps)
-                        let phase = x / size.width * .pi * 2
-                        let y = surfaceY
-                            + amplitude * sin(phase + t * 0.9)
-                            + amplitude * 0.5 * sin(phase * 2.3 + t * 1.4)
-                            + amplitude * 0.25 * sin(phase * 3.7 - t * 0.7)
-                        if i == 0 { glint.move(to: CGPoint(x: x, y: y)) }
-                        else { glint.addLine(to: CGPoint(x: x, y: y)) }
-                    }
-                    context.stroke(glint, with: .color(.white.opacity(0.42)), lineWidth: 1)
-                }
+                WaterFill.draw(context, size, settle: isLive ? current : nil, elapsed: elapsed,
+                               restLevel: level, ripple: ripple)
             }
         }
         .allowsHitTesting(false)
         .liquidOffscreen { offscreen = $0 }
-        .telosSettleWindow(on: fraction, active: $settling)
+        // Settles in on arrival: the tile is seen to hold water, not a painted level.
+        .onAppear { begin(from: restingLevel ?? clamped, to: clamped, slosh: 0.035) }
+        .onDisappear {
+            settle = nil
+            restingLevel = clamped
+        }
+        .onChangeCompat(of: clamped) { next in
+            // From where the water visibly is — mid-settle, that is the settle's own level.
+            let from = settle.map { $0.state(at: Date().timeIntervalSince($0.start)).level }
+                ?? restingLevel ?? next
+            begin(from: from, to: next, slosh: 0.03 + min(0.05, abs(next - from) * 0.3))
+        }
+        // Ends the motion. `.task(id:)` cancels the previous timer when a newer settle starts.
+        .task(id: settleGeneration) {
+            guard settle != nil else { return }
+            try? await Task.sleep(nanoseconds: UInt64(Self.motionDuration * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            settle = nil
+        }
+    }
+
+    private func begin(from: Double, to: Double, slosh: Double) {
+        restingLevel = to
+        guard !still else {
+            settle = nil
+            return
+        }
+        settle = WaterSettle(start: Date(), from: from, to: to, slosh: slosh)
+        settleGeneration &+= 1
+    }
+
+    private static func draw(_ context: GraphicsContext, _ size: CGSize, settle: WaterSettle?, elapsed: Double?,
+                             restLevel: Double, ripple: Bool) {
+        let w = size.width, h = size.height
+        guard w > 1, h > 1 else { return }
+
+        // THE MEASURE LINES, behind the water and across the whole tile. Dashed rather than solid: a solid
+        // rule at a quarter of the tile reads as a target, and there is no hydration target drawn here —
+        // these are a scale to judge the level against.
+        for share in [0.25, 0.5, 0.75] {
+            var rule = Path()
+            let y = h * (1 - share)
+            rule.move(to: CGPoint(x: 0, y: y))
+            rule.addLine(to: CGPoint(x: w, y: y))
+            context.stroke(rule, with: .color(StrandPalette.hairlineStrong),
+                           style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
+        }
+
+        // The rest surface: a fixed, barely-there ripple so still water reads as water, not a ruler line.
+        // Flat when the app is asked to hold still.
+        let restAmp = ripple ? h * 0.007 : 0
+
+        func sheet(depth: Double, lag: Double, gain: Double, opacity: Double) {
+            let s: WaterSettle.Frame
+            if let settle, let elapsed {
+                s = settle.state(at: max(0, elapsed - lag))
+            } else {
+                s = WaterSettle.Frame(level: restLevel, mode1: 0, mode2: 0)
+            }
+            let level = min(max(s.level, 0), 1)
+            // An empty tile stays empty: the slosh fades out as the water runs out.
+            let fill = min(1, level * 6)
+            let a1 = s.mode1 * gain * fill * h
+            let a2 = s.mode2 * gain * fill * h
+            let surfaceY = h * (1 - level) + depth
+            var path = Path()
+            path.move(to: CGPoint(x: 0, y: h))
+            let steps = 40
+            var crest = h
+            for i in 0...steps {
+                let u = Double(i) / Double(steps)
+                let x = w * u
+                let y = surfaceY
+                    - a1 * cos(.pi * u)
+                    - a2 * cos(2 * .pi * u)
+                    + restAmp * (sin(2 * .pi * u + 0.9 + depth * 0.4) + 0.5 * sin(2 * .pi * u * 2.3 + 2.1))
+                crest = Swift.min(crest, y)
+                path.addLine(to: CGPoint(x: x, y: y))
+            }
+            path.addLine(to: CGPoint(x: w, y: h))
+            path.closeSubpath()
+            // Lit at the surface, dark at the bottom — the gradient runs from the highest point this sheet
+            // reaches to the floor of the tile, so the lighter band stays ON the water as the level rises.
+            context.fill(path, with: .linearGradient(
+                Gradient(colors: [bright.opacity(opacity * 1.15), deep.opacity(opacity)]),
+                startPoint: CGPoint(x: 0, y: crest),
+                endPoint: CGPoint(x: 0, y: h)))
+        }
+
+        // Back to front: deeper, fainter and a beat behind.
+        sheet(depth: 6, lag: 0.12, gain: 0.6, opacity: 0.38)
+        sheet(depth: 3, lag: 0.06, gain: 0.8, opacity: 0.52)
+        sheet(depth: 0, lag: 0, gain: 1.0, opacity: 0.72)
+    }
+}
+
+/// One settle of the water tile: a level spring plus the two sloshing modes, all damped. Pure, so the drawn
+/// frame is a function of the elapsed time alone.
+private struct WaterSettle {
+    let start: Date
+    let from: Double
+    let to: Double
+    /// The first mode's starting amplitude, as a share of the tile height.
+    let slosh: Double
+
+    struct Frame {
+        let level: Double
+        /// Mode amplitudes, as shares of the tile height (signed — they swing through zero).
+        let mode1: Double
+        let mode2: Double
+    }
+
+    func state(at e: Double) -> Frame {
+        // The level: an underdamped spring — one soft overshoot (≈ 5 % of the step), gone within ~1.5 s.
+        let level = to + (from - to) * exp(-2.8 * e) * cos(3.0 * e)
+        // The fundamental slosh (period ≈ 1.1 s) and its first harmonic, the harmonic dying faster.
+        let mode1 = slosh * exp(-1.6 * e) * cos(5.6 * e)
+        let mode2 = slosh * 0.35 * exp(-2.4 * e) * cos(9.4 * e + 0.8)
+        return Frame(level: level, mode1: mode1, mode2: mode2)
     }
 }

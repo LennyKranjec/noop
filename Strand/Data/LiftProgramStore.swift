@@ -66,6 +66,38 @@ final class LiftProgramStore: ObservableObject {
         save()
     }
 
+    // MARK: - Bundled plan (seeded once)
+
+    /// Set once the bundled plan was imported, or once seeding was ruled out because the wearer already had a plan
+    /// file. Never cleared: deleting every program afterwards is respected, the plan does not come back.
+    nonisolated static let seededKey = "lift.bundledPlanSeeded"
+    /// The owner's Alphaprog plan export, shipped in the app bundle (`Strand/Resources/TelosLiftSeedPlan.csv`).
+    nonisolated static let seedResourceName = "TelosLiftSeedPlan"
+
+    /// Import the bundled plan through `importAlphaprogPlan` — ONLY on a first run with no plan at all: no
+    /// programs, no plan file on disk (a file holding zero programs is the wearer's own deletion), and no
+    /// unreadable file set aside (that is the wearer's plan too, just not readable by this build). Never merges
+    /// into or overwrites an existing or edited plan. Returns whether it imported.
+    @discardableResult
+    func seedBundledPlanIfNeeded(defaults: UserDefaults = .standard, bundle: Bundle = .main) -> Bool {
+        // Nowhere to save (no store directory yet): try again next launch rather than seed a plan that vanishes.
+        guard !defaults.bool(forKey: Self.seededKey), let fileURL else { return false }
+        let fm = FileManager.default
+        let hasPlanFile = fm.fileExists(atPath: fileURL.path)
+            || fm.fileExists(atPath: fileURL.deletingLastPathComponent()
+                .appendingPathComponent("lift-programs.unreadable.json").path)
+        guard library.programs.isEmpty, !hasPlanFile else {
+            defaults.set(true, forKey: Self.seededKey)
+            return false
+        }
+        // A missing / unparsable resource leaves the flag unset, so a later build that ships it still seeds.
+        guard let url = bundle.url(forResource: Self.seedResourceName, withExtension: "csv"),
+              let data = try? Data(contentsOf: url),
+              let outcome = importAlphaprogPlan(data: data), outcome.programs > 0 else { return false }
+        defaults.set(true, forKey: Self.seededKey)
+        return true
+    }
+
     // MARK: - Import
 
     struct ImportOutcome: Equatable {

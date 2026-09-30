@@ -88,6 +88,40 @@ final class LiftParityTests: XCTestCase {
         XCTAssertEqual(reopened.library.template(id: templateId)?.exercises.first?.restSeconds, 90)
     }
 
+    /// The owner's plan ships in the app bundle (`TelosLiftSeedPlan.csv`) and seeds ONCE into a store with no
+    /// plan — never again after the wearer deletes it, and never over an existing plan file.
+    @MainActor
+    func testBundledPlanSeedsOnceAndNeverOverAPlan() throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("lift-seed-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent(LiftProgramStore.fileName)
+        let suite = "lift-seed-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+
+        let store = LiftProgramStore(fileURL: url)
+        XCTAssertTrue(store.seedBundledPlanIfNeeded(defaults: defaults), "the CSV must be in the app bundle")
+        XCTAssertEqual(Set(store.library.allTemplates.map(\.name)),
+                       ["Lower A (Di)", "Lower B (Fr)", "Upper A (Mo)", "Upper B (Do)"])
+        // Tuesday, nothing completed yet → Lower A (Di), by the logger's own rule.
+        XCTAssertEqual(LiftTemplatePicker.pick(templates: store.library.allTemplates, weekday: 3,
+                                               lastCompletedTemplateId: nil)?.template.name, "Lower A (Di)")
+
+        // Deleting the plan is respected: no second seed.
+        store.mutate { $0.programs = [] }
+        XCTAssertFalse(store.seedBundledPlanIfNeeded(defaults: defaults))
+        XCTAssertTrue(store.library.programs.isEmpty)
+
+        // A device that never seeded but already has a plan file (here: an emptied one) keeps it as it is.
+        let otherSuite = suite + ".other"
+        let otherDefaults = try XCTUnwrap(UserDefaults(suiteName: otherSuite))
+        defer { otherDefaults.removePersistentDomain(forName: otherSuite) }
+        let reopened = LiftProgramStore(fileURL: url)
+        XCTAssertFalse(reopened.seedBundledPlanIfNeeded(defaults: otherDefaults))
+        XCTAssertTrue(reopened.library.programs.isEmpty)
+    }
+
     /// The stored-set → StrengthIndex shape used by the derived-series rebuild leaves warm-ups out and keeps the
     /// bodyweight flag.
     func testDerivedWorkoutShape() {

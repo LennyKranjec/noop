@@ -569,6 +569,9 @@ final class AppModel: ObservableObject {
         // Rehydrate a manual workout that was in flight when iOS killed the app, so it can still be ended
         // + saved on relaunch (#529). Restored here alongside the other UserDefaults-backed state.
         rehydrateActiveWorkout()
+        // Telos Lift: seed the owner's bundled plan on a first run with no plan at all (once, flag-guarded —
+        // never over an existing or edited plan; see `LiftProgramStore.seedBundledPlanIfNeeded`). Small CSV.
+        LiftProgramStore.shared.seedBundledPlanIfNeeded()
         // Telos Lift: a logger journal left behind by a killed session re-attaches to the rehydrated workout
         // or is finalised as an early finish (unfinished sets stay "not done", never zero).
         Task { [weak self] in

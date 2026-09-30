@@ -35,6 +35,12 @@ struct CoachView: View {
     var body: some View {
         CoachScreen(coach: coach, repo: repo, router: router)
             .equatable()
+            // A quest the wearer is asking about is parked while the chat is on screen (QuestOfferParking).
+            .onAppear { QuestOfferParking.shared.coachVisible = true }
+            .onDisappear {
+                QuestOfferParking.shared.coachVisible = false
+                QuestOfferParking.shared.parkedOfferId = nil
+            }
     }
 }
 
@@ -218,6 +224,10 @@ private struct CoachScreen: View, Equatable {
     /// The Habits hub and Goals, reached from the Coach (decision 3 / 14).
     @State private var showHabits = false
     @State private var showGoals = false
+    /// The software keyboard is up. The dock's two chip rows step aside while it is (see `composerDock`).
+    /// Read from the keyboard notifications rather than `composerFocused`, so the key-repair field raising
+    /// the keyboard gets the same room.
+    @State private var keyboardUp = false
 
     // K4: on-device voice input for the composer (iOS only). macOS gets a no-op stub via
     // `#if os(iOS)` guards — the shared file keeps compiling for both targets.
@@ -254,9 +264,7 @@ private struct CoachScreen: View, Equatable {
             }
         }
         .sheet(isPresented: $showCoachMenu) {
-            CoachMenuSheet(coach: coach,
-                           onClearConversation: { showClearConfirm = true },
-                           onDone: { showCoachMenu = false })
+            CoachMenuSheet(coach: coach, onDone: { showCoachMenu = false })
                 .environmentObject(coach)
         }
         // Environment passed explicitly: a sheet on macOS 13 does not inherit it.
@@ -367,6 +375,33 @@ private struct CoachScreen: View, Equatable {
         .onChangeCompat(of: chrome.dataConsent) { _ in
             Task { await coach.startBriefIfNeeded() }
         }
+        // THE CHAT SHOWS WHEN IT IS ASKED FOR. Everything that opens the Coach (`router.openCoach()`: the
+        // Today launcher, a quest, a workout's feedback, the Habits hub's "Ask the coach") lands on this
+        // tab. If one of this screen's own sheets is up, that request switches to a tab that is already
+        // selected and leaves the sheet covering the conversation, and the Habits hub opened FROM here has
+        // exactly such a button. So a coach request closes them. `$requestedDestination` publishes on
+        // every assignment, before the shell resets it to nil; the replay on subscription is a no-op.
+        .onReceive(router.$requestedDestination) { destination in
+            guard destination == .coach else { return }
+            showHabits = false
+            showGoals = false
+            showTaskSheet = false
+            showCoachMenu = false
+        }
+        #if os(iOS)
+        // The dock's chip rows step aside while the keyboard is up (see `composerDock`).
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            if !keyboardUp { keyboardUp = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            if keyboardUp { keyboardUp = false }
+        }
+        // A dictation left running when the wearer switches tab keeps the microphone open behind a
+        // screen they can no longer see. The words so far are already in the draft.
+        .onDisappear {
+            if voiceInput.isRecording { voiceInput.stopTranscribing { _ in } }
+        }
+        #endif
     }
 
     /// A screen the Coach links to (Habits, Goals), in its own navigation stack with a Done button. The
@@ -436,7 +471,7 @@ private struct CoachScreen: View, Equatable {
                 .frame(minHeight: 28)
                 .background(TelosColor.surfaceInset, in: Capsule(style: .continuous))
                 .overlay(Capsule(style: .continuous).strokeBorder(TelosColor.line, lineWidth: TelosStroke.line))
-                .frame(minHeight: TelosSpace.hitTarget)
+                .frame(minHeight: 36)
                 .contentShape(Rectangle())
             }
             .accessibilityLabel("Model")
@@ -529,7 +564,7 @@ private struct CoachScreen: View, Equatable {
                 .frame(minHeight: 28)
                 .background(TelosColor.surfaceInset, in: Capsule(style: .continuous))
                 .overlay(Capsule(style: .continuous).strokeBorder(TelosColor.line, lineWidth: TelosStroke.line))
-                .frame(minHeight: TelosSpace.hitTarget)
+                .frame(minHeight: 36)
                 .contentShape(Rectangle())
             }
             .accessibilityLabel(Text("Token allowance"))
@@ -590,17 +625,22 @@ private struct CoachScreen: View, Equatable {
         rateLimit = AIRateLimit.reading(model: coach.model)
     }
 
-    /// One round header button: a 36 pt icon disc (`surfaceInset` + `line`) in a 44 pt hit target.
-    /// They sit in the title row and must not drift apart.
+    /// One round header button: a 32 pt icon disc (`surfaceInset` + `line`), the pre-2.0 size, in a
+    /// 34 × 44 pt target. They sit in the title row and must not drift apart.
+    ///
+    /// NARROW ON PURPOSE. The level strip's pentagon hangs about 20 pt into the top of every tab, centred.
+    /// Four 44 pt-wide buttons reached back under it on a 375–390 pt phone, and the pentagon (which takes
+    /// taps: it opens the level timeline) swallowed the left one. At 34 pt with 2 pt gaps the four take
+    /// 142 pt from the trailing edge and stay right of it, where the pre-2.0 row of three always sat.
     private func coachHeaderGlyph(_ icon: String) -> some View {
         Image(systemName: icon)
             .font(TelosType.glyphRow)
             .foregroundStyle(TelosColor.textSecondary)
-            .frame(width: 36, height: 36)
+            .frame(width: 32, height: 32)
             .background(TelosColor.surfaceInset, in: Circle())
             .overlay(Circle().strokeBorder(TelosColor.line, lineWidth: TelosStroke.line))
-            .frame(width: TelosSpace.hitTarget, height: TelosSpace.hitTarget)
-            .contentShape(Circle())
+            .frame(width: 34, height: TelosSpace.hitTarget)
+            .contentShape(Rectangle())
     }
 
     private func coachHeaderButton(_ icon: String, _ label: String,
@@ -647,12 +687,14 @@ private struct CoachScreen: View, Equatable {
     /// Title and the header buttons, over a fade to the canvas so text scrolling under it does not collide.
     /// The fade is one static gradient (no material, no blur).
     private var titleOverlay: some View {
-        HStack(alignment: .center, spacing: 0) {
+        HStack(alignment: .center, spacing: TelosSpace.xxs) {
             // Title only. A subtitle explains the screen to somebody who has already opened it, on
             // every visit, and takes a line the conversation wants.
             Text("System")
                 .font(TelosType.title)
                 .foregroundStyle(TelosColor.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
             Spacer(minLength: TelosSpace.s)
             // HABITS AND GOALS, one tap from the coach that plans toward them (decisions 3 and 14).
             Menu {
@@ -698,8 +740,22 @@ private struct CoachScreen: View, Equatable {
     }
 
     /// The composer, the chips above it, and the things that only appear when they have something to
-    /// say — on an OPAQUE `surface` band with a hairline top edge (§6.9: no glass; the transcript scrolls
-    /// under it and stops at the edge).
+    /// say — the pre-2.0 dock, in the pre-2.0 order, on an OPAQUE `surface` band with a hairline top edge
+    /// (§6.9: no glass). Opaque on purpose: the transcript ENDS at the band instead of running on under
+    /// the chips, so no chip ever sits on top of a line of the conversation.
+    ///
+    /// IT SITS ABOVE THE FLOATING TAB BAR, never under it: this is a bottom safe-area inset on the
+    /// transcript, and the shell (`RootTabView.tab`) insets every tab root by the bar's height
+    /// (`TelosTabBarMetrics.contentInset`), so the band's bottom edge is the bar's top edge. With the
+    /// keyboard up the shell drops that inset and hides the bar, and the band rides the keyboard.
+    ///
+    /// COMPACT, SO THE CONVERSATION KEEPS THE SCREEN. The chip rows are 36 pt (32 pt chips) and the
+    /// model row the same, as they were before 2.0 — four 44 pt rows plus the bar and the keyboard left
+    /// a phone a sliver of transcript. While the keyboard is up the two chip rows step aside entirely
+    /// (they are for starting a question, not for one being typed), so the band is just the model row
+    /// and the input line; they come back the moment the keyboard goes. Chrome text is capped at
+    /// xxLarge (as the tab bar caps its own) so a large text size cannot grow the band over the chat;
+    /// the input line itself still scales fully.
     private var composerDock: some View {
         VStack(spacing: TelosSpace.s) {
             if let error = chrome.errorText, !error.isEmpty {
@@ -708,10 +764,16 @@ private struct CoachScreen: View, Equatable {
                 // error branch, never on its own flag, so it cannot outlive the message justifying it.
                 if chrome.keyRejected { keyRepairPanel }
             }
-            // K7: follow-ups after a reply, the opening chips before one.
-            if showFollowUpChips { followUpChips } else { suggestionChips }
-            analysisChips
+            if !keyboardUp {
+                // K7: follow-ups after a reply, the opening chips before one.
+                Group {
+                    if showFollowUpChips { followUpChips } else { suggestionChips }
+                    analysisChips
+                }
+                .dynamicTypeSize(...DynamicTypeSize.xxLarge)
+            }
             modelChip
+                .dynamicTypeSize(...DynamicTypeSize.xxLarge)
             composer
             if !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                let tokens = coach.estimatedTokens(forDraft: draft) {
@@ -948,12 +1010,10 @@ private struct CoachScreen: View, Equatable {
         .help(voiceInput.statusMessage ?? "Ask out loud")
         .accessibilityLabel(voiceInput.isRecording ? "Stop voice input" : "Voice input")
         .accessibilityHint(voiceInput.statusMessage ?? "Transcribes your question on-device")
-        .task {
-            // Pre-check on appear so the button reflects the right state without a tap.
-            if voiceInput.authorization == .notDetermined {
-                voiceInput.requestAuthorization { _ in }
-            }
-        }
+        // NO PERMISSION PROMPT ON APPEAR. This used to ask for speech + microphone access the moment the
+        // chat was shown, so the first visit to the Coach opened with two system alerts over it, before
+        // anyone had touched the mic. The button is enabled while the answer is undetermined, and its
+        // first tap asks (`toggleVoice`).
     }
 
     /// Whether the mic button is tappable: not while sending, and only if voice is either
@@ -1218,7 +1278,7 @@ private struct AssistantBubble: View, Equatable {
 // MARK: - Small shared pieces
 
 /// A prompt / analysis chip: capsule on `surfaceInset` with a hairline (an accent hairline for the named
-/// analyses), 32 pt visual inside a 44 pt target.
+/// analyses), 32 pt visual in a 36 pt row: the pre-2.0 density, so the dock does not eat the transcript.
 private struct CoachChipLabel: View {
     let text: String
     var symbol: String? = nil
@@ -1242,7 +1302,7 @@ private struct CoachChipLabel: View {
         .overlay(Capsule(style: .continuous)
             .strokeBorder(emphasised ? StrandPalette.accent.opacity(0.45) : TelosColor.line,
                           lineWidth: TelosStroke.line))
-        .frame(minHeight: TelosSpace.hitTarget)
+        .frame(minHeight: 36)
         .contentShape(Rectangle())
     }
 }
@@ -1562,9 +1622,12 @@ private struct CoachSetupCard: View {
 /// screen is a chat screen. Observes the engine while it is open (the toggles bind to it).
 private struct CoachMenuSheet: View {
     @ObservedObject var coach: AICoachEngine
-    /// Raise the "Clear conversation?" confirmation on the screen underneath.
-    let onClearConversation: () -> Void
     let onDone: () -> Void
+
+    /// K2: confirmation gate for "Clear conversation", held HERE. It used to be raised on the chat
+    /// underneath, and a dialog cannot present from a view that is covered by a sheet, so the menu item
+    /// did nothing at all.
+    @State private var showClearConfirm = false
 
     /// Whether the editable-system-prompt section is expanded. Collapsed by default.
     @State private var promptExpanded: Bool = false
@@ -1603,6 +1666,16 @@ private struct CoachMenuSheet: View {
                     Button("Done", action: onDone)
                 }
             }
+            .confirmationDialog(
+                "Clear conversation?",
+                isPresented: $showClearConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Clear", role: .destructive) { coach.clearConversation() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("This deletes the saved conversation from this device. Coach history is your own notes, not medical advice.")
+            }
         }
         #if os(iOS)
         .presentationBackground(TelosColor.canvas)
@@ -1638,7 +1711,7 @@ private struct CoachMenuSheet: View {
     private var connectionMenu: some View {
         Menu {
             Button {
-                onClearConversation()
+                showClearConfirm = true
             } label: {
                 Label("Clear conversation", systemImage: "trash")
             }

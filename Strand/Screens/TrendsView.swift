@@ -50,6 +50,8 @@ struct TrendsView: View {
     private var levelTrend: LevelTrendSnapshot? { levelBar.trend }
     /// Pushes the Sleep screen from the third vital tile.
     @State private var openSleep = false
+    /// The Biometrics tab's path push (iOS tab shell only); nil on macOS, where `openSleep` pushes.
+    @Environment(\.tabRoutePush) private var tabRoutePush
 
     @State private var range: Range = .quarter
 
@@ -302,7 +304,10 @@ struct TrendsView: View {
                         // Heart, lungs and sleep, directly under the muscle model. No heading of their
                         // own: the figure above already says what this part of the screen is, and a
                         // title here would label a label. The third tile IS the Sleep door.
-                        VitalTrioCardView(trend: levelTrend, onOpenSleep: { openSleep = true })
+                        VitalTrioCardView(trend: levelTrend, onOpenSleep: {
+                            // On the tab's path when there is one, so re-tapping Biometrics returns.
+                            if let tabRoutePush { tabRoutePush(.sleep) } else { openSleep = true }
+                        })
                             .staggeredAppear(index: 2)
                         // The Biometrics strip: the latest vitals as compact glass tiles (decision 11),
                         // each with its 14-day micro-line. A value from an earlier day says so.
@@ -943,8 +948,8 @@ struct BiometricsVitalsStrip: View {
 // MARK: - Go deeper (§6.4)
 
 /// Health Monitor, Explore, Sleep, Stress, Compare and Look ahead as one grouped list (§5.8 rows). The
-/// routes are the existing ones — `TabRoute` values where the stack registers them, the Compare and Look
-/// ahead screens by closure (they have no route value).
+/// routes are `TabRoute` values, every one — a closure link here bypassed the tab's path, so re-tapping
+/// Biometrics from Compare or Look ahead could not return to the tab's root.
 struct HealthGoDeeperList: View {
     var body: some View {
         VStack(alignment: .leading, spacing: TelosSpace.sectionHeaderGap) {
@@ -978,18 +983,14 @@ struct HealthGoDeeperList: View {
                 }
                 .buttonStyle(TelosRowButtonStyle())
                 TelosListDivider()
-                NavigationLink {
-                    CompareView()
-                } label: {
+                NavigationLink(value: TabRoute.compare) {
                     TelosListRow("Compare", systemImage: "chart.xyaxis.line", iconTint: TelosColor.teal,
                                  showsChevron: true)
                 }
                 .buttonStyle(TelosRowButtonStyle())
                 TelosListDivider()
                 // Look ahead (decision 13): projections on the current trend vs the plan.
-                NavigationLink {
-                    LookAheadDestination()
-                } label: {
+                NavigationLink(value: TabRoute.lookAhead) {
                     TelosListRow("Look ahead", systemImage: "chart.line.uptrend.xyaxis",
                                  iconTint: TelosColor.mint, showsChevron: true)
                 }

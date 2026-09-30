@@ -192,6 +192,9 @@ final class LiftSessionRecorder: ObservableObject {
         self.holdLoads = holdLoads
         if self.workoutStart == workoutStart, phase != .idle { return }
         self.workoutStart = workoutStart
+        // A day chosen on the picker's Telos Lift card before this workout started. Taken (and so cleared) here
+        // whatever happens below: a restored journal wins over it, and it never outlives this attach.
+        let preference = takeStartPreference(for: workoutStart)
         // A different workout: nothing of the previous one may leak in (its rows are already stored).
         stopRest()
         session = nil
@@ -213,6 +216,19 @@ final class LiftSessionRecorder: ObservableObject {
             }
             await finalizeOrphan(journal)
             await loadHistory(excluding: sessionId)
+        }
+
+        switch preference {
+        case .template(let id, let reason)? where programs.library.template(id: id) != nil:
+            pickReason = reason
+            start(templateId: id)
+            return
+        case .freehand?:
+            pickReason = nil
+            start(templateId: nil)
+            return
+        default:
+            break   // none, or a day deleted since the card showed it: the logger's own rule below
         }
 
         let templates = programs.library.allTemplates
@@ -270,6 +286,69 @@ final class LiftSessionRecorder: ObservableObject {
     var templates: [LiftDayTemplate] { LiftTemplatePicker.rotation(programs.library.allTemplates) }
 
     var canSwitchTemplate: Bool { (session?.doneCount ?? 0) == 0 }
+
+    // MARK: - Before the workout (the picker's Telos Lift card, the quick-action row)
+
+    /// How the NEXT strength workout should open, chosen before it exists.
+    enum StartPreference: Equatable {
+        /// A day template (the card's "Today" button carries the reason it showed; a chip carries none).
+        case template(String, reason: LiftTemplatePicker.Reason?)
+        /// No plan: straight to a freehand session.
+        case freehand
+    }
+
+    /// The sport the Telos Lift entry points start (a `WorkoutCatalog` name — stored data, never localised).
+    nonisolated static let liftStartSport = "Strength"
+
+    /// How long a preference waits for its workout. The card sets it and starts the workout in the same tap, so
+    /// anything older belongs to a start that never happened (a workout was already running) and is dropped.
+    nonisolated static let startPreferenceWindow: TimeInterval = 120
+
+    private var startPreference: (value: StartPreference, at: Date)?
+
+    /// Set by the picker's Telos Lift card right before it starts the Strength workout; `attach` consumes it.
+    func preferStart(_ preference: StartPreference, now: Date = Date()) {
+        startPreference = (preference, now)
+    }
+
+    /// Take (and clear) the pending preference if it was made for a workout starting at `workoutStart`.
+    private func takeStartPreference(for workoutStart: Date) -> StartPreference? {
+        guard let pending = startPreference else { return nil }
+        startPreference = nil
+        guard abs(workoutStart.timeIntervalSince(pending.at)) <= Self.startPreferenceWindow else { return nil }
+        return pending.value
+    }
+
+    /// Today's template by the logger's OWN rule (`LiftTemplatePicker`: weekday tag, then rotation after the last
+    /// completed day), for surfaces shown before a workout starts. Nil when there is no plan.
+    struct Suggestion: Equatable {
+        let template: LiftDayTemplate
+        let reason: LiftTemplatePicker.Reason
+    }
+
+    /// The last suggestion `refreshSuggestion` computed (nil until then, or when there is no plan).
+    @Published private(set) var suggestion: Suggestion?
+
+    /// Recompute `suggestion` from the stored sessions — the same rows `attach` reads — WITHOUT touching the
+    /// attached session's `history`, so it is safe while a workout runs.
+    @discardableResult
+    func refreshSuggestion(at date: Date = Date(),
+                           storeProvider: @escaping () async -> WhoopStore?) async -> Suggestion? {
+        let past: [LiftHistorySession]
+        if let store = await storeProvider() {
+            past = await Self.storedHistory(store: store, now: date)
+        } else {
+            past = []
+        }
+        let templates = programs.library.allTemplates
+        let weekday = Calendar.current.component(.weekday, from: date)
+        let next = LiftTemplatePicker.pick(
+            templates: templates, weekday: weekday,
+            lastCompletedTemplateId: Self.lastCompletedTemplateId(templates, in: past))
+            .map { Suggestion(template: $0.template, reason: $0.reason) }
+        if suggestion != next { suggestion = next }
+        return next
+    }
 
     // MARK: - Set edits
 
@@ -762,16 +841,21 @@ final class LiftSessionRecorder: ObservableObject {
 
     // MARK: - History + context
 
+    /// Every stored lift session with its sets, oldest first — the one read `attach` and `refreshSuggestion` share.
+    static func storedHistory(store: WhoopStore, now: Date) async -> [LiftHistorySession] {
+        let nowTs = Int(now.timeIntervalSince1970)
+        let sessions = (try? await store.liftSessions(deviceId: deviceId, fromTs: 0, toTs: nowTs)) ?? []
+        let sets = (try? await store.liftSetsWithSessionStart(deviceId: deviceId, fromTs: 0, toTs: nowTs)) ?? []
+        return LiftStoreBridge.history(sessions: sessions, sets: sets)
+    }
+
     private func loadHistory(excluding sessionId: String) async {
         guard let store = await storeProvider?() else {
             history = []
             progression = [:]
             return
         }
-        let nowTs = Int(Date().timeIntervalSince1970)
-        let sessions = (try? await store.liftSessions(deviceId: Self.deviceId, fromTs: 0, toTs: nowTs)) ?? []
-        let sets = (try? await store.liftSetsWithSessionStart(deviceId: Self.deviceId, fromTs: 0, toTs: nowTs)) ?? []
-        history = LiftStoreBridge.history(sessions: sessions, sets: sets).filter { $0.id != sessionId }
+        history = await Self.storedHistory(store: store, now: Date()).filter { $0.id != sessionId }
         let exercises = await StrengthProgressionSource.load(store: store)
         var byKey: [String: StrengthProgression.Exercise] = [:]
         for ex in exercises where byKey[LiftDedupe.exerciseKey(ex.name)] == nil {
@@ -783,6 +867,11 @@ final class LiftSessionRecorder: ObservableObject {
     /// The template of the most recent stored session that ran one of `templates` (a logged session by id, an
     /// imported one by its title's template segment) — the anchor for the rotation.
     private func lastCompletedTemplateId(_ templates: [LiftDayTemplate]) -> String? {
+        Self.lastCompletedTemplateId(templates, in: history)
+    }
+
+    nonisolated static func lastCompletedTemplateId(_ templates: [LiftDayTemplate],
+                                                    in history: [LiftHistorySession]) -> String? {
         for session in history.reversed() {
             if let t = templates.first(where: { session.ran(templateId: $0.id, templateName: $0.name) }) {
                 return t.id

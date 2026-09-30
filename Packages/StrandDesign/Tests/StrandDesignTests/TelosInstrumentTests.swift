@@ -3,7 +3,7 @@ import SwiftUI
 @testable import StrandDesign
 
 /// P2 · INS — pure tests for the instruments: the life orb's data mapping (incl. absent inputs and the
-/// unbounded Level), its seeded point cloud, ring overflow maths, the bezel and linear scales, the
+/// unbounded Level), its organ-blob geometry and eased pose, ring overflow maths, the bezel and linear scales, the
 /// frame-clock gate, and the pinned chart callout.
 final class TelosOrbMappingTests: XCTestCase {
 
@@ -99,15 +99,6 @@ final class TelosOrbMappingTests: XCTestCase {
         XCTAssertFalse(a.isNeutral)
     }
 
-    func testPartColoursFollowTheCumulativeShares() {
-        let thresholds = [0.5, 0.8, 1.0]
-        XCTAssertEqual(TelosOrbGeometry.colourIndex(hue: 0.0, thresholds: thresholds), 0)
-        XCTAssertEqual(TelosOrbGeometry.colourIndex(hue: 0.49, thresholds: thresholds), 0)
-        XCTAssertEqual(TelosOrbGeometry.colourIndex(hue: 0.5, thresholds: thresholds), 1)
-        XCTAssertEqual(TelosOrbGeometry.colourIndex(hue: 0.95, thresholds: thresholds), 2)
-        XCTAssertEqual(TelosOrbGeometry.colourIndex(hue: 1.0, thresholds: thresholds), 2)
-    }
-
     func testStressDrivesTurbulenceMonotonicallyWithinTheBoundedScale() {
         let t = [0.0, 1.0, 2.0, 3.0].map { TelosOrbAppearance.from(TelosOrbInputs(stress: $0)).turbulence }
         XCTAssertEqual(t.first!, TelosOrbAppearance.turbulenceRange.lowerBound, accuracy: 1e-12)
@@ -135,38 +126,114 @@ final class TelosOrbMappingTests: XCTestCase {
         for i in 1..<s.count { XCTAssertGreaterThan(s[i], s[i - 1]) }
     }
 
-    // MARK: Seeded point cloud
+    // MARK: The organ blob — geometry built once, lobes from the part shares
 
-    func testPointCloudIsDeterministicPerSeed() {
-        XCTAssertEqual(TelosOrbGeometry.cloud(count: 200, seed: 42), TelosOrbGeometry.cloud(count: 200, seed: 42))
-        XCTAssertNotEqual(TelosOrbGeometry.cloud(count: 200, seed: 42), TelosOrbGeometry.cloud(count: 200, seed: 43))
-        XCTAssertEqual(TelosOrbGeometry.makeLobes(count: 4, seed: 7), TelosOrbGeometry.makeLobes(count: 4, seed: 7))
-        XCTAssertEqual(TelosOrbGeometry.heroCloud, TelosOrbGeometry.cloud(count: 540, seed: 0x7E105_0B))
+    private func look(_ inputs: TelosOrbInputs) -> TelosOrbAppearance { TelosOrbAppearance.from(inputs) }
+
+    private func form(_ inputs: TelosOrbInputs, style: TelosOrb.Style = .hero) -> TelosOrbForm {
+        let a = look(inputs)
+        return TelosOrbGeometry.form(appearance: a, turbulence: a.turbulence, density: a.density, style: style)
     }
 
-    func testPointCloudShape() {
-        let cloud = TelosOrbGeometry.cloud(count: 1_000, seed: 9)
-        XCTAssertEqual(cloud.count, 1_000)
-        XCTAssertTrue(TelosOrbGeometry.cloud(count: 0, seed: 9).isEmpty)
-        for p in cloud {
-            XCTAssertEqual((p.x * p.x + p.y * p.y + p.z * p.z).squareRoot(), 1, accuracy: 1e-9)
-            XCTAssertTrue((0..<1).contains(p.hue))
-            XCTAssertTrue((0...1).contains(p.shell))
-        }
-        let interior = Double(cloud.filter(\.isInterior).count) / Double(cloud.count)
-        XCTAssertEqual(interior, 0.18, accuracy: 0.06)
+    func testFormIsDeterministic() {
+        let inputs = TelosOrbInputs(level: 64, partShares: [.sleep: 30, .heart: 20, .muscle: 18], stress: 1.2)
+        XCTAssertEqual(form(inputs), form(inputs))
+        XCTAssertEqual(form(inputs, style: .compact), form(inputs, style: .compact))
     }
 
-    func testStressDeformsTheSurfaceMoreThanCalm() {
-        let lobes = TelosOrbGeometry.lobes
-        let pulses = lobes.map { _ in 1.0 }
-        let cloud = TelosOrbGeometry.compactCloud
-        func spread(_ turbulence: Double) -> Double {
-            let r = cloud.map { TelosOrbGeometry.radius(x: $0.x, y: $0.y, z: $0.z, lobes: lobes, pulses: pulses,
-                                                        turbulence: turbulence, breath: 0, time: 0) }
-            return r.max()! - r.min()!
+    func testEachPartWithAShareGetsExactlyOneLobeInItsColour() {
+        let f = form(TelosOrbInputs(partShares: [.sleep: 30, .heart: 10, .lungs: 0, .muscle: .nan, .focus: 5]))
+        XCTAssertNil(f.lobes[0].part, "index 0 is the core")
+        let parts = f.lobes.compactMap(\.part)
+        XCTAssertEqual(Set(parts), [.sleep, .heart, .focus], "absent / zero / invalid parts have no lobe")
+        XCTAssertEqual(parts.count, 3)
+        for lobe in f.lobes where lobe.part != nil {
+            XCTAssertEqual(lobe.colorIndex, TelosOrbGeometry.colorIndex(of: lobe.part!))
         }
-        XCTAssertGreaterThan(spread(1.0), spread(0.12))
+    }
+
+    func testLobeSizeGrowsWithTheShare() {
+        let f = form(TelosOrbInputs(partShares: [.sleep: 40, .heart: 20, .focus: 5]))
+        func r(_ p: TelosOrbPart) -> Double { f.lobes.first(where: { $0.part == p })!.r }
+        XCTAssertGreaterThan(r(.sleep), r(.heart))
+        XCTAssertGreaterThan(r(.heart), r(.focus))
+        XCTAssertEqual(TelosOrbGeometry.lobeRadius(share: 0), 0)
+        XCTAssertEqual(TelosOrbGeometry.lobeRadius(share: .nan), 0)
+        let shares = [0.01, 0.05, 0.1, 0.2, 0.4, 0.8, 1.0]
+        for i in 1..<shares.count {
+            XCTAssertGreaterThan(TelosOrbGeometry.lobeRadius(share: shares[i]),
+                                 TelosOrbGeometry.lobeRadius(share: shares[i - 1]))
+        }
+    }
+
+    func testNoSharesDrawsTheTintsUnlabelledLobesNotParts() {
+        let f = form(TelosOrbInputs(level: 50))
+        XCTAssertTrue(f.lobes.allSatisfy { $0.part == nil && $0.colorIndex == 0 }, "no part is implied")
+        XCTAssertGreaterThan(f.lobes.count, 1, "still an organic blob, not a disc")
+    }
+
+    func testMembraneEnclosesTheCoreAndIsNotACircle() {
+        let f = form(TelosOrbInputs(level: 80, partShares: [.sleep: 30, .heart: 22, .muscle: 20, .lungs: 12, .focus: 9]))
+        XCTAssertEqual(f.outline.count, TelosOrbGeometry.outlineSamples)
+        XCTAssertTrue(f.outline.allSatisfy { $0 >= TelosOrbGeometry.coreRadius * 0.9 })
+        XCTAssertGreaterThan(f.outline.max()! - f.outline.min()!, 0.1, "lobed, not a sphere")
+        XCTAssertFalse(f.membrane.isEmpty)
+    }
+
+    func testStressRipplesTheMembrane() {
+        let lobes = TelosOrbGeometry.lobes(for: look(TelosOrbInputs(partShares: [.sleep: 1, .heart: 1])))
+        func roughness(_ turbulence: Double) -> Double {
+            let r = TelosOrbGeometry.outline(lobes: lobes, turbulence: turbulence).radii
+            return r.indices.reduce(0) { $0 + abs(r[$1] - r[($1 + 1) % r.count]) }
+        }
+        XCTAssertGreaterThan(roughness(1.0), roughness(0.12))
+    }
+
+    func testDotBudgetAndDensity() {
+        for style in [TelosOrb.Style.hero, .compact] {
+            let full = TelosOrbGeometry.form(appearance: look(TelosOrbInputs(level: 500)), turbulence: 0.12,
+                                             density: 1, style: style)
+            XCTAssertLessThanOrEqual(full.dotCount, TelosOrbGeometry.maxDots)
+            XCTAssertLessThanOrEqual(full.dots.count, TelosOrbPart.allCases.count * TelosOrbGeometry.tiers + TelosOrbGeometry.tiers,
+                                     "dots are batched: at most colour × tier fills")
+            let half = TelosOrbGeometry.form(appearance: look(TelosOrbInputs(level: 500)), turbulence: 0.12,
+                                             density: 0.5, style: style)
+            XCTAssertLessThan(half.dotCount, full.dotCount)
+        }
+        XCTAssertLessThan(form(TelosOrbInputs(level: 5)).dotCount, form(TelosOrbInputs(level: 100)).dotCount,
+                          "a higher Level fills the blob with more dots")
+    }
+
+    func testProvisionalLevelHasAFainterMembrane() {
+        XCTAssertEqual(form(TelosOrbInputs(level: 80)).assembly, 1)
+        XCTAssertLessThan(form(TelosOrbInputs(level: 80, confidence: .calibrating(done: 1, total: 7))).assembly, 1)
+    }
+
+    // MARK: Motion — transforms only, eased bursts, ≤ 20 fps
+
+    func testTheOrbClockIsCappedAtTwentyFramesPerSecond() {
+        XCTAssertGreaterThanOrEqual(TelosOrb.frameInterval, 1.0 / 20.0 - 1e-12)
+    }
+
+    func testBurstEnvelopeStartsAndEndsAtRest() {
+        XCTAssertEqual(TelosOrbPose.envelope(elapsed: 0, burst: 8), 0)
+        XCTAssertEqual(TelosOrbPose.envelope(elapsed: 4, burst: 8), 1, accuracy: 1e-12)
+        XCTAssertEqual(TelosOrbPose.envelope(elapsed: 8, burst: 8), 0, accuracy: 1e-12)
+        XCTAssertEqual(TelosOrbPose.envelope(elapsed: 12, burst: 8), 0)
+        XCTAssertEqual(TelosOrbPose.envelope(elapsed: .nan, burst: 8), 0)
+        XCTAssertEqual(TelosOrbPose.envelope(elapsed: 60, burst: nil), 1, accuracy: 1e-12)
+        XCTAssertEqual(TelosOrbPose.at(elapsed: 8, burst: 8, pulsePeriod: 6, turbulence: 1), .rest,
+                       "the still frame after a burst is the pose it ended in")
+        XCTAssertEqual(TelosOrbPose.at(elapsed: 0, burst: nil, pulsePeriod: 6, turbulence: 0.5), .rest)
+    }
+
+    func testPoseStaysGentle() {
+        for t in stride(from: 0.0, through: 30, by: 0.37) {
+            let p = TelosOrbPose.at(elapsed: t, burst: nil, pulsePeriod: 3, turbulence: 1)
+            XCTAssertEqual(p.scaleX, 1, accuracy: 0.05)
+            XCTAssertEqual(p.scaleY, 1, accuracy: 0.05)
+            XCTAssertLessThanOrEqual(abs(p.rotation), 0.09)
+        }
     }
 }
 
