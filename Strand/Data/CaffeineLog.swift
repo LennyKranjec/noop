@@ -298,7 +298,7 @@ public final class CaffeineLogStore: ObservableObject {
 enum CaffeineBedtime {
 
     /// Pure: the plan's bedtime, or `fallback`.
-    static func bedtimeMinutes(plan: SleepSchedulePlan?, fallback: Int) -> Int {
+    nonisolated static func bedtimeMinutes(plan: SleepSchedulePlan?, fallback: Int) -> Int {
         plan?.bedtimeMin ?? fallback
     }
 
@@ -309,7 +309,7 @@ enum CaffeineBedtime {
     }
 
     /// The cutoff, minutes past midnight, for `plan` (else `fallback` bedtime).
-    static func cutoffMinutes(plan: SleepSchedulePlan?, fallback: Int) -> Int {
+    nonisolated static func cutoffMinutes(plan: SleepSchedulePlan?, fallback: Int) -> Int {
         CaffeineDecay.cutoffMinutesSinceMidnight(bedtimeMinutes: bedtimeMinutes(plan: plan, fallback: fallback))
     }
 }
