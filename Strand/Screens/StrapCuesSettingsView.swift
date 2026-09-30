@@ -15,7 +15,9 @@ import UIKit
 struct StrapCuesSettingsView: View {
     @ObservedObject var engine: StrapCueEngine
 
-    /// The master switch every AMBIENT wrist buzz honours (same raw key as Automations' "Wrist alerts").
+    /// The Wrist-alerts master (same raw key as Automations' "Wrist alerts"). It holds only the evening cues
+    /// here (wind-down, screens off — `StrapCueKind.heldByWristAlertsMaster`) plus the HR / strain wrist
+    /// alerts in Automations; the sitting break, rewards and penalties follow their own switches.
     @AppStorage("notif.masterEnabled") private var wristAlertsMaster = false
     /// The older strap-offload inactivity reminder (Automations). Same raw key as `InactivityPrefs.enabled`.
     @AppStorage("inactivity.enabled") private var legacyInactivity = false
@@ -48,12 +50,12 @@ struct StrapCuesSettingsView: View {
                 .cueHelp()
             if !wristAlertsMaster {
                 Divider().overlay(StrandPalette.hairline)
-                Text("Wrist alerts are off, so the unrequested cues (sitting break, wind-down, screens off) stay quiet. Timers you start still buzz.")
+                Text("Wrist alerts are off, so the evening cues (wind-down, screens off) stay quiet. The sitting break, rewards and penalties follow their own switches; timers you start still buzz.")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.statusWarning)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            CueToggle(label: "Wrist alerts", help: "The master switch for every unrequested wrist buzz.",
+            CueToggle(label: "Wrist alerts", help: "Also governs the evening cues here. The sitting break, rewards and penalties have their own switches.",
                       isOn: $wristAlertsMaster)
         }
     }
@@ -86,13 +88,20 @@ struct StrapCuesSettingsView: View {
                 Text("The strap's own steps arrive minutes late, so live movement comes from this phone; the strap's steps only correct the record afterwards. Keep the phone with you: if it lies still while your strap shows you moving, the nudge pauses rather than guess.")
                     .cueHelp()
                 if legacyInactivity {
-                    Divider().overlay(StrandPalette.hairline)
-                    Text("The older inactivity reminder in Automations is also on, so one sitting stretch can buzz twice.")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.statusWarning)
-                        .fixedSize(horizontal: false, vertical: true)
-                    NoopButton("Turn the older reminder off", systemImage: "bell.slash", kind: .secondary) {
-                        legacyInactivity = false
+                    Divider().overlay(TelosColor.lineSoft)
+                    if engine.supersedesLegacyInactivityBuzz {
+                        // The legacy buzz stands down while this nudge can fire (BLEManager.maybeBuzzInactivity),
+                        // so there is no double buzz to warn about — only a switch that is currently idle.
+                        Text("The older inactivity reminder in Automations is paused while this nudge runs.")
+                            .cueHelp()
+                    } else {
+                        Text("The older inactivity reminder in Automations is also on, so one sitting stretch can buzz twice.")
+                            .font(TelosType.footnote)
+                            .foregroundStyle(TelosColor.warning)
+                            .fixedSize(horizontal: false, vertical: true)
+                        NoopButton("Turn the older reminder off", systemImage: "bell.slash", kind: .secondary) {
+                            legacyInactivity = false
+                        }
                     }
                 }
             }
@@ -398,10 +407,10 @@ private struct CueCard<Content: View>: View {
                     Image(systemName: icon)
                         .foregroundStyle(active ? StrandPalette.accent : StrandPalette.textSecondary)
                         .accessibilityHidden(true)
-                    Text(title).font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
+                    Text(title).font(TelosType.headline).foregroundStyle(TelosColor.textPrimary)
                     Spacer(minLength: 0)
                     if active {
-                        Text("ON").font(StrandFont.overline).tracking(StrandFont.overlineTracking)
+                        Text("ON").telosScale()
                             .foregroundStyle(StrandPalette.accent)
                     }
                 }

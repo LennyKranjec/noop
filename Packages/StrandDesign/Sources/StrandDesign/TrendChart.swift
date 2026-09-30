@@ -541,14 +541,16 @@ public struct TrendChart: View {
 // MARK: - Telos chart style (shared by TrendChart / OverviewHRChart)
 
 /// The luminous chart look (§5.7 + VISUAL DIRECTION): a faint dotted grid and a dark glass plot well.
-/// Stored once (static lets), so no chart builds a new style per render.
+/// Strokes and inks are stored once (static lets); the well is a tiny static view.
 enum TelosChartStyle {
     /// Faint dotted grid lines.
     static let gridStroke = StrokeStyle(lineWidth: TelosStroke.hair, dash: [1, 3])
     static let gridInk = TelosColor.lineStrong
     /// The plot's dark glass well: a flat translucent inset fill with rounded corners. No material.
-    static let plotWell = RoundedRectangle(cornerRadius: 10, style: .continuous)
-        .fill(TelosColor.surfaceInset.opacity(0.45))
+    static var plotWell: some View {
+        RoundedRectangle(cornerRadius: 10, style: .continuous)
+            .fill(TelosColor.surfaceInset.opacity(0.45))
+    }
 }
 
 // MARK: - Chart downsampling (pure)

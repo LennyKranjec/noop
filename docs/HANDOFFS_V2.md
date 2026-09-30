@@ -143,9 +143,29 @@ Findings for owner: load term = training done not adaptation (uncapped by decisi
 - [ ] Owner/level note: the week review's "Wake time varied by ±N min" uses the 14-night S2 figure (the field's documented source), not strictly the reviewed Mon–Sun week.
 
 ## Telos Lift (done — exact code in agent report, summarised)
-- [ ] AppModel.endWorkout(): keep a strength session without HR samples: `let liftNote = LiftSessionRecorder.isStrengthSport(w.sport) ? LiftSessionRecorder.shared.finishedWorkoutNote : nil`; guard becomes `samples.count >= 2 || route != nil || liftNote != nil`; WorkoutRow `notes: liftNote`
-- [ ] AppModel launch (after active workout restore): `Task { [weak self] in guard let self else { return }; await LiftSessionRecorder.shared.finalizeOrphanedJournal(activeWorkoutStart: self.activeWorkout?.start, storeProvider: { [weak self] in await self?.repo.storeHandle() }) }`
+- [x] AppModel.endWorkout(): keep a strength session without HR samples: `let liftNote = LiftSessionRecorder.isStrengthSport(w.sport) ? LiftSessionRecorder.shared.finishedWorkoutNote : nil`; guard becomes `samples.count >= 2 || route != nil || liftNote != nil`; WorkoutRow `notes: liftNote` — done (coordinator)
+- [x] AppModel launch (after active workout restore): `Task { [weak self] in guard let self else { return }; await LiftSessionRecorder.shared.finalizeOrphanedJournal(activeWorkoutStart: self.activeWorkout?.start, storeProvider: { [weak self] in await self?.repo.storeHandle() }) }` — done (coordinator)
 - [ ] More/Settings: `.sheet(isPresented: $showLiftPlan) { LiftProgramEditorView(programs: LiftProgramStore.shared) }` (editor owns its NavigationStack)
 - [ ] Optional AI: CoachLiftNote.line(exercise:proposal:) → ExerciseContext.coachNote
 - [ ] Optional StrandImport: StrengthProgression.maxIncrementKg 5 → allow observed 8 kg steps
 - [ ] Integration: xcodegen + xcstrings for Lift strings
+
+## INS (P2 · Instruments) — hand-offs for the screen packages
+Components live in `Packages/StrandDesign/Sources/StrandDesign/Telos/` (TelosOrb, TelosRing, TelosBezel, TelosLinearScale, TelosFrameGate). All are data-driven and honest: nil / non-finite = absent (never a zero), unbounded values overflow visibly (never clipped at 100).
+- [ ] TODAY — Home life orb (owner direction: appearance AND animation bound to real numbers):
+  `TelosOrb(inputs: TelosOrbInputs(level:, partShares:, stress:, heartRateBpm:, charge:, effortRatio:, confidence:), tint: .green, style: .hero)`
+  - `level: Double?` today's Level, unbounded (100 = own P95) → size/density via growth = log2(1 + level/100) (monotone, no max; past 100 each growth unit adds a particle shell)
+  - `partShares: [TelosOrbPart: Double]` (.sleep/.heart/.lungs/.muscle/.focus → that part's points or share of the level; normalised inside; meditation deduction is NOT a part) → colour composition in the levelPartTint hues
+  - `stress: Double?` daily stress on the 0–3 scale → surface turbulence (calm = smooth)
+  - `heartRateBpm: Double?` RESTING HR or a rolling average (not the raw 1 Hz stream — the pulse phase restarts on change) → pulse period = 6 × 60 / bpm s
+  - `charge: Double?` today's Charge 0–100 (nil when not measured today; do not pass a carried value as today's) → glow brightness
+  - `effortRatio: Double?` today's Effort ÷ today's optimum/target (unbounded) → orbit-dot speed
+  - `confidence: TelosConfidence` map the Level's ScoreConfidence (.calibrating(done:total:) / .building / .solid) → provisional orb is sparser + dimmer, dots still drifting in
+  - all nil → the neutral dim desaturated STILL orb (no clock). Pure mapping: `TelosOrbAppearance.from(_:)` (tests: TelosInstrumentTests). The orb is accessibility-hidden: the Level numeral beside it must carry the data.
+  - clock: default `.whileVisible` (owner's direction; ≤ 30 fps, pauses offscreen / under a sheet / Reduce Motion / Low Power). If the final perf audit holds Today to §2.1 "idle = 0 clocks", pass `clock: .burst(seconds: 6)` (animates after appear + each data change, then rests). COORDINATOR DECISION NEEDED.
+- [ ] TODAY — REST / CHARGE / EFFORT: `LiquidScoreGauge` / `LiquidVessel` already render the luminous ring (no call-site change). New code: `TelosRing(value:, scale: 100 (Effort WHOOP: 21), color: TelosColor.rest/.charge/.effort, diameter:, unit: "%", caption: Text("REST"), target: optimum?, confidence:, isCarried:)`.
+- [ ] TODAY — "87 % OPTIMAL" ring: `ZStack { TelosBezel(value:, range: 0...100, color: TelosColor.mint); TelosRing(value:, color: TelosColor.mint, diameter:, unit: "%", caption: Text("OPTIMAL")) }`.
+- [ ] FRAME / TODAY — any Level ring, bar or widget gauge: `TelosRing(value: level, scale: 100, …)` — >100 draws a second (third…) lap + lap tick, past 3 laps a "3.7×" label. `GlowRing` still clamps to 0…1 (bounded scores only).
+- [ ] BODY / other tabs: compact orbs `TelosOrb(inputs:…, tint: .teal (Environment) / .violet (Mind & Focus, sleep) / .amber (Metabolic), style: .compact)`; pips `TelosSegmentedBar(value:, scale:, segments:, color:)`; gradient bars `TelosGradientBar(value:, scale:, colors:)`; load wave `TelosLoadWave(values:, color:, range:)`; micro-sparklines `TelosLuminousSparkline(values:, color:)` (non-finite values break the line); dials `TelosBezel(value:, range:, bands:, target:)`.
+- [ ] Any new frame loop in a screen package: gate it with `TelosFrameGate.mode(…)` + `.telosOffscreen` + `\.noopBackgroundCovered` + `NoopMotionState.poseStill`, ≤ `TelosFrameGate.minimumInterval`; settle-then-rest clocks use `.telosSettleWindow(on:active:)`.
+- Notes for the coordinator (applied inside INS files, visible app-wide): TrendChart / OverviewHRChart now `.monotone` (no overshoot), luminous halo line, dotted grid, dark plot well, y labels trailing (§5.7), point marks only for n ≤ 14, callout pinned to the plot top beside the point; LiquidVessel is a luminous ring (no liquid, no frame loop — the 60 fps-loop-ignoring-its-sim finding is fixed); LiquidTube settles ≤ 1.2 s then rests; LiquidThread has no clock / glint / endpoint loop; the sky is static (900 s re-evaluation) bioluminescent ground with a seeded dotted depth field; RecoveryRing micro-wordmark reads "TELOS"; BrandMark VoiceOver label "Telos" (verbatim). No new localized strings.

@@ -243,11 +243,15 @@ struct LiquidTube: View {
         }
         .frame(height: height)
         .liquidOffscreen { offscreen = $0 }
-        .onAppear { posedFrac = clamped }
+        .onAppear {
+            posedFrac = clamped
+            sim.level = clamped      // a first change settles from the drawn level, never from empty
+            sim.target = clamped
+        }
         .onChangeCompat(of: clamped) { next in
-            // Start the settle from the level on screen, then chase the new one.
-            let from = posedFrac ?? next
-            sim.level = from
+            // Start the settle from the level on screen (mid-settle, the sim's own level already is),
+            // then chase the new one.
+            if !settling { sim.level = posedFrac ?? next }
             sim.target = next
             posedFrac = next
         }

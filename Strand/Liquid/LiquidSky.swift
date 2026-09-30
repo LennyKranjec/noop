@@ -1,9 +1,16 @@
 //  LiquidSky.swift
-//  NOOP · Liquid design language
+//  NOOP · Liquid design language → Telos 2.0 (INS)
 //
-//  The time-of-day sky: a gradient that flows continuously through the day's
-//  keyframes, a quiet starfield, and two subtle sheets of light. No objects,
-//  no blur — clean and crisp, the atmosphere of the app's header.
+//  The time-of-day ground behind the header: in Telos 2.0 the DARK BIOLUMINESCENT background of the
+//  reference — a near-black gradient with a whisper of green-teal, a faint green-teal vignette glow at
+//  the top, and a faint dotted depth field (deterministic seeded dots whose size and opacity follow
+//  their depth), with brighter stars at night (dark scheme only, ≤ 0.35 opacity). The hour tints the
+//  keyframes subtly (deeper at night, a faint teal horizon by day, a warmer dusk).
+//
+//  STATIC (§7.4 "backgrounds and the sky never animate"): one Canvas, drawn once; when it follows the
+//  live hour it re-evaluates every 900 s through a periodic TimelineView (a label-tick clock, not a
+//  per-frame loop). `LiquidSky` is a thin wrapper over `LiquidSkyStatic`. The bottom settles into the
+//  `TelosColor.canvas` token (resolved by the Canvas for the current scheme — no literal RGB copies).
 
 import SwiftUI
 import StrandDesign
@@ -21,34 +28,27 @@ private func hx(_ hex: UInt32) -> Color {
           blue: Double(hex & 0xff) / 255, opacity: 1)
 }
 
-/// The ten keyframes mirror the real app's day-cycle scenes (SceneHeroBackground),
-/// as pure gradients rather than painted art.
+/// Dark keyframes: the bioluminescent ground (#05090A → #0B1214 family), tinted by the hour.
+/// `stars` scales the brighter night stars (the faint depth field is always there in dark).
 let liquidSkyKeys: [LiquidSkyStop] = [
-    .init(h: 0,    top: hx(0x191A1F), mid: hx(0x1D1E23), hor: hx(0x22242B), stars: 0.20, warm: 0),
-    .init(h: 5,    top: hx(0x1A1B20), mid: hx(0x1D1F24), hor: hx(0x23252C), stars: 0.12, warm: 0),
-    .init(h: 6.5,  top: hx(0x1B1C21), mid: hx(0x1F2026), hor: hx(0x25272E), stars: 0.06, warm: 0),
-    .init(h: 8.5,  top: hx(0x1C1D22), mid: hx(0x202229), hor: hx(0x272A31), stars: 0, warm: 0),
-    .init(h: 11,   top: hx(0x1D1E23), mid: hx(0x21232A), hor: hx(0x292C33), stars: 0, warm: 0),
-    .init(h: 14,   top: hx(0x1D1E23), mid: hx(0x22242B), hor: hx(0x292C34), stars: 0, warm: 0),
-    .init(h: 17.5, top: hx(0x1C1D22), mid: hx(0x202229), hor: hx(0x272930), stars: 0, warm: 0),
-    .init(h: 19.5, top: hx(0x1B1C21), mid: hx(0x1F2026), hor: hx(0x24262D), stars: 0.05, warm: 0),
-    .init(h: 22,   top: hx(0x191A1F), mid: hx(0x1D1E23), hor: hx(0x22242B), stars: 0.16, warm: 0),
-    .init(h: 24,   top: hx(0x191A1F), mid: hx(0x1D1E23), hor: hx(0x22242B), stars: 0.20, warm: 0),
+    .init(h: 0,    top: hx(0x030608), mid: hx(0x05090B), hor: hx(0x07100F), stars: 1.00, warm: 0),
+    .init(h: 5.5,  top: hx(0x04070A), mid: hx(0x070B0F), hor: hx(0x0A1214), stars: 0.55, warm: 0),
+    .init(h: 7,    top: hx(0x05090B), mid: hx(0x081012), hor: hx(0x0D1A18), stars: 0,    warm: 0.25),
+    .init(h: 12,   top: hx(0x05090A), mid: hx(0x0A1213), hor: hx(0x0E1B1A), stars: 0,    warm: 0),
+    .init(h: 18.5, top: hx(0x06080B), mid: hx(0x0A0F12), hor: hx(0x10161A), stars: 0,    warm: 0.35),
+    .init(h: 21,   top: hx(0x04070A), mid: hx(0x06090C), hor: hx(0x081010), stars: 0.70, warm: 0),
+    .init(h: 24,   top: hx(0x030608), mid: hx(0x05090B), hor: hx(0x07100F), stars: 1.00, warm: 0),
 ]
 
-/// Light appearance keeps the same time-of-day movement without beginning from the dark-only
-/// keyframes above. The restrained blue-gray atmosphere settles naturally into the light canvas.
+/// Light keyframes: the pale green-grey Telos ground, the same hour movement. No stars in light.
 private let liquidLightSkyKeys: [LiquidSkyStop] = [
-    .init(h: 0,    top: hx(0xDCE3ED), mid: hx(0xE5EAF1), hor: hx(0xEEF1F5), stars: 0.08, warm: 0),
-    .init(h: 5,    top: hx(0xDDE5EE), mid: hx(0xE7EBF1), hor: hx(0xEFF2F5), stars: 0.05, warm: 0),
-    .init(h: 6.5,  top: hx(0xE1E8EF), mid: hx(0xE9EDF2), hor: hx(0xF0F2F5), stars: 0.02, warm: 0),
-    .init(h: 8.5,  top: hx(0xE3EBF1), mid: hx(0xEAF0F3), hor: hx(0xF1F3F5), stars: 0, warm: 0),
-    .init(h: 11,   top: hx(0xE1EAF0), mid: hx(0xE9EEF2), hor: hx(0xF1F3F5), stars: 0, warm: 0),
-    .init(h: 14,   top: hx(0xDFE8EF), mid: hx(0xE8EDF2), hor: hx(0xF0F2F5), stars: 0, warm: 0),
-    .init(h: 17.5, top: hx(0xE1E7ED), mid: hx(0xE8ECF1), hor: hx(0xEFF1F4), stars: 0, warm: 0),
-    .init(h: 19.5, top: hx(0xDDE4EC), mid: hx(0xE6EAF0), hor: hx(0xEEF1F4), stars: 0.02, warm: 0),
-    .init(h: 22,   top: hx(0xDAE2EC), mid: hx(0xE4E9F0), hor: hx(0xEDF0F4), stars: 0.06, warm: 0),
-    .init(h: 24,   top: hx(0xDCE3ED), mid: hx(0xE5EAF1), hor: hx(0xEEF1F5), stars: 0.08, warm: 0),
+    .init(h: 0,    top: hx(0xDDE6E3), mid: hx(0xE6EDEA), hor: hx(0xEEF3F1), stars: 0, warm: 0),
+    .init(h: 5.5,  top: hx(0xE0E6E6), mid: hx(0xE9EDEC), hor: hx(0xF1F2EF), stars: 0, warm: 0),
+    .init(h: 7,    top: hx(0xE4E9E6), mid: hx(0xECF0EE), hor: hx(0xF3F4F1), stars: 0, warm: 0.25),
+    .init(h: 12,   top: hx(0xE3ECE9), mid: hx(0xEBF1EF), hor: hx(0xF1F5F3), stars: 0, warm: 0),
+    .init(h: 18.5, top: hx(0xE6E6E6), mid: hx(0xEDEDEB), hor: hx(0xF3F2EF), stars: 0, warm: 0.35),
+    .init(h: 21,   top: hx(0xDDE5E3), mid: hx(0xE6ECEA), hor: hx(0xEEF3F1), stars: 0, warm: 0),
+    .init(h: 24,   top: hx(0xDDE6E3), mid: hx(0xE6EDEA), hor: hx(0xEEF3F1), stars: 0, warm: 0),
 ]
 
 private func lerp(_ a: Double, _ b: Double, _ t: Double) -> Double { a + (b - a) * t }
@@ -59,111 +59,109 @@ private func lerpColor(_ a: Color, _ b: Color, _ t: Double) -> Color {
 
 func liquidSkyAt(_ hour: Double, light: Bool = false) -> (top: Color, mid: Color, hor: Color, stars: Double, warm: Double) {
     let keys = light ? liquidLightSkyKeys : liquidSkyKeys
+    let hh = hour.isFinite ? min(max(hour, 0), 24) : 0
     var i = 0
-    while i < keys.count - 2 && keys[i + 1].h <= hour { i += 1 }
+    while i < keys.count - 2 && keys[i + 1].h <= hh { i += 1 }
     let a = keys[i], b = keys[i + 1]
-    let t = max(0, min(1, (hour - a.h) / (b.h - a.h)))
+    let t = max(0, min(1, (hh - a.h) / (b.h - a.h)))
     return (lerpColor(a.top, b.top, t), lerpColor(a.mid, b.mid, t), lerpColor(a.hor, b.hor, t),
             lerp(a.stars, b.stars, t), lerp(a.warm, b.warm, t))
 }
 
-/// A precomputed quiet star field (positions fixed; only the count that render
-/// depends on how starry the hour is).
-private struct LiquidStar { let x, y, z, ph, sp: Double }
-private let liquidStars: [LiquidStar] = (0..<70).map { _ in
-    LiquidStar(x: .random(in: 0...1), y: .random(in: 0...0.78), z: .random(in: 0...1),
-               ph: .random(in: 0..<7), sp: 0.2 + .random(in: 0..<0.5))
+/// One dot of the depth field: unit position, depth 0 (far) … 1 (near), and whether it is a brighter
+/// night star.
+private struct LiquidSkyDot { let x, y, z: Double; let star: Bool }
+
+/// The deterministic dotted depth field (SplitMix64, fixed seed): the same dots on every launch, so the
+/// static frame never shimmers between renders.
+private let liquidSkyDots: [LiquidSkyDot] = {
+    var state: UInt64 = 0x7E1_05_5C1
+    func next() -> Double {
+        state = state &+ 0x9E3779B97F4A7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        z = z ^ (z >> 31)
+        return Double(z >> 11) / Double(UInt64(1) << 53)
+    }
+    return (0..<96).map { _ in
+        let x = next(), y = next() * 0.82, z = next(), star = next() < 0.22
+        return LiquidSkyDot(x: x, y: y, z: z, star: star)
+    }
+}()
+
+/// The pale green-white of the depth field and the vignette hue.
+private let liquidSkyDotInk = Color(.sRGB, red: 191 / 255, green: 1, blue: 230 / 255, opacity: 1)
+
+/// The one sky renderer (static). Pure drawing into a GraphicsContext.
+private func liquidSkyRender(_ base: GraphicsContext, _ size: CGSize, hour: Double, light: Bool,
+                             settleStrength: Double) {
+    let S = liquidSkyAt(hour, light: light)
+    let w = size.width, h = size.height
+    guard w > 0, h > 0 else { return }
+    var ctx = base
+    // The gradient IS the ground.
+    ctx.fill(Path(CGRect(x: 0, y: 0, width: w, height: h)),
+             with: .linearGradient(Gradient(stops: [
+                .init(color: S.top, location: 0),
+                .init(color: S.mid, location: 0.5),
+                .init(color: S.hor, location: 0.9)]),
+                                   startPoint: CGPoint(x: 0, y: 0), endPoint: CGPoint(x: 0, y: h)))
+    // The faint green-teal vignette glow at the top (pre-composited radial — no blur).
+    let glowCentre = CGPoint(x: w * 0.5, y: h * 0.14)
+    let glowRadius = max(w, h) * 0.75
+    ctx.fill(Path(CGRect(x: 0, y: 0, width: w, height: h)),
+             with: .radialGradient(Gradient(colors: [TelosColor.glow.opacity(light ? 0.05 : 0.09),
+                                                     TelosColor.glow.opacity(light ? 0.015 : 0.03), .clear]),
+                                   center: glowCentre, startRadius: 0, endRadius: glowRadius))
+    // Dusk / dawn: a whisper of warmth low down.
+    if S.warm > 0.01 {
+        ctx.fill(Path(CGRect(x: 0, y: h * 0.55, width: w, height: h * 0.45)),
+                 with: .linearGradient(Gradient(colors: [TelosColor.amber.opacity(0),
+                                                         TelosColor.amber.opacity(S.warm * (light ? 0.04 : 0.06))]),
+                                       startPoint: CGPoint(x: 0, y: h * 0.55), endPoint: CGPoint(x: 0, y: h)))
+    }
+    // The dotted depth field (dark only): faint always, brighter stars at night. Two paths, two fills.
+    if !light {
+        var field = Path()
+        var stars = Path()
+        for d in liquidSkyDots {
+            let sz = 0.5 + d.z * 1.1
+            let rect = CGRect(x: d.x * w, y: d.y * h, width: sz, height: sz)
+            if d.star && S.stars > 0.05 {
+                stars.addEllipse(in: rect.insetBy(dx: -0.3, dy: -0.3))
+            } else {
+                field.addEllipse(in: rect)
+            }
+        }
+        ctx.fill(field, with: .color(liquidSkyDotInk.opacity(0.12)))
+        if S.stars > 0.05 {
+            ctx.fill(stars, with: .color(liquidSkyDotInk.opacity(min(0.35, 0.10 + 0.25 * S.stars))))
+        }
+    }
+    // Settle into the page canvas (the token, resolved for the current scheme) — no hard seam.
+    ctx.fill(Path(CGRect(x: 0, y: h * 0.45, width: w, height: h * 0.55)),
+             with: .linearGradient(Gradient(colors: [TelosColor.canvas.opacity(0),
+                                                     TelosColor.canvas.opacity(settleStrength)]),
+                                   startPoint: CGPoint(x: 0, y: h * 0.45), endPoint: CGPoint(x: 0, y: h)))
 }
 
+private func liquidLiveHour(_ date: Date = Date()) -> Double {
+    let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+    return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60
+}
+
+/// The header sky. Telos 2.0: a thin wrapper over the static renderer — no per-frame clock at all (the
+/// old twinkle / breath loop is gone; §7.4). Kept as its own type so existing call sites compile.
 struct LiquidSky: View {
-    /// Hour of day 0...24. Defaults to live time when nil.
+    /// Hour of day 0...24. Defaults to live time when nil (re-evaluated every 900 s).
     var hour: Double?
     /// How fully the sky dissolves into the canvas at the bottom (1 = the default seamless fade; <1 holds
     /// the atmosphere so the sky still reads under a full-height "sky behind cards" backdrop).
     var settleStrength: Double = 1
-    @Environment(\.colorScheme) private var scheme
-    /// The call site already swaps in `LiquidSkyStatic` when motion is unwanted, but this view carried
-    /// no gate of its own — a second call site would have been silently ungated. `paused:` makes the
-    /// frame loop stand down from inside, so the gate travels with the view.
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.noopBackgroundCovered) private var covered
-    @ObservedObject private var motion = NoopMotionState.shared
 
     var body: some View {
-        // Frame rate follows the hour: only the starfield twinkle needs 20 fps. With no stars the only
-        // moving layer is the breath of light, whose opacity changes by at most 0.03·0.5·0.22 ≈ 0.0033/s
-        // — under one 8-bit colour step per second even white-over-dark — so 1 fps is visually
-        // identical there. A once-a-minute outer tick re-evaluates `starry` for the live hour (stars
-        // ramp in over hours and only draw once o ≥ 0.02, i.e. S.stars ≳ 0.04, so a ≤60 s lag is invisible).
-        TimelineView(.periodic(from: Date(timeIntervalSinceReferenceDate: 0), by: 60)) { _ in
-            let starry = liquidSkyAt(hour ?? liveHour(), light: scheme == .light).stars > 0.01
-            frames(interval: starry ? 1.0 / 20.0 : 1.0)
-        }
-    }
-
-    private func frames(interval: Double) -> some View {
-        TimelineView(.animation(minimumInterval: interval,
-                                paused: motion.poseStill(reduceMotion) || covered)) { tl in
-            let now = liquidSeconds(tl.date)
-            let h = hour ?? liveHour()
-            // The sky must dissolve into the SAME canvas colour the body uses (theme-aware surfaceBase),
-            // so there is no hard seam where the sky meets the page — light mode made this glaring.
-            let dark = scheme == .dark
-            let settle = Color(.sRGB,
-                               red: dark ? 29.0 / 255.0 : 242.0 / 255.0,
-                               green: dark ? 30.0 / 255.0 : 242.0 / 255.0,
-                               blue: dark ? 35.0 / 255.0 : 247.0 / 255.0,
-                               opacity: 1)
-            Canvas { ctx, size in
-                render(ctx, size, hour: h, now: now, settle: settle, light: !dark)
-            }
-        }
-    }
-
-    private func liveHour() -> Double {
-        let c = Calendar.current.dateComponents([.hour, .minute], from: Date())
-        return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60
-    }
-
-    private func render(_ base: GraphicsContext, _ size: CGSize, hour: Double, now: Double,
-                        settle: Color, light: Bool) {
-        let S = liquidSkyAt(hour, light: light)
-        let w = size.width, h = size.height
-        var ctx = base
-        // the gradient IS the scene
-        ctx.fill(Path(CGRect(x: 0, y: 0, width: w, height: h)),
-                 with: .linearGradient(Gradient(stops: [
-                    .init(color: S.top, location: 0),
-                    .init(color: S.mid, location: 0.5),
-                    .init(color: S.hor, location: 0.9)]),
-                                       startPoint: CGPoint(x: 0, y: 0), endPoint: CGPoint(x: 0, y: h)))
-        // slow breath of light low in the sky
-        let breathe = 0.5 + 0.5 * sin(now * 0.22)
-        ctx.fill(Path(CGRect(x: 0, y: h * 0.45, width: w, height: h * 0.55)),
-                 with: .linearGradient(Gradient(colors: [.white.opacity(0), .white.opacity(0.05 + breathe * 0.03)]),
-                                       startPoint: CGPoint(x: 0, y: h * 0.45), endPoint: CGPoint(x: 0, y: h)))
-        if S.warm > 0.01 {
-            let warm = Color(.sRGB, red: 1, green: 200/255, blue: 120/255, opacity: 1)
-            ctx.fill(Path(CGRect(x: 0, y: h * 0.55, width: w, height: h * 0.45)),
-                     with: .linearGradient(Gradient(colors: [warm.opacity(0), warm.opacity(S.warm * 0.10)]),
-                                           startPoint: CGPoint(x: 0, y: h * 0.55), endPoint: CGPoint(x: 0, y: h)))
-        }
-        // stars
-        if S.stars > 0.01 {
-            for s in liquidStars {
-                let baseA = 0.04 + s.z * 0.16
-                let tw = pow(max(0, sin(s.ph + now * s.sp)), 6)
-                let o = S.stars * (baseA + tw * 0.28)
-                if o < 0.02 { continue }
-                let sz = 0.6 + s.z * 0.8
-                ctx.fill(Path(CGRect(x: s.x * w, y: s.y * h, width: sz, height: sz)), with: .color(.white.opacity(o)))
-            }
-        }
-        // Settle into the page: a long fade to the theme's surfaceBase over the lower half so the sky
-        // dissolves seamlessly into the body — no hard cut (the light-mode dark→white slam is gone).
-        ctx.fill(Path(CGRect(x: 0, y: h * 0.45, width: w, height: h * 0.55)),
-                 with: .linearGradient(Gradient(colors: [settle.opacity(0), settle.opacity(settleStrength)]),
-                                       startPoint: CGPoint(x: 0, y: h * 0.45), endPoint: CGPoint(x: 0, y: h)))
+        LiquidSkyStatic(hour: hour, settleStrength: settleStrength)
     }
 }
 
@@ -209,10 +207,9 @@ func liquidScaffoldSky(height: CGFloat = 240) -> AnyView {
     AnyView(LiquidScaffoldSky(height: height))
 }
 
-/// A STATIC time-of-day sky, rendered ONCE (no TimelineView → CoreAnimation caches it as a stable layer,
-/// zero per-frame cost) for the scaffold backgrounds on the chart-heavy tabs. An always-animating Canvas
-/// behind the charts stole frame headroom and caused stutter (2026-07-02); this is the same look
-/// minus the twinkle/breath, matching the classic app's static scene image for scroll perf.
+/// The STATIC sky, rendered once (no per-frame clock → Core Animation caches it as a stable layer).
+/// When it follows the live hour (`hour == nil`) a periodic TimelineView re-evaluates it every 900 s —
+/// a quarter-hour tick, not an animation.
 struct LiquidSkyStatic: View {
     var hour: Double?
     /// See `LiquidSky.settleStrength` — 1 = default seamless fade; <1 holds the atmosphere for the
@@ -220,40 +217,24 @@ struct LiquidSkyStatic: View {
     var settleStrength: Double = 1
     @Environment(\.colorScheme) private var scheme
 
+    /// How often a live-hour sky re-evaluates.
+    static let reevaluationInterval: TimeInterval = 900
+
     var body: some View {
-        let h = hour ?? liveHour()
-        let dark = scheme == .dark
-        let settle = Color(.sRGB,
-                           red: dark ? 29.0 / 255.0 : 242.0 / 255.0,
-                           green: dark ? 30.0 / 255.0 : 242.0 / 255.0,
-                           blue: dark ? 35.0 / 255.0 : 247.0 / 255.0,
-                           opacity: 1)
-        Canvas { ctx, size in
-            let S = liquidSkyAt(h, light: !dark)
-            let w = size.width, hh = size.height
-            ctx.fill(Path(CGRect(x: 0, y: 0, width: w, height: hh)),
-                     with: .linearGradient(Gradient(stops: [
-                        .init(color: S.top, location: 0),
-                        .init(color: S.mid, location: 0.5),
-                        .init(color: S.hor, location: 0.9)]),
-                                           startPoint: CGPoint(x: 0, y: 0), endPoint: CGPoint(x: 0, y: hh)))
-            if S.stars > 0.01 {
-                for s in liquidStars {
-                    let o = S.stars * (0.04 + s.z * 0.16)
-                    if o < 0.02 { continue }
-                    let sz = 0.6 + s.z * 0.8
-                    ctx.fill(Path(CGRect(x: s.x * w, y: s.y * hh, width: sz, height: sz)),
-                             with: .color(.white.opacity(o)))
-                }
+        if let hour {
+            canvas(hour: hour)
+        } else {
+            TimelineView(.periodic(from: Date(timeIntervalSinceReferenceDate: 0), by: Self.reevaluationInterval)) { tl in
+                canvas(hour: liquidLiveHour(tl.date))
             }
-            ctx.fill(Path(CGRect(x: 0, y: hh * 0.45, width: w, height: hh * 0.55)),
-                     with: .linearGradient(Gradient(colors: [settle.opacity(0), settle.opacity(settleStrength)]),
-                                           startPoint: CGPoint(x: 0, y: hh * 0.45), endPoint: CGPoint(x: 0, y: hh)))
         }
     }
 
-    private func liveHour() -> Double {
-        let c = Calendar.current.dateComponents([.hour, .minute], from: Date())
-        return Double(c.hour ?? 0) + Double(c.minute ?? 0) / 60
+    private func canvas(hour: Double) -> some View {
+        let light = scheme == .light
+        let settle = settleStrength
+        return Canvas { ctx, size in
+            liquidSkyRender(ctx, size, hour: hour, light: light, settleStrength: settle)
+        }
     }
 }

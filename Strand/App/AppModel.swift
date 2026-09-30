@@ -556,6 +556,14 @@ final class AppModel: ObservableObject {
         // Rehydrate a manual workout that was in flight when iOS killed the app, so it can still be ended
         // + saved on relaunch (#529). Restored here alongside the other UserDefaults-backed state.
         rehydrateActiveWorkout()
+        // Telos Lift: a logger journal left behind by a killed session re-attaches to the rehydrated workout
+        // or is finalised as an early finish (unfinished sets stay "not done", never zero).
+        Task { [weak self] in
+            guard let self else { return }
+            await LiftSessionRecorder.shared.finalizeOrphanedJournal(
+                activeWorkoutStart: self.activeWorkout?.start,
+                storeProvider: { [weak self] in await self?.repo.storeHandle() })
+        }
 
         #if os(iOS)
         // Strap cues: arm the minute tick now that every hook above is wired and an in-flight workout has been
@@ -1394,9 +1402,12 @@ final class AppModel: ObservableObject {
             route = gpsRecorder.capturedRoute()
         }
         let samples = w.samples
+        // Telos Lift: a strength session logged in the app is a workout even when no HR streamed (a gym
+        // session without the strap). Its row carries the same volume note an imported session does.
+        let liftNote = LiftSessionRecorder.isStrengthSport(w.sport) ? LiftSessionRecorder.shared.finishedWorkoutNote : nil
         // Save when there's an HR window OR a real GPS route , a GPS-only walk (HR not streaming) is
         // still a workout (parity with Android's `samples.size < 2 && track.size < 2` discard gate).
-        guard samples.count >= 2 || route != nil else {
+        guard samples.count >= 2 || route != nil || liftNote != nil else {
             // Workouts & GPS test mode: record WHY a session vanished (too short / no route), tagged `.workouts`.
             emitWorkoutsTrace(WorkoutsTrace.sessionLine(
                 event: "discarded", sportKey: WorkoutSource.traceSportKey(w.sport),
@@ -1442,7 +1453,7 @@ final class AppModel: ObservableObject {
             // GPS distance rides the shared row so the Workouts list / detail show it like any other
             // distance workout; the polyline itself is persisted alongside in RouteStore (the shared
             // WorkoutRow has no route column on Apple). Only a real route sets distance , honest ",".
-            distanceM: route?.distanceM, zonesJSON: nil, notes: nil, steps: nil)
+            distanceM: route?.distanceM, zonesJSON: nil, notes: liftNote, steps: nil)
         // Persist the route polyline under the row's natural key so WorkoutDetailView can draw it. On
         // device only; mirrors the moments / sleepMarks UserDefaults persistence. (#524)
         if let route { RouteStore.store(route, startTs: startTs, sport: w.sport) }
