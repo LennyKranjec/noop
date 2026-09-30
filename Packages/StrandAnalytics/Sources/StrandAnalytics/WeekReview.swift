@@ -27,6 +27,8 @@ import Foundation
 
 public enum WeekComponent: String, Codable, Equatable, Sendable {
     case aerobic, strength, steps
+    /// Zone 4–5 minutes (`WeekPlanEngine.zone45WeeklyTargetMin`).
+    case zone45
 }
 
 public enum ComponentStatus: String, Codable, Equatable, Sendable {
@@ -35,7 +37,7 @@ public enum ComponentStatus: String, Codable, Equatable, Sendable {
 
 public struct ComponentResult: Codable, Equatable, Sendable {
     public let component: WeekComponent
-    /// The plan's target for the whole week (aerobic min, strength sessions, steps/day).
+    /// The plan's target for the whole week (aerobic min, zone 4–5 min, strength sessions, steps/day).
     public let planned: Double?
     /// The target after easy/rest days were taken out of the denominator.
     public let effectiveTarget: Double?
@@ -165,8 +167,10 @@ public struct WeekReview: Equatable, Sendable {
     ///   - guidanceByDay: the guidance each day actually got. A day missing from the map counts as planned.
     ///   - liftDataFresh: the lift log has been imported since the week ended (or there is none to import).
     ///     When false, a strength shortfall is `notMeasured`, not `missed`.
+    ///   - liftSessions: stored lift sessions, for matching done sessions to the plan's Lift templates
+    ///     (`WeekPlanEngine.strengthStatus`, the same count the card shows). Empty ⇒ strength days.
     public static func planVsDone(plan: WeekPlan, days: [DayActivity], guidanceByDay: [String: DayGuidance.Kind],
-                                  liftDataFresh: Bool) -> [ComponentResult] {
+                                  liftDataFresh: Bool, liftSessions: [LiftSessionMark] = []) -> [ComponentResult] {
         let byDay = WeekPlanEngine.index(days)
         let week = WeekPlanEngine.weekDays(plan.weekStart)
         let planned = week.filter { d in
@@ -206,10 +210,48 @@ public struct WeekReview: Equatable, Sendable {
                                        status: .notAsked, note: "No personal target while the baseline builds."))
         }
 
-        // Strength.
+        // Zone 4–5 (only worn / measured time; unknown is never 0).
+        let z45 = WeekPlanEngine.zone45Week(days: days, dayKeys: week)
+        if let target = plan.zone45Target {
+            let eff = target * fraction
+            if eff <= 0 {
+                out.append(ComponentResult(component: .zone45, planned: target, effectiveTarget: eff,
+                                           done: z45.minutes, status: .notAsked,
+                                           note: "Every day this week was easy or rest."))
+            } else if let done = z45.minutes {
+                if observed < minObservedDays {
+                    out.append(ComponentResult(component: .zone45, planned: target, effectiveTarget: eff, done: done,
+                                               status: .notMeasured,
+                                               note: "The strap was worn on \(observed) of 7 days."))
+                } else {
+                    var st = status(ratio: done / eff)
+                    var note: String? = nil
+                    if st != .met && (z45.unmeasuredSessions > 0 || z45.unknownDays > 0) {
+                        st = .notMeasured
+                        note = z45.unmeasuredSessions > 0
+                            ? "\(z45.unmeasuredSessions) session\(z45.unmeasuredSessions == 1 ? "" : "s") without heart rate."
+                            : "Zones could not be computed on \(z45.unknownDays) day\(z45.unknownDays == 1 ? "" : "s")."
+                    }
+                    out.append(ComponentResult(component: .zone45, planned: target, effectiveTarget: eff, done: done,
+                                               status: st, note: note))
+                }
+            } else {
+                out.append(ComponentResult(component: .zone45, planned: target, effectiveTarget: eff, done: nil,
+                                           status: .notMeasured,
+                                           note: "Zone 4–5 — " + (z45.absence ?? .notWorn).text + "."))
+            }
+        } else {
+            out.append(ComponentResult(component: .zone45, planned: nil, effectiveTarget: nil, done: z45.minutes,
+                                       status: .notAsked,
+                                       note: plan.type == .easy ? "No high-intensity target in an easy week."
+                                                                : "No zone 4–5 target that week."))
+        }
+
+        // Strength (matched to the wearer's Lift templates when the plan carries them).
         let sTarget = Double(plan.strength.minSessions)
         let sEff = sTarget * fraction
-        let sDone = Double(acts.filter { $0.strengthSession == true }.count)
+        let sDone = Double(WeekPlanEngine.strengthStatus(templates: plan.strength.templates, days: days,
+                                                         lifts: liftSessions, dayKeys: week).done)
         if sEff <= 0 {
             out.append(ComponentResult(component: .strength, planned: sTarget, effectiveTarget: sEff, done: sDone,
                                        status: .notAsked, note: nil))
@@ -419,8 +461,9 @@ public struct WeekReview: Equatable, Sendable {
     ///   - trialStatus: S1's one-line trial status, nil when no trial is running or finished recently.
     public static func build(plan: WeekPlan, days: [DayActivity], guidanceByDay: [String: DayGuidance.Kind],
                              liftDataFresh: Bool, trends: WeekTrendInputs, vo2Estimates: [VO2SessionEstimate],
-                             trialStatus: String?) -> WeekReview {
-        let comps = planVsDone(plan: plan, days: days, guidanceByDay: guidanceByDay, liftDataFresh: liftDataFresh)
+                             trialStatus: String?, liftSessions: [LiftSessionMark] = []) -> WeekReview {
+        let comps = planVsDone(plan: plan, days: days, guidanceByDay: guidanceByDay, liftDataFresh: liftDataFresh,
+                               liftSessions: liftSessions)
         let (vo2, why) = vo2Trend(vo2Estimates, asOf: plan.weekEnd)
         let history = days.filter { $0.day <= plan.weekEnd }
         return WeekReview(weekStart: plan.weekStart, weekEnd: plan.weekEnd, weekType: plan.type, components: comps,
@@ -437,6 +480,7 @@ public struct WeekReview: Equatable, Sendable {
         case .aerobic: name = "Aerobic"
         case .strength: name = "Strength"
         case .steps: name = "Steps"
+        case .zone45: name = "Zone 4–5"
         }
         let statusWord: String
         switch c.status {
@@ -448,7 +492,7 @@ public struct WeekReview: Equatable, Sendable {
         }
         let figures: String
         switch c.component {
-        case .aerobic:
+        case .aerobic, .zone45:
             let done = c.done.map { String(Int($0.rounded())) } ?? "—"
             let eff = c.effectiveTarget.map { String(Int($0.rounded())) } ?? "—"
             figures = "\(done) / \(eff) min"

@@ -1445,7 +1445,10 @@ Per-session aerobic minutes by ACSM relative intensity (Garber 2011 position sta
 - **Outputs:**
   - `moderateMin`, `vigorousMin`, `hardMin`, and `mvpaEq = moderate + 2 × vigorous` (WHO equivalence);
   - `hardSession = hardMin ≥ 10`;
-  - `strengthSession`: a lift session that day, or a workout ≥ 20 min in a strength category of `WorkoutCatalog`.
+  - `strengthSession`: a lift session that day, or a workout ≥ 20 min in a strength category of `WorkoutCatalog`;
+  - `zone45Min`: minutes at or above the lower edge of zone 4 of the display zones (`hrZoneSet`: Karvonen 80 % HRR,
+    or the wearer's custom boundary), inside the same sessions; imported-only sessions add their z4 + z5 share
+    ("≈"). Owner request 2026-09-30.
 - **Imported-only sessions** (no strap HR, but `zonesJSON`): z2–z3 count as moderate, z4–z5 as vigorous. They
   carry `source = importedZones`, and the card marks them "≈".
 - **Abstention:** a session with < 50 % HR coverage of its window is `unmeasured`. It is counted as a session
@@ -1486,6 +1489,8 @@ Per-session aerobic minutes by ACSM relative intensity (Garber 2011 position sta
 | Aerobic `mvpaEq` | `b < 150`: `min(150, b + max(20, 0.10 b))`. `150 ≤ b < 300`: `min(300, 1.10 b)`. Invariant: `≤ max(1.3 b, b + 20)`. Rounded to 5. | `round5(b)` | `round5(0.6 b)` |
 | Hard sessions | 0 while `b < 150` (build the base first; vigorous minutes still count). Otherwise `min(2, round(mean hard/week over 4 weeks))`. When that mean is 0 and `b ≥ 150` for 3 weeks, the target is 1 and the card offers it as optional. | same as build, without the new-hard-session offer | 0 |
 | Strength sessions | 2 (WHO), or 1 in the first week if the 4-week mean is < 1 | 2 | 1–2 at about two-thirds of the sets, loads held |
+| Strength sessions, with a Telos Lift plan (owner request 2026-09-30) | the plan's day templates for a week (tagged templates; the owner's Upper A/Lower A/Upper B/Lower B → 4), each done session matched to its template by Telos id or imported title, unmatched strength sessions still counted as "other" | same | one fewer (never below 1), about two-thirds of the sets, loads held — "Easy week — 3 of 4" |
+| Zone 4–5 minutes (owner request 2026-09-30) | 10 min/week (`zone45WeeklyTargetMin`, a short high-intensity dose, a coaching choice not a study threshold); only worn / measured time counts, unknown is "—" + reason | 10 | none |
 | Steps/day (only if reliable, see 3.4) | `m < P`: `min(P, round250(m + 1000))`, and never more than +1000 above last week's target. `m ≥ P`: `round250(m)`, i.e. hold, with no step-up past the plateau. | same | unchanged (walking is compatible with recovery) |
 
 `P` (plateau) = 8,000 if age < 60, 7,000 if ≥ 60 or age unknown; from the lower edge of the plateau ranges in

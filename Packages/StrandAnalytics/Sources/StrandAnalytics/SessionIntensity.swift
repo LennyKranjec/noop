@@ -31,6 +31,13 @@ import WhoopProtocol
 //   * A sample is credited with the gap to the next one, capped at `StrainScorer.maxSampleGapMin` (2 min)
 //     and never past the window's end — so one reading before a dropout cannot invent minutes.
 //
+// ZONE 4–5 MINUTES (the week plan's high-intensity line). Counted by the same sample walk, inside the same
+// sessions: a strap sample at or above the lower edge of ZONE 4 of the app's display zones
+// (`ProfileStore.hrZoneSet` — Karvonen 80 % of heart-rate reserve, or the wearer's custom boundary) adds its
+// credited time. Without an explicit edge the Karvonen zone-4 edge is used, which is exactly `hardLow`
+// (f ≥ 0.80), so zone 4–5 minutes and "hard" minutes are the same number on the default zones. An
+// imported-zones session adds WHOOP's own z4 + z5 share ("≈"); an unmeasured session adds nothing.
+//
 // Pure, deterministic, DB-free. Swift-only engine (HEALTH_V2 platform note): platform-neutral arithmetic
 // so a Kotlin twin can be added later without changing results.
 
@@ -105,6 +112,8 @@ public enum SessionIntensity {
         public let moderateMin: Double
         public let vigorousMin: Double
         public let hardMin: Double
+        /// Minutes at or above the zone-4 edge (zones 4 + 5 of the display zones).
+        public let zone45Min: Double
         /// Fraction of the window covered by HR (0–1), nil when no HR was read.
         public let coverage: Double?
         public let source: Source
@@ -118,6 +127,9 @@ public enum SessionIntensity {
         public let moderateMin: Double
         public let vigorousMin: Double
         public let hardMin: Double
+        /// Zone 4–5 minutes inside the day's sessions (strap HR, or imported z4 + z5 when approximate).
+        /// Meaningless (0) when `abstained` is set — read it as unknown then, never as zero.
+        public let zone45Min: Double
         public let hardSession: Bool
         public let strengthSession: Bool
         /// Sessions (after union) seen that day.
@@ -132,7 +144,7 @@ public enum SessionIntensity {
         public var mvpaEq: Double { moderateMin + 2 * vigorousMin }
 
         public static func abstaining(_ reason: Abstention, sessions: Int, strength: Bool) -> DaySummary {
-            DaySummary(moderateMin: 0, vigorousMin: 0, hardMin: 0, hardSession: false,
+            DaySummary(moderateMin: 0, vigorousMin: 0, hardMin: 0, zone45Min: 0, hardSession: false,
                        strengthSession: strength, sessionCount: sessions, unmeasuredCount: sessions,
                        approximate: false, abstained: reason)
         }
@@ -193,17 +205,22 @@ public enum SessionIntensity {
     /// Each in-window sample is credited with the gap to the next in-window sample, capped at
     /// `StrainScorer.maxSampleGapMin` and at the window end; the last sample gets the smaller of the
     /// previous gap (the `StrainScorer` convention), the cap and the time left in the window.
+    ///
+    /// - Parameter zone4LowerBpm: the lower edge of zone 4 of the display zones (bpm). nil (or not a
+    ///   positive finite number) ⇒ the Karvonen zone-4 edge, i.e. f ≥ `hardLow`.
     public static func minutes(hr: [HRSample], start: Int, end: Int,
-                               restingHR: Double, hrMax: Double) -> SessionMinutes {
+                               restingHR: Double, hrMax: Double,
+                               zone4LowerBpm: Double? = nil) -> SessionMinutes {
         let inWin = hr.filter { $0.ts >= start && $0.ts < end }.sorted { $0.ts < $1.ts }
         let coverage = WorkoutDetector.hrCoveragePct(sampleTs: inWin.map { $0.ts }, start: start, end: end,
                                                      bucketSeconds: coverageBucketSeconds).map { $0 / 100.0 }
         guard !inWin.isEmpty, let cov = coverage, cov >= minCoverage else {
             return SessionMinutes(start: start, end: end, moderateMin: 0, vigorousMin: 0, hardMin: 0,
-                                  coverage: inWin.isEmpty ? nil : coverage, source: .unmeasured)
+                                  zone45Min: 0, coverage: inWin.isEmpty ? nil : coverage, source: .unmeasured)
         }
         let cap = StrainScorer.maxSampleGapMin
-        var mod = 0.0, vig = 0.0, hard = 0.0
+        let z4Edge: Double? = zone4LowerBpm.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        var mod = 0.0, vig = 0.0, hard = 0.0, z45 = 0.0
         var prevGap = 1.0 / 60.0
         for i in inWin.indices {
             let s = inWin[i]
@@ -226,9 +243,10 @@ public enum SessionIntensity {
             case .vigorous: vig += dur
             case .hard: vig += dur; hard += dur
             }
+            if z4Edge.map({ Double(s.bpm) >= $0 }) ?? (f >= hardLow) { z45 += dur }
         }
         return SessionMinutes(start: start, end: end, moderateMin: mod, vigorousMin: vig, hardMin: hard,
-                              coverage: cov, source: .strapHR)
+                              zone45Min: z45, coverage: cov, source: .strapHR)
     }
 
     /// Minutes from WHOOP-imported zone percentages: z2–z3 moderate, z4–z5 vigorous. No hard minutes.
@@ -239,6 +257,14 @@ public enum SessionIntensity {
         let vigorous = durationMin * (p[3] + p[4])
         guard moderate + vigorous >= 0 else { return nil }
         return (moderate, vigorous)
+    }
+
+    /// Zone 4–5 minutes from WHOOP-imported zone percentages (z4 + z5 of the duration). WHOOP's own zones,
+    /// not the app's — the caller marks the figure approximate ("≈"). nil without five zones or a duration.
+    public static func zone45FromZones(_ percents: [Double], durationMin: Double) -> Double? {
+        guard percents.count >= 5, durationMin > 0 else { return nil }
+        let p = percents.map { min(max($0, 0), 100) / 100.0 }
+        return durationMin * (p[3] + p[4])
     }
 
     // MARK: - One day
@@ -253,8 +279,9 @@ public enum SessionIntensity {
     ///   - hrMax: the zone HRmax (learned / Tanaka floor / override).
     ///   - liftSession: a lift-log session exists on this day (counts as strength regardless of duration,
     ///     because its sets are the evidence).
+    ///   - zone4LowerBpm: the lower edge of zone 4 of the display zones; nil ⇒ the Karvonen edge (f ≥ 0.80).
     public static func day(sessions: [Window], hr: [HRSample], restingHR: Double?, hrMax: Double?,
-                           liftSession: Bool = false) -> DaySummary {
+                           liftSession: Bool = false, zone4LowerBpm: Double? = nil) -> DaySummary {
         let strength = liftSession || sessions.contains {
             isStrengthSport($0.sport) && $0.durationMin >= strengthMinMinutes
         }
@@ -262,37 +289,39 @@ public enum SessionIntensity {
         guard let rhr = restingHR, let mx = hrMax, mx - rhr >= minReserveBpm else {
             if merged.isEmpty {
                 // No sessions: nothing to classify, so nothing to abstain from.
-                return DaySummary(moderateMin: 0, vigorousMin: 0, hardMin: 0, hardSession: false,
+                return DaySummary(moderateMin: 0, vigorousMin: 0, hardMin: 0, zone45Min: 0, hardSession: false,
                                   strengthSession: strength, sessionCount: 0, unmeasuredCount: 0,
                                   approximate: false, abstained: nil)
             }
             return .abstaining(.zoneInputsMissing, sessions: merged.count, strength: strength)
         }
-        var mod = 0.0, vig = 0.0, hard = 0.0
+        var mod = 0.0, vig = 0.0, hard = 0.0, z45 = 0.0
         var anyHard = false
         var unmeasured = 0
         var approximate = false
         for iv in merged {
-            let m = minutes(hr: hr, start: iv.start, end: iv.end, restingHR: rhr, hrMax: mx)
+            let m = minutes(hr: hr, start: iv.start, end: iv.end, restingHR: rhr, hrMax: mx,
+                            zone4LowerBpm: zone4LowerBpm)
             if m.source == .strapHR {
-                mod += m.moderateMin; vig += m.vigorousMin; hard += m.hardMin
+                mod += m.moderateMin; vig += m.vigorousMin; hard += m.hardMin; z45 += m.zone45Min
                 if m.hardSession { anyHard = true }
                 continue
             }
             // No usable strap HR for this interval: fall back to imported zones of the constituent rows.
-            var zoneMod = 0.0, zoneVig = 0.0, usedZones = false
+            var zoneMod = 0.0, zoneVig = 0.0, zoneZ45 = 0.0, usedZones = false
             for w in sessions where w.start < iv.end && w.end > iv.start {
                 guard let p = w.zonePercents,
                       let z = minutesFromZones(p, durationMin: w.durationMin) else { continue }
                 zoneMod += z.moderate; zoneVig += z.vigorous; usedZones = true
+                zoneZ45 += zone45FromZones(p, durationMin: w.durationMin) ?? 0
             }
             if usedZones {
-                mod += zoneMod; vig += zoneVig; approximate = true
+                mod += zoneMod; vig += zoneVig; z45 += zoneZ45; approximate = true
             } else {
                 unmeasured += 1
             }
         }
-        return DaySummary(moderateMin: mod, vigorousMin: vig, hardMin: hard, hardSession: anyHard,
+        return DaySummary(moderateMin: mod, vigorousMin: vig, hardMin: hard, zone45Min: z45, hardSession: anyHard,
                           strengthSession: strength, sessionCount: merged.count, unmeasuredCount: unmeasured,
                           approximate: approximate, abstained: nil)
     }

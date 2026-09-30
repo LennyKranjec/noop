@@ -17,7 +17,15 @@ import WhoopStore
 //     reliable only when it is a measurement (calibrated counter or phone) or a fitted 4.0 estimate
 //     (≥ 3 phone-calibrated days, or a manual k). An uncalibrated counter total ("est.") never is;
 //   * the illness heads-up (`AppModel.illnessSignal`), sleep debt (`SleepModel.debtLedger`), age;
-//   * the lift log (`StrengthProgressionSource`) for the strength line.
+//   * the lift log (`StrengthProgressionSource`) for the strength line;
+//   * the wearer's Telos Lift plan (`LiftProgramStore`) — its day templates for a week become the strength
+//     target (`WeekPlanEngine.plannedDays(from:)`) — and the stored lift sessions (`liftSession` / `liftSet`,
+//     both Telos-logged and imported), which are matched to those templates for the card, the review and
+//     the coach alike;
+//   * zone 4–5 minutes per day from `SessionIntensityCache` (`zone45_min`).
+//
+// A plan frozen before the wearer had a Lift plan (or before the zone 4–5 line existed) adopts both once
+// (`WeekPlanEngine.adopt`); a plan that already carries templates is never re-targeted mid-week.
 //
 // WHAT IT KEEPS — `week-plans.json` in the store directory (NOT on the `.noopbak` whitelist in 2.0; the
 // Android codec parity contract, HEALTH_V2 §4.3):
@@ -93,6 +101,7 @@ final class WeekPlanSource: ObservableObject {
     private var archive: WeekPlanArchive
     private var refreshing = false
     private var lastDays: [DayActivity] = []
+    private var lastLifts: [LiftSessionMark] = []
     private var lastGuidanceArgs: GuidanceArgs?
     /// The log-map denominator of the method that scores Effort, kept for `optimumNoticeDue`.
     private var effortDenominator: Double = StrainScorer.strainDenominator
@@ -193,9 +202,15 @@ final class WeekPlanSource: ObservableObject {
                 trimp: trimp,
                 wearCoverage: c?.wear,
                 unmeasuredSessions: c?.unmeasured ?? 0,
-                approximate: c?.approximate ?? false))
+                approximate: c?.approximate ?? false,
+                zone45Min: c?.zone45))
         }
         lastDays = days
+
+        // The wearer's Lift plan for a week, and the stored lift sessions to match against it.
+        let program = WeekPlanEngine.plannedDays(from: LiftProgramStore.shared.library.allTemplates)
+        let lifts = await Self.liftMarks(repo: repo, days: Self.windowDays, now: now)
+        lastLifts = lifts
 
         // HRV: nightly RMSSD aligned by day, the tier today and on each of the last 7 days.
         var hrvKeys: [String] = []
@@ -226,9 +241,14 @@ final class WeekPlanSource: ObservableObject {
         let inputs = WeekPlanInputs(today: logicalToday, days: days, hrvTier: tierToday, hrvTierLast7: last7,
                                     hrvValidNights: validNights, charge: charge,
                                     illnessRaisedDays: archive.illnessDays, illnessRaisedNow: illnessNow,
-                                    sleepDebtMin: debt, age: age)
-        let plan = WeekPlanEngine.plan(inputs, frozen: archive.plans, guidanceHistory: archive.guidance)
-        if !archive.plans.contains(where: { $0.weekStart == plan.weekStart }) { archive.plans.append(plan) }
+                                    sleepDebtMin: debt, age: age, liftProgram: program, liftSessions: lifts)
+        let plan = WeekPlanEngine.adopt(
+            WeekPlanEngine.plan(inputs, frozen: archive.plans, guidanceHistory: archive.guidance), program: program)
+        if let i = archive.plans.firstIndex(where: { $0.weekStart == plan.weekStart }) {
+            archive.plans[i] = plan
+        } else {
+            archive.plans.append(plan)
+        }
 
         let args = GuidanceArgs(day: calendarToday, hrvTier: tierToday, hrvValidNights: validNights, charge: charge,
                                 illness: illnessNow, sleepDebtMin: debt)
@@ -253,8 +273,24 @@ final class WeekPlanSource: ObservableObject {
         save()
         currentPlan = plan
         todayGuidance = guidance
-        progress = WeekPlanEngine.progress(plan: plan, days: days, today: calendarToday)
+        progress = WeekPlanEngine.progress(plan: plan, days: days, today: calendarToday, lifts: lifts)
         lastReview = review
+    }
+
+    /// Every stored lift session (Telos-logged and imported, deviceId "lifting") that started in the last
+    /// `days` + 1 days, as the week plan matches it. Sessions with no stored set are not sessions
+    /// (`LiftStoreBridge.history` drops them), so a started-but-empty session never ticks a template.
+    static func liftMarks(repo: Repository, days: Int, now: Date) async -> [LiftSessionMark] {
+        guard let store = await repo.storeHandle() else { return [] }
+        let toTs = Int(now.timeIntervalSince1970)
+        let fromTs = toTs - (days + 1) * 86_400
+        let deviceId = LiftingImporter.sourceId
+        let sessions = (try? await store.liftSessions(deviceId: deviceId, fromTs: fromTs, toTs: toTs)) ?? []
+        guard !sessions.isEmpty else { return [] }
+        let sets = (try? await store.liftSetsWithSessionStart(deviceId: deviceId, fromTs: fromTs, toTs: toTs)) ?? []
+        return LiftStoreBridge.history(sessions: sessions, sets: sets).map {
+            LiftSessionMark(day: Repository.localDayKey($0.start), templateId: $0.templateId, title: $0.title)
+        }
     }
 
     /// A day's steps resolved exactly as Today resolves them (`TodayView.stepsTileSource`), and whether the
@@ -344,7 +380,8 @@ final class WeekPlanSource: ObservableObject {
             save()
             todayGuidance = g
         }
-        progress = WeekPlanEngine.progress(plan: next, days: lastDays, today: Repository.localDayKey(Date()))
+        progress = WeekPlanEngine.progress(plan: next, days: lastDays, today: Repository.localDayKey(Date()),
+                                           lifts: lastLifts)
     }
 
     // MARK: - Review
@@ -397,7 +434,8 @@ final class WeekPlanSource: ObservableObject {
         }
 
         return WeekReview.build(plan: lastPlan, days: days, guidanceByDay: archive.guidance, liftDataFresh: liftFresh,
-                                trends: trends, vo2Estimates: vo2, trialStatus: trialStatusProvider?())
+                                trends: trends, vo2Estimates: vo2, trialStatus: trialStatusProvider?(),
+                                liftSessions: lastLifts)
     }
 
     // MARK: - Strength line
@@ -420,6 +458,17 @@ final class WeekPlanSource: ObservableObject {
 
     // MARK: - Coach
 
+    /// "Zone 4-5 6/10 min" — or "—" with its reason; never a 0 the data does not hold.
+    static func zone45CoachLine(plan: WeekPlan, progress p: WeekProgress) -> String {
+        let z = p.zone45
+        guard let minutes = z.minutes else {
+            return "Zone 4-5 — (" + (z.absence ?? .notWorn).text + ")"
+        }
+        let done = (z.approximate ? "~" : "") + String(Int(minutes.rounded()))
+        guard let target = plan.zone45Target else { return "Zone 4-5 \(done) min (no target in an easy week)" }
+        return "Zone 4-5 \(done)/\(Int(target)) min"
+    }
+
     /// The coach's week block: the plan, today's line, and last week's review, priority-truncated to
     /// `maxChars` (whole lines only). Hand-off: registered with the context budget by the Strand/AI owner.
     func coachBlock(maxChars: Int = 700) -> String {
@@ -434,6 +483,12 @@ final class WeekPlanSource: ObservableObject {
                 ?? "\(Int(p.aerobicDone.rounded())) min, no personal target yet (WHO range 150-300)"
             lines.append("Aerobic \(aero) · strength \(p.strengthDone)/\(plan.strength.minSessions)"
                 + (plan.stepsTarget.map { " · steps target \(Int($0))/day" } ?? " · no step target (steps not calibrated)"))
+            lines.append(Self.zone45CoachLine(plan: plan, progress: p))
+            if let t = WeekPlanEngine.templateLine(p.strength) {
+                let easy = plan.strength.templates != nil && plan.strength.minSessions < plan.strength.maxSessions
+                    ? " (easy week: \(plan.strength.minSessions) of \(plan.strength.maxSessions), loads held)" : ""
+                lines.append("Lift plan this week: " + t + easy)
+            }
         }
         var out = ""
         for line in lines {

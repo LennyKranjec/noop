@@ -10,7 +10,10 @@ import WhoopStore
 //
 //     aerobic_mod_min · aerobic_vig_min · aerobic_hard_min · aerobic_hard_session (0/1)
 //     strength_session (0/1) · aerobic_unmeasured_n · aerobic_approx (0/1) · aerobic_abstained (0/1)
-//     wear_coverage (0–1)
+//     zone45_min (zone 4–5 minutes of the display zones, `ProfileStore.hrZoneSet`) · wear_coverage (0–1)
+//
+// A day banked before `zone45_min` existed has no such row and reads as UNKNOWN (nil), never 0; the
+// fingerprint version moved to v2 with it, so every day in the window is recomputed once and gets the row.
 //
 // IDEMPOTENT. A day is recomputed only when its fingerprint changed: the session windows and sports, how
 // much HR sits inside them (so a strap offload that lands after the workout was logged is picked up), the
@@ -42,6 +45,7 @@ enum SessionIntensityCache {
     static let keyUnmeasured = "aerobic_unmeasured_n"
     static let keyApprox = "aerobic_approx"
     static let keyAbstained = "aerobic_abstained"
+    static let keyZone45 = "zone45_min"
     static let keyWear = "wear_coverage"
 
     /// The repository's per-read row cap.
@@ -68,6 +72,8 @@ enum SessionIntensityCache {
         let approximate: Bool
         let abstained: Bool
         let wear: Double?
+        /// Zone 4–5 minutes; nil when the day abstained or was banked before the key existed.
+        var zone45: Double? = nil
 
         /// nil when the day abstained — unknown, never 0.
         var mvpaEq: Double? { abstained ? nil : moderate + 2 * vigorous }
@@ -98,13 +104,14 @@ enum SessionIntensityCache {
 
     /// The fingerprint that decides whether a day is recomputed. Pure.
     nonisolated static func fingerprint(sessions: [SessionIntensity.Window], hrCount: Int, liftSession: Bool,
-                                        restingHR: Double?, hrMax: Double?) -> String {
+                                        restingHR: Double?, hrMax: Double?, zone4Lower: Double? = nil) -> String {
         let s = sessions.sorted { ($0.start, $0.end) < ($1.start, $1.end) }
             .map { "\($0.start)-\($0.end)-\($0.sport)-\($0.zonePercents?.map { Int($0.rounded()) } ?? [])" }
             .joined(separator: ",")
         let r = restingHR.map { String(Int($0.rounded())) } ?? "-"
         let m = hrMax.map { String(Int($0.rounded())) } ?? "-"
-        return "v1|\(s)|hr\(hrCount)|lift\(liftSession ? 1 : 0)|z\(r)/\(m)"
+        let z4 = zone4Lower.map { String(Int($0.rounded())) } ?? "-"
+        return "v2|\(s)|hr\(hrCount)|lift\(liftSession ? 1 : 0)|z\(r)/\(m)/\(z4)"
     }
 
     // MARK: - Refresh
@@ -120,6 +127,10 @@ enum SessionIntensityCache {
         let rhrInput = profile.zoneRestingHR
         let restingHR: Double? = rhrInput.source == .fallback ? nil : rhrInput.bpm
         let hrMax: Double? = profile.zoneHRmaxResolved.bpm
+        // Zone 4's lower edge of the ONE display-zone model (Karvonen, or the wearer's custom boundaries), so
+        // the week plan's zone 4–5 minutes are the zones the wearer sees everywhere else.
+        let zoneSet = profile.hrZoneSet
+        let zone4Lower: Double? = zoneSet.zones.count >= 4 ? zoneSet.zones[3].lower : nil
 
         // Sessions by the local day they started on.
         let fromTs = Int(windowStart.timeIntervalSince1970)
@@ -177,7 +188,8 @@ enum SessionIntensityCache {
             let recentZones = offset < zoneRecheckDays
             let fp = fingerprint(sessions: sessions, hrCount: hrCount, liftSession: lift,
                                  restingHR: recentZones ? restingHR : restingHR.map { _ in 0 },
-                                 hrMax: recentZones ? hrMax : hrMax.map { _ in 0 })
+                                 hrMax: recentZones ? hrMax : hrMax.map { _ in 0 },
+                                 zone4Lower: recentZones ? zone4Lower : zone4Lower.map { _ in 0 })
             guard prints[key] != fp else { continue }
 
             var hr: [HRSample] = []
@@ -187,7 +199,7 @@ enum SessionIntensityCache {
                 }
             }
             let summary = SessionIntensity.day(sessions: sessions, hr: hr, restingHR: restingHR, hrMax: hrMax,
-                                               liftSession: lift)
+                                               liftSession: lift, zone4LowerBpm: zone4Lower)
             points.append(contentsOf: Self.points(day: key, summary))
             prints[key] = fp
         }
@@ -218,6 +230,7 @@ enum SessionIntensityCache {
             MetricPoint(day: day, key: keyUnmeasured, value: Double(s.unmeasuredCount)),
             MetricPoint(day: day, key: keyApprox, value: s.approximate ? 1 : 0),
             MetricPoint(day: day, key: keyAbstained, value: s.abstained == nil ? 0 : 1),
+            MetricPoint(day: day, key: keyZone45, value: s.zone45Min),
         ]
     }
 
@@ -258,12 +271,15 @@ enum SessionIntensityCache {
         let apx = await map(keyApprox)
         let abs_ = await map(keyAbstained)
         let wear = await map(keyWear)
+        let z45 = await map(keyZone45)
         var out: [String: CachedDay] = [:]
         for day in Set(mod.keys).union(wear.keys) {
+            let abstained = mod[day] == nil || (abs_[day] ?? 0) > 0
             out[day] = CachedDay(moderate: mod[day] ?? 0, vigorous: vig[day] ?? 0, hard: hard[day] ?? 0,
                                  hardSession: (hardS[day] ?? 0) > 0, strength: (str[day] ?? 0) > 0,
                                  unmeasured: Int(unm[day] ?? 0), approximate: (apx[day] ?? 0) > 0,
-                                 abstained: mod[day] == nil || (abs_[day] ?? 0) > 0, wear: wear[day])
+                                 abstained: abstained, wear: wear[day],
+                                 zone45: abstained ? nil : z45[day])
         }
         return out
     }

@@ -314,8 +314,9 @@ public struct OverviewHRChart: View {
 
     /// Workout span fill / edge-rule tint: the badge tint at low opacity, so the band reads as "this
     /// stretch was training" in both appearances without competing with the data line drawn over it.
-    private static let workoutBandOpacity: Double = 0.15
-    private static let workoutRuleOpacity: Double = 0.55
+    /// 0.22 (was 0.15): at 0.15 the amber sank into the 2.0 dark plot well and the span stopped reading.
+    nonisolated static let workoutBandOpacity: Double = 0.22
+    nonisolated static let workoutRuleOpacity: Double = 0.7
 
     private func nearestPoint(toX x: CGFloat, proxy: ChartProxy, plot: CGRect) -> TrendPoint? {
         guard !points.isEmpty else { return nil }
@@ -433,7 +434,7 @@ public struct OverviewHRChart: View {
         if let sleep, let label = sleep.label, sleep.end > xDomain.lowerBound {
             placed(SleepBandLabel(text: label),
                    atX: xPos(clampX(sleep.start), proxy, plot) ?? plot.minX,
-                   topY: topY, width: estWidth(label, extra: 34), plot: plot)
+                   topY: topY, width: estWidth(SleepBandLabel.display(label), extra: 34), plot: plot)
         }
         if let recovery, let rx = xPos(clampX(recovery.date), proxy, plot) {
             placed(MarkerLabel(text: recovery.label, color: recovery.color),
@@ -443,7 +444,7 @@ public struct OverviewHRChart: View {
             placed(MarkerLabel(text: effort.label, color: effort.color),
                    atX: sx, topY: topY, width: estWidth(effort.label), plot: plot)
         }
-        // One glyph per workout, centred over the VISIBLE part of its span (so it sits on the band, and a
+        // One glyph + name chip per workout, centred over the VISIBLE part of its span (so it sits on the band, and a
         // workout outside the zoom window gets no glyph dragged to the plot edge). Vertically it floats
         // just above the metric's peak inside that part, or at the band top when there's no sample there.
         let domain = xDomain
@@ -453,12 +454,16 @@ public struct OverviewHRChart: View {
             if visEnd >= visStart,
                let x0 = xPos(visStart, proxy, plot),
                let x1 = xPos(visEnd, proxy, plot) {
-                let cx = min(max((x0 + x1) / 2, plot.minX + 14), plot.maxX - 14)
                 let peakY: CGFloat? = peak(from: visStart, to: visEnd)
                     .flatMap { proxy.position(forY: $0.value) }
                     .map { $0 + plot.minY - 20 }
-                WorkoutBadge(symbol: w.symbol, tint: workoutTint)
-                    .position(x: cx, y: max(topY + 26, peakY ?? (topY + 26)))
+                // Glyph + the workout's NAME (the band said "something happened here" but only the scrub
+                // tooltip said what), centred on the visible band and clamped inside the plot.
+                let name = w.label ?? String(localized: "Workout", bundle: .module)
+                placed(WorkoutBadge(symbol: w.symbol, name: name, tint: workoutTint),
+                       atX: (x0 + x1) / 2,
+                       topY: max(topY + 26, peakY ?? (topY + 26)),
+                       width: estWidth(name, extra: 40), plot: plot)
             }
         }
     }
@@ -674,20 +679,52 @@ public struct OverviewHRChart: View {
 
 // MARK: - Marker chrome
 
-/// Sport glyph in a tinted badge, anchored above a workout's HR peak.
+/// The backing of every in-plot label: an OPAQUE flat chip (`surfaceRaised` + a 1 pt hairline in the label's
+/// own ink), radius 6, no shadow, no glow (decision 19).
+///
+/// Why opaque: these labels used `NoopPanelSurface`, which 1.x drew as an opaque panel. Telos 2.0 re-pointed
+/// that surface to the translucent card glass (`glassFill`, ~8 % white in dark), so the chips turned
+/// see-through and the sleep / recovery / effort text sat bare on the HR line, the area fill and the dotted
+/// grid, where it no longer read as a label at all. A label over a live plot needs its own ground.
+struct ChartLabelChip: View {
+    let edge: Color
+    nonisolated static let radius: CGFloat = 6
+    nonisolated static let edgeOpacity: Double = 0.6
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
+        shape
+            .fill(TelosColor.surfaceRaised)
+            .overlay(shape.strokeBorder(edge.opacity(Self.edgeOpacity), lineWidth: TelosStroke.line))
+    }
+}
+
+/// Sport glyph (in a solid tinted plate) + the workout's name, anchored above the workout's HR peak.
 private struct WorkoutBadge: View {
     let symbol: String
+    let name: String
     let tint: Color
     var body: some View {
-        Image(systemName: symbol)
-            .font(.system(size: 11, weight: .bold))
-            .foregroundStyle(StrandPalette.textPrimary)
-            .frame(width: 22, height: 22)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(tint)
-            )
-            .allowsHitTesting(false)
+        HStack(spacing: 5) {
+            Image(systemName: symbol)
+                .font(.system(size: 10, weight: .bold))
+                .foregroundStyle(StrandPalette.textPrimary)
+                .frame(width: 18, height: 18)
+                .background(
+                    RoundedRectangle(cornerRadius: 4, style: .continuous)
+                        .fill(tint)
+                )
+            Text(name)
+                .font(StrandFont.footnote)
+                .fontWeight(.semibold)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .lineLimit(1)
+        }
+        .padding(.leading, 3)
+        .padding(.trailing, 7)
+        .padding(.vertical, 2)
+        .background(ChartLabelChip(edge: tint))
+        .fixedSize()
+        .allowsHitTesting(false)
     }
 }
 
@@ -702,24 +739,31 @@ private struct MarkerLabel: View {
             .foregroundStyle(color)
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
-            .background(NoopPanelSurface(cornerRadius: 6, elevated: true, surfaceOpacity: 0.92))
+            .background(ChartLabelChip(edge: color))
             .fixedSize()
             .allowsHitTesting(false)
     }
 }
 
-/// Moon glyph + sleep duration, shown at the leading corner of the sleep band.
-private struct SleepBandLabel: View {
+/// Moon glyph + "Sleep" + duration (e.g. "Sleep 6:06"), shown at the leading corner of the sleep band.
+struct SleepBandLabel: View {
     let text: String
+
+    /// The label's words: the band is NAMED, not just timed — a bare "6:06" over the plot did not say what
+    /// the shaded stretch was.
+    nonisolated static func display(_ duration: String) -> String {
+        "\(String(localized: "Sleep", bundle: .module)) \(duration)"
+    }
+
     var body: some View {
         HStack(spacing: 4) {
             Image(systemName: "moon.fill").font(.system(size: 9))
-            Text(text).font(StrandFont.footnote).fontWeight(.semibold)
+            Text(Self.display(text)).font(StrandFont.footnote).fontWeight(.semibold)
         }
         .foregroundStyle(StrandPalette.sleepLight)
         .padding(.horizontal, 6)
         .padding(.vertical, 3)
-        .background(NoopPanelSurface(cornerRadius: 6, elevated: true, surfaceOpacity: 0.92))
+        .background(ChartLabelChip(edge: StrandPalette.sleepLight))
         .fixedSize()
         .allowsHitTesting(false)
     }

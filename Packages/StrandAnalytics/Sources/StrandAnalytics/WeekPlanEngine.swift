@@ -6,7 +6,9 @@ import Foundation
 // with a week-level plan that moves the wearer toward the ranges with the strongest health evidence:
 //   * aerobic minutes toward the WHO 150–300 min/week range (Bull 2020), counted as `mvpaEq`
 //     (moderate + 2 × vigorous, `SessionIntensity`), ramped from the wearer's OWN baseline;
-//   * 2 strength sessions a week (WHO; Momma 2022), tied to `StrengthProgression` in the app;
+//   * 2 strength sessions a week (WHO; Momma 2022), tied to `StrengthProgression` in the app — or, when the
+//     wearer has a Telos Lift plan, the plan's own day templates for the week (`WeekPlanProgram.swift`);
+//   * a short weekly zone 4–5 dose (`zone45WeeklyTargetMin`, `WeekPlanProgram.swift`);
 //   * a step target from the wearer's own median toward the plateau of the dose-response (Paluch 2022),
 //     ONLY when steps are reliable (the step gate);
 //   * easy / hold weeks TRIGGERED BY DATA (the 7-day HRV tier, illness, sleep debt, load spikes,
@@ -52,11 +54,14 @@ public struct DayActivity: Codable, Equatable, Sendable {
     public let unmeasuredSessions: Int
     /// Minutes partly from imported zones ("≈").
     public let approximate: Bool
+    /// Zone 4–5 minutes inside the day's sessions. nil = unknown (the day's intensity abstained, or the
+    /// cache has no reading for it). A worn day with no session is 0.
+    public let zone45Min: Double?
 
     public init(day: String, mvpaEq: Double? = nil, moderateMin: Double? = nil, vigorousMin: Double? = nil,
                 hardSession: Bool? = nil, strengthSession: Bool? = nil, steps: Double? = nil,
                 stepsReliable: Bool = false, trimp: Double? = nil, wearCoverage: Double? = nil,
-                unmeasuredSessions: Int = 0, approximate: Bool = false) {
+                unmeasuredSessions: Int = 0, approximate: Bool = false, zone45Min: Double? = nil) {
         self.day = day
         self.mvpaEq = mvpaEq
         self.moderateMin = moderateMin
@@ -69,6 +74,7 @@ public struct DayActivity: Codable, Equatable, Sendable {
         self.wearCoverage = wearCoverage
         self.unmeasuredSessions = unmeasuredSessions
         self.approximate = approximate
+        self.zone45Min = zone45Min
     }
 }
 
@@ -94,10 +100,15 @@ public struct WeekPlanInputs: Equatable, Sendable {
     public let sleepDebtMin: Double?
     /// Age in years, nil when unknown.
     public let age: Int?
+    /// The wearer's Telos Lift plan for a week (`WeekPlanEngine.plannedDays(from:)`), nil without one.
+    public let liftProgram: [PlannedLiftDay]?
+    /// Stored lift sessions over `days` (template matching for the strength line and the review).
+    public let liftSessions: [LiftSessionMark]
 
     public init(today: String, days: [DayActivity], hrvTier: ReadinessTier?, hrvTierLast7: [ReadinessTier?],
                 hrvValidNights: Int, charge: Double?, illnessRaisedDays: [String], illnessRaisedNow: Bool,
-                sleepDebtMin: Double?, age: Int?) {
+                sleepDebtMin: Double?, age: Int?, liftProgram: [PlannedLiftDay]? = nil,
+                liftSessions: [LiftSessionMark] = []) {
         self.today = today
         self.days = days
         self.hrvTier = hrvTier
@@ -108,6 +119,8 @@ public struct WeekPlanInputs: Equatable, Sendable {
         self.illnessRaisedNow = illnessRaisedNow
         self.sleepDebtMin = sleepDebtMin
         self.age = age
+        self.liftProgram = liftProgram
+        self.liftSessions = liftSessions
     }
 }
 
@@ -181,18 +194,25 @@ public struct WeekTypeReason: Codable, Equatable, Sendable {
 
 /// Strength sessions for the week, tied to `StrengthProgression` in the app.
 public struct StrengthTarget: Codable, Equatable, Sendable {
+    /// The sessions asked for (the target the card, the review and the coach read).
     public let minSessions: Int
     public let maxSessions: Int
     /// Easy week: keep loads where they are (the card shows "hold loads" on the progression).
     public let holdLoads: Bool
     /// Share of the usual sets (easy week ≈ two-thirds).
     public let setsFactor: Double
+    /// The wearer's Lift plan templates for the week, in week order; nil when the target is the default
+    /// (no plan, or a plan frozen before one existed). With templates, `maxSessions` is the plan's count and
+    /// `minSessions` is the same, or one fewer in an easy week.
+    public let templates: [PlannedLiftDay]?
 
-    public init(minSessions: Int, maxSessions: Int, holdLoads: Bool, setsFactor: Double) {
+    public init(minSessions: Int, maxSessions: Int, holdLoads: Bool, setsFactor: Double,
+                templates: [PlannedLiftDay]? = nil) {
         self.minSessions = minSessions
         self.maxSessions = maxSessions
         self.holdLoads = holdLoads
         self.setsFactor = setsFactor
+        self.templates = templates
     }
 }
 
@@ -211,7 +231,8 @@ public enum EasyOfferState: String, Codable, Equatable, Sendable {
 /// The frozen plan for one Monday–Sunday week.
 public struct WeekPlan: Codable, Equatable, Sendable {
     /// Bumped when the decision rules change; a plan from an older version is still shown as frozen.
-    public static let currentVersion = 1
+    /// 2: the zone 4–5 target and the strength target from the wearer's Lift plan.
+    public static let currentVersion = 2
 
     public let version: Int
     /// Monday, `yyyy-MM-dd`.
@@ -240,6 +261,9 @@ public struct WeekPlan: Codable, Equatable, Sendable {
     public let ageKnown: Bool
     public let stepGate: StepGate
     public var easyOffer: EasyOfferState?
+    /// Weekly zone 4–5 minutes asked for; nil in an easy week (and in a plan frozen before the line existed,
+    /// until `WeekPlanEngine.adopt` fills it).
+    public var zone45Target: Double?
 
     /// Sunday of the week.
     public var weekEnd: String { WeeklyDigestEngine.addDays(weekStart, 6) }
@@ -312,7 +336,12 @@ public struct WeekProgress: Equatable, Sendable {
     public let moderateMin: Double
     public let vigorousMin: Double
     public let hardSessionsDone: Int
+    /// `strength.done` (kept as its own field for the readers that only need the count).
     public let strengthDone: Int
+    /// The week's strength sessions matched to the plan's templates (templates nil without a Lift plan).
+    public let strength: StrengthWeekStatus
+    /// Zone 4–5 minutes so far; `minutes` nil ⇒ "—" + `absence`.
+    public let zone45: Zone45Week
     public let unmeasuredSessions: Int
     public let approximate: Bool
     /// Mean of this week's reliable daily step totals so far, nil when none.
@@ -550,11 +579,12 @@ public enum WeekPlanEngine {
     /// Whether the last `buildStreakWeeks` frozen plans were all `build` and each met every target at
     /// ≥ 90 % (reason (d)).
     static func buildStreakMet(weekStart: String, frozen: [WeekPlan], days: [DayActivity],
-                               guidance: [String: DayGuidance.Kind]) -> Bool {
+                               guidance: [String: DayGuidance.Kind], lifts: [LiftSessionMark] = []) -> Bool {
         let starts = previousWeekStarts(weekStart, buildStreakWeeks)
         for s in starts {
             guard let p = frozen.first(where: { $0.weekStart == s }), p.type == .build else { return false }
-            let parts = WeekReview.planVsDone(plan: p, days: days, guidanceByDay: guidance, liftDataFresh: true)
+            let parts = WeekReview.planVsDone(plan: p, days: days, guidanceByDay: guidance, liftDataFresh: true,
+                                              liftSessions: lifts)
             let asked = parts.filter { $0.status != .notAsked }
             guard !asked.isEmpty, asked.allSatisfy({ $0.status == .met }) else { return false }
         }
@@ -602,7 +632,8 @@ public enum WeekPlanEngine {
                 type = .build
                 reasons = []
                 // (d): OFFERED, never imposed. The plan stays a build week until the wearer accepts.
-                if buildStreakMet(weekStart: start, frozen: frozen, days: inputs.days, guidance: guidanceHistory) {
+                if buildStreakMet(weekStart: start, frozen: frozen, days: inputs.days, guidance: guidanceHistory,
+                                  lifts: inputs.liftSessions) {
                     offer = .offered
                     reasons = [WeekTypeReason(.buildStreak)]
                 }
@@ -621,19 +652,22 @@ public enum WeekPlanEngine {
             reasons: reasons, baselineMvpa: b, validBaselineWeeks: validWeeks, chronicLoad: chronic,
             lastWeekLoad: lastLoad, monotony: mono, aerobicTarget: nil, hardSessionTarget: 0,
             hardSessionOptional: false,
-            strength: StrengthTarget(minSessions: 2, maxSessions: 2, holdLoads: false, setsFactor: 1),
+            strength: StrengthTarget(minSessions: 2, maxSessions: 2, holdLoads: false, setsFactor: 1,
+                                     templates: inputs.liftProgram.flatMap { $0.isEmpty ? nil : $0 }),
             stepsTarget: steps, stepsMedian: median, stepsPlateau: p, ageKnown: (inputs.age ?? 0) > 0,
-            stepGate: gate, easyOffer: offer)
+            stepGate: gate, easyOffer: offer, zone45Target: nil)
         applyTargets(&plan, days: inputs.days)
         return plan
     }
 
-    /// Fill the aerobic, hard-session and strength targets for the plan's current type.
+    /// Fill the aerobic, zone 4–5, hard-session and strength targets for the plan's current type. The
+    /// wearer's Lift plan travels in `plan.strength.templates` and survives a re-apply (an accepted easy week).
     static func applyTargets(_ plan: inout WeekPlan, days: [DayActivity]) {
         let byDay = index(days)
         let prev = previousWeekStarts(plan.weekStart, baselineWeeks)
         let b = plan.baselineMvpa
         plan.aerobicTarget = aerobicTarget(type: plan.type, b: b)
+        plan.zone45Target = zone45Target(type: plan.type)
 
         // Hard sessions: mean hard days per week over the last 4 weeks.
         let hardDays = prev.flatMap { weekDays($0) }.filter { byDay[$0]?.hardSession == true }.count
@@ -654,6 +688,12 @@ public enum WeekPlanEngine {
         plan.hardSessionTarget = hard
         plan.hardSessionOptional = optional
 
+        // Strength from the wearer's own Lift plan: its templates for the week (one fewer in an easy week,
+        // loads held). See `WeekPlanProgram.swift`.
+        if let program = plan.strength.templates, !program.isEmpty {
+            plan.strength = programStrength(type: plan.type, program: program)
+            return
+        }
         // Strength: 2 (WHO), stepping in at 1 while the wearer averages < 1 a week.
         let strengthDays = prev.flatMap { weekDays($0) }.filter { byDay[$0]?.strengthSession == true }.count
         let meanStrength = Double(strengthDays) / Double(baselineWeeks)
@@ -734,7 +774,10 @@ public enum WeekPlanEngine {
 
     // MARK: Progress
 
-    public static func progress(plan: WeekPlan, days: [DayActivity], today: String) -> WeekProgress {
+    /// The live state of the week. `lifts`: stored lift sessions (template matching; empty ⇒ the strength
+    /// count is the days with a strength session, as before).
+    public static func progress(plan: WeekPlan, days: [DayActivity], today: String,
+                                lifts: [LiftSessionMark] = []) -> WeekProgress {
         let byDay = index(days)
         let elapsed = weekDays(plan.weekStart).filter { $0 <= today }
         let acts = elapsed.compactMap { byDay[$0] }
@@ -742,7 +785,9 @@ public enum WeekPlanEngine {
         let moderate = acts.reduce(0) { $0 + ($1.moderateMin ?? 0) }
         let vigorous = acts.reduce(0) { $0 + ($1.vigorousMin ?? 0) }
         let hard = acts.filter { $0.hardSession == true }.count
-        let strength = acts.filter { $0.strengthSession == true }.count
+        let strength = strengthStatus(templates: plan.strength.templates, days: days, lifts: lifts,
+                                      dayKeys: elapsed)
+        let zone45 = zone45Week(days: days, dayKeys: elapsed)
         let unmeasured = acts.reduce(0) { $0 + $1.unmeasuredSessions }
         let approx = acts.contains { $0.approximate }
         let steps = acts.compactMap { a -> Double? in a.stepsReliable ? a.steps : nil }
@@ -755,7 +800,8 @@ public enum WeekPlanEngine {
             note = true
         }
         return WeekProgress(weekStart: plan.weekStart, today: today, aerobicDone: aerobic, moderateMin: moderate,
-                            vigorousMin: vigorous, hardSessionsDone: hard, strengthDone: strength,
+                            vigorousMin: vigorous, hardSessionsDone: hard, strengthDone: strength.done,
+                            strength: strength, zone45: zone45,
                             unmeasuredSessions: unmeasured, approximate: approx, stepsMeanReliable: stepsMean,
                             loadSoFar: loadSoFar, midWeekLoadNote: note)
     }

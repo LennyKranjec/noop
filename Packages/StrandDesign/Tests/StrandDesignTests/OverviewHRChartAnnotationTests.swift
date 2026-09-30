@@ -161,5 +161,28 @@ final class OverviewHRChartAnnotationTests: XCTestCase {
         XCTAssertEqual(OverviewHRChart.workout(at: date(116_000), in: [run, ride])?.label, "Running")
         XCTAssertEqual(OverviewHRChart.workout(at: date(112_000), in: [run, ride])?.label, "Cycling")
     }
+
+    // MARK: Label legibility on the 2.0 dark plot well (owner: "sleep/training no longer labelled")
+
+    /// The sleep band's label NAMES the band and keeps its duration ("Sleep 6:06"), not a bare "6:06".
+    func testSleepBandLabelNamesTheBandAndKeepsTheDuration() {
+        let text = SleepBandLabel.display("6:06")
+        XCTAssertTrue(text.hasSuffix(" 6:06"))
+        XCTAssertGreaterThan(text.count, "6:06".count + 1)
+    }
+
+    /// The workout span must stay visible on the dark well (it sank at 0.15) and its edge rules stay
+    /// stronger than the fill; both stay translucent so the HR line drawn over them reads.
+    func testWorkoutBandStaysVisibleButTranslucent() {
+        XCTAssertGreaterThanOrEqual(OverviewHRChart.workoutBandOpacity, 0.2)
+        XCTAssertLessThan(OverviewHRChart.workoutBandOpacity, 0.4)
+        XCTAssertGreaterThan(OverviewHRChart.workoutRuleOpacity, OverviewHRChart.workoutBandOpacity)
+    }
+
+    /// In-plot labels sit on their own flat chip with a visible hairline in the label's ink (no glow).
+    func testLabelChipEdgeIsVisible() {
+        XCTAssertGreaterThanOrEqual(ChartLabelChip.edgeOpacity, 0.4)
+        XCTAssertGreaterThan(ChartLabelChip.radius, 0)
+    }
 }
 #endif

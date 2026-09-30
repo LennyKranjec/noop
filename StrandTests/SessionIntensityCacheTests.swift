@@ -60,6 +60,21 @@ final class SessionIntensityCacheTests: XCTestCase {
         XCTAssertEqual(first.first { $0.key == SessionIntensityCache.keyAbstained }?.value, 0)
     }
 
+    func testZone45IsBankedAndItsEdgeMovesTheFingerprint() {
+        let a = [SessionIntensity.Window(start: 10, end: 610, sport: "Running")]
+        let fp = SessionIntensityCache.fingerprint(sessions: a, hrCount: 600, liftSession: false,
+                                                   restingHR: 60, hrMax: 160, zone4Lower: 140)
+        XCTAssertNotEqual(fp, SessionIntensityCache.fingerprint(sessions: a, hrCount: 600, liftSession: false,
+                                                                restingHR: 60, hrMax: 160, zone4Lower: 150),
+                          "a custom zone-4 edge recomputes the day")
+        XCTAssertTrue(fp.hasPrefix("v2|"), "days banked before zone45_min existed are recomputed once")
+        let s = SessionIntensity.day(sessions: [.init(start: 0, end: 600, sport: "Running")],
+                                     hr: (0..<600).map { HRSample(ts: $0, bpm: 145) },
+                                     restingHR: 60, hrMax: 160, zone4LowerBpm: 140)
+        let points = SessionIntensityCache.points(day: "2026-09-28", s)
+        XCTAssertEqual(points.first { $0.key == SessionIntensityCache.keyZone45 }?.value ?? -1, 10, accuracy: 1e-9)
+    }
+
     func testWeekPlanArchiveIsBounded() {
         var a = WeekPlanArchive()
         a.guidance = ["2026-01-01": .easy, "2026-09-27": .asPlanned]

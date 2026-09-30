@@ -12,6 +12,11 @@ import StrandDesign
 //
 // COST: static. No animation, no timer; it re-renders only when `WeekPlanSource` publishes.
 //
+// STRENGTH FROM THE WEARER'S PLAN. With a Telos Lift plan the strength row asks for the plan's templates of
+// the week and names them ("Upper A ✓ · Lower A · Upper B · Lower B"); an easy week says so ("Easy week —
+// 3 of 4"). ZONE 4–5 sits under the aerobic row: measured minutes against the weekly dose on the same thin
+// scale, "—" plus its reason when nothing was measured (never a 0).
+//
 // TELOS (BODY): a glass card; aerobic minutes on a thin linear scale with the WHO range hatched and the
 // week's target as a caret; strength sessions as pips; the step target as a caret over the measured daily
 // mean; the day's guidance line as the card's closing word. The scales GROW to hold the value (a week past
@@ -44,6 +49,7 @@ struct WeekPlanCardView: View {
             header(plan)
             if plan.easyOffer == .offered { offer(plan) }
             aerobicRow(plan)
+            zone45Row(plan)
             if plan.hardSessionTarget > 0 { hardRow(plan) }
             strengthRow(plan)
             stepsRow(plan)
@@ -130,6 +136,36 @@ struct WeekPlanCardView: View {
         }
     }
 
+    /// Zone 4–5 minutes against the weekly dose. The scale is drawn only from a measured figure.
+    private func zone45Row(_ plan: WeekPlan) -> some View {
+        let z = source.progress?.zone45
+        let target = plan.zone45Target
+        let value: String
+        let caption: String
+        if let z, let minutes = z.minutes {
+            let done = (z.approximate ? "≈" : "") + Self.whole(minutes)
+            value = target.map { "\(done) / \(Self.whole($0)) min" } ?? "\(done) min"
+            caption = target == nil
+                ? String(localized: "No high-intensity target in an easy week")
+                : String(localized: "high intensity, inside recorded sessions")
+        } else {
+            value = target.map { "\u{2014} / \(Self.whole($0)) min" } ?? "\u{2014}"
+            switch z?.absence {
+            case .some(.zoneInputsMissing):
+                caption = String(localized: "Needs a measured resting heart rate for your zones")
+            case .some(.notWorn), .none:
+                caption = String(localized: "No worn time with heart rate this week yet")
+            }
+        }
+        return VStack(alignment: .leading, spacing: 4) {
+            line(String(localized: "Zone 4–5"), value, caption: caption)
+            if let minutes = z?.minutes {
+                PlanScale(value: minutes, target: target, band: nil, tint: TelosColor.heart)
+                    .padding(.leading, 74)
+            }
+        }
+    }
+
     private func hardRow(_ plan: WeekPlan) -> some View {
         let done = source.progress.map { String($0.hardSessionsDone) } ?? "\u{2014}"
         let caption = plan.hardSessionOptional ? String(localized: "optional") : String(localized: "moved by your HRV trend")
@@ -138,10 +174,16 @@ struct WeekPlanCardView: View {
 
     private func strengthRow(_ plan: WeekPlan) -> some View {
         let done = source.progress.map { String($0.strengthDone) } ?? "\u{2014}"
-        let target = plan.strength.minSessions == plan.strength.maxSessions
+        let fromPlan = !(plan.strength.templates ?? []).isEmpty
+        // With the wearer's plan the target is one number (the plan, or one fewer in an easy week, which
+        // the caption names); without it the default range stays as it was.
+        let target = fromPlan || plan.strength.minSessions == plan.strength.maxSessions
             ? "\(plan.strength.minSessions)"
             : "\(plan.strength.minSessions)–\(plan.strength.maxSessions)"
         var parts: [String] = []
+        if fromPlan && plan.strength.minSessions < plan.strength.maxSessions {
+            parts.append(String(localized: "Easy week — \(plan.strength.minSessions) of \(plan.strength.maxSessions)"))
+        }
         if let last = source.lastLiftSession {
             parts.append(String(localized: "last import \(last.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated)))"))
         }
@@ -153,6 +195,12 @@ struct WeekPlanCardView: View {
         return VStack(alignment: .leading, spacing: 4) {
             line(String(localized: "Strength"), "\(done) / \(target) sessions",
                  caption: parts.isEmpty ? nil : parts.joined(separator: "; "))
+            if let templates = Self.templateText(plan: plan, status: source.progress?.strength) {
+                templates
+                    .font(TelosType.caption)
+                    .padding(.leading, 74)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             // Sessions as pips (one cell per planned session); only with a measured count.
             if let p = source.progress, plan.strength.maxSessions > 0 {
                 TelosSegmentedBar(value: Double(p.strengthDone),
@@ -193,6 +241,31 @@ struct WeekPlanCardView: View {
         }
     }
 
+    /// "Upper A ✓ · Lower A · Upper B · Lower B": done templates in the primary ink with a tick, open ones
+    /// muted; "+1 other" for a strength session that matched no open template (it still counts). Before the
+    /// first progress read the plan's names show without ticks. nil without the wearer's plan.
+    static func templateText(plan: WeekPlan, status: StrengthWeekStatus?) -> Text? {
+        guard let planned = plan.strength.templates, !planned.isEmpty else { return nil }
+        var items: [(name: String, done: Bool)] = []
+        if let matched = status?.templates {
+            items = matched.map { (name: $0.template.displayName, done: $0.done) }
+        } else {
+            items = planned.map { (name: $0.displayName, done: false) }
+        }
+        var out = Text(verbatim: "")
+        for (i, item) in items.enumerated() {
+            if i > 0 { out = out + Text(verbatim: " · ").foregroundColor(TelosColor.textTertiary) }
+            out = out + (item.done
+                ? Text(verbatim: item.name + " ✓").foregroundColor(TelosColor.textPrimary)
+                : Text(verbatim: item.name).foregroundColor(TelosColor.textTertiary))
+        }
+        if let other = status?.otherSessions, other > 0 {
+            out = out + Text(verbatim: " · ").foregroundColor(TelosColor.textTertiary)
+                + Text(String(localized: "+\(other) other")).foregroundColor(TelosColor.textSecondary)
+        }
+        return out
+    }
+
     private func todayRow(_ g: DayGuidance) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
@@ -223,6 +296,10 @@ struct WeekPlanCardView: View {
             }
             Text(SessionIntensity.limitNote)
             Text(String(localized: "Aerobic minutes are moderate (40–59 % of heart-rate reserve) plus vigorous (60 % and above) counted double, toward the WHO range of 150–300 minutes a week. Targets rise from your own baseline by at most 30 % a week. VO₂max is shown only as a monthly trend with its ±5 error band, never as a target."))
+            Text(String(localized: "Zone 4–5 minutes are the minutes at or above the start of zone 4 of your heart-rate zones, inside recorded sessions. The \(Int(WeekPlanEngine.zone45WeeklyTargetMin)) minutes a week are a short high-intensity dose — a coaching choice, not a threshold from a study. An easy week asks for none."))
+            if plan.strength.templates != nil {
+                Text(String(localized: "Strength follows your Lift plan: one session per day template in the week. An easy week asks for one fewer, with loads held."))
+            }
         }
         .font(StrandFont.caption)
         .foregroundStyle(StrandPalette.textTertiary)
