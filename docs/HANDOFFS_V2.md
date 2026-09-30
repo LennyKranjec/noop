@@ -117,3 +117,10 @@ Findings for owner: load term = training done not adaptation (uncapped by decisi
 - [ ] SleepScheduleProvider must expose wake SD + usual wake minute so `WeekPlanSource.sleepInputsProvider` can be set (HA file)
 - [ ] HabitLedgerSource reads `breath_session_min` (source `noop-habits`) (HB file)
 - [ ] Views: master-switch copy in AutomationsView.wristAlertsCard and StrapCuesSettingsView (banner + help) — the master now only holds wind-down/screens-off + HR/strain wrist alerts
+
+## HF Look ahead + Goals (done — exact code in agent report)
+- [ ] AI: goals block in `AICoachEngine.contextBlocks()` after "the day's other figures", before the dream journal: `let goalDay = Repository.localDayKey(Date()); let goalAssessments = GoalStore.shared.activeGoals.map { ProjectionSource.shared.assess($0, today: goalDay) }; if !goalAssessments.isEmpty { out.append(CoachContextBlock(name: GoalCoachPrompt.blockName, value: 60, full: GoalCoachSummary.block(goalAssessments, asOf: goalDay), short: GoalCoachSummary.shortBlock(goalAssessments, asOf: goalDay))) }`; optional same in StateGrounding at value 45
+- [ ] HealthV2Refresh.run end: `await ProjectionSource.shared.refresh(model: model, now: now); let goalDay = Repository.localDayKey(now); GoalStore.shared.noteAssessments(GoalStore.shared.activeGoals.map { ProjectionSource.shared.assess($0, today: goalDay) }, today: goalDay)`
+- [ ] FRAME root: `GoalStore.shared.momentSink = { TelosMomentPresenter.shared.enqueue($0) }`; presenter API expected `func enqueue(_ moment: TelosMoment, onPrimary: (() -> Void)? = nil)`; primary "Set the next goal" opens GoalsView()
+- [ ] Entry points: More → `NavigationLink { GoalsView() } label: { Label("Goals", systemImage: "flag.checkered") }`; Level breakdown → `Text(ProjectionSource.shared.levelEightWeekLine())` + links to LookAheadView()/GoalsView() + `.task { await ProjectionSource.shared.refresh(model: model) }`; Health tab + WeekReviewView → `NavigationLink { LookAheadView() }`; both need AppModel env (panel also AICoachEngine)
+- [ ] Suggested: WeekPlanSource exposes per-day step resolution (ProjectionSource.stepActivity copies it)
