@@ -332,9 +332,13 @@ final class QuestStore: ObservableObject {
     /// Tick off a custom task by hand. Only custom tasks — a system quest closes on its data, never on
     /// the wearer's word (see `QuestReviewSheet`).
     ///
-    /// HB INSERTION POINT (S1-B): a trial quest (`QuestPenaltyRules.trialIdPrefix`) is answered through the
-    /// trial store, not completed here — its hook goes at the top of this function and returns.
+    /// HB (S1-B): a trial quest (`QuestPenaltyRules.trialIdPrefix`) is answered through the trial store, not
+    /// completed here — a bare check-off carries no answer, so the bridge asks for one and this returns.
     func checkOff(id: String) {
+        if HabitTrialQuestBridge.isTrialQuest(id) {
+            HabitTrialQuestBridge.shared.handleCheckOff(questId: id)
+            return
+        }
         guard let quest = quests.first(where: { $0.id == id }), quest.kind == .custom,
               quest.state == .active || quest.state == .offered else { return }
         complete(quest, summary: "Checked off by you.")

@@ -22,7 +22,9 @@ import CoreHaptics
 // | `commit`      | rigid                                  | something committed: save, accept, log         |
 // | `success`     | two rising taps                        | a real milestone: quest completed, debt cleared|
 // | `warning`     | firm, then softer                      | not allowed / needs attention                  |
-// | `failure`     | a HEAVIER two-beat                     | a penalty landing, a failed action             |
+// | `failure`     | a heavier two-beat                     | a failed action, a refused input               |
+// | `reward`      | a bright rising sparkle + swell        | a BIG reward: PR, quest / goal done, level up  |
+// | `penalty`     | two heavy thuds over a low rumble      | a penalty landing, a broken streak             |
 // | `levelSettle` | a slow three-step rise over a swell    | the day's Level settling (full-screen moment)  |
 // | `heartbeat`   | one subtle lub-dub                     | RESERVED for full-screen moments about the heart|
 // | `tick`        | a pinprick (≥ 75 ms apart)             | the typewriter, per letter (SystemHaptics)     |
@@ -44,6 +46,12 @@ import CoreHaptics
 //   • Never on scroll, never per list row appearing, never per frame. Haptics answer a touch or a state
 //     change the wearer should notice.
 //
+// The STRAP buzz (decision 17: a reward pattern and a heavier penalty pattern on the wrist) is not this
+// engine — it goes through the app's strap-cue system with its daily budget, never during sleep, never
+// twice for one event. `TelosMoment.Kind.defaultStrapCue` names which one a moment wants
+// (`TelosStrapCue.reward` / `.penalty`) so the moment presenter can request it alongside the phone
+// pattern of the same name.
+//
 // Engine: ONE `CHHapticEngine`, created lazily on first use, auto-shutdown between cues, stopped when
 // the app backgrounds and rebuilt on demand; the reset handler restarts it, the stopped handler drops
 // it. Where Core Haptics is unavailable (older hardware, Simulator) each pattern falls back to the
@@ -59,6 +67,8 @@ public enum TelosHaptic: String, CaseIterable, Sendable {
     case success
     case warning
     case failure
+    case reward
+    case penalty
     case levelSettle
     case heartbeat
     case tick
@@ -83,6 +93,17 @@ public enum TelosHaptic: String, CaseIterable, Sendable {
         case .failure:
             return [.transient(0, intensity: 1.00, sharpness: 0.30),
                     .transient(0.16, intensity: 0.85, sharpness: 0.20)]
+        case .reward:
+            // Three quick rising sparkles over a short bright swell — vivid, but done in half a second.
+            return [.continuous(0.05, duration: 0.40, intensity: 0.30, sharpness: 0.60),
+                    .transient(0, intensity: 0.55, sharpness: 0.70),
+                    .transient(0.09, intensity: 0.75, sharpness: 0.80),
+                    .transient(0.18, intensity: 1.00, sharpness: 0.90)]
+        case .penalty:
+            // Heavier than `failure`: two full-strength dull thuds over a low rumble.
+            return [.continuous(0, duration: 0.45, intensity: 0.45, sharpness: 0.05),
+                    .transient(0, intensity: 1.00, sharpness: 0.15),
+                    .transient(0.22, intensity: 1.00, sharpness: 0.10)]
         case .levelSettle:
             return [.continuous(0, duration: 0.55, intensity: 0.22, sharpness: 0.10),
                     .transient(0, intensity: 0.35, sharpness: 0.30),
@@ -247,6 +268,8 @@ public enum TelosHaptics {
         case .success:     UINotificationFeedbackGenerator().notificationOccurred(.success)
         case .warning:     UINotificationFeedbackGenerator().notificationOccurred(.warning)
         case .failure:     UINotificationFeedbackGenerator().notificationOccurred(.error)
+        case .reward:      UINotificationFeedbackGenerator().notificationOccurred(.success)
+        case .penalty:     UIImpactFeedbackGenerator(style: .heavy).impactOccurred()
         case .levelSettle: UINotificationFeedbackGenerator().notificationOccurred(.success)
         case .heartbeat:   UIImpactFeedbackGenerator(style: .soft).impactOccurred()
         case .tick:        break   // a UIKit impact is far heavier than a tick; type silently instead
@@ -262,9 +285,9 @@ public enum TelosHaptics {
         switch haptic {
         case .select, .tap, .tick: device.play(.click)
         case .settle:              device.play(.click)
-        case .commit, .success, .levelSettle, .summon: device.play(.success)
+        case .commit, .success, .levelSettle, .summon, .reward: device.play(.success)
         case .warning:             device.play(.retry)
-        case .failure:             device.play(.failure)
+        case .failure, .penalty:   device.play(.failure)
         case .heartbeat:           device.play(.directionUp)
         }
     }

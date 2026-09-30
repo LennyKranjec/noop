@@ -1012,7 +1012,11 @@ final class AICoachEngine: ObservableObject {
         errorText = nil
         let userMessage = ChatMessage(role: .user, text: trimmed)
         // A named analysis shows its short name in the thread and sends its full brief on the wire.
-        if let wireText, !wireText.isEmpty { wireOverrides[userMessage.id] = wireText }
+        // A preset that carries live material (the week review, for "Review my week") gets it attached
+        // here, at send time, and only with data consent (`CoachAnalysisPreset.wire`).
+        if let wireText, !wireText.isEmpty {
+            wireOverrides[userMessage.id] = CoachAnalysisPreset.wire(for: wireText, dataConsent: dataConsent)
+        }
         appendMessage(userMessage)
         sending = true
         // K2: persist once the turn is fully settled (success, mid-stream error, or empty-stream
@@ -1529,6 +1533,17 @@ final class AICoachEngine: ObservableObject {
         // never raw R-R egress. Omitted when there aren't enough clean beats yet.
         if let line = await stressIndexLine() {
             out.append(CoachContextBlock(name: "today's stress index", value: 65, full: line))
+        }
+        // THE WEEK PLAN (HEALTH_V2 S3): the week's type, today's guidance line and the progress so far, plus
+        // last week's review when there is room. Empty until the plan has run, and then it is left out
+        // rather than sent as a heading over nothing. Short form: the head and today's line.
+        let weekPlan = WeekPlanSource.shared.coachBlock(maxChars: 700)
+        if !weekPlan.isEmpty {
+            // The short form can come back empty (a head line over 250 characters): then the block has no
+            // short form and is dropped whole rather than "shortened" to nothing.
+            let weekPlanShort = WeekPlanSource.shared.coachBlock(maxChars: 250)
+            out.append(CoachContextBlock(name: "the week plan", value: 60, full: weekPlan,
+                                         short: weekPlanShort.isEmpty ? nil : weekPlanShort))
         }
         // EVERYTHING ELSE THE APP HOLDS about the day and the week — journal, water, energy, streaks, stress
         // now and by the hour, quests, meditation, the level's gaps, VO₂max, strength, the bedroom and the

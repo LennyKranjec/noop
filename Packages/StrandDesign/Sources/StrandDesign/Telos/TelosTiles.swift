@@ -40,8 +40,9 @@ extension EnvironmentValues {
 // MARK: - Tile
 
 /// A compact metric tile: `scale` label → numeral (`numeralM`, capped) + unit → delta → micro-sparkline
-/// → carried line / absent reason → confidence tag. Radius `tile` (14), padding 12, flat surface
-/// honouring `\.telosCardOpacity`, no minimum height. One VoiceOver element.
+/// → carried line / absent reason → confidence tag, with an optional thin accent glyph beside the
+/// label. Radius `tile` (20), padding 12, the faux-glass surface honouring `\.telosCardOpacity`, no
+/// minimum height. One VoiceOver element.
 public struct TelosMetricTile: View {
     private let label: Text
     private let value: Double?
@@ -54,6 +55,8 @@ public struct TelosMetricTile: View {
     private let sparkline: [Double]?
     private let ink: Color
     private let sparkColor: Color?
+    private let icon: String?
+    private let iconTint: Color?
 
     @ScaledMetric(relativeTo: .title2) private var numeralSize: CGFloat = 24
     @Environment(\.colorSchemeContrast) private var contrast
@@ -69,7 +72,9 @@ public struct TelosMetricTile: View {
                 carriedFrom: Date? = nil,
                 sparkline: [Double]? = nil,
                 ink: Color = TelosColor.textPrimary,
-                sparkColor: Color? = nil) {
+                sparkColor: Color? = nil,
+                icon: String? = nil,
+                iconTint: Color? = nil) {
         self.label = Text(label)
         self.value = value
         self.unit = unit
@@ -81,6 +86,8 @@ public struct TelosMetricTile: View {
         self.sparkline = sparkline
         self.ink = ink
         self.sparkColor = sparkColor
+        self.icon = icon
+        self.iconTint = iconTint
     }
 
     private var finiteValue: Double? {
@@ -108,12 +115,21 @@ public struct TelosMetricTile: View {
     public var body: some View {
         let tertiary = TelosColor.tertiaryInk(for: contrast)
         VStack(alignment: .leading, spacing: TelosSpace.xs) {
-            label
-                .telosScale()
-                .textCase(.uppercase)
-                .foregroundStyle(tertiary)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .firstTextBaseline, spacing: TelosSpace.xs) {
+                if let icon {
+                    // The reference's thin accent glyph beside the label.
+                    Image(systemName: icon)
+                        .font(TelosType.glyphChevron)
+                        .foregroundStyle(iconTint ?? TelosColor.mint)
+                        .accessibilityHidden(true)
+                }
+                label
+                    .telosScale()
+                    .textCase(.uppercase)
+                    .foregroundStyle(tertiary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
 
             HStack(alignment: .firstTextBaseline, spacing: TelosSpace.xxs) {
                 if let v = finiteValue {

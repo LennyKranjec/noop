@@ -46,13 +46,20 @@ enum StateGrounding {
                        stress: String?,
                        routines: String?,
                        memory: String?,
-                       closing: String) -> [CoachContextBlock] {
+                       closing: String,
+                       weekPlan: String? = nil) -> [CoachContextBlock] {
         var out: [CoachContextBlock] = []
         // Declaration order is READING order, and it is deliberate: which day it is, then today's figures,
         // then the clock, then the background, then the rule to close on.
         out.append(CoachContextBlock(name: "which day each figure belongs to", value: 90, full: dayFrame))
         out.append(CoachContextBlock(name: "today's training state", value: 100,
                                      full: training, short: trainingShort))
+        // THE WEEK PLAN'S WORD ON TODAY (HEALTH_V2 H9): one line, right after the training state it bounds.
+        // The tile suggests sessions; on a day the plan made easy or rest, a hard one would contradict the
+        // quests issued for the same day.
+        if let weekPlan, !weekPlan.isEmpty {
+            out.append(CoachContextBlock(name: "the week plan's guidance for today", value: 80, full: weekPlan))
+        }
         out.append(CoachContextBlock(name: "today's schedule", value: 95, full: schedule))
         if let stress {
             out.append(CoachContextBlock(name: "stress today", value: 60, full: stress))

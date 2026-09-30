@@ -52,14 +52,32 @@ final class StrapCueRulesTests: XCTestCase {
     }
 
     func testRequestedVersusAmbient() {
-        XCTAssertEqual(Set(StrapCueKind.allCases.filter { !$0.isRequested }), [.sittingBreak, .windDown, .screensOff])
+        XCTAssertEqual(Set(StrapCueKind.allCases.filter { !$0.isRequested }),
+                       [.sittingBreak, .windDown, .screensOff, .reward, .penalty])
+        XCTAssertEqual(Set(StrapCueKind.allCases.filter { $0.respectsSpacing }),
+                       [.sittingBreak, .windDown, .screensOff, .reward, .penalty, .restOver])
+    }
+
+    func testRestOverRewardAndPenaltyHaveTheirOwnPatterns() {
+        XCTAssertEqual(StrapCueKind.restOver.pattern, .restOver)
+        XCTAssertEqual(StrapCueKind.reward.pattern, .reward)
+        XCTAssertEqual(StrapCueKind.penalty.pattern, .penalty)
+        // Rest-over must not feel like the zone-lock cues that can run in the same workout (one pulse; two short).
+        XCTAssertNotEqual(StrapCuePattern.restOver.pulses, StrapCuePattern.move.pulses)
+        XCTAssertGreaterThan(StrapCuePattern.restOver.pulses.count, 1)
+        XCTAssertEqual(StrapCuePattern.restOver.pulses.first?.loops, 2)
+        // The penalty is the heavier pattern.
+        let motor: (StrapCuePattern) -> Int = { $0.pulses.reduce(0) { $0 + $1.loops } }
+        XCTAssertGreaterThan(motor(.penalty), motor(.reward))
     }
 
     // ── Settings defaults ─────────────────────────────────────────────────────────────────────────────
 
-    func testOnlyTheSittingBreakIsOnByDefault() {
+    func testOnlyTheSittingBreakIsOnByDefaultAmongEverydayCues() {
         let s = StrapCueSettings()
         XCTAssertTrue(s.sittingBreakEnabled)
+        // Decisions 16–17 specify these as part of their features (each keeps its own switch).
+        XCTAssertTrue(s.restOverEnabled && s.rewardCuesEnabled && s.penaltyCuesEnabled)
         XCTAssertFalse(s.breathingPacerEnabled || s.windDownEnabled || s.screensOffEnabled
                        || s.focusBlocksEnabled || s.meditationTimerEnabled)
         XCTAssertEqual(s.sittingIntervalMinutes, 30)
@@ -83,6 +101,20 @@ final class StrapCueRulesTests: XCTestCase {
         XCTAssertEqual(c.focusMinutes, 50)
         XCTAssertEqual(c.breathingPaceBpm, 6)
         XCTAssertEqual(StrapCueSettings(sittingIntervalMinutes: 44).sanitized().sittingIntervalMinutes, 45)
+    }
+
+    func testOlderStoredSettingsDecodeWithDefaultsForNewKeys() throws {
+        // A blob written before the decision-16/17 switches existed, with a non-default interval.
+        let old = #"{"sittingBreakEnabled":false,"sittingIntervalMinutes":45,"dailyBudget":5}"#
+        let s = try JSONDecoder().decode(StrapCueSettings.self, from: Data(old.utf8))
+        XCTAssertFalse(s.sittingBreakEnabled)
+        XCTAssertEqual(s.sittingIntervalMinutes, 45)
+        XCTAssertEqual(s.dailyBudget, 5)
+        XCTAssertTrue(s.restOverEnabled)
+        XCTAssertEqual(s.quietStartMin, 22 * 60)
+        // Round trip.
+        let again = try JSONDecoder().decode(StrapCueSettings.self, from: JSONEncoder().encode(s))
+        XCTAssertEqual(again, s)
     }
 
     // ── Budget, spacing, quiet hours ──────────────────────────────────────────────────────────────────
@@ -151,19 +183,85 @@ final class StrapCueRulesTests: XCTestCase {
         XCTAssertEqual(check(.sittingBreak, l, ms(3), none), .allow)
     }
 
-    func testWristAlertsMasterHoldsAmbientCuesOnly() {
+    func testWristAlertsMasterHoldsOnlyTheEveningCues() {
         let l = StrapCueLedger.empty
-        XCTAssertEqual(check(.sittingBreak, l, ms(10), wrist: false), .hold(.wristAlertsOff))
+        // Coordinator decision: the master (default OFF) keeps the evening cues…
+        XCTAssertEqual(check(.windDown, l, ms(10), wrist: false), .hold(.wristAlertsOff))
+        XCTAssertEqual(check(.screensOff, l, ms(10), wrist: false), .hold(.wristAlertsOff))
+        // …but the sitting-break nudge and the reward / penalty cues run on their own switches.
+        XCTAssertEqual(check(.sittingBreak, l, ms(10), wrist: false), .allow)
+        XCTAssertEqual(check(.reward, l, ms(10), wrist: false), .allow)
+        XCTAssertEqual(check(.penalty, l, ms(10), wrist: false), .allow)
+        // Requested cues never consult it.
         XCTAssertEqual(check(.focusEnd, l, ms(10), wrist: false), .allow)
+        XCTAssertEqual(StrapCueKind.allCases.filter(\.heldByWristAlertsMaster), [.windDown, .screensOff])
+    }
+
+    func testCuesFreeOfTheMasterStillPayQuietHoursSleepAndBudget() {
+        let l = StrapCueLedger.empty
+        for kind in [StrapCueKind.sittingBreak, .reward, .penalty] {
+            XCTAssertEqual(check(kind, l, ms(23, 30), wrist: false), .hold(.quietHours), "\(kind)")
+            XCTAssertEqual(StrapCueGate.check(kind, ledger: l, settings: settings, wristAlertsOn: false,
+                                              nowMs: ms(15), tzOffsetSec: 0, inSleepWindow: true),
+                           .hold(.sleepWindow), "\(kind)")
+            var spent = l
+            spent.dayKey = StrapCueClock.dayKey(epochSec: ms(15) / 1000, tzOffsetSec: 0)
+            spent.unrequestedToday = settings.dailyBudget
+            XCTAssertEqual(check(kind, spent, ms(15), wrist: false), .hold(.budgetSpent), "\(kind)")
+            // Their own switch still holds them first.
+            let off = StrapCueSettings(sittingBreakEnabled: false, rewardCuesEnabled: false, penaltyCuesEnabled: false)
+            XCTAssertFalse(off.isEnabled(kind), "\(kind)")
+        }
+    }
+
+    func testRestOverIsRequestedButKeepsTheSpacing() {
+        let t = ms(23, 30)   // quiet hours, late-evening lifting session
+        // No budget, no quiet hours, no wrist-alerts master…
+        var spent = StrapCueLedger.empty
+        spent.dayKey = StrapCueClock.dayKey(epochSec: t / 1000, tzOffsetSec: 0)
+        spent.unrequestedToday = 8
+        XCTAssertEqual(check(.restOver, spent, t, wrist: false), .allow)
+        // …but never within a minute of the previous cue, and it spends no budget.
+        let l = StrapCueGate.recordDelivered(.reward, ledger: .empty, nowMs: t, tzOffsetSec: 0)
+        XCTAssertEqual(check(.restOver, l, t + 20_000), .deferUntil(ms: t + 60_000))
+        let after = StrapCueGate.recordDelivered(.restOver, ledger: l, nowMs: t + 60_000, tzOffsetSec: 0)
+        XCTAssertEqual(after.unrequestedToday, l.unrequestedToday)
+    }
+
+    func testRewardAndPenaltyAreBudgetedNeverInSleepAndOncePerEvent() {
+        let t = ms(15)
+        let l = StrapCueLedger.empty
+        // Never during the sleep window, whatever the clock says about quiet hours.
+        XCTAssertEqual(StrapCueGate.check(.reward, ledger: l, settings: settings, wristAlertsOn: true, nowMs: t,
+                                          tzOffsetSec: 0, inSleepWindow: true), .hold(.sleepWindow))
+        XCTAssertEqual(check(.penalty, l, ms(23)), .hold(.quietHours))
+        // Once per event.
+        let key = StrapCueGate.eventKey(.reward, eventId: "pr:bench:2026-09-30")
+        XCTAssertEqual(StrapCueGate.check(.reward, ledger: l, settings: settings, wristAlertsOn: true, nowMs: t,
+                                          tzOffsetSec: 0, eventKey: key), .allow)
+        var done = StrapCueGate.recordDelivered(.reward, ledger: l, nowMs: t, tzOffsetSec: 0)
+        done = StrapCueGate.markFired(key, ledger: done)
+        XCTAssertEqual(done.unrequestedToday, 1, "rewards spend the daily budget")
+        XCTAssertEqual(StrapCueGate.check(.reward, ledger: done, settings: settings, wristAlertsOn: true,
+                                          nowMs: t + 3_600_000, tzOffsetSec: 0, eventKey: key), .hold(.duplicate))
+        // A different event is fine; so is the same id for a different kind.
+        XCTAssertEqual(StrapCueGate.check(.reward, ledger: done, settings: settings, wristAlertsOn: true,
+                                          nowMs: t + 3_600_000, tzOffsetSec: 0,
+                                          eventKey: StrapCueGate.eventKey(.reward, eventId: "quest:42")), .allow)
+        XCTAssertNotEqual(StrapCueGate.eventKey(.penalty, eventId: "x"), StrapCueGate.eventKey(.reward, eventId: "x"))
+        // The budget holds them like any unrequested cue.
+        var spent = done
+        spent.unrequestedToday = settings.dailyBudget
+        XCTAssertEqual(check(.penalty, spent, t + 3_600_000), .hold(.budgetSpent))
     }
 
     func testFireOnceKeysAreBounded() {
         var l = StrapCueLedger.empty
-        for d in 0..<40 { l = StrapCueGate.markFired("windDown:\(d)", ledger: l) }
+        for d in 0..<80 { l = StrapCueGate.markFired("windDown:\(d)", ledger: l) }
         XCTAssertEqual(l.firedKeys.count, StrapCueGate.maxFiredKeys)
-        XCTAssertTrue(StrapCueGate.hasFired("windDown:39", ledger: l))
+        XCTAssertTrue(StrapCueGate.hasFired("windDown:79", ledger: l))
         XCTAssertFalse(StrapCueGate.hasFired("windDown:0", ledger: l))
-        let again = StrapCueGate.markFired("windDown:39", ledger: l)
+        let again = StrapCueGate.markFired("windDown:79", ledger: l)
         XCTAssertEqual(again, l)
     }
 

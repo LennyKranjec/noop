@@ -30,6 +30,7 @@ struct StrapCuesSettingsView: View {
             eveningCard
             focusCard
             meditationCard
+            momentsCard
             rulesCard
             vocabularyCard
             historyCard
@@ -269,6 +270,21 @@ struct StrapCuesSettingsView: View {
         }
     }
 
+    // MARK: - Lift rest timer + reward / penalty moments
+
+    private var momentsCard: some View {
+        CueCard(icon: "sparkles", title: "Workouts and big moments",
+                active: engine.settings.restOverEnabled || engine.settings.rewardCuesEnabled
+                    || engine.settings.penaltyCuesEnabled) {
+            CueToggle(label: "Rest over", help: "Long, then short when a Telos Lift rest timer ends. You started the timer, so it isn't counted in the daily budget or held by quiet hours.",
+                      isOn: binding(\.restOverEnabled))
+            CueToggle(label: "Rewards", help: "Short, short, long with a PR, a finished quest or goal, or a level up. Counted in the daily budget, never while you sleep, once per event.",
+                      isOn: binding(\.rewardCuesEnabled))
+            CueToggle(label: "Penalties", help: "Two extra-long pulses with the daily penalty card or a broken streak. Same limits as rewards.",
+                      isOn: binding(\.penaltyCuesEnabled))
+        }
+    }
+
     // MARK: - Rules
 
     private var rulesCard: some View {
@@ -321,6 +337,9 @@ struct StrapCuesSettingsView: View {
         case .windDown: return String(localized: "Wind down")
         case .screensOff: return String(localized: "Screens off")
         case .timesUp: return String(localized: "Time's up")
+        case .restOver: return String(localized: "Rest over")
+        case .reward: return String(localized: "Reward")
+        case .penalty: return String(localized: "Penalty")
         }
     }
 

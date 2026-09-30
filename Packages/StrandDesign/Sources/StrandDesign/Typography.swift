@@ -7,12 +7,15 @@ import AppKit
 
 // MARK: - Strand Typography (§9.2) — re-pointed to Telos 2.0 (docs/DESIGN_V2.md §4.2)
 //
-// Three voices: numbers are SF Rounded, prose is SF Pro, anything that qualifies a number is SF Mono.
-// The 1.x names are kept and re-pointed so the whole app takes the V2 voice with no call-site edit:
+// The reference voices: wide-tracked small-caps LABELS, calm light-to-regular SF Pro NUMBERS, SF Pro
+// prose, SF Mono only for timestamps / ticks / IDs. The 1.x names are kept and re-pointed so the whole
+// app takes the V2 voice with no call-site edit:
 //   • the PROSE styles (`title1`, `title2`, `headline`, `body`, `subhead`, `caption`, `footnote`) are
 //     SF Pro now (the `.rounded` design is dropped);
-//   • `overline` is SF Mono medium (`TelosType.scale`) with `overlineTracking` 0.8 (was 0.45) — mono
-//     is ~12 % wider, so each screen package re-checks its `strandOverline()` sites for truncation;
+//   • `overline` is the label voice (`TelosType.scale`: SF Pro semibold 12) with `overlineTracking` 1.6
+//     (was 0.45) — much wider, so each screen package re-checks its `strandOverline()` sites for
+//     truncation;
+//   • `bodyNumber` / `captionNumber` are the V2 SF Pro tabular numerals;
 //   • `display` / `rounded` / `number` stay SF Rounded at a FIXED size — geometry-bound callers rely
 //     on that. New numerals use `TelosType` / `.telosNumeral(_:)`.
 //
@@ -67,7 +70,7 @@ public enum StrandFont {
     /// Footnote 13, SF Pro (`TelosType.footnote`). Scales with Dynamic Type.
     public static let footnote = TelosType.footnote
 
-    /// Overline — SF Mono medium 11 (`TelosType.scale`), letter-spaced by `overlineTracking` (apply it at
+    /// Overline — the label voice, SF Pro semibold 12 (`TelosType.scale`), letter-spaced by `overlineTracking` (apply it at
     /// the use site; `strandOverline()` does it for you). Sparing ALL-CAPS labels. Scales with Dynamic
     /// Type.
     ///
@@ -76,26 +79,19 @@ public enum StrandFont {
     /// is what makes an overline read as one.
     public static let overline = TelosType.scale
 
-    /// `overline` at a custom point size — the same SF Mono medium face and Dynamic-Type scaling
+    /// `overline` at a custom point size — the same SF Pro semibold face and Dynamic-Type scaling
     /// (relativeTo `.caption2`), just a different base. Lets a caller shrink an ALL-CAPS label to fit a
     /// small container without losing accessibility text-scaling. (V2 minimum rendered size is 11 pt.)
     public static func overlineScaled(_ size: CGFloat) -> Font {
         #if os(watchOS)
-        return Font.system(size: size, weight: .medium, design: .monospaced)
+        return Font.system(size: size, weight: .semibold, design: .default)
         #elseif canImport(UIKit)
-        let base = UIFont.systemFont(ofSize: size, weight: .medium)
-        let descriptor = base.fontDescriptor.withDesign(.monospaced) ?? base.fontDescriptor
-        let mono = UIFont(descriptor: descriptor, size: size)
-        return Font(UIFontMetrics(forTextStyle: .caption2).scaledFont(for: mono))
+        let base = UIFont.systemFont(ofSize: size, weight: .semibold)
+        return Font(UIFontMetrics(forTextStyle: .caption2).scaledFont(for: base))
         #elseif canImport(AppKit)
-        let base = NSFont.systemFont(ofSize: size, weight: .medium)
-        guard let descriptor = base.fontDescriptor.withDesign(.monospaced),
-              let mono = NSFont(descriptor: descriptor, size: size) else {
-            return Font(base)
-        }
-        return Font(mono)
+        return Font(NSFont.systemFont(ofSize: size, weight: .semibold))
         #else
-        return Font.system(size: size, weight: .medium, design: .monospaced)
+        return Font.system(size: size, weight: .semibold, design: .default)
         #endif
     }
 
@@ -110,11 +106,11 @@ public enum StrandFont {
         roundedSystem(size, weight: weight).monospacedDigit()
     }
 
-    /// Body number — SF Rounded medium 17, tabular (`TelosType.numeralS`). Scales with Dynamic Type
+    /// Body number — SF Pro regular 17, tabular (`TelosType.numeralS`). Scales with Dynamic Type
     /// alongside its sibling `body` label so a value and its label stay matched.
     public static let bodyNumber = TelosType.numeralS
 
-    /// Small number — SF Rounded medium 13, tabular (`TelosType.numeralXS`; was caption 12). Scales
+    /// Small number — SF Pro medium 13, tabular (`TelosType.numeralXS`; was caption 12). Scales
     /// with Dynamic Type.
     public static let captionNumber = TelosType.numeralXS
 
@@ -125,14 +121,14 @@ public enum StrandFont {
 
     /// The ONE tracking for overline text (ALL-CAPS labels). Every caps label reads this —
     /// state pills, source badges and chart footers each used to carry their own 0.4/0.5, which
-    /// is visible when two of them sit in the same row. V2: 0.45 → 0.8 (`TelosType.Tracking.scale`).
+    /// is visible when two of them sit in the same row. V2: 0.45 → 1.6 (`TelosType.Tracking.scale`).
     public static let overlineTracking: CGFloat = TelosType.Tracking.scale
 }
 
 // MARK: - Text helpers
 
 public extension Text {
-    /// Style as an overline label: ALL-CAPS, SF Mono medium (V2 `scale`), `overlineTracking`, secondary text.
+    /// Style as an overline label: ALL-CAPS, the V2 label voice (`scale`), `overlineTracking`, secondary text.
     func strandOverline() -> some View {
         self.font(StrandFont.overline)
             .tracking(StrandFont.overlineTracking)

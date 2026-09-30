@@ -3,11 +3,17 @@ import Foundation
 // StrapCueSettings.swift — the wearer's Strap-cue settings as ONE pure value, with the defaults and the
 // allowed options in one place so the settings screen, the runtime and the tests cannot disagree.
 //
-// DEFAULTS. Every cue is OFF except the sitting-break nudge, which the owner asked for. That default does
+// DEFAULTS. Every everyday cue is OFF except the sitting-break nudge, which the owner asked for. The three
+// cues added by DESIGN_V2 decisions 16–17 default ON because those decisions specify them as part of the
+// features: the Telos Lift rest-over cue (the wearer starts the rest timer) and the reward / penalty buzz
+// that accompanies a big full-screen moment. Each still has its own switch. That default does
 // not make a fresh install buzz on its own: the nudge abstains until Motion & Fitness is granted (it has no
-// honest live signal without it), and — like every ambient wrist buzz in the app — it is held while the
-// "Wrist alerts" master switch (`notif.masterEnabled`) is off. Requested cues (pacer, focus block,
-// meditation timer) are started by the wearer and are not held by that switch.
+// honest live signal without it). Coordinator decision: the sitting-break nudge and the reward / penalty cues
+// are governed by their own switches, NOT by the "Wrist alerts" master (`notif.masterEnabled`, default off),
+// which keeps the HR / strain wrist alerts and the evening cues (wind-down, screens off) —
+// `StrapCueKind.heldByWristAlertsMaster`. Quiet hours, the sleep window and the daily budget still hold them.
+// Requested cues (pacer, focus block, meditation timer, rest over) are started by the wearer and are not held
+// by that switch.
 //
 // Pure, Codable (the app persists it as one JSON blob), Swift-only in 2.0.
 
@@ -46,6 +52,13 @@ public struct StrapCueSettings: Equatable, Sendable, Codable {
     /// Buzz the PHONE when the strap cannot be reached — only ever while NOOP is in the foreground.
     public var phoneFallbackEnabled: Bool
 
+    // MARK: Decisions 16–17
+    /// Telos Lift: buzz when a rest period ends.
+    public var restOverEnabled: Bool
+    /// Reward / penalty buzz with the big full-screen moments.
+    public var rewardCuesEnabled: Bool
+    public var penaltyCuesEnabled: Bool
+
     public init(sittingBreakEnabled: Bool = true,
                 sittingIntervalMinutes: Int = StrapCueSettings.defaultSittingIntervalMinutes,
                 breathingPacerEnabled: Bool = false,
@@ -60,7 +73,10 @@ public struct StrapCueSettings: Equatable, Sendable, Codable {
                 dailyBudget: Int = StrapCueSettings.defaultDailyBudget,
                 quietStartMin: Int = 22 * 60,
                 quietEndMin: Int = 7 * 60,
-                phoneFallbackEnabled: Bool = true) {
+                phoneFallbackEnabled: Bool = true,
+                restOverEnabled: Bool = true,
+                rewardCuesEnabled: Bool = true,
+                penaltyCuesEnabled: Bool = true) {
         self.sittingBreakEnabled = sittingBreakEnabled
         self.sittingIntervalMinutes = sittingIntervalMinutes
         self.breathingPacerEnabled = breathingPacerEnabled
@@ -76,6 +92,45 @@ public struct StrapCueSettings: Equatable, Sendable, Codable {
         self.quietStartMin = quietStartMin
         self.quietEndMin = quietEndMin
         self.phoneFallbackEnabled = phoneFallbackEnabled
+        self.restOverEnabled = restOverEnabled
+        self.rewardCuesEnabled = rewardCuesEnabled
+        self.penaltyCuesEnabled = penaltyCuesEnabled
+    }
+
+    /// Tolerant decoding: a key missing from a stored blob (written before that setting existed) takes its
+    /// default instead of failing the whole decode — which would silently reset every other setting.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = StrapCueSettings()
+        func v<T: Decodable>(_ k: CodingKeys, _ fallback: T) -> T {
+            // `try?` flattens (SE-0230): absent key, null or a wrong type all read as nil → the default.
+            (try? c.decodeIfPresent(T.self, forKey: k)) ?? fallback
+        }
+        self.init(sittingBreakEnabled: v(.sittingBreakEnabled, d.sittingBreakEnabled),
+                  sittingIntervalMinutes: v(.sittingIntervalMinutes, d.sittingIntervalMinutes),
+                  breathingPacerEnabled: v(.breathingPacerEnabled, d.breathingPacerEnabled),
+                  breathingMinutes: v(.breathingMinutes, d.breathingMinutes),
+                  breathingPaceBpm: v(.breathingPaceBpm, d.breathingPaceBpm),
+                  windDownEnabled: v(.windDownEnabled, d.windDownEnabled),
+                  screensOffEnabled: v(.screensOffEnabled, d.screensOffEnabled),
+                  focusBlocksEnabled: v(.focusBlocksEnabled, d.focusBlocksEnabled),
+                  focusMinutes: v(.focusMinutes, d.focusMinutes),
+                  meditationTimerEnabled: v(.meditationTimerEnabled, d.meditationTimerEnabled),
+                  meditationMinutes: v(.meditationMinutes, d.meditationMinutes),
+                  dailyBudget: v(.dailyBudget, d.dailyBudget),
+                  quietStartMin: v(.quietStartMin, d.quietStartMin),
+                  quietEndMin: v(.quietEndMin, d.quietEndMin),
+                  phoneFallbackEnabled: v(.phoneFallbackEnabled, d.phoneFallbackEnabled),
+                  restOverEnabled: v(.restOverEnabled, d.restOverEnabled),
+                  rewardCuesEnabled: v(.rewardCuesEnabled, d.rewardCuesEnabled),
+                  penaltyCuesEnabled: v(.penaltyCuesEnabled, d.penaltyCuesEnabled))
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case sittingBreakEnabled, sittingIntervalMinutes, breathingPacerEnabled, breathingMinutes,
+             breathingPaceBpm, windDownEnabled, screensOffEnabled, focusBlocksEnabled, focusMinutes,
+             meditationTimerEnabled, meditationMinutes, dailyBudget, quietStartMin, quietEndMin,
+             phoneFallbackEnabled, restOverEnabled, rewardCuesEnabled, penaltyCuesEnabled
     }
 
     public static let defaultSittingIntervalMinutes = 30
@@ -113,6 +168,9 @@ public struct StrapCueSettings: Equatable, Sendable, Codable {
         case .screensOff: return screensOffEnabled
         case .focusEnd: return focusBlocksEnabled
         case .meditationEnd: return meditationTimerEnabled
+        case .restOver: return restOverEnabled
+        case .reward: return rewardCuesEnabled
+        case .penalty: return penaltyCuesEnabled
         }
     }
 

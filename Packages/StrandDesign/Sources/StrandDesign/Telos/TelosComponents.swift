@@ -21,6 +21,10 @@ import SwiftUI
 //   • A carried value (an earlier day shown because today has none) renders its numeral in
 //     `textSecondary` with the existing "Carried · d MMM" line.
 //
+// Building blocks for later packages (Telos Lift, Today, Body): `TelosChip` (selectable pill),
+// `TelosTag` (static label capsule), `TelosStepper` (numeric stepper with a custom step),
+// `TelosListRow` / `TelosListDivider` / `TelosRowButtonStyle`, `TelosEmptyState`, `TelosPressButtonStyle`.
+//
 // Strings: every visible word here reuses an existing app-catalog key ("Solid", "Building",
 // "Calibrating", "Calibrating (%lld of %lld)", "Carried · %@", "Updated %@", "No data", "Try again").
 // Callers pass their own reasons as `Text` / `LocalizedStringKey`, so no new copy is introduced.
@@ -666,8 +670,9 @@ public struct TelosPressButtonStyle: ButtonStyle {
 
 // MARK: - Chip (selectable)
 
-/// A selectable capsule (§5.5): 32 pt visual / 44 pt hit, `subhead` semibold, 12 pt side padding.
-/// Off: `surfaceInset` + 1 pt `line`. On: `textPrimary` fill + `canvas` text. Plays the `select` haptic.
+/// A selectable capsule (§5.5 in the glass look): 32 pt visual / 44 pt hit, `subhead` semibold, 12 pt
+/// side padding. Off: glass fill + luminous glass edge, `textSecondary`. On: the accent-lit pill (muted
+/// accent fill + accent gradient hairline) with a `textPrimary` label. Plays the `select` haptic.
 public struct TelosChip: View {
     private let title: Text
     private let isOn: Bool
@@ -694,11 +699,17 @@ public struct TelosChip: View {
             title
                 .font(TelosType.subhead.weight(.semibold))
                 .lineLimit(1)
-                .foregroundStyle(isOn ? TelosColor.canvas : TelosColor.textPrimary)
+                .foregroundStyle(isOn ? TelosColor.textPrimary : TelosColor.textSecondary)
                 .padding(.horizontal, TelosSpace.m)
                 .frame(minHeight: 32)
-                .background(shape.fill(isOn ? TelosColor.textPrimary : TelosColor.surfaceInset))
-                .overlay(shape.strokeBorder(isOn ? Color.clear : TelosColor.line, lineWidth: TelosStroke.line))
+                .background(shape.fill(isOn ? StrandPalette.accentMuted : TelosColor.glassFill))
+                .overlay(
+                    shape.strokeBorder(
+                        isOn ? LinearGradient(colors: [StrandPalette.accent.opacity(0.9), StrandPalette.accent.opacity(0.25)],
+                                              startPoint: .topLeading, endPoint: .bottomTrailing)
+                             : TelosColor.glassEdge,
+                        lineWidth: TelosStroke.line)
+                )
                 .frame(minHeight: TelosSpace.hitTarget)
                 .contentShape(Rectangle())
         }
@@ -902,5 +913,122 @@ public struct TelosEmptyState: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - Numeric stepper
+
+/// A numeric stepper for direct entry: [−] value unit [+] on a glass capsule, stepping by a CUSTOM
+/// increment (2.5 kg plates, an 8 kg machine stack, 1 rep, ±15 s rest). Values snap to multiples of
+/// `step` and clamp to `range`; each change plays the `select` haptic; VoiceOver adjusts it with the
+/// swipe-up / swipe-down gesture. Telos Lift's weight / reps / rest controls are built from this.
+///
+///     TelosStepper("KG", value: $weight, step: machine.increment, range: 0...500,
+///                  unit: "kg", format: TelosFormat.decimal(1))
+public struct TelosStepper: View {
+    @Binding private var value: Double
+    private let label: Text
+    private let step: Double
+    private let range: ClosedRange<Double>?
+    private let unit: String?
+    private let format: (Double) -> String
+    @Environment(\.colorSchemeContrast) private var contrast
+
+    public init(_ label: LocalizedStringKey,
+                value: Binding<Double>,
+                step: Double,
+                range: ClosedRange<Double>? = nil,
+                unit: String? = nil,
+                format: @escaping (Double) -> String = TelosFormat.integer) {
+        self._value = value
+        self.label = Text(label)
+        self.step = step
+        self.range = range
+        self.unit = unit
+        self.format = format
+    }
+
+    /// `candidate` snapped to a multiple of the step and clamped into the range. Pure (tested).
+    public static func snapped(_ candidate: Double, step: Double, range: ClosedRange<Double>?) -> Double {
+        guard candidate.isFinite else { return range?.lowerBound ?? 0 }
+        var v = candidate
+        if step > 0, step.isFinite {
+            v = (v / step).rounded() * step
+        }
+        if let range {
+            v = min(max(v, range.lowerBound), range.upperBound)
+        }
+        return v
+    }
+
+    private func next(_ direction: Double) -> Double {
+        TelosStepper.snapped(value + direction * step, step: step, range: range)
+    }
+
+    private func bump(_ direction: Double) {
+        let target = next(direction)
+        guard target != value else { return }
+        value = target
+        TelosHaptics.play(.select)
+    }
+
+    private var spokenValue: Text {
+        guard let unit else { return Text(verbatim: format(value)) }
+        return Text(verbatim: format(value) + " " + unit)
+    }
+
+    public var body: some View {
+        let shape = Capsule(style: .continuous)
+        return HStack(spacing: TelosSpace.xs) {
+            stepButton(systemImage: "minus", direction: -1)
+            VStack(spacing: 0) {
+                label
+                    .telosScale()
+                    .textCase(.uppercase)
+                    .foregroundStyle(TelosColor.tertiaryInk(for: contrast))
+                    .lineLimit(1)
+                HStack(alignment: .firstTextBaseline, spacing: TelosSpace.xxs) {
+                    Text(verbatim: format(value))
+                        .telosNumeral(.numeralM)
+                        .foregroundStyle(TelosColor.textPrimary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                    if let unit {
+                        Text(verbatim: unit)
+                            .font(TelosType.unitFont(forNumeralSize: TelosNumeralStyle.numeralM.size))
+                            .foregroundStyle(TelosColor.textSecondary)
+                    }
+                }
+            }
+            .frame(minWidth: 64)
+            stepButton(systemImage: "plus", direction: 1)
+        }
+        .padding(.horizontal, TelosSpace.xs)
+        .background(shape.fill(TelosColor.glassFill))
+        .overlay(shape.strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityValue(spokenValue)
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: bump(1)
+            case .decrement: bump(-1)
+            default: break
+            }
+        }
+    }
+
+    private func stepButton(systemImage: String, direction: Double) -> some View {
+        Button {
+            bump(direction)
+        } label: {
+            Image(systemName: systemImage)
+                .font(TelosType.glyphControl)
+                .foregroundStyle(StrandPalette.accent)
+                .frame(width: TelosSpace.hitTarget, height: TelosSpace.hitTarget)
+                .contentShape(Circle())
+        }
+        .buttonStyle(TelosPressButtonStyle())
+        .disabled(next(direction) == value)
     }
 }

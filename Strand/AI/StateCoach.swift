@@ -1273,10 +1273,12 @@ enum WorkoutSuggestionWriter {
         s += "- heart short → sleep and calm hours, NOT more training today.\n"
         s += "- lungs short → steady Zone 2 minutes.\n"
         s += "- muscle short → a lifting session.\n"
-        s += "- focus short → meditation / breathwork minutes and calm waking hours.\n"
+        s += "- focus short → calmer waking hours: breaks and slow breathing between demands.\n"
         s += "- a step average below the floor → a walk, the cheapest point available.\n"
         s += "A part listed as NOT MEASURED is not a weak part. Never call it low, weak or behind; say it is "
-        s += "not measured yet. Never invent a level figure that is not given to you."
+        s += "not measured yet. Never invent a level figure that is not given to you.\n"
+        // HEALTH_V2 H5: the level is a lens, never an objective the wearer's health is traded for.
+        s += CoachLevelContext.objective
         return s
     }()
 

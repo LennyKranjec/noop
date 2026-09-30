@@ -17,6 +17,38 @@ struct StrapCueLogEntry: Codable, Equatable, Identifiable {
     let delivered: Bool?
 }
 
+/// An app event that may buzz the strap through `StrapCueEngine.fire(_:eventId:)` (DESIGN_V2 decisions 16–17).
+enum StrapCueEvent: String, CaseIterable {
+    /// Telos Lift: the rest timer the wearer started has run out. REQUESTED: no budget, no quiet hours, but
+    /// the one-minute spacing and honest delivery still apply.
+    case restOver
+    /// A big reward moment (PR, quest/goal completed, level up). Unrequested: budgeted, never in the sleep
+    /// window or quiet hours, once per event id.
+    case reward
+    /// A big penalty moment (the daily penalty card, a broken streak). Same rules as `reward`.
+    case penalty
+
+    var kind: StrapCueKind {
+        switch self {
+        case .restOver: return .restOver
+        case .reward: return .reward
+        case .penalty: return .penalty
+        }
+    }
+}
+
+/// What `fire` actually did — never what was hoped.
+enum StrapCueFireResult: Equatable {
+    /// Decided now: `.strap` (write issued to a reachable, accepting strap), `.phone(reason:)` (the strap could
+    /// not be reached, NOOP was in front, the phone buzzed instead) or `.notDelivered(reason:)`.
+    case attempted(StrapCueOutcome)
+    /// The motor is busy or the one-minute spacing has not passed: the engine re-fires at `at` (≤ ~60 s) and
+    /// logs the real outcome then.
+    case scheduled(at: Date)
+    /// Not sent: switched off, duplicate event, wrist alerts off, sleep window, quiet hours, budget spent.
+    case held(StrapCueHold)
+}
+
 /// STRAP CUES — purposeful vibrations on the WHOOP strap in everyday life (Telos 2.0).
 ///
 /// The runtime around the pure `StrandAnalytics/StrapCues` logic: it gathers the inputs (iPhone motion, live
@@ -42,6 +74,9 @@ struct StrapCueLogEntry: Codable, Equatable, Identifiable {
 /// NOOP is in front.
 @MainActor
 final class StrapCueEngine: ObservableObject {
+
+    /// The one engine. `AppModel` wires and starts it; the Lift logger and the moment presenter call `fire`.
+    static let shared = StrapCueEngine()
 
     // MARK: - Published state (the settings screen reads these)
 
@@ -203,7 +238,9 @@ final class StrapCueEngine: ObservableObject {
         tick()
     }
 
-    /// The master switch every ambient wrist buzz honours (Automations' "Wrist alerts"; default OFF).
+    /// Automations' "Wrist alerts" master (default OFF). Only the cues whose `heldByWristAlertsMaster` is true
+    /// (wind-down, screens off) consult it; the sitting-break nudge and reward / penalty cues have their own
+    /// switches alone (coordinator decision — see `StrapCueGate`).
     var wristAlertsOn: Bool { defaults.object(forKey: AppModel.wristAlertsMasterKey) as? Bool ?? false }
 
     // MARK: - Timers the wearer starts
@@ -297,6 +334,37 @@ final class StrapCueEngine: ObservableObject {
             if case .allow = gate(kind, now: now) { deliver(kind, now: now) }
         }
         if step.phase == .postQuietEnd { finishBreathing() }
+    }
+
+    // MARK: - App events (Telos Lift rest timer, reward / penalty moments)
+
+    /// Buzz the strap for an app event and report honestly what happened. Synchronous to call; main actor.
+    ///
+    /// - `fire(.restOver)` when a Lift rest period ends.
+    /// - `fire(.reward, eventId: "pr:<exerciseId>:<sessionId>")` / `fire(.penalty, eventId: "penaltyCard:<yyyy-MM-dd>")`
+    ///   alongside the full-screen moment. `eventId` must identify the EVENT (not the kind of event): a second
+    ///   call with the same id is held as `.duplicate` once the first one reached the wearer.
+    @discardableResult
+    func fire(_ event: StrapCueEvent, eventId: String? = nil, now: Date = Date()) -> StrapCueFireResult {
+        let kind = event.kind
+        let key = eventId.map { StrapCueGate.eventKey(kind, eventId: $0) }
+        switch gate(kind, now: now, eventKey: key) {
+        case .hold(let h):
+            if h != .duplicate { note(kind, "\(kind.label) held: \(h.text)") }
+            return .held(h)
+        case .deferUntil(let ms):
+            let at = Date(timeIntervalSince1970: TimeInterval(ms) / 1000)
+            DispatchQueue.main.asyncAfter(deadline: .now() + max(0, at.timeIntervalSince(now))) { [weak self] in
+                Task { @MainActor in _ = self?.fire(event, eventId: eventId) }
+            }
+            return .scheduled(at: at)
+        case .allow:
+            let outcome = deliver(kind, now: now, detail: eventId.map { "event \($0)" })
+            // Only a cue that REACHED the wearer consumes the event: an undelivered one may be fired again.
+            if outcome.reachedWearer, let key { ledger = StrapCueGate.markFired(key, ledger: ledger) }
+            Self.encode(ledger, to: defaults, key: Key.ledger)
+            return .attempted(outcome)
+        }
     }
 
     // MARK: - Late correction from the strap
@@ -431,10 +499,9 @@ final class StrapCueEngine: ObservableObject {
                                heartRate: Self.median(hrByMinute[m.start]))
             }
         }
-        let cal = Calendar.current
-        let today = cal.startOfDay(for: now)
-        let nightToday = sleepPlan?(today).map { StrapCueNight($0) }
-        let nightTomorrow = cal.date(byAdding: .day, value: 1, to: today).flatMap { sleepPlan?($0) }.map { StrapCueNight($0) }
+        let n = nights(now: now)
+        let nightToday = n.today
+        let nightTomorrow = n.tomorrow
         sleepPlanAvailable = nightToday != nil || nightTomorrow != nil
         let context = SittingBreakContext(
             motionAccess: motionAccess,
@@ -503,11 +570,27 @@ final class StrapCueEngine: ObservableObject {
 
     // MARK: - Gate + delivery
 
-    private func gate(_ kind: StrapCueKind, now: Date) -> StrapCueGateVerdict {
+    private func gate(_ kind: StrapCueKind, now: Date, eventKey: String? = nil) -> StrapCueGateVerdict {
         guard settings.isEnabled(kind) else { return .hold(.switchedOff) }
         let nowMs = Int(now.timeIntervalSince1970 * 1000)
+        let tz = TimeZone.current.secondsFromGMT(for: now)
+        var sleeping = false
+        if !kind.isRequested {
+            let n = nights(now: now)
+            sleeping = StrapCueNight.inSleepWindow(nowSec: nowMs / 1000, tzOffsetSec: tz,
+                                                   endingToday: n.today, endingTomorrow: n.tomorrow)
+        }
         return StrapCueGate.check(kind, ledger: ledger, settings: settings, wristAlertsOn: wristAlertsOn,
-                                  nowMs: nowMs, tzOffsetSec: TimeZone.current.secondsFromGMT(for: now))
+                                  nowMs: nowMs, tzOffsetSec: tz, inSleepWindow: sleeping, eventKey: eventKey)
+    }
+
+    /// The night ending today and the one ending tomorrow, from the sleep anchor (nil when it abstains).
+    private func nights(now: Date) -> (today: StrapCueNight?, tomorrow: StrapCueNight?) {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: now)
+        let a = sleepPlan?(today).map { StrapCueNight($0) }
+        let b = cal.date(byAdding: .day, value: 1, to: today).flatMap { sleepPlan?($0) }.map { StrapCueNight($0) }
+        return (a, b)
     }
 
     private var appInForeground: Bool {

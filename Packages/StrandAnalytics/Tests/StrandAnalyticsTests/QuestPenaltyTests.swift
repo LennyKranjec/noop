@@ -19,7 +19,10 @@ final class QuestPenaltyTests: XCTestCase {
     private let today = "2026-09-29"
     private let now: Int64 = 1_790_000_000_000
 
-    private var goodDay: QuestDebtContext { QuestDebtContext(today: today, charge: 70, effortBand21: 10...14) }
+    /// A good day whose missed day (`day`) the week plan made a training day, so training misses may be charged.
+    private var goodDay: QuestDebtContext {
+        QuestDebtContext(today: today, charge: 70, effortBand21: 10...14, trainingChargeableByDay: [day: true])
+    }
     private var lowDay: QuestDebtContext { QuestDebtContext(today: today, charge: 20, effortBand21: 4...8) }
 
     private func subject(_ id: String = "q1", kind: QuestKind = .side, day: String? = nil,
@@ -293,6 +296,37 @@ final class QuestPenaltyTests: XCTestCase {
         XCTAssertEqual(idle?.outcome, .penalised)
         XCTAssertEqual(idle?.shortfall, 1)
         XCTAssertEqual(idle?.applied, -38)
+    }
+
+    func testATrainingMissOnAnEasyOrUnplannedDayIsReportedNotCharged() {
+        func miss(_ metric: QuestMetric, plan: [String: Bool]) -> QuestJudgement? {
+            var ledger = QuestLedger()
+            _ = ledger.enqueue(subject("m", metric: metric, threshold: metric == .strain ? 12 : 45, xp: 50, gear: .push))
+            let context = QuestDebtContext(today: today, charge: 70, effortBand21: 10...14,
+                                           trainingChargeableByDay: plan)
+            return judged(ledger.judge(questId: "m", evidence: QuestEvidence(workoutMinutes: 0, strain: 2),
+                                       nowMs: now, context: context))
+        }
+        let note = "The week plan made this an easy day: reported, not charged."
+        for metric in [QuestMetric.workoutMinutes, .strain] {
+            // The plan made the missed day easy.
+            let easy = miss(metric, plan: [day: false])
+            XCTAssertEqual(easy?.outcome, .reported, "\(metric)")
+            XCTAssertEqual(easy?.note, note, "\(metric)")
+            XCTAssertEqual(easy?.applied ?? 0, 0, "\(metric)")
+            // The plan never saw that day: unknown counts as low, so not charged either.
+            XCTAssertEqual(miss(metric, plan: [:])?.outcome, .reported, "\(metric)")
+            XCTAssertEqual(miss(metric, plan: [today: true])?.outcome, .reported, "keyed by the MISSED day")
+            // A training day: charged.
+            XCTAssertEqual(miss(metric, plan: [day: true])?.outcome, .penalised, "\(metric)")
+        }
+        // Other metrics never consult the plan.
+        var ledger = QuestLedger()
+        _ = ledger.enqueue(subject("steps"))
+        let steps = judged(ledger.judge(questId: "steps", evidence: QuestEvidence(steps: 2_000), nowMs: now,
+                                        context: QuestDebtContext(today: today, charge: 70)))
+        XCTAssertEqual(steps?.outcome, .penalised)
+        XCTAssertTrue(QuestDebtContext(today: today).weekPlanAllowsCharge(metric: .sleepHours, day: day))
     }
 
     func testTrialQuestsAreNeverJudged() {

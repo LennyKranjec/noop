@@ -178,9 +178,11 @@ enum CoachExtraContext {
         // EVERY LINE IN THIS SECTION CARRIES ITS DAY. These four were the undated ones: an energy bank, a
         // streak and a stress curve stated without a date read as timeless facts, and the model then
         // offered them as an answer about tomorrow.
-        if let e = CoachDaySnapshot.energy {
-            day.append(String(format: "  Energy bank for %@ (today, so far): %.0f of %.0f left (spent %.0f on strain, %.0f on stress; %.0f back from calm). It resets at midnight and does not carry to another day.",
-                              today, e.balance, e.opening, e.strainSpend, e.stressSpend, e.restReturn))
+        // The energy line is the check-in store's: worded by what its calibration verdict allows the figure
+        // to be called, with the wearer's own reports for today, which outrank the model.
+        if let line = EnergyCheckInStore.shared.coachLine(CoachDaySnapshot.energy) {
+            day.append("  For \(today): " + line
+                       + " It resets at the 04:00 day rollover and does not carry to another day.")
         }
         let running = CoachDaySnapshot.streaks.filter { $0.days > 0 }
         if !running.isEmpty {

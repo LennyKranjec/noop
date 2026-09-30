@@ -443,6 +443,8 @@ final class WizLightStore: ObservableObject {
         }
         if due(windDownOn, times.windDown, K.windRan) {
             d.set(today, forKey: K.windRan)
+            // HB (HEALTH_V2 §S1-A.8): the per-evening "the wind-down actually ran" record for the habit model.
+            WizDailyRecord.markRan(day: today, at: now)
             await apply(.windDown)
         }
     }

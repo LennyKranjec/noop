@@ -288,11 +288,26 @@ public struct QuestDebtContext: Equatable, Sendable {
     public let charge: Double?
     /// Today's recommended day-strain band on WHOOP's 0–21 axis, nil when there is none.
     public let effortBand21: ClosedRange<Int>?
+    /// Per MISSED day (`yyyy-MM-dd`): may a missed training quest (`workoutMinutes` / `strain`) be charged?
+    /// Decided by the week plan from that morning's guidance and Charge (`WeekPlanSource.trainingChargeableByDay`).
+    /// A day that is absent or `false` is NOT chargeable — unknown counts as low (HEALTH_V2 S0 rule 2).
+    public let trainingChargeableByDay: [String: Bool]
 
-    public init(today: String, charge: Double? = nil, effortBand21: ClosedRange<Int>? = nil) {
+    public init(today: String, charge: Double? = nil, effortBand21: ClosedRange<Int>? = nil,
+                trainingChargeableByDay: [String: Bool] = [:]) {
         self.today = today
         self.charge = charge
         self.effortBand21 = effortBand21
+        self.trainingChargeableByDay = trainingChargeableByDay
+    }
+
+    /// Whether a miss of `metric` on `day` may be charged as far as the week plan is concerned. Only the
+    /// training metrics consult the plan; every other metric is unaffected (true).
+    public func weekPlanAllowsCharge(metric: QuestMetric, day: String) -> Bool {
+        switch metric {
+        case .workoutMinutes, .strain: return trainingChargeableByDay[day] == true
+        default: return true
+        }
     }
 
     /// Whether today's Charge allows ANY added training load. Unknown is treated as low: a make-up that
@@ -723,6 +738,11 @@ public struct QuestLedger: Codable, Equatable, Sendable {
             case .none:
                 reportNote = "Whether you trained could not be read, so there is no penalty."
             }
+        }
+        // THE WEEK PLAN DECIDES WHETHER TRAINING WAS OWED (HD). A training miss on a day the plan made easy
+        // (rest / deload / low Charge), or on a day the plan never saw, is reported, never charged.
+        if reportNote == nil, !context.weekPlanAllowsCharge(metric: goal.metric, day: s.dayKey) {
+            reportNote = "The week plan made this an easy day: reported, not charged."
         }
         if let reportNote {
             let j = QuestJudgement(

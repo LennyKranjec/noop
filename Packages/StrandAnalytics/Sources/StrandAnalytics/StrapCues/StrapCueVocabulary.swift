@@ -20,11 +20,16 @@ import Foundation
 //   windDown     0:2, 2200:2                       two slow long pulses    wind-down cue
 //   screensOff   0:1, 1000:1, 2000:1               three short taps        "screens off" cue
 //   timesUp      0:3                               one extra-long          focus block / meditation / pacer end
+//   restOver     0:2, 1700:1                       long, then short        Telos Lift rest timer ended ("up, go")
+//   reward       0:1, 1000:1, 2000:2               short, short, long      PR, quest/goal done, level up (rising)
+//   penalty      0:3, 2400:3                       two extra-long          penalty card, broken streak (heavy)
 //
 // inhale = 1 loop and exhale = 2 loops are the SHIPPED Breathe language (`BreathPacer.inhaleLoops` /
 // `exhaleLoops`), kept so existing users do not have to relearn it. "Two short taps" is also the zone-lock
 // "speed up" cue (`AppModel.playZoneCue`); the two never meet because an active workout suppresses the
-// sitting-break nudge. The three "time's up" cues share one pattern on purpose: they mean the same thing —
+// sitting-break nudge. `restOver` is deliberately NOT "two quick pulses": two short taps is already `move`
+// AND the zone-lock "speed up" cue, which can be live during the same strength workout, so rest-over leads
+// with a long pulse instead. The three "time's up" cues share one pattern on purpose: they mean the same thing —
 // a timer the wearer started has ended — and the wearer knows which timer they started.
 //
 // Pure, deterministic, no I/O. Swift-only in 2.0 (iOS feature; there is no Android twin of Strap cues).
@@ -48,6 +53,9 @@ public enum StrapCuePattern: String, CaseIterable, Sendable, Codable {
     case windDown
     case screensOff
     case timesUp
+    case restOver
+    case reward
+    case penalty
 
     /// The pulses, in time order.
     public var pulses: [StrapCuePulse] {
@@ -59,6 +67,10 @@ public enum StrapCuePattern: String, CaseIterable, Sendable, Codable {
         case .screensOff: return [StrapCuePulse(offsetMs: 0, loops: 1), StrapCuePulse(offsetMs: 1000, loops: 1),
                                   StrapCuePulse(offsetMs: 2000, loops: 1)]
         case .timesUp:    return [StrapCuePulse(offsetMs: 0, loops: 3)]
+        case .restOver:   return [StrapCuePulse(offsetMs: 0, loops: 2), StrapCuePulse(offsetMs: 1700, loops: 1)]
+        case .reward:     return [StrapCuePulse(offsetMs: 0, loops: 1), StrapCuePulse(offsetMs: 1000, loops: 1),
+                                  StrapCuePulse(offsetMs: 2000, loops: 2)]
+        case .penalty:    return [StrapCuePulse(offsetMs: 0, loops: 3), StrapCuePulse(offsetMs: 2400, loops: 3)]
         }
     }
 
@@ -76,6 +88,9 @@ public enum StrapCuePattern: String, CaseIterable, Sendable, Codable {
         case .windDown:   return "two slow, long pulses"
         case .screensOff: return "three short taps"
         case .timesUp:    return "one extra-long"
+        case .restOver:   return "long, then short"
+        case .reward:     return "short, short, long"
+        case .penalty:    return "two extra-long"
         }
     }
 }
@@ -91,6 +106,12 @@ public enum StrapCueKind: String, CaseIterable, Sendable, Codable {
     case screensOff
     case focusEnd
     case meditationEnd
+    /// Telos Lift: a rest period the wearer started has ended.
+    case restOver
+    /// A big app event worth celebrating (PR, quest/goal completed, level up).
+    case reward
+    /// A big app event that costs something (the daily penalty card, a broken streak).
+    case penalty
 
     public var pattern: StrapCuePattern {
         switch self {
@@ -100,6 +121,9 @@ public enum StrapCueKind: String, CaseIterable, Sendable, Codable {
         case .windDown:      return .windDown
         case .screensOff:    return .screensOff
         case .breathingDone, .focusEnd, .meditationEnd: return .timesUp
+        case .restOver:      return .restOver
+        case .reward:        return .reward
+        case .penalty:       return .penalty
         }
     }
 
@@ -109,8 +133,27 @@ public enum StrapCueKind: String, CaseIterable, Sendable, Codable {
     /// unrequested and pay for every rule.
     public var isRequested: Bool {
         switch self {
-        case .sittingBreak, .windDown, .screensOff: return false
-        case .breathInhale, .breathExhale, .breathingDone, .focusEnd, .meditationEnd: return true
+        case .sittingBreak, .windDown, .screensOff, .reward, .penalty: return false
+        case .breathInhale, .breathExhale, .breathingDone, .focusEnd, .meditationEnd, .restOver: return true
+        }
+    }
+
+    /// Whether the one-minute spacing applies. Every unrequested cue, plus `restOver` (coordinator decision:
+    /// requested, but still spaced). The pacer's phase cues and the timer ends are exempt: a pacer cues every
+    /// few seconds by design, and a timer end must land when the timer ends.
+    public var respectsSpacing: Bool { !isRequested || self == .restOver }
+
+    /// Whether the "Wrist alerts" master switch (`notif.masterEnabled`, default OFF) holds this cue.
+    /// Coordinator decision (Telos 2.0): the master stays in charge of the HR / strain / stress / inactivity
+    /// wrist alerts, and of the two evening cues (wind-down, screens off). The sitting-break nudge and the
+    /// reward / penalty cues work by default and are governed ONLY by their own switches — the owner asked
+    /// for them, and a default-off master would silently disable all three. They still pay every other
+    /// unrequested rule (sleep window, quiet hours, daily budget, spacing). Requested cues never consult it.
+    public var heldByWristAlertsMaster: Bool {
+        switch self {
+        case .windDown, .screensOff: return true
+        case .sittingBreak, .reward, .penalty: return false
+        case .breathInhale, .breathExhale, .breathingDone, .focusEnd, .meditationEnd, .restOver: return false
         }
     }
 
@@ -125,6 +168,9 @@ public enum StrapCueKind: String, CaseIterable, Sendable, Codable {
         case .screensOff:    return "Screens off"
         case .focusEnd:      return "Focus block done"
         case .meditationEnd: return "Meditation done"
+        case .restOver:      return "Rest over"
+        case .reward:        return "Reward"
+        case .penalty:       return "Penalty"
         }
     }
 }

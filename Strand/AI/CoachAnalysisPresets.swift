@@ -1,4 +1,5 @@
 import Foundation
+import StrandAnalytics
 
 /// Named deep-analysis prompts for the Coach composer.
 ///
@@ -94,4 +95,21 @@ struct CoachAnalysisPreset: Identifiable, Equatable {
             focus on over the next 4 weeks to keep improving?
             """),
     ]
+
+    /// The week preset's id; its brief carries the app's own week review when there is one.
+    static let weekReviewId = "week"
+
+    /// The brief actually sent for `instruction`. The "Review my week" brief gets the app's own last week
+    /// review appended (`WeekReview.coachBlock`, 500 chars), so the model reviews from the same figures the
+    /// review card shows rather than re-deriving them. Only with data consent: the review is the wearer's
+    /// figures. Any other text goes out unchanged.
+    @MainActor
+    static func wire(for instruction: String, dataConsent: Bool) -> String {
+        guard dataConsent,
+              let week = all.first(where: { $0.id == weekReviewId }), week.instruction == instruction,
+              let review = WeekPlanSource.shared.lastReview?.coachBlock(maxChars: 500), !review.isEmpty
+        else { return instruction }
+        return instruction + "\n\nThe app's own review of last week, from the same data (use its figures; "
+            + "do not restate them as new findings):\n" + review
+    }
 }

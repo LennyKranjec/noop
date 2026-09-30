@@ -152,13 +152,48 @@ final class TelosBehaviourTests: XCTestCase {
     func testMomentDefaultsFollowItsKind() {
         let penalty = TelosMoment(id: "p.1", kind: .penalty, overline: "Missed", headline: "Walk 10,000 steps")
         XCTAssertEqual(penalty.tone, .critical)
-        XCTAssertEqual(penalty.haptic, .failure)
+        XCTAssertEqual(penalty.haptic, .penalty)
+        XCTAssertEqual(penalty.entrance, .penalty)
+        XCTAssertEqual(penalty.strapCue, .penalty)
         XCTAssertNil(penalty.fill)                                           // no value → no liquid
         let stress = TelosMoment(id: "s.1", kind: .stressDiagnostic, overline: "Stress", headline: "High")
         XCTAssertEqual(stress.register, .diagnostic)
         XCTAssertEqual(stress.haptic, .heartbeat)                            // the heart-moment pattern
+        XCTAssertEqual(stress.entrance, .standard)
         XCTAssertTrue(TelosMoment.showsBefore(stress, penalty))
         XCTAssertNil(TelosMoment.Kind.gearChoice.defaultHaptic)
+        // Big rewards celebrate, play the reward pattern and ask the strap for the reward cue.
+        let rewards: [TelosMoment.Kind] = [.personalRecord, .questCompleted, .goalCompleted, .levelUp, .debtCleared]
+        for kind in rewards {
+            XCTAssertEqual(kind.defaultEntrance, .celebration, "\(kind)")
+            XCTAssertEqual(kind.defaultHaptic, .reward, "\(kind)")
+            XCTAssertEqual(kind.defaultStrapCue, .reward, "\(kind)")
+        }
+        XCTAssertEqual(TelosMoment.Kind.streakBroken.defaultStrapCue, .penalty)
+        // A Lift finish celebrates but only buzzes the strap when the presenter says it holds a PR.
+        XCTAssertEqual(TelosMoment.Kind.liftFinished.defaultEntrance, .celebration)
+        XCTAssertNil(TelosMoment.Kind.liftFinished.defaultStrapCue)
+        // A verdict is a reading, never a celebration.
+        XCTAssertEqual(TelosMoment.Kind.trialVerdict.defaultEntrance, .standard)
+    }
+
+    func testMomentBurstIsShortAndEnds() {
+        XCTAssertLessThanOrEqual(TelosMomentStyle.burstDuration, 1.5)
+        XCTAssertEqual(TelosMomentStyle.burstProgress(elapsed: 0), 0)
+        XCTAssertEqual(TelosMomentStyle.burstProgress(elapsed: -1), 0)
+        XCTAssertEqual(TelosMomentStyle.burstProgress(elapsed: TelosMomentStyle.burstDuration), 1, accuracy: 1e-9)
+        XCTAssertEqual(TelosMomentStyle.burstProgress(elapsed: 60), 1, accuracy: 1e-9)   // never loops
+        let half = TelosMomentStyle.burstProgress(elapsed: TelosMomentStyle.burstDuration / 2)
+        XCTAssertGreaterThan(half, 0.5)                                                  // eased out
+    }
+
+    func testCountingFigureFormats() {
+        XCTAssertTrue(TelosMoment.Figure(label: "Level", value: "81", countFrom: 57, countTo: 81).counts)
+        XCTAssertFalse(TelosMoment.Figure(label: "Level", value: "81").counts)
+        XCTAssertFalse(TelosMoment.Figure(label: "Level", value: "81", countFrom: 81, countTo: 81).counts)
+        XCTAssertFalse(TelosMoment.Figure(label: "Level", value: "81", countFrom: .nan, countTo: 81).counts)
+        XCTAssertEqual(TelosMoment.CountFormat.signed(0).string(24), "+24")
+        XCTAssertEqual(TelosMoment.CountFormat.signed(0).string(-3), "\u{2212}3")
     }
 
     // MARK: Micro-sparkline
@@ -174,5 +209,44 @@ final class TelosBehaviourTests: XCTestCase {
         // A flat series draws mid-height, not at the floor.
         let flat = TelosSparklineGeometry.points([5, 5, 5], in: rect)
         XCTAssertEqual(flat[0]?.y ?? -1, 10, accuracy: 1e-9)
+    }
+
+    // MARK: Reward / penalty patterns
+
+    func testRewardAndPenaltyPatterns() {
+        let reward = TelosHaptic.reward.events.filter { $0.duration == 0 }
+        XCTAssertEqual(reward.count, 3)
+        XCTAssertTrue(reward[0].intensity < reward[1].intensity && reward[1].intensity < reward[2].intensity,
+                      "the reward rises")
+        func energy(_ h: TelosHaptic) -> Float { h.events.reduce(Float(0)) { $0 + $1.intensity } }
+        XCTAssertGreaterThan(energy(.penalty), energy(.failure), "the penalty is heavier than a failure")
+        let penaltySharpness: Float = TelosHaptic.penalty.events.map { $0.sharpness }.max() ?? 1
+        let rewardSharpness: Float = TelosHaptic.reward.events.map { $0.sharpness }.max() ?? 0
+        XCTAssertLessThan(penaltySharpness, rewardSharpness, "dull thuds vs a bright sparkle")
+    }
+
+    // MARK: Stepper
+
+    func testStepperSnapsToTheCustomStepAndClamps() {
+        XCTAssertEqual(TelosStepper.snapped(61.4, step: 2.5, range: 0...500), 62.5, accuracy: 1e-9)
+        XCTAssertEqual(TelosStepper.snapped(40 + 8, step: 8, range: 0...200), 48, accuracy: 1e-9)
+        XCTAssertEqual(TelosStepper.snapped(-5, step: 2.5, range: 0...500), 0)
+        XCTAssertEqual(TelosStepper.snapped(510, step: 2.5, range: 0...500), 500)
+        XCTAssertEqual(TelosStepper.snapped(150 + 15, step: 15, range: nil), 165, accuracy: 1e-9)   // rest ±15 s
+        XCTAssertEqual(TelosStepper.snapped(.nan, step: 1, range: 1...20), 1)
+    }
+
+    // MARK: Particle field
+
+    func testParticlesAreDeterministicAndBounded() {
+        let a = TelosParticleField.makeParticles(count: 50, seed: 42, sizes: 1...2)
+        let b = TelosParticleField.makeParticles(count: 50, seed: 42, sizes: 1...2)
+        XCTAssertEqual(a.count, 50)
+        XCTAssertEqual(a.map { $0.x }, b.map { $0.x })
+        XCTAssertEqual(a.map { $0.y }, b.map { $0.y })
+        XCTAssertTrue(a.allSatisfy { $0.x >= 0 && $0.x < 1 && $0.y >= 0 && $0.y < 1 && $0.size >= 1 && $0.size <= 2 })
+        XCTAssertEqual(TelosParticleField.makeParticles(count: 5_000, seed: 1, sizes: 1...2).count, 400)
+        XCTAssertNotEqual(TelosParticleField.makeParticles(count: 5, seed: 1, sizes: 1...2).map { $0.x },
+                          TelosParticleField.makeParticles(count: 5, seed: 2, sizes: 1...2).map { $0.x })
     }
 }

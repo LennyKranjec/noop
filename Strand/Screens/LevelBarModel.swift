@@ -51,7 +51,7 @@ enum LevelMissingInput: String, CaseIterable, Identifiable {
         switch self {
         case .restorativeSleep: return "No staged night in the last 7 days."
         case .hrv: return "No night HRV in the last 7 days."
-        case .regularity: return "Needs two nights in a row with bed and wake times."
+        case .regularity: return "Needs 7 of the last 14 nights with a wake time."
         case .rhr: return "No resting heart rate in the last 7 days."
         case .vo2max: return "No estimate yet: record runs or brisk walks with GPS, or add your waist in the profile."
         case .respRate: return "No respiratory rate in the last 7 days."

@@ -171,19 +171,18 @@ struct RitualGrounding {
     var extra: [String] = []
 
     /// The block handed to the model.
+    ///
+    /// Main-actor because the energy line is the check-in store's (`EnergyCheckInStore.coachLine`): worded
+    /// by what the calibration verdict allows the figure to be called, and carrying what the wearer
+    /// reported today, which outranks the model.
+    @MainActor
     var text: String {
         var lines: [String] = ["TODAY'S FIGURES:"]
         lines.append("- Recovery: " + (recovery.map { "\(Int($0.rounded()))%" } ?? "not scored yet"))
         lines.append("- Sleep score: " + (sleepScore.map { "\(Int($0.rounded()))%" } ?? "not scored yet"))
         lines.append("- Strain so far: "
                      + (strain.map { String(format: "%.1f of 21", $0) } ?? "not scored yet"))
-        if let energy {
-            lines.append(String(
-                format: "- Energy bank: %d of the %d it opened with (%@) — %d spent on strain, %d on stress",
-                Int(energy.balance.rounded()), Int(energy.opening.rounded()),
-                EnergyBank.state(energy.balance),
-                Int(energy.strainSpend.rounded()), Int(energy.stressSpend.rounded())))
-        }
+        if let line = EnergyCheckInStore.shared.coachLine(energy) { lines.append("- " + line) }
         if let line = DayDeficits.promptLine(deficits) { lines.append("- " + line) }
         if !streaks.isEmpty {
             let running = streaks.filter { $0.days > 0 }

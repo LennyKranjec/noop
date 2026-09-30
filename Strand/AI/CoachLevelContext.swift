@@ -8,15 +8,23 @@ import StrandAnalytics
 // those the day's level was actually short on, or by how much.
 //
 // SO IT GETS THE WHOLE THING: today's frozen level, every part's score, weight, contribution and
-// headroom, the step penalty, the metric driving each part, and the formula itself — and the instruction
-// that raising this number is its primary objective. The formula is written from the engine's own
-// constants, so the explanation cannot drift from the calculation it explains.
+// headroom, the step penalty, the meditation deduction, the metric driving each part, and the formula
+// itself. The formula is written from the engine's own constants, so the explanation cannot drift from the
+// calculation it explains.
+//
+// THE LEVEL IS A LENS, NOT THE OBJECTIVE (HEALTH_V2 H5). It used to be told that raising this number was
+// its primary objective, which is how a coach ends up advising more load or less sleep for points. The
+// objective is the wearer's health; the level is one view of the long-term trend.
 
 enum CoachLevelContext {
 
+    /// The opening line: what the level is for, and what the coach may never trade for it.
+    static let objective = "The level is one lens on long-term trends. Your objective is the wearer's "
+        + "health. Never advise more training load, less sleep or skipping recovery to raise the level."
+
     static func promptSection() -> String {
-        var s = "THE LEVEL — YOUR PRIMARY OBJECTIVE IS TO RAISE THIS SCORE. Every recommendation should "
-        s += "say which part of the level it moves and roughly how many points it is worth.\n"
+        var s = "THE LEVEL. " + objective + " When a recommendation moves a part of the level, you may "
+        s += "say which part and roughly how many points.\n"
 
         // FROM THE LEDGER, like every other surface: the current day's written level, or — while it is
         // not today's — the last day that was written, said to be exactly that and why. "Not today's" is
@@ -60,7 +68,11 @@ enum CoachLevelContext {
                     s += "- \(name): not measured (its weight is shared across the other parts)\n"
                 }
             }
-            s += String(format: "Before steps: %.1f. Step multiplier applied: ×%.3f.\n", b.raw, b.stepPenalty)
+            s += String(format: "Before steps: %.1f. Step multiplier applied: ×%.3f.", b.raw, b.stepPenalty)
+            let meditation = b.meditationPenalty
+            s += meditation > 0.05
+                ? String(format: " Meditation deduction: −%.1f points.\n", meditation)
+                : " Meditation deduction: none.\n"
             let levers = b.levers().prefix(3).map {
                 String(format: "%@ (+%.1f)", $0.part.rawValue, $0.headroom * b.stepPenalty)
             }
@@ -73,19 +85,34 @@ enum CoachLevelContext {
             s += pendingReason(shownDay: nil) ?? "Today's level has not been computed yet.\n"
         }
 
-        s += "HOW IT IS CALCULATED (no ceiling, no floor):\n"
-        s += "- Every input is scored against the wearer's own frozen baseline: 50 = their average day, 100 = their own 95th-percentile day in the good direction, linear and UNBOUNDED both ways. Beating their 95th percentile scores above 100.\n"
-        s += "- level = (sum of part score × weight, weights re-shared over the parts that have data) × step multiplier. Not clamped: all five parts at their own 100 with no step penalty is a level of 100, more is more.\n"
+        s += recipe()
+        return s
+    }
+
+    /// HOW THE LEVEL IS CALCULATED, from the engine's own constants (ledger epoch 4). Pure: no store read.
+    static func recipe() -> String {
+        func share(_ v: Double) -> String { String(format: "%.2f", v) }
+        let sleep = LevelEngine.sleepShares
+        let heart = LevelEngine.heartShares
+        let lungs = LevelEngine.lungsShares
+        let muscle = LevelEngine.muscleShares
+        let before = LevelEngine.meditationMinChangeoverDay
+        var s = "HOW IT IS CALCULATED (no ceiling, no floor):\n"
+        s += "- Every input is scored against the wearer's own frozen baseline: 50 = their average day, 100 = their own 95th-percentile day in the good direction, linear and UNBOUNDED both ways. Beating their 95th percentile scores above 100. No input is capped.\n"
+        s += "- level = (sum of part score × weight, weights re-shared over the parts that have data) × step multiplier − meditation deduction. Not clamped: all five parts at their own 100 with no step penalty and no deduction is a level of 100, more is more.\n"
         s += "- Weights: " + LevelPart.allCases.map { "\($0.rawValue) \(Int(($0.weight * 100).rounded()))%" }
             .joined(separator: ", ") + ".\n"
-        s += "- A LEVEL OF STATE: every physiological input is a 7-day mean, strength a 12-week best, training load a 42-day chronic figure, meditation a 28-day share — one bad day barely moves it.\n"
-        s += "- sleep = 0.60 × deep+REM minutes + 0.25 × night HRV + 0.15 × bedtime/wake regularity (minutes moved vs the night before, lower is better).\n"
-        s += "- heart = 0.5 × HRV + 0.5 × resting HR (lower is better).\n"
-        s += "- lungs = 0.75 × VO2max (NOOP's own estimate: runs and walks — speed against heart-rate reserve — blended with the HUNT model from the weekly training days, minutes and zone-4–5 share) + 0.25 × respiratory rate (lower is better).\n"
-        s += "- muscle = 0.60 × strength (estimated-1RM index: each exercise's best e1RM over 12 weeks as a ratio of its own median) + 0.40 × chronic training load (42-day exponentially weighted volume).\n"
-        s += "- focus = 0.75 × daytime calm (RMSSD of still waking hours) + 0.25 × meditation (weighted share of the last 28 days with at least 5 minutes).\n"
+        s += "- A LEVEL OF STATE: every physiological input is a 7-day mean, wake regularity a 14-night spread, strength a 12-week best, training load a 42-day chronic figure — one bad day barely moves it.\n"
+        s += "- sleep = \(share(sleep.duration)) × sleep duration against their need (7-night mean of asleep ÷ need, not capped) + \(share(sleep.regularity)) × wake-time regularity (spread of wake times over 14 nights, needs 7; lower is better) + \(share(sleep.restorative)) × deep+REM minutes. HRV is not in sleep; it counts once, in heart.\n"
+        s += "- heart = \(share(heart.hrv)) × HRV + \(share(heart.rhr)) × resting HR (lower is better).\n"
+        s += "- lungs = \(share(lungs.vo2max)) × VO2max (NOOP's own estimate: runs and walks — speed against heart-rate reserve — blended with the HUNT model from the weekly training days, minutes and zone-4–5 share) + \(share(lungs.respRate)) × respiratory rate (lower is better).\n"
+        s += "- muscle = \(share(muscle.strength)) × strength (estimated-1RM index: each exercise's best e1RM over 12 weeks as a ratio of its own median) + \(share(muscle.load)) × chronic training load (42-day exponentially weighted volume, not capped: it measures training done, not adaptation).\n"
+        s += "- focus = daytime calm only (RMSSD of still waking hours). Meditation adds nothing to focus.\n"
         s += "- steps (7-day average): below \(LevelEngine.stepsFloor) the level is multiplied down, linearly, by up to \(Int(LevelEngine.stepsMaxPenalty * 100))% at zero steps.\n"
-        s += "- The day's level is fixed when they first open the app in the morning, from the night that ended that morning and the previous full day's activity (steps, calm, meditation, training load, strength), so what they do TODAY shows up in TOMORROW's level.\n"
+        s += String(format: "- meditation only deducts: %.0f point per missed day in the level's 7-day window, and only in its era (from their first logged session; before it there is no meditation term at all). A day counts as meditated at %.0f min before %@ and %.0f min from it. A day with no data is not a miss.\n",
+                    LevelEngine.meditationMissPenaltyPoints, LevelEngine.meditationMinMinutesBeforeChangeover,
+                    before, LevelEngine.meditationMinMinutes)
+        s += "- The day's level is fixed when they first open the app in the morning, from the night that ended that morning and the previous full day's activity (steps, calm, training load, strength), so what they do TODAY shows up in TOMORROW's level.\n"
         s += "Because the level tracks state, advise for the weeks ahead — sustained sleep, progressive strength, aerobic base — rather than for tomorrow's number."
         return s
     }

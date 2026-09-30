@@ -153,6 +153,11 @@ enum StressDayCurve {
         // A day with no scored hour is unmeasured, not calm, so nothing is written for it.
         if !scored.scored.isEmpty {
             await repo.bankStressMinutes(day: Repository.localDayKey(now), minutes: scored.highStressMinutes)
+            // Energy hand-off B: bank the day's MEASURED calm beside it, same rescore, same replace-the-row
+            // rule. `calmMinutes` is nil when no hour was scored, so an unmeasured day banks nothing.
+            if let calm = EnergyBank.calmMinutes(hours: scored.hours) {
+                await repo.bankCalmMinutes(day: Repository.localDayKey(now), minutes: calm)
+            }
         }
         return (scored, day)
     }

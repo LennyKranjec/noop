@@ -392,6 +392,25 @@ final class AppModel: ObservableObject {
         // from having issued one.
         wakeBuzz.bondRefused = { [weak self] in self?.live.strapWritesRefused ?? false }
 
+        #if os(iOS)
+        // STRAP CUES (Telos 2.0, iOS feature). Wired here, next to the wake buzz whose delivery reads they
+        // reuse, and BEFORE `start()` below — every hook must be in place before the first tick. The pulse
+        // goes through the plain `buzz(loops:)` (the engine owns its own gate: switches, quiet hours, sleep
+        // window, budget, spacing); reachability and refusal use the same two reads as the wake buzz, so a
+        // cue on an unreachable strap is reported as not delivered rather than assumed.
+        let cues = StrapCueEngine.shared
+        cues.buzzPulse = { [weak self] loops in self?.buzz(loops: loops) }
+        cues.strapReady = { [weak self] in self?.ble.commandChannelReady ?? false }
+        cues.bondRefused = { [weak self] in self?.live.strapWritesRefused ?? false }
+        cues.strapLog = { [live] line in live.append(log: line) }
+        cues.sleepPlan = { day in SleepScheduleProvider.shared.plan(wakingOn: day) }
+        cues.isWorkoutActive = { [weak self] in self?.activeWorkout != nil }
+        cues.onMeditationCompleted = { [weak self] secs in
+            guard let self else { return }
+            Task { await self.repo.logMeditation(seconds: secs) }
+        }
+        #endif
+
         // Physical-input + wear hooks (fired live by FrameRouter).
         live.onDoubleTap = { [weak self] in self?.handleDoubleTap() }
         live.onWristChange = { [weak self] worn in self?.handleWristChange(worn) }
@@ -450,8 +469,17 @@ final class AppModel: ObservableObject {
             self?.evaluateStrainTarget()
             // Keep the battery night-guard's learned bedtime warm off the same signal (throttled inside).
             self?.refreshHabitualMidsleep()
+            // `@Published` replays its CURRENT value on subscribe, so this sink first runs here in `init` with
+            // the empty list, before the store is open. The two health hooks below are throttled (15 / 10 min)
+            // and stamp their throttle on that first call — an empty-list run would read nothing, overwrite the
+            // cached sleep plan with an abstention, and then block the real refresh when the days load. They
+            // wait for a list with data in it instead.
+            guard !days.isEmpty else { return }
             // HEALTH_V2 S2: the one sleep plan every evening consumer reads (throttled inside).
             if let repo = self?.repo { SleepScheduleProvider.shared.noteDaysChanged(repo: repo) }
+            // HEALTH_V2 S1 (HB): bedroom / WiZ / caffeine records, the habit-trial tick + its quest, the daily
+            // habit report and the week plan (`WeekPlanSource.refresh` is called from inside it, not here).
+            if let model = self { HealthV2Refresh.shared.daysChanged(days, model: model) }
         }.store(in: &hrCancellables)
         // Re-arm the strap's firmware alarm once the connection has SETTLED — not the instant it (re)bonds.
         // A smart-alarm time changed while the strap was away never reached it , the send is gated on bond
@@ -528,6 +556,13 @@ final class AppModel: ObservableObject {
         // Rehydrate a manual workout that was in flight when iOS killed the app, so it can still be ended
         // + saved on relaunch (#529). Restored here alongside the other UserDefaults-backed state.
         rehydrateActiveWorkout()
+
+        #if os(iOS)
+        // Strap cues: arm the minute tick now that every hook above is wired and an in-flight workout has been
+        // rehydrated (the sitting-break nudge is suppressed during one). The iOS foreground hook ticks again
+        // on every resume. Idempotent.
+        StrapCueEngine.shared.start()
+        #endif
 
         AppModel.shared = self   // publish for App Intents (Shortcuts) , see the static above (#42)
 
@@ -873,6 +908,12 @@ final class AppModel: ObservableObject {
         // analyze pass below refreshed it back — and when that pass skipped (unchanged inputs) the
         // dashboard was left holding only 120 days.
         await repo.refresh()
+        #if os(iOS)
+        // Strap cues: the strap's own step counter for the last ~3 h can only DELAY the next sitting-break
+        // nudge (a break the phone missed) or mark a past one a false alarm — never cause one. Early, before
+        // the (possibly minutes-long) analyze pass, so the correction lands while it still matters.
+        if !emptyOffload { await reconcileStrapCueSteps() }
+        #endif
         // Score the freshly-offloaded raw data RIGHT NOW rather than waiting for the next 15-minute
         // analyzeRecent tick , otherwise a just-synced night's Charge / Effort / Rest can take up to
         // 15 minutes to appear on a strap-only (no-import) dashboard. analyzeRecent no-ops if a tick is
@@ -914,6 +955,26 @@ final class AppModel: ObservableObject {
         #endif
     }
 
+    #if os(iOS)
+    /// Feed the strap's offloaded step samples of the last three hours to the strap-cue engine. Reads the
+    /// active strap first and stops at the first id with a countable window — two devices' cumulative
+    /// counters are never interleaved (the same rule as `Repository.strapStepTicks`). A WHOOP 4.0 has no
+    /// counter, so this is a no-op there.
+    private func reconcileStrapCueSteps(now: Date = Date()) async {
+        guard StrapCueEngine.shared.settings.sittingBreakEnabled,
+              let store = await repo.storeHandle() else { return }
+        let to = Int(now.timeIntervalSince1970)
+        let from = to - 3 * 3600
+        for id in repo.importedReadIds {
+            let samples = (try? await store.stepSamples(deviceId: id, from: from, to: to, limit: 20_000)) ?? []
+            if samples.count >= 2 {
+                StrapCueEngine.shared.reconcileStrapSteps(samples)
+                return
+            }
+        }
+    }
+    #endif
+
     /// Fold a fresh reading into the smoothing window and republish a stable bpm.
     /// Prefers the strap's reported HR; falls back to 60000/R-R. Clamps to a plausible
     /// 30–220 range (rejects 0 / garbage spikes) and publishes the window MEDIAN.
@@ -931,6 +992,11 @@ final class AppModel: ObservableObject {
             return
         }
         foldSmoothing(inst)
+        #if os(iOS)
+        // Strap cues: live HR for the sitting-break detector, and the throttled background heartbeat that lets
+        // a cue fire while the app is backgrounded on a BLE wake.
+        StrapCueEngine.shared.ingestHeartRate(Int(inst.rounded()))
+        #endif
         // A reading is present, so the clock that keeps the window a TIME window must be running.
         // Armed here (rather than only at connect) so every entry into a live feed re-establishes it.
         armHRTick()

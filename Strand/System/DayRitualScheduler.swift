@@ -26,24 +26,85 @@ import UserNotifications
 @MainActor
 enum DayRitualScheduler {
 
-    private static let enabledKey = "rituals.enabled"
+    /// The single switch before HEALTH_V2 H4. Read once, by `migrateLegacy`, and then removed.
+    static let legacyEnabledKey = "rituals.enabled"
     private static let requestPrefix = "ritual-"
     static let notificationCategoryId = "day-ritual"
 
-    /// Default ON. The three slots are the app's own rhythm rather than an added feature, and a system
-    /// that only ever speaks when spoken to is a search box.
+    /// ONE SWITCH PER SLOT (HEALTH_V2 H4): `rituals.enabled.{morning,midday,evening}`.
+    static func enabledKey(_ slot: DayRitual) -> String { "rituals.enabled.\(slot.rawValue)" }
+
+    /// The morning ON, midday and evening OFF. The morning briefing is the app's own rhythm; three knocks a
+    /// day by default was more than most wearers asked for.
     ///
     /// ON IS NOT PERMISSION, and it is not a reason to speak either: `schedule()` additionally requires
     /// notification authorization the user has already granted somewhere they asked for it, and a day
     /// that has actually been scored. A default-ON preference that could by itself raise a permission
     /// dialog and then schedule daily claims about an empty install is what this used to be.
-    static var isEnabled: Bool {
-        (UserDefaults.standard.object(forKey: enabledKey) as? Bool) ?? true
+    nonisolated static func defaultEnabled(_ slot: DayRitual) -> Bool { slot == .morning }
+
+    /// Whether `slot` is on.
+    static func isEnabled(slot: DayRitual, _ d: UserDefaults = .standard) -> Bool {
+        migrateLegacy(d)
+        return (d.object(forKey: enabledKey(slot)) as? Bool) ?? defaultEnabled(slot)
     }
 
+    /// Whether any slot is on.
+    static var isEnabled: Bool { DayRitual.allCases.contains { isEnabled(slot: $0) } }
+
+    /// A wearer who had switched the rituals OFF keeps them off: every slot not yet set explicitly is
+    /// written off. A legacy ON (the old default) says nothing about which slots were wanted, so the
+    /// per-slot defaults apply. The legacy key is removed either way, so this runs once.
+    static func migrateLegacy(_ d: UserDefaults = .standard) {
+        guard let legacy = d.object(forKey: legacyEnabledKey) as? Bool else { return }
+        if !legacy {
+            for slot in DayRitual.allCases where d.object(forKey: enabledKey(slot)) == nil {
+                d.set(false, forKey: enabledKey(slot))
+            }
+        }
+        d.removeObject(forKey: legacyEnabledKey)
+    }
+
+    /// Switch one slot, registering or cancelling just that slot's notification.
+    static func setEnabled(_ on: Bool, slot: DayRitual) async {
+        migrateLegacy()
+        UserDefaults.standard.set(on, forKey: enabledKey(slot))
+        if on { await schedule() } else { cancel([slot]) }
+    }
+
+    /// Switch every slot at once.
     static func setEnabled(_ on: Bool) async {
-        UserDefaults.standard.set(on, forKey: enabledKey)
+        migrateLegacy()
+        for slot in DayRitual.allCases { UserDefaults.standard.set(on, forKey: enabledKey(slot)) }
         if on { await schedule() } else { cancel() }
+    }
+
+    /// When `ritual` runs, in minutes past local midnight: the morning at the sleep anchor + 15 minutes
+    /// when there is one (`SleepScheduleProvider.morningRitualMinute`), its own default time otherwise;
+    /// the other slots at their fixed times. Pure.
+    nonisolated static func minute(_ ritual: DayRitual, morningAnchorMinute: Int?) -> Int {
+        guard ritual == .morning, let anchored = morningAnchorMinute else { return ritual.minutes }
+        return ((anchored % 1440) + 1440) % 1440
+    }
+
+    /// The morning ritual's minute for the day `date` falls on.
+    static func morningMinute(on date: Date) -> Int {
+        minute(.morning, morningAnchorMinute: SleepScheduleProvider.shared.morningRitualMinute(on: date))
+    }
+
+    /// The next date on or after `now` that falls on `weekday` (1 = Sunday ... 7 = Saturday). Pure.
+    nonisolated static func nextDate(weekday: Int, from now: Date, calendar: Calendar = .current) -> Date {
+        let today = calendar.component(.weekday, from: now)
+        let ahead = ((weekday - today) % 7 + 7) % 7
+        return calendar.date(byAdding: .day, value: ahead, to: now) ?? now
+    }
+
+    /// Every notification identifier a slot may have registered. The morning is one per weekday (the
+    /// anchor differs at weekends); the bare `ritual-morning` is the pre-H4 daily one, cancelled with it.
+    nonisolated static func requestIds(_ ritual: DayRitual) -> [String] {
+        let base = requestPrefix + ritual.rawValue
+        guard ritual == .morning else { return [base] }
+        return [base] + (1...7).map { "\(base)-\($0)" }
     }
 
     /// The last day each slot produced something, so a repeat open does not re-run it.
@@ -105,8 +166,14 @@ enum DayRitualScheduler {
                           hasScoredDay: hasScoredDay,
                           status: await NotificationPermission.status()) else { return }
         let centre = UNUserNotificationCenter.current()
+        let now = Date()
 
         for ritual in DayRitual.allCases {
+            // PER SLOT: a slot switched off has its own requests withdrawn, the others are untouched.
+            guard isEnabled(slot: ritual) else {
+                cancel([ritual])
+                continue
+            }
             let content = UNMutableNotificationContent()
             content.title = ritual.title
             // ONE LINE, AND NOT THE BRIEFING. See the note at the top on why the body cannot be the
@@ -115,6 +182,26 @@ enum DayRitualScheduler {
             content.sound = .default
             content.categoryIdentifier = notificationCategoryId
             content.userInfo = ["ritual": ritual.rawValue]
+
+            if ritual == .morning {
+                // ONE PER WEEKDAY, at that weekday's anchor + 15 (the weekend offset makes them differ).
+                // The pre-H4 single daily request is withdrawn so the morning never knocks twice.
+                let base = requestPrefix + ritual.rawValue
+                centre.removePendingNotificationRequests(withIdentifiers: [base])
+                for weekday in 1...7 {
+                    let minute = morningMinute(on: nextDate(weekday: weekday, from: now))
+                    var when = DateComponents()
+                    when.weekday = weekday
+                    when.hour = minute / 60
+                    when.minute = minute % 60
+                    let request = UNNotificationRequest(
+                        identifier: "\(base)-\(weekday)",
+                        content: content,
+                        trigger: UNCalendarNotificationTrigger(dateMatching: when, repeats: true))
+                    try? await centre.add(request)
+                }
+                continue
+            }
 
             var when = DateComponents()
             when.hour = ritual.minutes / 60
@@ -129,10 +216,11 @@ enum DayRitualScheduler {
         #endif
     }
 
-    static func cancel() {
+    /// Withdraw the notifications of `slots` (every slot by default).
+    static func cancel(_ slots: [DayRitual] = DayRitual.allCases) {
         #if canImport(UserNotifications)
         UNUserNotificationCenter.current().removePendingNotificationRequests(
-            withIdentifiers: DayRitual.allCases.map { requestPrefix + $0.rawValue })
+            withIdentifiers: slots.flatMap { requestIds($0) })
         #endif
     }
 
@@ -253,12 +341,25 @@ enum DayRitualScheduler {
     ///
     /// ONLY TODAY'S. A briefing read at ten is still worth reading; yesterday's is history, and running
     /// it would write yesterday's directive onto today.
+    ///
+    /// ONLY ENABLED SLOTS (H4): a slot switched off is not run on open either, and the morning is due at
+    /// its anchored time.
     static func dueRituals(now: Date = Date()) -> [DayRitual] {
-        let calendar = Calendar.current
+        due(now: now,
+            morningAnchorMinute: SleepScheduleProvider.shared.morningRitualMinute(on: now),
+            enabled: { isEnabled(slot: $0) },
+            lastRun: { lastRunDay($0) })
+    }
+
+    /// `dueRituals`, with every read handed in. Pure.
+    nonisolated static func due(now: Date, calendar: Calendar = .current, morningAnchorMinute: Int?,
+                                enabled: (DayRitual) -> Bool,
+                                lastRun: (DayRitual) -> String?) -> [DayRitual] {
         let minutes = calendar.component(.hour, from: now) * 60 + calendar.component(.minute, from: now)
-        let today = DailyMissionStore.dayKey(now)
+        let today = DailyMissionStore.dayKey(now, calendar: calendar)
+        func at(_ r: DayRitual) -> Int { minute(r, morningAnchorMinute: morningAnchorMinute) }
         return DayRitual.allCases
-            .filter { $0.minutes <= minutes && lastRunDay($0) != today }
-            .sorted { $0.minutes < $1.minutes }
+            .filter { enabled($0) && at($0) <= minutes && lastRun($0) != today }
+            .sorted { at($0) < at($1) }
     }
 }

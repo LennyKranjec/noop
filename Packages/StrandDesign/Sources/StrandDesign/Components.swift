@@ -494,10 +494,11 @@ public struct SegmentedPillControl<T: Hashable>: View {
     }
 
     private func track(equalWidth: Bool) -> some View {
-        // V2 (§5.11): track 44 high (36 segment + 4 inner padding), radius 12, `surfaceInset` + 1 pt
-        // `line`. Selected segment: radius 9, `surfaceRaised` + 1 pt `lineStrong`, NO shadow; label
-        // `subhead` semibold `textPrimary`; unselected `textSecondary`; disabled `textDisabled` (and the
-        // system "dimmed" trait via `.disabled`). Selection slides with `select`; Reduce Motion: instant.
+        // V2 (§5.11 + VISUAL DIRECTION): a glass capsule track 44 high (36 segment + 4 inner padding) with
+        // the luminous edge. Selected segment: an accent-lit capsule (muted accent fill + accent gradient
+        // hairline, NO shadow — it lives in content) with a `textPrimary` label; unselected
+        // `textSecondary`; disabled `textDisabled` (and the system "dimmed" trait via `.disabled`).
+        // Selection slides with `select`; Reduce Motion: instant.
         HStack(spacing: TelosSpace.xs) {
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 let sel = item == selection
@@ -512,6 +513,7 @@ public struct SegmentedPillControl<T: Hashable>: View {
                         .lineLimit(equalWidth ? 1 : nil)
                         // Range selection stays deliberately neutral so the control works above charts
                         // from every metric colour world without borrowing their green/blue/amber tint.
+                        // Selected label stays textPrimary (the accent-on-accent-wash pair misses AA in light).
                         .foregroundStyle(sel ? TelosColor.textPrimary
                                              : (enabled ? TelosColor.textSecondary : TelosColor.textDisabled))
                         // Fill the segment height so the selected pill has EQUAL margins to the track
@@ -522,15 +524,19 @@ public struct SegmentedPillControl<T: Hashable>: View {
                         .padding(.horizontal, equalWidth ? NoopMetrics.space1 : 10)
                         .background {
                             if sel {
-                                let selectedShape = RoundedRectangle(cornerRadius: TelosRadius.segment, style: .continuous)
+                                let selectedShape = Capsule(style: .continuous)
                                 selectedShape
-                                    .fill(TelosColor.surfaceRaised)
+                                    .fill(StrandPalette.accentMuted)
                                     .overlay(
-                                        selectedShape.strokeBorder(TelosColor.lineStrong, lineWidth: TelosStroke.line)
+                                        selectedShape.strokeBorder(
+                                            LinearGradient(colors: [StrandPalette.accent.opacity(0.9),
+                                                                    StrandPalette.accent.opacity(0.25)],
+                                                           startPoint: .topLeading, endPoint: .bottomTrailing),
+                                            lineWidth: TelosStroke.line)
                                     )
                             }
                         }
-                        .contentShape(RoundedRectangle(cornerRadius: TelosRadius.segment, style: .continuous))
+                        .contentShape(Capsule(style: .continuous))
                 }
                 // The shared press style (`press` token) — the one control used on every screen must
                 // never feel dead while the selection animation catches up.
@@ -547,10 +553,10 @@ public struct SegmentedPillControl<T: Hashable>: View {
         .padding(TelosSpace.xs)
         .frame(maxWidth: equalWidth ? .infinity : nil)
         .background {
-            let trackShape = RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
+            let trackShape = Capsule(style: .continuous)
             trackShape
-                .fill(TelosColor.surfaceInset)
-                .overlay(trackShape.strokeBorder(TelosColor.line, lineWidth: TelosStroke.line))
+                .fill(TelosColor.glassFill)
+                .overlay(trackShape.strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line))
         }
     }
 }
@@ -642,7 +648,7 @@ public struct NoopPrimaryButtonStyle: ButtonStyle {
     }
 }
 
-/// Secondary: `surfaceInset` well + 1 pt `line` edge + `textPrimary` label.
+/// Secondary: a glass button — `glassFill` + the luminous glass edge + `textPrimary` label.
 public struct NoopSecondaryButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -657,8 +663,8 @@ public struct NoopSecondaryButtonStyle: ButtonStyle {
             .foregroundStyle(isEnabled ? TelosColor.textPrimary : TelosColor.textDisabled)
             .padding(.vertical, TelosSpace.s).padding(.horizontal, 18)
             .frame(maxWidth: .infinity, minHeight: NoopButtonMetrics.height)
-            .background(shape.fill(TelosColor.surfaceInset))
-            .overlay(shape.strokeBorder(TelosColor.line, lineWidth: TelosStroke.line))
+            .background(shape.fill(TelosColor.glassFill))
+            .overlay(shape.strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line))
             .opacity(pressed ? TelosMotion.pressOpacity : 1)
             .scaleEffect(pressed && !reduceMotion ? TelosMotion.pressScale : 1)
             .animation(TelosMotion.press, value: pressed)

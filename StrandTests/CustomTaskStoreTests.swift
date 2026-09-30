@@ -53,6 +53,23 @@ final class CustomTaskStoreTests: XCTestCase {
         XCTAssertEqual(store.completions.count, 1)
     }
 
+    func testATrialQuestIsAnsweredThroughTheBridgeNotCheckedOff() {
+        let store = QuestStore(defaults: defaults)
+        let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let id = HabitTrialQuestId.make(trialId: "t1", day: "2026-09-30")
+        store.addCustom(Quest(id: id, kind: .custom, title: "Trial: x", taunt: "", target: "t", rewards: [],
+                              xp: HabitTrialQuestId.loggingXp, state: .active, dayKey: "2026-09-30",
+                              createdAtMs: nowMs, expiresAtMs: nil, goal: nil))
+        let bridge = HabitTrialQuestBridge.shared
+        let before = bridge.pendingAnswerQuestId
+        defer { bridge.pendingAnswerQuestId = before }
+        store.checkOff(id: id)
+        // A bare check-off carries no answer: the quest stays open and the bridge asks for one.
+        XCTAssertEqual(store.quests.first { $0.id == id }?.state, .active)
+        XCTAssertTrue(store.completions.isEmpty)
+        XCTAssertEqual(bridge.pendingAnswerQuestId, id)
+    }
+
     func testASystemQuestCannotBeCheckedOffOrRemovedThisWay() {
         let store = QuestStore(defaults: defaults)
         let system = Quest(kind: .side, title: "System", taunt: "", target: "8000 steps", rewards: [],

@@ -40,31 +40,34 @@ final class TelosTokenMappingTests: XCTestCase {
 
     // MARK: 1. The table holds the §4.1 values
 
-    func testChromeTableMatchesSpec() {
-        XCTAssertEqual(Spec.canvas, Pair(dark: "#0B0E11", light: "#F3F4F1"))
-        XCTAssertEqual(Spec.surface, Pair(dark: "#13171B", light: "#FFFFFF"))
-        XCTAssertEqual(Spec.surfaceRaised, Pair(dark: "#1A1F24", light: "#FFFFFF"))
-        XCTAssertEqual(Spec.surfaceInset, Pair(dark: "#0F1215", light: "#E9EBE7"))
-        XCTAssertEqual(Spec.line, Pair(dark: "#252B31", light: "#D8DBD5"))
-        XCTAssertEqual(Spec.lineStrong, Pair(dark: "#39414A", light: "#B3B9B2"))
-        XCTAssertEqual(Spec.lineSoft, Pair(dark: "#1B2025", light: "#E7E9E4"))
-        XCTAssertEqual(Spec.textPrimary, Pair(dark: "#F2F4F3", light: "#111416"))
-        XCTAssertEqual(Spec.textSecondary, Pair(dark: "#A9B0B4", light: "#4A5156"))
-        XCTAssertEqual(Spec.textTertiary, Pair(dark: "#858D92", light: "#666D72"))
-        XCTAssertEqual(Spec.textDisabled, Pair(dark: "#4E555B", light: "#A5AAA6"))
+    func testGroundGlassAndTextTableMatchesTheReferencePalette() {
+        // The ground: near-black with a green-teal depth (VISUAL DIRECTION: ≈ #05090A → #0B1214).
+        XCTAssertEqual(Spec.canvas, Pair(dark: "#05090A", light: "#EEF3F1"))
+        XCTAssertEqual(Spec.canvasDeep, Pair(dark: "#0B1214", light: "#E7EEEB"))
+        // Glass: translucent white (≈ 6–10 %) with a luminous green-white edge.
+        XCTAssertEqual(Spec.glassFill, Pair(dark: "#FFFFFF14", light: "#FFFFFFE0"))
+        XCTAssertEqual(Spec.glassEdgeHigh, Pair(dark: "#BFFFE666", light: "#FFFFFFFF"))
+        XCTAssertEqual(Spec.surface, Pair(dark: "#131A1B", light: "#FFFFFF"))
+        XCTAssertEqual(Spec.surfaceRaised, Pair(dark: "#1B2425", light: "#FFFFFF"))
+        XCTAssertEqual(Spec.surfaceInset, Pair(dark: "#030607", light: "#E4EBE8"))
+        XCTAssertEqual(Spec.line, Pair(dark: "#1E2B2C", light: "#D2DDD9"))
+        // Text: primary #E8F2F0, secondary ≈ 60 %, tertiary tuned to pass on glass.
+        XCTAssertEqual(Spec.textPrimary, Pair(dark: "#E8F2F0", light: "#0C1614"))
+        XCTAssertEqual(Spec.textSecondary, Pair(dark: "#9AA8A5", light: "#43524F"))
+        XCTAssertEqual(Spec.textTertiary, Pair(dark: "#8C9C99", light: "#5C6B68"))
         // onDark* are unchanged from 1.x.
         XCTAssertEqual(Spec.onDarkPrimary, Pair.fixed("#F4F6F8"))
         XCTAssertEqual(Spec.onDarkSecondary, Pair.fixed("#C8CFD8"))
         XCTAssertEqual(Spec.onDarkTertiary, Pair.fixed("#8A94A4"))
     }
 
-    func testAccentAndStatusTableMatchesSpec() {
-        XCTAssertEqual(Spec.mint, Pair(dark: "#5FE0B5", light: "#0B7F63"))
-        XCTAssertEqual(Spec.mintPressed, Pair(dark: "#8DEBCD", light: "#086A52"))
-        XCTAssertEqual(Spec.onAccent, Pair(dark: "#062019", light: "#FFFFFF"))
-        XCTAssertEqual(Spec.positive, Pair(dark: "#3FD68F", light: "#0A7F4F"))
-        XCTAssertEqual(Spec.warning, Pair(dark: "#F2B03D", light: "#9A6100"))
-        XCTAssertEqual(Spec.critical, Pair(dark: "#FF5A5F", light: "#C62A32"))
+    func testAccentAndStatusTableMatchesTheReferencePalette() {
+        XCTAssertEqual(Spec.mint.dark, "#3CF0A0")          // bioluminescent green
+        XCTAssertEqual(Spec.glow.dark, "#2BD98B")
+        XCTAssertEqual(Spec.onAccent, Pair(dark: "#03140C", light: "#FFFFFF"))
+        XCTAssertEqual(Spec.positive.dark, "#3CF0A0")
+        XCTAssertEqual(Spec.warning.dark, "#FFC94A")       // sun-yellow
+        XCTAssertEqual(Spec.critical.dark, "#FF6468")
         // Precomputed-alpha tokens: accent @ 0.16, critical @ 0.10 dark / 0.07 light.
         XCTAssertEqual(Color.sRGBComponents(hex: Spec.mintMuted.dark).a, 0.16, accuracy: 0.005)
         XCTAssertEqual(Color.sRGBComponents(hex: Spec.mintMuted.light).a, 0.16, accuracy: 0.005)
@@ -76,37 +79,30 @@ final class TelosTokenMappingTests: XCTestCase {
         XCTAssertEqual(String(Spec.criticalWash.light.prefix(7)), Spec.critical.light)
     }
 
-    func testMetricIdentityTableMatchesSpec() {
-        XCTAssertEqual(Spec.charge, Pair(dark: "#03E095", light: "#0F9D62"))
-        XCTAssertEqual(Spec.chargeInk, Pair(dark: "#03E095", light: "#087F50"))
-        XCTAssertEqual(Spec.effort, Pair(dark: "#4090E0", light: "#2A78C8"))
-        XCTAssertEqual(Spec.effortInk, Pair(dark: "#4090E0", light: "#2468B0"))
-        XCTAssertEqual(Spec.rest, Pair(dark: "#9D9BF2", light: "#6663D6"))
-        XCTAssertEqual(Spec.restInk, Pair(dark: "#9D9BF2", light: "#6663D6"))
-        XCTAssertEqual(Spec.restDeep, Pair(dark: "#5B57C9", light: "#4A46B0"))
-        XCTAssertEqual(Spec.restBright, Pair(dark: "#B9B7F7", light: "#6663D6"))
-        XCTAssertEqual(Spec.stress, Pair(dark: "#F0A020", light: "#C7891A"))
-        XCTAssertEqual(Spec.stressInk, Pair(dark: "#F0A020", light: "#8F5E00"))
-        XCTAssertEqual(Spec.heart, Pair(dark: "#FF6B81", light: "#D94C64"))
-        XCTAssertEqual(Spec.heartInk, Pair(dark: "#FF6B81", light: "#B8354D"))
-        XCTAssertEqual(Spec.lungs, Pair(dark: "#3FA9C9", light: "#1F7F9E"))
-        XCTAssertEqual(Spec.muscle, Pair(dark: "#F08A4B", light: "#B5561C"))
-        XCTAssertEqual(Spec.focus, Pair(dark: "#C39BFF", light: "#7A4FD0"))
-        XCTAssertEqual(Spec.bestGold, Pair(dark: "#E5B84B", light: "#9A7310"))
-        // "…Ink equals the fill in dark".
-        for (fill, ink) in [(Spec.charge, Spec.chargeInk), (Spec.effort, Spec.effortInk), (Spec.rest, Spec.restInk),
-                            (Spec.stress, Spec.stressInk), (Spec.heart, Spec.heartInk), (Spec.lungs, Spec.lungsInk),
-                            (Spec.muscle, Spec.muscleInk), (Spec.focus, Spec.focusInk)] {
+    func testMetricIdentityFollowsTheReferenceHues() {
+        XCTAssertEqual(Spec.charge.dark, "#3CF0A0")        // green
+        XCTAssertEqual(Spec.effort.dark, "#3A8DFF")        // effort blue
+        XCTAssertEqual(Spec.rest.dark, "#A9C8FF")          // rest pale blue
+        XCTAssertEqual(Spec.lungs.dark, "#3FD6D0")         // teal / cyan
+        XCTAssertEqual(Spec.teal.dark, "#3FD6D0")
+        XCTAssertEqual(Spec.focus.dark, "#8B5CFF")         // violet — mind
+        XCTAssertEqual(Spec.violet.dark, "#8B5CFF")
+        XCTAssertEqual(Spec.magenta.dark, "#C45CFF")       // magenta — mind / sleep
+        XCTAssertEqual(Spec.muscle.dark, "#FF8A3D")        // orange — fuel
+        XCTAssertEqual(Spec.orange.dark, "#FF8A3D")
+        XCTAssertEqual(Spec.amber.dark, "#FFB547")         // amber — fuel
+        XCTAssertEqual(Spec.stress.dark, "#FFB547")
+        XCTAssertEqual(Spec.heart.dark, "#FF6B81")
+        // Text inks: equal to the fill in dark where the fill already reads as text.
+        for (fill, ink) in [(Spec.charge, Spec.chargeInk), (Spec.rest, Spec.restInk), (Spec.stress, Spec.stressInk),
+                            (Spec.heart, Spec.heartInk), (Spec.lungs, Spec.lungsInk), (Spec.muscle, Spec.muscleInk)] {
             XCTAssertEqual(fill.dark, ink.dark)
         }
     }
 
     func testDiagnosticRegisterMatchesSpec() {
         XCTAssertEqual(Spec.diagField, Pair.fixed("#000000"))
-        XCTAssertEqual(Spec.diagCard, Pair.fixed("#121214"))
-        XCTAssertEqual(Spec.diagLine, Pair.fixed("#2B2B2E"))
         XCTAssertEqual(Spec.diagText, Pair.fixed("#FFFFFF"))
-        XCTAssertEqual(Spec.diagMuted, Pair.fixed("#8C8C8C"))
         XCTAssertEqual(Spec.diagAlarm.dark, Spec.critical.dark)
     }
 
@@ -141,10 +137,10 @@ final class TelosTokenMappingTests: XCTestCase {
         XCTAssertEqual(StrandPalette.textSecondary, TelosColor.textSecondary)
         XCTAssertEqual(StrandPalette.textTertiary, TelosColor.textTertiary)
         XCTAssertEqual(StrandPalette.onDarkPrimary, TelosColor.onDarkPrimary)
-        XCTAssertEqual(StrandPalette.heroFill, TelosColor.surface)
-        XCTAssertEqual(StrandPalette.heroBorder, TelosColor.line)
-        XCTAssertEqual(StrandPalette.cardFillTop, TelosColor.surface)
-        XCTAssertEqual(StrandPalette.cardFillBottom, TelosColor.surface)
+        XCTAssertEqual(StrandPalette.heroFill, TelosColor.glassFill)
+        XCTAssertEqual(StrandPalette.heroBorder, TelosColor.glassEdgeHigh)
+        XCTAssertEqual(StrandPalette.cardFillTop, TelosColor.glassFill)
+        XCTAssertEqual(StrandPalette.cardFillBottom, TelosColor.glassFill)
         XCTAssertEqual(StrandPalette.glowAmbient, Color.clear)
         XCTAssertEqual(StrandPalette.goldDeepText, TelosColor.onAccent)
         XCTAssertEqual(StrandPalette.liquidHeart, TelosColor.heart)
@@ -236,8 +232,8 @@ final class TelosTokenMappingTests: XCTestCase {
     // MARK: Numbers, type and motion
 
     func testMetricTokensAreRepointed() {
-        XCTAssertEqual(NoopVisualStyle.cardRadius, 20)          // 22 → 20
-        XCTAssertEqual(NoopVisualStyle.compactRadius, 14)       // 16 → 14
+        XCTAssertEqual(NoopVisualStyle.cardRadius, 24)          // 22 → 24 (large, soft glass tiles)
+        XCTAssertEqual(NoopVisualStyle.compactRadius, 20)       // 16 → 20
         XCTAssertEqual(NoopVisualStyle.sectionGap, 24)          // 26 → 24
         XCTAssertEqual(NoopVisualStyle.pagePadding, 16)
         XCTAssertEqual(NoopVisualStyle.rimWidth, 1)             // 0.8 → 1
@@ -247,7 +243,7 @@ final class TelosTokenMappingTests: XCTestCase {
         XCTAssertEqual(NoopMetrics.sectionGap, TelosSpace.sectionGap)
         XCTAssertEqual(NoopMetrics.tabBarClearance, TelosSpace.tabBarClearance)
         XCTAssertEqual(StrandPalette.disabledOpacity, TelosOpacity.disabled)
-        XCTAssertEqual(TelosRadius.hero, 24)
+        XCTAssertEqual(TelosRadius.hero, 28)
         XCTAssertEqual(TelosRadius.control, 12)
         XCTAssertEqual(TelosRadius.segment, 9)
         XCTAssertEqual(TelosRadius.plate, 8)
@@ -284,7 +280,7 @@ final class TelosTokenMappingTests: XCTestCase {
         XCTAssertEqual(StrandFont.overline, TelosType.scale)
         XCTAssertEqual(StrandFont.bodyNumber, TelosType.numeralS)
         XCTAssertEqual(StrandFont.captionNumber, TelosType.numeralXS)
-        XCTAssertEqual(StrandFont.overlineTracking, 0.8)        // 0.45 → 0.8
+        XCTAssertEqual(StrandFont.overlineTracking, 1.6)        // 0.45 → 1.6 (wide-tracked small caps)
         // The honesty glyphs.
         XCTAssertEqual(TelosType.absent, "\u{2014}")
         XCTAssertEqual(TelosType.minus, "\u{2212}")

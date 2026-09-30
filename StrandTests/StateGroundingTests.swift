@@ -62,8 +62,18 @@ final class StateGroundingTests: XCTestCase {
                                                stressIndex: 140),
             routines: "THEIR ROUTINES — hard constraints…",
             memory: "YOUR MEMORY FILE — notes you wrote…",
-            closing: CoachDayFrame.closingRule)
+            closing: CoachDayFrame.closingRule,
+            // The longest guidance line the week plan writes, as the controller wraps it.
+            weekPlan: "WEEK PLAN, TODAY (\(dayKey(now))): "
+                + "Move today's hard session — HRV below your range.")
         return CoachContextBudget.fit(blocks, budget: budget, reserved: reserved)
+    }
+
+    /// The week plan's line rides the lean grounding, next to the training state it bounds.
+    func testTheWeekPlanGuidanceRidesTheLeanGrounding() {
+        let text = grounding(budget: CoachRequestBudget.stateTile.tokens, reserved: 900, now: at(14, 30)).text
+        XCTAssertTrue(text.contains("WEEK PLAN, TODAY"), text)
+        XCTAssertTrue(text.contains("Move today's hard session"), text)
     }
 
     // MARK: - The lean grounding still carries the figures the prompt names

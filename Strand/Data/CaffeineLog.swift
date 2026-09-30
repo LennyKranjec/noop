@@ -195,10 +195,24 @@ public final class CaffeineLogStore: ObservableObject {
     /// itself. The Apple Health import writes from outside it, and two instances over one UserDefaults
     /// key would mean the card kept publishing its stale in-memory array until it was rebuilt — the
     /// imported intakes would be on disk and invisible. One instance, one source of truth.
-    public static let shared = CaffeineLogStore()
+    public static let shared: CaffeineLogStore = {
+        let store = CaffeineLogStore()
+        store.feedsDailySummary = true
+        return store
+    }()
 
-    /// Logged intakes, newest first. Persisted as JSON under one UserDefaults key.
-    @Published public private(set) var intakes: [CaffeineIntake] { didSet { save() } }
+    /// Logged intakes, newest first. Persisted as JSON under one UserDefaults key. HB (HEALTH_V2 §S1-A.8):
+    /// every change also refreshes the daily caffeine summary that outlives this 48-hour list.
+    @Published public private(set) var intakes: [CaffeineIntake] {
+        didSet {
+            save()
+            if feedsDailySummary { CaffeineDailySummary.intakesChanged(intakes) }
+        }
+    }
+
+    /// Only the process-wide store writes the daily summary: a test (or any other) instance over its own
+    /// UserDefaults suite must never write its intakes into the real metric series.
+    private var feedsDailySummary = false
 
     private let d: UserDefaults
     private let now: () -> Date

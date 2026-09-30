@@ -356,6 +356,10 @@ struct StrandiOSApp: App {
                 // instant that was missed by less than one ring window, and re-checks the auto-stop
                 // window of a ring that was still "on" when we were suspended.
                 model.wakeBuzz.reschedule()
+                // Strap cues: the minute tick cannot run while suspended, so evaluate on every resume (a timer
+                // that ended meanwhile is reported, the sitting-break window re-read). Idempotent; a tick
+                // already running is not doubled.
+                StrapCueEngine.shared.tick()
                 // #267: pull a reasonably fresh sync on open rather than waiting for the 900s periodic
                 // timer or an incidental reconnect. Floored at 90s and never clock/empty-streak-suppressed
                 // (BackfillPolicy.shouldRun's .foreground case), so this is a safe no-op on rapid re-opens.

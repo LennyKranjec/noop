@@ -6,14 +6,19 @@ import Foundation
 // THE RULES (DESIGN_V2 item 8 applied to the strap, plus the owner's Strap-cue brief):
 //   1. The motor is never asked for two patterns at once: a cue waits until the previous pattern has
 //      finished (`motorFreeAtMs`). Applies to every cue.
-//   2. REQUESTED cues (the wearer started a pacer / focus block / meditation) pass once the motor is free.
-//      Nothing else holds them — they are the feature being used.
-//   3. UNREQUESTED cues (sitting break, wind-down, screens off) are additionally held by:
-//        a. the "Wrist alerts" master switch (`notif.masterEnabled`), whose copy promises that off keeps
-//           the strap quiet "no matter what else is on";
+//   2. REQUESTED cues (the wearer started a pacer / focus block / meditation / a Lift rest timer) pass once
+//      the motor is free. Nothing else holds them — they are the feature being used — except that the Lift
+//      `restOver` cue still keeps the one-minute spacing (DESIGN_V2 decision 16).
+//   3. UNREQUESTED cues (sitting break, wind-down, screens off, reward, penalty) are additionally held by:
+//        a. the "Wrist alerts" master switch (`notif.masterEnabled`) — ONLY for the kinds whose
+//           `heldByWristAlertsMaster` is true (wind-down, screens off). Coordinator decision: the sitting-break
+//           nudge and the reward / penalty cues are governed by their own switches alone; the master stays
+//           in charge of the HR / strain wrist alerts and the evening cues;
 //        b. quiet hours (local clock window, may cross midnight);
 //        c. the daily budget (default 8 per local day, counting only cues that actually reached the
 //           wearer — a cue dropped on an unreachable strap interrupted nobody);
+//        e. the sleep window from the sleep anchor (the caller passes `inSleepWindow`);
+//        f. event dedupe: an event key already cued (a reward / penalty for one event id) is never cued again;
 //        d. spacing: never within `minSpacingSeconds` (60 s) of the previous cue of ANY kind.
 //      a–c HOLD (nothing will change in the next minute); d and rule 1 DEFER to a known instant.
 //
@@ -48,6 +53,10 @@ public struct StrapCueLedger: Equatable, Sendable, Codable {
 public enum StrapCueHold: String, Equatable, Sendable, Codable {
     /// The cue's own switch is off (decided by the caller from `StrapCueSettings.isEnabled`).
     case switchedOff
+    /// This event (`eventKey`) was already cued.
+    case duplicate
+    /// Inside the sleep window from the sleep anchor.
+    case sleepWindow
     case wristAlertsOff
     case quietHours
     case budgetSpent
@@ -55,6 +64,8 @@ public enum StrapCueHold: String, Equatable, Sendable, Codable {
     public var text: String {
         switch self {
         case .switchedOff: return "This cue is switched off."
+        case .duplicate: return "This event was already cued once."
+        case .sleepWindow: return "Sleep window."
         case .wristAlertsOff: return "Wrist alerts are off, so the strap stays quiet."
         case .quietHours: return "Quiet hours."
         case .budgetSpent: return "Today's cue budget is used up."
@@ -73,22 +84,35 @@ public enum StrapCueGate {
 
     /// Never two cues within this many seconds (unrequested cues only; see the file header).
     public static let minSpacingSeconds = 60
-    public static let maxFiredKeys = 32
+    /// Bounded so the ledger stays small; generous enough that one-per-event dedupe keys (a day of rewards
+    /// and penalties at most `budgetRange.upperBound`) and the evening keys survive several days.
+    public static let maxFiredKeys = 64
 
-    /// May `kind` buzz now?
+    /// May `kind` buzz now? `eventKey` (see `eventKey(_:eventId:)`) makes the cue once-per-event.
     public static func check(_ kind: StrapCueKind, ledger: StrapCueLedger, settings: StrapCueSettings,
-                             wristAlertsOn: Bool, nowMs: Int, tzOffsetSec: Int) -> StrapCueGateVerdict {
+                             wristAlertsOn: Bool, nowMs: Int, tzOffsetSec: Int,
+                             inSleepWindow: Bool = false, eventKey: String? = nil) -> StrapCueGateVerdict {
+        if let key = eventKey, hasFired(key, ledger: ledger) { return .hold(.duplicate) }
         let motorFree = ledger.motorFreeAtMs ?? Int.min
-        if kind.isRequested {
-            return nowMs < motorFree ? .deferUntil(ms: motorFree) : .allow
+        var earliest = motorFree
+        if kind.respectsSpacing, let last = ledger.lastCueAtMs {
+            earliest = max(earliest, last + minSpacingSeconds * 1000)
         }
-        if !wristAlertsOn { return .hold(.wristAlertsOff) }
+        if kind.isRequested {
+            return nowMs < earliest ? .deferUntil(ms: earliest) : .allow
+        }
+        if kind.heldByWristAlertsMaster && !wristAlertsOn { return .hold(.wristAlertsOff) }
+        if inSleepWindow { return .hold(.sleepWindow) }
         if inQuietHours(settings, nowSec: nowMs / 1000, tzOffsetSec: tzOffsetSec) { return .hold(.quietHours) }
         let today = rolled(ledger, nowMs: nowMs, tzOffsetSec: tzOffsetSec)
         if today.unrequestedToday >= settings.dailyBudget { return .hold(.budgetSpent) }
-        var earliest = motorFree
-        if let last = ledger.lastCueAtMs { earliest = max(earliest, last + minSpacingSeconds * 1000) }
         return nowMs < earliest ? .deferUntil(ms: earliest) : .allow
+    }
+
+    /// The once-per-event dedupe key for a cue fired for an app event (e.g. `reward:pr.bench.2026-09-30`).
+    /// Callers should make `eventId` unique per event, not per kind of event.
+    public static func eventKey(_ kind: StrapCueKind, eventId: String) -> String {
+        "event.\(kind.rawValue):\(eventId)"
     }
 
     /// The ledger after a cue of `kind` REACHED the wearer (strap write issued, or the phone fallback

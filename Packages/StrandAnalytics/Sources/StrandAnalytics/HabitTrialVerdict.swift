@@ -149,7 +149,8 @@ public enum HabitTrialCopy {
         }
     }
 
-    static func bare(_ value: Double, outcome: HabitOutcome) -> String {
+    /// A signed number without its unit ("+4", "−12").
+    public static func bare(_ value: Double, outcome: HabitOutcome) -> String {
         let v = outcome.display(value)
         let digits = (outcome == .nightRhr || outcome == .sleepEfficiency) ? 1 : 0
         let magnitude = format(abs(v), digits: digits)
@@ -158,7 +159,7 @@ public enum HabitTrialCopy {
         return magnitude
     }
 
-    static func format(_ v: Double, digits: Int) -> String {
+    public static func format(_ v: Double, digits: Int) -> String {
         String(format: digits == 0 ? "%.0f" : "%.1f", v)
     }
 }

@@ -135,7 +135,10 @@ enum QuestPenaltyAssessor {
         let row = repo.days.first { $0.day == today }
         let charge = await repo.whoopCloudDay(today)?.recovery ?? row?.recovery
         let band = await repo.todayEffortTarget()?.band
-        return QuestDebtContext(today: today, charge: charge, effortBand21: band)
+        // HD: whether each missed day's training was owed, as the week plan decided that morning. The plan
+        // itself is refreshed by `HealthV2Refresh` (not here), so this only reads its archive.
+        return QuestDebtContext(today: today, charge: charge, effortBand21: band,
+                                trainingChargeableByDay: WeekPlanSource.shared.trainingChargeableByDay)
     }
 
     /// The make-up as a quest on the strip: active, closing on its own goal like any other, due by the

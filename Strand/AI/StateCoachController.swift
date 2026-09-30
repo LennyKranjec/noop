@@ -369,7 +369,8 @@ final class StateCoachController: ObservableObject {
                                                stressIndex: await coach.stressIndexToday(now: now)),
             routines: CoachRoutines.promptSection(),
             memory: CoachMemory.shared.promptSection(),
-            closing: CoachDayFrame.closingRule)
+            closing: CoachDayFrame.closingRule,
+            weekPlan: WeekPlanSource.shared.guidance(for: day).map { "WEEK PLAN, TODAY (\($0.day)): " + $0.line })
         // Measured rather than guessed: a budget that under-reserves the asking overruns by exactly its own
         // error, which is how a request sized for 8,000 came to ask for 8,646.
         let reserved = coach.reservedTokens(framing: framing, question: question, now: now)

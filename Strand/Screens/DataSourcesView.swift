@@ -25,6 +25,9 @@ struct DataSourcesView: View {
     @State private var liftingImporting = false
     @State private var liftingSummary: String?
     @State private var liftingFailed = false
+    /// Telos Lift (DESIGN_V2 decision 16): the Alphaprog PLAN import's result line.
+    @State private var liftPlanSummary: String?
+    @State private var liftPlanFailed = false
     // Activity-file (GPX / TCX / FIT) import state — same lightweight, self-contained pattern: parse the
     // file, upsert one workout row under the "activity-file" source, and persist optional measured
     // summaries like file steps under that source, refresh. No HR Effort is touched.
@@ -279,6 +282,18 @@ struct DataSourcesView: View {
                 Text(s).font(StrandFont.subhead)
                     .foregroundStyle(liftingFailed ? StrandPalette.statusWarning : StrandPalette.statusPositive)
             }
+            // TELOS LIFT: the Alphaprog PLAN export (programs → day templates → exercises) next to the history
+            // import, because it is the same app's other file. It fills the in-app logger's programs; it writes
+            // nothing to the store (the plan is not training that happened).
+            Button { presentImporter(.alphaprogPlan) } label: {
+                Label("Import training plan from Alphaprog…", systemImage: "list.bullet.clipboard")
+            }
+            .buttonStyle(NoopButtonStyle(.secondary))
+            .disabled(model.hasActiveImport || liftingImporting)
+            if let s = liftPlanSummary {
+                Text(s).font(StrandFont.subhead)
+                    .foregroundStyle(liftPlanFailed ? StrandPalette.statusWarning : StrandPalette.statusPositive)
+            }
         }
     }
 
@@ -423,6 +438,8 @@ struct DataSourcesView: View {
             importLifting(url: url)
         case .alphaprog:
             importLifting(url: url, forceAlphaprog: true)
+        case .alphaprogPlan:
+            importAlphaprogPlan(url: url)
         case .activityFile:
             importActivityFile(url: url)
         case .wearable:
@@ -650,7 +667,13 @@ struct DataSourcesView: View {
                     liftingImporting = false
                     return
                 }
-                let rows = result.sessions.map { s in
+                // TELOS LIFT DEDUPE (decision 16): a session the wearer already logged in the in-app logger is
+                // skipped here — its workout row, its sets and its muscle volume — so nothing counts twice. The
+                // rule is `LiftDedupe.isSameSession` (± 30 min and the same template or exercises); the logged
+                // session wins because it carries warm-up flags, set times and rest taken.
+                let dedupe = await LiftImportDedupe.filter(result.sessions, store: store)
+                let sessionsToWrite = dedupe.kept
+                let rows = sessionsToWrite.map { s in
                     WorkoutRow(
                         startTs: Int(s.start.timeIntervalSince1970),
                         endTs: Int(s.end.timeIntervalSince1970),
@@ -675,11 +698,11 @@ struct DataSourcesView: View {
                 // Best-effort like the muscle rows below it: a session's totals and its muscle split are
                 // the figures the rest of the app depends on, and a failure to store the per-set detail
                 // must not lose the import that produced it.
-                let setsWritten = (try? await ImportedLiftSets.write(result.sessions, store: store)) ?? 0
+                let setsWritten = (try? await ImportedLiftSets.write(sessionsToWrite, store: store)) ?? 0
                 // THE PER-MUSCLE VOLUME, on the generic series seam the muscle view reads. Written
                 // alongside the workouts rather than derived later: the attribution needs the exercise
                 // NAMES, and the stored workout row keeps only the session's totals.
-                let muscleRows = LiftingImporter.muscleSeriesRows(result.sessions)
+                let muscleRows = LiftingImporter.muscleSeriesRows(sessionsToWrite)
                 if !muscleRows.isEmpty {
                     _ = try? await store.upsertMetricSeries(
                         muscleRows.map { MetricPoint(day: $0.day, key: $0.key, value: $0.value) },
@@ -695,8 +718,12 @@ struct DataSourcesView: View {
                             deviceId: LiftingImporter.sourceId)
                     }
                 }
+                // Re-derive the per-day strength / muscle series from the stored sets when Telos-logged sessions
+                // exist, so the file's own strength index (which cannot know about them) does not overwrite
+                // their contribution. A no-op for a wearer who has never used the logger.
+                await LiftDerivedSeries.rebuild(store: store)
                 await repo.refresh()
-                let totalVolume = result.sessions.reduce(0.0) { $0 + $1.volumeLoadKg }
+                let totalVolume = sessionsToWrite.reduce(0.0) { $0 + $1.volumeLoadKg }
                 // Whole-phrase variants per count so translators never see a stitched plural.
                 var msg = result.sessionCount == 1
                     ? String(localized: "Imported 1 workout")
@@ -710,6 +737,9 @@ struct DataSourcesView: View {
                     if lo != hi { msg += " · \(lo)-\(hi)" }
                 }
                 if result.skipped > 0 { msg += " · " + String(localized: "\(result.skipped) skipped") }
+                if dedupe.skipped > 0 {
+                    msg += " · " + String(localized: "\(dedupe.skipped) already logged in Telos Lift — not counted twice")
+                }
                 // Said out loud, because it is what decides whether the Progression section can read this
                 // import at all. Zero is the honest report for a format that carries no per-set detail.
                 if setsWritten > 0 {
@@ -730,6 +760,48 @@ struct DataSourcesView: View {
                 logImport("Lifting log failed: \(error.localizedDescription)")
             }
             liftingImporting = false
+        }
+    }
+
+    /// Telos Lift: import the Alphaprog PLAN export into the logger's programs (`LiftProgramStore`).
+    ///
+    /// Same read path as the history import — `ImportFileRead` (materialises an iCloud placeholder) and
+    /// `ImportText.decode` inside the parser (BOM, CRLF) — because the plan file is written by the same exporter
+    /// with the same byte shape. A program already in the app with the same name is REPLACED by the file's
+    /// version (template ids and per-exercise rest overrides are kept, see `LiftLibrary.merge`).
+    private func importAlphaprogPlan(url: URL) {
+        liftPlanSummary = nil
+        liftPlanFailed = false
+        Task {
+            let scoped = url.startAccessingSecurityScopedResource()
+            defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+            do {
+                let read = try await ImportFileRead.read(url)
+                guard !read.data.isEmpty else {
+                    liftPlanSummary = String(localized: "That file is empty or not downloaded yet — open it once in Files, then try again.")
+                    liftPlanFailed = true
+                    return
+                }
+                guard let outcome = LiftProgramStore.shared.importAlphaprogPlan(data: read.data) else {
+                    liftPlanSummary = String(localized: "Couldn't read that file as text — it isn't UTF-8, UTF-16 or Windows-1252.")
+                    liftPlanFailed = true
+                    return
+                }
+                guard outcome.programs > 0 else {
+                    let d = outcome.diagnostics
+                    liftPlanSummary = String(localized: "No training plan found in that file.")
+                        + " · " + String(localized: "\(d.programHeaders) programs, \(d.dayHeaders) days, \(d.exerciseRows) exercises recognised")
+                    liftPlanFailed = true
+                    logImport("Lift plan: nothing recognised (\(read.logDetail))")
+                    return
+                }
+                liftPlanSummary = String(localized: "Imported \(outcome.programs) programs · \(outcome.days) days · \(outcome.exercises) exercises")
+                liftPlanFailed = false
+                logImport("Lift plan: \(outcome.programs) programs, \(outcome.days) days, \(outcome.exercises) exercises")
+            } catch {
+                liftPlanSummary = String(localized: "Import failed: \(error.localizedDescription)")
+                liftPlanFailed = true
+            }
         }
     }
 
@@ -1016,6 +1088,8 @@ struct DataSourcesView: View {
         /// target (rather than sniffing the one button's file) is what lets the wearer say which app
         /// they exported from, so a file the sniff would misread cannot land in the wrong parser.
         case alphaprog
+        /// Telos Lift: the Alphaprog PLAN export (not training history).
+        case alphaprogPlan
         case activityFile
         case wearable
 
@@ -1063,7 +1137,7 @@ struct DataSourcesView: View {
                 // Hevy exports .csv, Liftosaur exports .json — accept both (plus plain text, since some
                 // share sheets type a .csv as text/plain). The importer sniffs the actual format.
                 return [.commaSeparatedText, .json, .plainText, .text, .data]
-            case .alphaprog:
+            case .alphaprog, .alphaprogPlan:
                 // A semicolon-separated .csv, which some share sheets type as plain text.
                 return [.commaSeparatedText, .plainText, .text, .data]
             case .activityFile:

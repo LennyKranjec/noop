@@ -72,7 +72,7 @@ public extension Color {
 
 public enum StrandPalette {
 
-    // MARK: Surfaces — V2: canvas < surface < surfaceRaised, flat, separated by 1 pt lines
+    // MARK: Surfaces — V2: the near-black bioluminescent ground; opaque surfaces for chrome (cards are glass)
     public static let surfaceBase    = TelosColor.canvas
     public static let surfaceRaised  = TelosColor.surface
     public static let surfaceOverlay = TelosColor.surfaceRaised
@@ -106,10 +106,10 @@ public enum StrandPalette {
     // (which flip) — NOT onDark*, which stays fixed for the genuinely-always-dark SKY backdrop
     // (ScreenScaffold's over-sky title). 8-digit hex = RRGGBBAA (alpha last).
     //
-    // V2: the hero is a card like any other — flat `surface` + 1 pt `line` (card transparency is applied
-    // by the hero's own container from `\.telosCardOpacity`).
-    public static let heroFill   = TelosColor.surface
-    public static let heroBorder = TelosColor.line
+    // V2: the hero is a glass tile like any other — the translucent `glassFill` with the luminous edge's
+    // bright colour as its border (card transparency is applied from `\.telosCardOpacity`).
+    public static let heroFill   = TelosColor.glassFill
+    public static let heroBorder = TelosColor.glassEdgeHigh
 
     // MARK: Glow — RETIRED in V2 (no additive bloom anywhere). Resolves to clear so old call sites
     // draw nothing.
@@ -324,9 +324,9 @@ public enum StrandPalette {
     /// Star tint for the scenic starfield (very faint on light; the hero suppresses stars there).
     public static let scenicStar       = Color(light: "#D8CDB6", dark: "#C8CFD8")
 
-    /// Frosted-card fill endpoints — V2: both are the flat `surface` (the gradient collapses).
-    public static let cardFillTop      = TelosColor.surface
-    public static let cardFillBottom   = TelosColor.surface
+    /// Frosted-card fill endpoints — V2: both are the translucent glass fill (the gradient collapses).
+    public static let cardFillTop      = TelosColor.glassFill
+    public static let cardFillBottom   = TelosColor.glassFill
 
     // MARK: - Titanium & Gold core tokens (NEW)
     //

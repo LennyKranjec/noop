@@ -7,8 +7,9 @@ import SwiftUI
 // minimum height; one attribute is a compact tile (`TelosMetricTile`), never a full-width card.
 //
 // ELEVATION: everything in a scroll view is `flat` — cards, tiles, rows, chips and charts cast NO
-// shadow in either scheme (separation comes from the fill step canvas < surface < surfaceRaised plus a
-// 1 pt line). At most three shadowed views on screen, never one inside another (§2.1 rule 4).
+// shadow in either scheme (separation comes from the translucent glass fill over the dark ground plus
+// the luminous 1 pt glass edge). At most three shadowed views on screen, never one inside another
+// (§2.1 rule 4); the glowing pill's single small shadow counts toward that.
 
 // MARK: - Spacing (4-pt grid)
 
@@ -48,12 +49,12 @@ public enum TelosSpace {
     public static let hitTarget: CGFloat = 44
 }
 
-// MARK: - Corner radii (all `.continuous`)
+// MARK: - Corner radii (all `.continuous`) — large and soft for the glass tiles (VISUAL DIRECTION: ~22–26)
 
 public enum TelosRadius {
-    public static let hero: CGFloat = 24
-    public static let card: CGFloat = 20
-    public static let tile: CGFloat = 14
+    public static let hero: CGFloat = 28
+    public static let card: CGFloat = 24
+    public static let tile: CGFloat = 20
     public static let control: CGFloat = 12
     public static let segment: CGFloat = 9
     public static let plate: CGFloat = 8
