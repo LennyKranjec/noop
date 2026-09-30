@@ -18,6 +18,50 @@ pentagon radar. *Package* means one implementation agent's unit of work (§8).
 ---
 
 
+> ## VISUAL DIRECTION — KEY REFERENCE (owner, binding; supersedes the colour/mood parts of §1 and §4)
+>
+> Reference images (open them before designing anything): `docs/design-ref/telos-v2-today.jpg` — the Today
+> ("Home") screen to recreate **one to one** (adapting only content), and `docs/design-ref/telos-v2-screens.png`
+> — the family of screens (Biometrics, Sleep & Recovery, Nervous System, Training Coach, Metabolic Engine,
+> Mind & Focus, Environment) showing how every tab should look.
+>
+> **Mood:** organic, bioluminescent, alien. Dark near-black backgrounds with subtle depth; shining lights;
+> dotted/particle fields; glowing organic blobs; thin luminous rings and scales; abstract, technological,
+> futuristic — "as if the app served to breed an alien-like human". Wordmark "T E L O S" (wide tracking) with
+> the subline "BIOLOGICAL OPTIMIZATION ENGINE".
+>
+> **Palette (from the references):** background ≈ #05090A → #0B1214 with a faint green-teal vignette;
+> primary bioluminescent green ≈ #3CF0A0 (glow #2BD98B); teal/cyan ≈ #3FD6D0; effort blue ≈ #3A8DFF;
+> rest pale blue ≈ #A9C8FF; violet/magenta for mind/sleep ≈ #8B5CFF / #C45CFF; warm amber/orange for
+> metabolic/fuel ≈ #FF8A3D / #FFB547; warning sun-yellow ≈ #FFC94A. Text: primary #E8F2F0, secondary ≈ 60 %.
+> Contrast rules from §2 still apply — tune values so body text passes 4.5:1.
+>
+> **Tiles:** "futuristic transparent glass": dark translucent fill (≈ 6–10 % white over the background),
+> a 1 pt luminous gradient hairline border (brighter top-left), large radius (~22–26 pt), a faint inner
+> glow at the top edge, generous dark negative space. Metric labels in small caps with wide tracking; big
+> numbers light/regular weight; thin icon glyphs in the accent colour.
+>
+> **Today / Home layout (recreate 1:1):** wordmark header with a small ring button at top right; LEVEL block
+> left (big number, tier word e.g. "SUPERHUMAN" in green caps, "↑ +24 pts" delta, "◇ × 1.00" multiplier);
+> centre the glowing organic 3-D blob of dotted particles with thin orbit ellipses and two small orbiting
+> glowing dots; right a thin progress ring with a percentage and a status word ("87 % OPTIMAL"); a pill row
+> "☼ Today · date | temperature | humidity"; a glowing pill for the window advice ("Open now · shut 10:35 ›")
+> with dotted light trails; a glass panel with three large thin rings REST / CHARGE / EFFORT (values inside,
+> label below, a small glyph and a secondary line); a glass strip of three compact metrics (Body temp · HRV ·
+> UV index); a "TODAY'S MISSION" glass card with title, subtitle and a round chevron button; a floating glass
+> tab bar with a glowing selected pill: Home · Biometrics · Focus · System · More. Content adapts to the
+> app's real data and honesty rules (e.g. "—" plus reason when absent; the level stays unbounded; confidence
+> tags where a value is provisional); every existing Today feature must still be reachable below this hero
+> (State tile, workouts today, quests + penalties, sleep panel promotion in the evening, etc.).
+>
+> **Performance — how to get this look cheaply (binding, the owner reports lag):** "glass" is faux-glass
+> (translucent fill + gradient stroke), NOT `.ultraThinMaterial`/live blur behind scrolling content; glows
+> are pre-composited gradients/radial fills or a single `.shadow` on a small static element, never stacked
+> blurred shadows per card; particle fields and the blob are drawn with `Canvas` into a cached layer
+> (`drawingGroup`) and animate only while visible, at ≤30 fps, pausing offscreen and under Reduce Motion /
+> Low Power (a still frame then); rings animate only on value change. If a flourish costs frames on an
+> iPhone 12 Pro, simplify it — keep the look, drop the cost.
+>
 > ## COORDINATOR DECISIONS — binding, they override anything below that disagrees
 >
 > Recorded by the coordinator on behalf of the owner, who asked for full autonomy. Every package must
