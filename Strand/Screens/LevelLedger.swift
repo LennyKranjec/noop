@@ -93,7 +93,13 @@ final class LevelLedger: @unchecked Sendable {
     /// `sleepDurationRatio` and the redefined `sleepRegularityMin` — then the ledger is emptied and stamped
     /// in one save) and every day is walked again. No user data is touched: only the derived ledger and
     /// the derived baselines. From epoch 4 on, a committed day never changes again.
-    static let currentEpoch = 4
+    ///
+    /// 5 = THE PRE-2.0 SLEEP RECIPE RESTORED (owner, 2026-09-30: epoch 4's sleep rebuild flattened the level —
+    /// "before, my best days also had the best scores"). Sleep is deep + REM 0.60, night HRV 0.25 and the
+    /// night-to-night bed/wake drift 0.15 again (7-night means). What stays from epoch 4 is only what the
+    /// owner asked for: no ceiling anywhere, focus = daytime calm, and meditation only as a deduction in its
+    /// era. The whole history is walked again once, through the same path as epoch 4.
+    static let currentEpoch = 5
 
     private struct Stored: Codable {
         var entries: [String: FrozenLevel]

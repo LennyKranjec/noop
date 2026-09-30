@@ -73,8 +73,31 @@ final class ProjectionSource: ObservableObject {
         plans[m.id] ?? .abstained("No week plan yet")
     }
 
-    /// The newest weekly value of a metric.
-    func current(_ m: ProjectionMetricID) -> WeeklyValue? { weekly[m.id]?.last }
+    /// The metric's value NOW. For the Level and its parts that is the figure the rest of the app shows —
+    /// the Level strip, Home and the widgets all read `LevelBarModel.shared.trend.now` — so Look ahead and
+    /// Goals can never show a different "current" Level (owner report, 2026-09-30). Every other metric, and
+    /// the Level before the model has loaded, uses its newest weekly value. The projection itself still
+    /// runs on weekly values; only the "now" figure is shared.
+    func current(_ m: ProjectionMetricID) -> WeeklyValue? { liveLevelValue(m) ?? weekly[m.id]?.last }
+
+    /// Whether `current(m)` is the app-wide live Level figure (label it "now") rather than a week's value.
+    func currentIsLive(_ m: ProjectionMetricID) -> Bool { liveLevelValue(m) != nil }
+
+    private func liveLevelValue(_ m: ProjectionMetricID) -> WeeklyValue? {
+        guard let now = LevelBarModel.shared.trend?.now else { return nil }
+        let value: Double?
+        switch m.kind {
+        case .level:
+            value = now.level
+        case .levelPart:
+            value = now.components.first { $0.part.rawValue == m.qualifier }?.score
+        default:
+            return nil
+        }
+        guard let v = value, v.isFinite else { return nil }
+        let today = Repository.localDayKey(Date())
+        return WeeklyValue(weekStart: ProjectionEngine.monday(of: today) ?? today, value: v, readings: 1)
+    }
 
     /// The Level breakdown's compact line: "In 8 weeks: projection …" or the abstention reason.
     /// Hand-off: the design package shows it inside the Level breakdown.
@@ -89,7 +112,7 @@ final class ProjectionSource: ObservableObject {
         if goal.targetDate < today, let wk = ProjectionEngine.monday(of: goal.targetDate) {
             final = series.first { $0.weekStart == wk }?.value
         }
-        return GoalFeasibility.assess(goal: goal, current: series.last,
+        return GoalFeasibility.assess(goal: goal, current: current(goal.metric) ?? series.last,
                                       trend: trends[goal.metric.id], plausible: rate, today: today,
                                       finalValue: final)
     }

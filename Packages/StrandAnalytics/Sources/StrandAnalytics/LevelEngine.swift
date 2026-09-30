@@ -21,11 +21,12 @@ import Foundation
 // scored input is something the strap, the WHOOP data or the workout log carried in January as it does
 // now, so a day in January and a day today are scored the same way and can be compared:
 //
-//   · SLEEP  (30 %) — duration against need (0.50: the 7-night mean of asleep ÷ need), wake-time
-//                     regularity (0.30: circular SD of wake times over 14 nights, `SleepRegularity`,
-//                     lower is better) and deep + REM minutes (0.20, 7-night mean). HRV is NOT here any
-//                     more: it was counted twice (sleep and heart, ≈ 19 % of the level together) and now
-//                     lives in HEART only.
+//   · SLEEP  (30 %) — deep + REM minutes (0.60), night HRV (0.25), bedtime/wake regularity (0.15:
+//                     the night-to-night drift, lower is better). 7-night means. EPOCH 5 RESTORED THIS:
+//                     epoch 4 had swapped in duration-vs-need and a 14-night wake SD, which the owner
+//                     found flattened the level ("my best days had the best scores; now everything is
+//                     flattened out"). Only the owner's two decisions stay: no ceiling, and meditation
+//                     only as a deduction.
 //   · MUSCLE (24 %) — strength (0.60: the estimated-1RM index) and chronic training load (0.40).
 //   · HEART  (23 %) — HRV (0.5) and resting HR (0.5, lower is better). 7-day means.
 //   · LUNGS  (12 %) — VO₂max (0.75) and respiratory rate (0.25, lower is better, 7-day mean).
@@ -285,7 +286,7 @@ public enum LevelEngine {
     public static let rollingMinDays = 3
 
     /// The shares inside each part. HRV is in exactly one of them (heart); focus is daytime calm alone.
-    public static let sleepShares = (duration: 0.50, regularity: 0.30, restorative: 0.20)
+    public static let sleepShares = (restorative: 0.60, hrv: 0.25, regularity: 0.15)
     public static let heartShares = (hrv: 0.5, rhr: 0.5)
     public static let lungsShares = (vo2max: 0.75, respRate: 0.25)
     public static let muscleShares = (strength: 0.60, load: 0.40)
@@ -322,9 +323,9 @@ public enum LevelEngine {
 
     public static func sleepSubScores(_ i: LevelInputs, _ b: [LevelMetric: Baseline]) -> [(LevelDriver, Double?, Double)] {
         [
-            (.sleepDuration, scored(i.sleepDurationRatio, .sleepDurationRatio, b, higherIsBetter: true), sleepShares.duration),
-            (.sleepRegularity, scored(i.regularityMin, .sleepRegularityMin, b, higherIsBetter: false), sleepShares.regularity),
             (.restorativeSleep, scored(i.restorativeMin, .restorativeMin, b, higherIsBetter: true), sleepShares.restorative),
+            (.sleepHrv, scored(i.sleepHrv, .hrv, b, higherIsBetter: true), sleepShares.hrv),
+            (.sleepRegularity, scored(i.regularityMin, .sleepRegularityMin, b, higherIsBetter: false), sleepShares.regularity),
         ]
     }
 

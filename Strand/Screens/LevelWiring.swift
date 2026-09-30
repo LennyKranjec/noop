@@ -118,11 +118,10 @@ enum LevelWiring {
     /// (`SleepRegularity.wakeSdMin`, the one canonical regularity), nil with fewer than 7. Already a
     /// window, so it is NOT averaged again.
     static func regularity(_ key: String, _ series: LevelSeries, _ calendar: Calendar) -> Double? {
-        let nights = keysBack(key, SleepRegularity.windowNights, calendar).compactMap { k -> SleepTimingNight? in
-            guard let t = series.sleepTimings[k] else { return nil }
-            return SleepTimingNight(wakeDay: k, onsetMin: t.onsetMinute, wakeMin: t.wakeMinute)
-        }
-        return SleepRegularity.wakeSdMin(nights)
+        guard let tonight = series.sleepTimings[key], let prev = shift(key, -1, calendar),
+              let lastNight = series.sleepTimings[prev] else { return nil }
+        return (Streaks.clockDistance(tonight.onsetMinute, lastNight.onsetMinute)
+                + Streaks.clockDistance(tonight.wakeMinute, lastNight.wakeMinute)) / 2
     }
 
     /// The need nights are measured against (see `LevelSeries.sleepNeedHours`), or nil before any.
@@ -224,12 +223,10 @@ enum LevelWiring {
     ) -> LevelInputs {
         // The seven-day window, built once and read by every rolling metric.
         let window = keysBack(asOf, LevelEngine.rollingDays, calendar)
-        let need = sleepNeedHours(series)
         return LevelInputs(
             restorativeMin: rolling(window: window) { byDay[$0].flatMap(restorative) },
             sleepHrv: rolling(window: window) { byDay[$0]?.avgHrv },
-            regularityMin: regularity(asOf, series, calendar),
-            sleepDurationRatio: rolling(window: window) { byDay[$0].flatMap { durationRatio($0, needHours: need) } },
+            regularityMin: rolling(window: window) { regularity($0, series, calendar) },
             hrv: rolling(window: window) { byDay[$0]?.avgHrv },
             rhr: rolling(window: window) { byDay[$0]?.restingHr.map(Double.init) },
             vo2max: series.vo2max.last { $0.day <= asOf }?.value,
@@ -250,14 +247,10 @@ enum LevelWiring {
     ) -> [LevelMetric: [Double]] {
         let byDay = byDay(days)
         let keys = days.map(\.day)
-        let need = sleepNeedHours(series)
         func each(_ f: (String) -> Double?) -> [Double] { keys.compactMap(f) }
         return [
             .restorativeMin: each { k in rolling(k, calendar) { byDay[$0].flatMap(restorative) } },
-            .sleepRegularityMin: each { regularity($0, series, calendar) },
-            .sleepDurationRatio: each { k in
-                rolling(k, calendar) { byDay[$0].flatMap { durationRatio($0, needHours: need) } }
-            },
+            .sleepRegularityMin: each { k in rolling(k, calendar) { regularity($0, series, calendar) } },
             .hrv: each { k in rolling(k, calendar) { byDay[$0]?.avgHrv } },
             .rhr: each { k in rolling(k, calendar) { byDay[$0]?.restingHr.map(Double.init) } },
             .vo2max: series.vo2max.map(\.value),

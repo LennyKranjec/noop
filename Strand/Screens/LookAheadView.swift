@@ -178,7 +178,7 @@ struct LookAheadRow: View {
                                         .foregroundStyle(TelosColor.textSecondary)
                                 }
                             }
-                            Text(verbatim: "WEEK OF \(c.weekStart)")
+                            Text(verbatim: source.currentIsLive(metric) ? "NOW" : "WEEK OF \(c.weekStart)")
                                 .font(TelosType.scaleNumber)
                                 .foregroundStyle(TelosColor.textTertiary)
                         } else {

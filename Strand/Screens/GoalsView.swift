@@ -384,7 +384,8 @@ struct GoalEditorSheet: View {
                 }
                 .disabled(existing != nil)
                 if let c = source.current(metric) {
-                    Text("Now: " + metric.formatWithUnit(c.value) + " (week of " + c.weekStart + ")")
+                    Text("Now: " + metric.formatWithUnit(c.value)
+                         + (source.currentIsLive(metric) ? "" : " (week of " + c.weekStart + ")"))
                         .font(TelosType.footnote)
                         .foregroundStyle(TelosColor.textSecondary)
                 } else {

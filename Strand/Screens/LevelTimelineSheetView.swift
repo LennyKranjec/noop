@@ -257,6 +257,12 @@ struct LevelTimelineSheetView: View {
                         .font(TelosType.caption)
                         .foregroundStyle(TelosColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
+                    if item == .strength || item == .trainingLoad {
+                        Text(model.lastLiftingDataDay.map { String(localized: "Newest lifting data: \($0)") }
+                             ?? String(localized: "No lifting data found at all"))
+                            .font(TelosType.caption)
+                            .foregroundStyle(TelosColor.textTertiary)
+                    }
                 }
             }
         }

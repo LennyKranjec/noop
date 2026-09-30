@@ -77,9 +77,8 @@ public struct Baseline: Equatable, Sendable {
 public enum LevelMetric: String, CaseIterable, Sendable, Codable {
     /// Deep + REM minutes a night (7-night mean).
     case restorativeMin
-    /// Wake-time regularity: circular SD of wake times over 14 nights, in minutes (lower is better).
-    /// Epoch 4 (HEALTH_V2 H6): this was the night-to-night drift of bed and wake times; the stored key is
-    /// kept and the epoch's re-freeze derives its scale again from the new definition.
+    /// How far bedtime and wake time moved against the night before, in minutes (7-night mean, lower is
+    /// better). Epoch 4 briefly redefined it as a 14-night wake SD; epoch 5 restored this definition.
     case sleepRegularityMin
     /// Sleep duration against need: the 7-night mean of asleep ÷ need (epoch 4). Higher is better, and
     /// NOT capped — see `LevelEngine`'s header.
@@ -120,7 +119,7 @@ public enum LevelBaselines {
     /// is deep enough, and frozen then.
     public static let table: [LevelMetric: Baseline] = [
         .restorativeMin: entry(mean: 170, sd: 25),
-        .sleepRegularityMin: entry(mean: 40, sd: 15),
+        .sleepRegularityMin: entry(mean: 45, sd: 15),
         // HEALTH_V2 H6: a week at 95 % of need, ± 8 %.
         .sleepDurationRatio: entry(mean: 0.95, sd: 0.08),
         .hrv: entry(mean: 50, sd: 8),

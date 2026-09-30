@@ -3,7 +3,7 @@ import StrandAnalytics
 import WhoopStore
 @testable import Strand
 
-/// The owner's 2026-09-29 recipe, through the wiring (epoch 4):
+/// The owner's 2026-09-29 meditation rules, through the wiring (epoch 5 keeps them):
 ///
 ///   * a January-like day — before any meditation was ever logged — scores IDENTICALLY whether or not the
 ///     wearer starts meditating later, so the history is comparable;
@@ -131,21 +131,21 @@ final class LevelMeditationEraTests: XCTestCase {
 
     // MARK: - The recompute
 
-    func testTheEpochIsFourAndALedgerFromEpochThreeIsEmptiedOnceThenHolds() throws {
-        XCTAssertEqual(LevelLedger.currentEpoch, 4)
+    func testTheEpochIsFiveAndALedgerFromEpochFourIsEmptiedOnceThenHolds() throws {
+        XCTAssertEqual(LevelLedger.currentEpoch, 5)
         let ledger = LevelLedger(fileURL: nil)
         let written = FrozenLevel(
             day: "2026-09-16",
             breakdown: LevelBreakdown(components: [LevelComponent(part: .sleep, score: 60, effectiveWeight: 1)],
                                       raw: 60, stepPenalty: 1, level: 60, coverage: 1),
             drivers: [:])
-        ledger.resetAll(epoch: 3)
+        ledger.resetAll(epoch: 4)
         XCTAssertTrue(ledger.write(written))
         var refrozen = 0
         XCTAssertTrue(ledger.adoptCurrentEpochIfNeeded(rescoreDone: true) { refrozen += 1 })
         XCTAssertEqual(refrozen, 1, "the baselines are re-derived first")
         XCTAssertNil(ledger.entry("2026-09-16"), "every day is walked again under the new recipe")
-        XCTAssertEqual(ledger.epoch, 4)
+        XCTAssertEqual(ledger.epoch, 5)
         // From here on, a committed day never changes again.
         XCTAssertTrue(ledger.write(written))
         XCTAssertFalse(ledger.adoptCurrentEpochIfNeeded(rescoreDone: true) { refrozen += 1 })
@@ -153,16 +153,16 @@ final class LevelMeditationEraTests: XCTestCase {
         XCTAssertEqual(ledger.entry("2026-09-16")?.level, 60)
     }
 
-    func testTheBaselineHistoryCarriesTheNewSleepInputsAndNoMeditation() {
+    func testTheBaselineHistoryCarriesTheSleepInputsAndNoMeditation() {
         let keys = LevelWiring.keysBack("2026-09-20", 20, calendar)
         var timings: [String: SleepTiming] = [:]
         for k in keys { timings[k] = SleepTiming(onsetMinute: 23 * 60, wakeMinute: 7 * 60) }
         var s = series(meditation: [:])
         s.sleepTimings = timings
         let history = LevelWiring.baselineHistory(days: keys.map(row), series: s, calendar: calendar)
-        XCTAssertFalse(history[.sleepDurationRatio, default: []].isEmpty)
-        XCTAssertEqual(history[.sleepDurationRatio]?.first ?? 0, 450.0 / 480.0, accuracy: 1e-9)
+        // Epoch 5: sleep duration against need is not a level input any more.
+        XCTAssertTrue(history[.sleepDurationRatio, default: []].isEmpty)
         XCTAssertFalse(history[.sleepRegularityMin, default: []].isEmpty)
-        XCTAssertEqual(history[.sleepRegularityMin]?.last ?? -1, 0, accuracy: 1e-6, "every wake at 07:00")
+        XCTAssertEqual(history[.sleepRegularityMin]?.last ?? -1, 0, accuracy: 1e-6, "same bed and wake every night")
     }
 }

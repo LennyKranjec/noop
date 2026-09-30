@@ -38,7 +38,7 @@ final class LevelEngineTests: XCTestCase {
 
     func testTheSharesInsideEveryPartSumToOne() {
         let s = LevelEngine.sleepShares
-        XCTAssertEqual(s.duration + s.regularity + s.restorative, 1, accuracy: 1e-9)
+        XCTAssertEqual(s.restorative + s.hrv + s.regularity, 1, accuracy: 1e-9)
         XCTAssertEqual(LevelEngine.heartShares.hrv + LevelEngine.heartShares.rhr, 1, accuracy: 1e-9)
         XCTAssertEqual(LevelEngine.focusShares.calm, 1, accuracy: 1e-9)
     }
@@ -47,7 +47,7 @@ final class LevelEngineTests: XCTestCase {
 
     private func atBest() -> LevelInputs {
         LevelInputs(
-            restorativeMin: 100, sleepHrv: 100, regularityMin: 0, sleepDurationRatio: 100,
+            restorativeMin: 100, sleepHrv: 100, regularityMin: 0,
             hrv: 100, rhr: 0, vo2max: 100, respRate: 0,
             strengthIndex: 100, chronicLoad: 100,
             daytimeRmssd: 100, steps: 10_000)
@@ -73,12 +73,12 @@ final class LevelEngineTests: XCTestCase {
         var high = atBest()
         high.chronicLoad = 400
         high.hrv = 250
-        high.sleepDurationRatio = 180
+        high.restorativeMin = 180
         high.daytimeRmssd = 220
         let b = try XCTUnwrap(LevelEngine.compute(inputs: high, baselines: allUnit))
         let muscle = try XCTUnwrap(b.components.first { $0.part == .muscle }?.score)
         XCTAssertEqual(muscle, 0.6 * 100 + 0.4 * 400, accuracy: 1e-9, "the load term is not capped")
-        let sleepPart: Double = 0.30 * (0.5 * 180 + 0.3 * 100 + 0.2 * 100)
+        let sleepPart: Double = 0.30 * (0.60 * 180 + 0.25 * 100 + 0.15 * 100)
         let heartPart: Double = 0.23 * (0.5 * 250 + 0.5 * 100)
         let lungsPart: Double = 0.12 * 100
         let musclePart: Double = 0.24 * muscle
@@ -104,37 +104,29 @@ final class LevelEngineTests: XCTestCase {
         XCTAssertEqual(s ?? 0, 75, accuracy: 1e-9)
     }
 
-    // MARK: - HEALTH_V2 H6: HRV once, duration in, sleep = 0.50 / 0.30 / 0.20
+    // MARK: - Epoch 5: the pre-2.0 sleep recipe (restorative 0.60, night HRV 0.25, regularity 0.15)
 
-    func testHRVIsCountedInExactlyOnePart() throws {
-        let all = LevelEngine.sleepSubScores(atBest(), allUnit) + LevelEngine.heartSubScores(atBest(), allUnit)
-            + LevelEngine.lungsSubScores(atBest(), allUnit) + LevelEngine.muscleSubScores(atBest(), allUnit)
-            + LevelEngine.focusSubScores(atBest(), allUnit)
-        let hrvDrivers = all.map { $0.0 }.filter { $0 == .hrv || $0 == .sleepHrv }
-        XCTAssertEqual(hrvDrivers, [.hrv])
-        // Night HRV no longer moves the level at all.
+    func testTheSleepPartIsRestorativeNightHrvAndRegularity() {
+        let s = LevelEngine.part(LevelEngine.sleepSubScores(
+            LevelInputs(restorativeMin: 40, sleepHrv: 70, regularityMin: 20), allUnit))
+        // regularity is lower-is-better: 20 min on this scale scores 80.
+        XCTAssertEqual(s ?? 0, 0.60 * 40 + 0.25 * 70 + 0.15 * 80, accuracy: 1e-9)
+    }
+
+    func testNightHrvMovesTheLevelAgain() throws {
         var low = atBest(); low.sleepHrv = 0
-        var high = atBest(); high.sleepHrv = 500
+        var high = atBest(); high.sleepHrv = 200
         let a = try XCTUnwrap(LevelEngine.compute(inputs: low, baselines: allUnit))
         let b = try XCTUnwrap(LevelEngine.compute(inputs: high, baselines: allUnit))
-        XCTAssertEqual(a.level, b.level, accuracy: 1e-12)
+        XCTAssertGreaterThan(b.level, a.level)
     }
 
-    func testTheSleepPartIsDurationRegularityAndRestorative() {
-        let s = LevelEngine.part(LevelEngine.sleepSubScores(
-            LevelInputs(restorativeMin: 40, regularityMin: 20, sleepDurationRatio: 90), allUnit))
-        // regularity is lower-is-better: 20 min on this scale scores 80.
-        XCTAssertEqual(s ?? 0, 0.50 * 90 + 0.30 * 80 + 0.20 * 40, accuracy: 1e-9)
-    }
-
-    func testAShortNightLowersSleepThroughDurationEvenWithoutStaging() throws {
-        // No staging at all (restorative nil): duration alone still reads the short week.
-        let table = LevelBaselines.table
-        let rested = try XCTUnwrap(LevelEngine.part(LevelEngine.sleepSubScores(
-            LevelInputs(regularityMin: 30, sleepDurationRatio: 1.0), table)))
-        let short = try XCTUnwrap(LevelEngine.part(LevelEngine.sleepSubScores(
-            LevelInputs(regularityMin: 30, sleepDurationRatio: 0.75), table)))
-        XCTAssertLessThan(short, rested)
+    func testSleepDurationRatioIsNotScored() throws {
+        var a = atBest(); a.sleepDurationRatio = 0.5
+        var b = atBest(); b.sleepDurationRatio = 1.5
+        let la = try XCTUnwrap(LevelEngine.compute(inputs: a, baselines: allUnit))
+        let lb = try XCTUnwrap(LevelEngine.compute(inputs: b, baselines: allUnit))
+        XCTAssertEqual(la.level, lb.level, accuracy: 1e-12)
     }
 
     // MARK: - Meditation: a date-effective minimum, and a deduction only
@@ -232,9 +224,9 @@ final class LevelEngineTests: XCTestCase {
     // MARK: - drivers
 
     func testTheDriverIsTheSubMetricWithTheMostRoom() {
-        let inputs = LevelInputs(restorativeMin: 95, regularityMin: 50, sleepDurationRatio: 40)
-        // duration: (100 − 40) × 0.50 = 30 of room, the most in the part.
-        XCTAssertEqual(LevelDrivers.driver(for: .sleep, inputs: inputs, baselines: allUnit), .sleepDuration)
+        let inputs = LevelInputs(restorativeMin: 40, sleepHrv: 95, regularityMin: 5)
+        // restorative: (100 − 40) × 0.60 = 36 of room, the most in the part.
+        XCTAssertEqual(LevelDrivers.driver(for: .sleep, inputs: inputs, baselines: allUnit), .restorativeSleep)
         XCTAssertEqual(LevelDrivers.driver(for: .muscle, inputs: LevelInputs(strengthIndex: 40, chronicLoad: 90),
                                            baselines: allUnit), .strength)
     }

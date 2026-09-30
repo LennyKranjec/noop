@@ -51,7 +51,7 @@ enum LevelMissingInput: String, CaseIterable, Identifiable {
         switch self {
         case .restorativeSleep: return "No staged night in the last 7 days."
         case .hrv: return "No night HRV in the last 7 days."
-        case .regularity: return "Needs 7 of the last 14 nights with a wake time."
+        case .regularity: return "Needs two nights in a row with bed and wake times."
         case .rhr: return "No resting heart rate in the last 7 days."
         case .vo2max: return "No estimate yet: record runs or brisk walks with GPS, or add your waist in the profile."
         case .respRate: return "No respiratory rate in the last 7 days."
@@ -99,6 +99,10 @@ final class LevelBarModel: ObservableObject {
     /// The day whose level is shown: today's once it is written, and until then the ONE stand-in day held
     /// for it (`LevelDayFreeze.standIn`) — so this moves at most once per level day.
     @Published private(set) var shownDay: String?
+    /// The newest day with any lifting data the level can read (strength index or muscle volume), or nil
+    /// when there is none — so "Strength missing" can say WHY: the strength term looks back 12 weeks and
+    /// training load 6 months, and a log last imported before that is honestly out of the window.
+    @Published private(set) var lastLiftingDataDay: String?
     /// The latest `missing`, for the coach's context.
     static var lastMissing: [LevelMissingInput] = []
 
@@ -535,6 +539,8 @@ final class LevelBarModel: ObservableObject {
             calm = await repo.bankedDaytimeRmssd()
         }
 
+        let lastLift = [strength.last?.day, muscle.keys.max()].compactMap { $0 }.max()
+        if lastLiftingDataDay != lastLift { lastLiftingDataDay = lastLift }
         return LevelSeries(vo2max: vo2, muscleByDay: muscle, meditation: meditation,
                            sleepTimings: timings, daytimeRmssd: calm, strengthIndex: strength)
     }
