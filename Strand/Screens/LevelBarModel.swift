@@ -285,6 +285,20 @@ final class LevelBarModel: ObservableObject {
                                                                                     calendar: calendar))
             }
             UserDefaults.standard.removeObject(forKey: Self.retiredResetKey)
+            // An epoch reset already re-scores everything; a pending import request is covered by it.
+            UserDefaults.standard.removeObject(forKey: LevelLedger.rescoreRequestedKey)
+        }
+        // IMPORTED HISTORY (see `LevelLedger.rescoreRequestedKey`): the same re-freeze + re-walk, once.
+        if ledger.isWritable, LevelLedger.isRescoreRequested() {
+            cachedSeries = nil   // the import wrote series the cache key does not see
+            let full = await readSeries(repo: repo, backfill: true)
+            guard gen == generation else { return }
+            guard !dataInFlight() else { scheduleRetry(repo: repo); return }
+            let rows = repo.days
+            _ = LevelBaselineStore.refreeze(history: LevelWiring.baselineHistory(days: rows, series: full,
+                                                                                calendar: calendar))
+            ledger.resetAll(epoch: LevelLedger.currentEpoch)
+            UserDefaults.standard.removeObject(forKey: LevelLedger.rescoreRequestedKey)
         }
         guard ledger.isWritable else { return }
 

@@ -722,6 +722,8 @@ struct DataSourcesView: View {
                 // exist, so the file's own strength index (which cannot know about them) does not overwrite
                 // their contribution. A no-op for a wearer who has never used the logger.
                 await LiftDerivedSeries.rebuild(store: store)
+                // The level's committed days were written without this history: re-score them once.
+                LevelLedger.requestFullRescore()
                 await repo.refresh()
                 let totalVolume = sessionsToWrite.reduce(0.0) { $0 + $1.volumeLoadKg }
                 // Whole-phrase variants per count so translators never see a stitched plural.

@@ -427,6 +427,13 @@ struct RootTabView: View {
         // THE SYSTEM BAR IS HIDDEN (per tab, in `tab(...)` / `moreTab`) and the floating `TelosTabBar` below
         // replaces it. The TabView stays: it keeps each tab's root alive once visited (scroll positions,
         // chart ranges, `.task`s run once) exactly as before, and lazily builds a tab on first visit.
+        // THE BAR IS IN THE LAYOUT, NOT FLOATING OVER IT (owner, 2026-09-30: "I can't type anything in the coach
+        // tab — the text field is overlaid by the Home etc. buttons"). The floating version reserved its room
+        // with a bottom safe-area inset on each tab's stack, which did not reach every screen on device, so
+        // the Coach's input row sat under the bar. Stacking the bar BELOW the tabs makes the clearance
+        // physical: every tab ends where the bar begins, with no inset to propagate. The bar leaves the
+        // layout while the keyboard is up, so the keyboard-avoiding composer gets the whole height.
+        VStack(spacing: 0) {
         TabView(selection: nativeTabSelection) {
             // HOME is the day you are in (the reference's house). Its hero belongs to Today itself
             // (LiquidTodayView); the shell only hosts it.
@@ -478,12 +485,11 @@ struct RootTabView: View {
         // THE FLOATING TAB BAR. Over the content, which scrolls beneath it (every tab's safe area is inset
         // by the bar's height, so nothing ends up hidden under it). Steps aside for the keyboard, as the
         // system bar did; `ignoresSafeArea(.keyboard)` keeps it from riding up on the way out.
-        .overlay(alignment: .bottom) {
+        if !keyboardVisible {
             TelosTabBar(items: tabBarItems, selected: selectedTab, onSelect: selectTab)
-                .opacity(keyboardVisible ? 0 : 1)
-                .allowsHitTesting(!keyboardVisible)
-                .accessibilityHidden(keyboardVisible)
-                .ignoresSafeArea(.keyboard, edges: .bottom)
+                .padding(.top, TelosSpace.xxs)
+                .background(StrandPalette.surfaceBase.ignoresSafeArea(edges: .bottom))
+        }
         }
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
             if !keyboardVisible { keyboardVisible = true }
@@ -952,9 +958,8 @@ struct RootTabView: View {
         // THE FLOATING BAR'S ROOM, on the stack so every pushed screen gets it too: scroll content ends above
         // the bar (and still scrolls beneath it), bottom-pinned rows (the coach's input) sit above it. Drops
         // to zero while the keyboard is up, when the bar steps aside.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            Color.clear.frame(height: keyboardVisible ? 0 : TelosTabBarMetrics.contentInset)
-        }
+        // (No bottom inset: the tab bar is stacked below the tabs in `shellCore`, so content already ends
+        // above it.)
         // Drive this tab's root scroll-to-top on an at-root re-tap (#198 follow-up); read by ScreenScaffold
         // / LiquidTodayView inside. Only THIS tab's token changes on its reselect, so the others don't scroll.
         .environment(\.scrollToTopSignal, scrollSignal)
@@ -1077,9 +1082,8 @@ struct RootTabView: View {
         }
         // The system bar hidden for the whole stack, and the floating bar's room — as in `tab(...)`.
         .toolbar(.hidden, for: .tabBar)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            Color.clear.frame(height: keyboardVisible ? 0 : TelosTabBarMetrics.contentInset)
-        }
+        // (No bottom inset: the tab bar is stacked below the tabs in `shellCore`, so content already ends
+        // above it.)
         // Scroll the More index to the top on an at-root re-tap (#198 follow-up); read by its ScreenScaffold.
         .environment(\.scrollToTopSignal, scrollSignal)
         .tabItem { Label("More", systemImage: "ellipsis") }

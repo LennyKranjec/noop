@@ -101,6 +101,30 @@ final class LevelLedger: @unchecked Sendable {
     /// era. The whole history is walked again once, through the same path as epoch 4.
     static let currentEpoch = 5
 
+    /// IMPORTED HISTORY RE-OPENS THE LEDGER, ONCE (owner, 2026-09-30: "my Alphaprog data is imported and
+    /// recognised, but the level says there is no lifting data"). A committed day never changes — so a
+    /// lifting log imported AFTER its days were written could never reach them, and every one of those days
+    /// kept "strength missing" for good. An import that brings history the level reads sets this flag
+    /// (`requestFullRescore()`); the next settle pass re-freezes the baselines and walks the whole span
+    /// again through the same path a new epoch uses, then clears it.
+    static let rescoreRequestedKey = "level.rescoreRequested"
+
+    /// Ask for one full re-score of the ledger (see `rescoreRequestedKey`).
+    static func requestFullRescore(_ defaults: UserDefaults = .standard) {
+        defaults.set(true, forKey: rescoreRequestedKey)
+    }
+
+    static func isRescoreRequested(_ defaults: UserDefaults = .standard) -> Bool {
+        // ONE-TIME CATCH-UP (12.0.2): lifting logs imported before this build never reached the days they
+        // cover, so every install re-scores once after updating.
+        let catchUpKey = "level.importRescoreCatchUp.v1"
+        if !defaults.bool(forKey: catchUpKey) {
+            defaults.set(true, forKey: catchUpKey)
+            defaults.set(true, forKey: rescoreRequestedKey)
+        }
+        return defaults.bool(forKey: rescoreRequestedKey)
+    }
+
     private struct Stored: Codable {
         var entries: [String: FrozenLevel]
         var empty: [String]
