@@ -7,7 +7,7 @@ enum AppChangelog {
 
     /// Bump this when you add a release below. The "What's New" sheet shows automatically when the
     /// stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
-    static let currentVersion = "12.0.0"
+    static let currentVersion = "12.0.1"
 
     struct Release: Identifiable {
         let version: String
@@ -19,6 +19,19 @@ enum AppChangelog {
 
     /// Newest first.
     static let releases: [Release] = [
+        Release(
+            version: "12.0.1",
+            title: "A Level that separates your good days again, a calmer look, and Telos Lift one tap away",
+            date: "September 2026",
+            items: [
+                "**Your Level, as it was measured before 2.0.** Sleep is deep + REM, night HRV and bed/wake regularity again, so your best days score highest again. What stays: no upper limit, and meditation only counts as a penalty for a missed day. Your history is recalculated once.",
+                "**One Level everywhere.** Look ahead and Goals now show the same current Level as Home and the widgets. On Home the Level appears once, on the left.",
+                "**Telos Lift one tap away.** \"Strength workout\" in the + menu and a card at the top of the workout picker start the logger on today's day of your plan. Your Upper/Lower plan is loaded on first launch.",
+                "**A calmer, professional look.** No glow, glimmer or bursts. Thin lines, data colours and type carry the design.",
+                "**Your orb, explained.** The Home orb is an organic cell whose lobes are your Level parts. Tap it to see what shapes it and how it has grown.",
+                "**Smoother.** Screens no longer redraw with every heartbeat, the Home tab takes you back from Sleep, the coach's chat is no longer covered, and the water tile moves again.",
+            ]
+        ),
         Release(
             version: "12.0.0",
             title: "Telos 2.0: a living, bioluminescent redesign, an in-app strength logger, goals that look ahead, and habits you can test",
