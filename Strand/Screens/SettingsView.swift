@@ -1880,14 +1880,17 @@ struct SettingsView: View {
 
                 // 2.0 (HEALTH_V2 H1b / H4 / S2 + the energy check-in + strap cues): each group is its own
                 // small view so it owns its state (and its one store read) instead of widening this card.
-                rowDivider
-                FeaturesAlertsAndRituals()
-                rowDivider
-                SleepAnchorSettingsRows()
-                rowDivider
-                EnergySettingsRows()
-                rowDivider
-                FeaturesLinks()
+                // One transparent group, so the card's builder gains a single child.
+                Group {
+                    rowDivider
+                    FeaturesAlertsAndRituals()
+                    rowDivider
+                    SleepAnchorSettingsRows()
+                    rowDivider
+                    EnergySettingsRows()
+                    rowDivider
+                    FeaturesLinks()
+                }
             }
         }
     }

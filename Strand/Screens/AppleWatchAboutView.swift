@@ -122,7 +122,7 @@ struct AppleWatchAboutView: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
                     Image(systemName: "applewatch")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(TelosType.headline)
                         .foregroundStyle(StrandPalette.accent)
                         .frame(width: 34, height: 34)
                         .background(StrandPalette.accent.opacity(0.14),
@@ -177,7 +177,7 @@ struct AppleWatchAboutView: View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 10) {
                 Image(systemName: item.icon)
-                    .font(.system(size: 15, weight: .semibold))
+                    .font(TelosType.glyphRow)
                     .foregroundStyle(item.confidence.accent)
                     .frame(width: 22)
                     .accessibilityHidden(true)
@@ -206,7 +206,7 @@ struct AppleWatchAboutView: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
                     Image(systemName: "waveform.path.ecg")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(TelosType.glyphField)
                         .foregroundStyle(StrandPalette.chargeColor)
                         .accessibilityHidden(true)
                     Text("Why recovery calibrates over about a week")
@@ -234,7 +234,7 @@ struct AppleWatchAboutView: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
                     Image(systemName: "drop.degreesign")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(TelosType.glyphField)
                         .foregroundStyle(StrandPalette.metricCyan)
                         .accessibilityHidden(true)
                     Text("A note on blood oxygen and your model")

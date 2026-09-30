@@ -36,7 +36,7 @@ struct SmartLightsView: View {
                                     Task { await store.apply(scene) }
                                 } label: {
                                     VStack(spacing: 6) {
-                                        Image(systemName: scene.symbol).font(.system(size: 18))
+                                        Image(systemName: scene.symbol).font(TelosType.body)
                                         Text(scene.title).font(StrandFont.caption)
                                     }
                                     .frame(width: 76, height: 64)

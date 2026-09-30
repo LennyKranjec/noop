@@ -98,7 +98,21 @@ final class LiftSessionRecorder: ObservableObject {
         var lastTime: [LiftHistorySet]
         var lastTimeTitle: String?
         var proposal: LiftProposal.Result
+        /// The best this exercise had reached BEFORE this session (e1RM, heaviest load, and the set behind the
+        /// best e1RM). Empty for a first-ever session: then nothing today can be a PR.
+        var priorBest: LiftPriorBest
     }
+
+    /// A set that just became a personal record — drives the row's short gold flash in the logger.
+    struct PRFlash: Equatable {
+        let exerciseId: String
+        let setId: String
+        let records: [LiftSessionSummary.Record]
+        let at: Date
+    }
+
+    /// How long the row's PR flash stays up (decision 17: ≤ 1.5 s, then rest).
+    nonisolated static let prFlashSeconds: Double = 1.4
 
     nonisolated static let deviceId = LiftingImporter.sourceId
     nonisolated static let sport = LiftingImporter.sport
@@ -116,11 +130,18 @@ final class LiftSessionRecorder: ObservableObject {
     @Published private(set) var loading = false
     /// The last stored-write failure, said on screen rather than swallowed (the journal still has the data).
     @Published private(set) var writeProblem: String?
+    /// The PR flash on screen right now, nil otherwise.
+    @Published private(set) var prFlash: PRFlash?
 
     let programs: LiftProgramStore
     var cues: LiftCueing
 
     private var history: [LiftHistorySession] = []
+    /// Exercises whose PR already buzzed the strap this session (once per exercise per session). The strap-cue
+    /// engine ALSO dedupes on the event id `pr:<session>:<exercise>`, so a relaunch that forgets this set cannot
+    /// double-buzz either; this set only keeps the finish path from asking at all.
+    private var rewardedExercises: Set<String> = []
+    private var prFlashTask: Task<Void, Never>?
     private var progression: [String: StrengthProgression.Exercise] = [:]
     private var workoutStart: Date?
     private var storeProvider: (() async -> WhoopStore?)?
@@ -176,6 +197,8 @@ final class LiftSessionRecorder: ObservableObject {
         session = nil
         context = [:]
         summary = nil
+        rewardedExercises = []
+        prFlash = nil
         phase = .idle
         loading = true
         defer { loading = false }
@@ -289,7 +312,7 @@ final class LiftSessionRecorder: ObservableObject {
         guard let seconds = s.check(exerciseId: exerciseId, setId: setId, at: now,
                                     defaultRestSeconds: programs.library.defaultRestSeconds) else { return }
         session = s
-        TelosHaptics.play(.commit)
+        rewardIfRecord(exerciseId: exerciseId, setId: setId, session: s)
         if !s.allPlannedDone, seconds > 0 {
             startRest(seconds: seconds, exerciseName: s.exercises.first { $0.id == exerciseId }?.name, now: now)
         } else {
@@ -298,6 +321,38 @@ final class LiftSessionRecorder: ObservableObject {
         writeJournal()
         enqueueStoreWrite(replacing: false)
         askForNotificationsOnce()
+    }
+
+    /// The in-the-moment reward (decisions 16–17). A checked set that beats the exercise's pre-session best
+    /// (raised by this session's other done sets) flashes its row gold and plays the reward haptic; the FIRST
+    /// such set per exercise also buzzes the strap. Any other check plays `success`. One action, one pattern.
+    private func rewardIfRecord(exerciseId: String, setId: String, session s: LiftLoggedSession) {
+        guard let ex = s.exercises.first(where: { $0.id == exerciseId }) else { return }
+        let records = LiftRecordCheck.liveRecords(setId: setId, in: ex,
+                                                  prior: context[exerciseId]?.priorBest ?? LiftPriorBest())
+        guard !records.isEmpty else {
+            TelosHaptics.play(.success)
+            return
+        }
+        TelosHaptics.play(.reward, action: "lift.pr.\(s.id).\(setId)")
+        if !rewardedExercises.contains(exerciseId) {
+            rewardedExercises.insert(exerciseId)
+            cues.reward(eventId: Self.prEventId(sessionId: s.id, exerciseId: exerciseId))
+        }
+        let flash = PRFlash(exerciseId: exerciseId, setId: setId, records: records, at: Date())
+        prFlash = flash
+        prFlashTask?.cancel()
+        prFlashTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(Self.prFlashSeconds * 1_000_000_000))
+            guard !Task.isCancelled, self?.prFlash == flash else { return }
+            self?.prFlash = nil
+        }
+    }
+
+    /// The strap-cue event id for one exercise's PR in one session — shared by the live check and the finish
+    /// screen, so the engine's per-event dedupe (`StrapCueGate.eventKey` + `markFired`) holds the second call.
+    nonisolated static func prEventId(sessionId: String, exerciseId: String) -> String {
+        "pr:\(sessionId):\(exerciseId)"
     }
 
     func uncheck(exerciseId: String, setId: String) {
@@ -520,10 +575,16 @@ final class LiftSessionRecorder: ObservableObject {
             musclesFor: { MuscleAttribution.muscles(for: $0).map(\.rawValue) },
             calendar: .current)
         summary = built
-        if built.recordCount > 0 {
-            cues.reward(eventId: "pr:\(finished.id)")
-            TelosHaptics.play(.reward, action: "lift.pr.\(finished.id)")
+        // Records that did not already buzz at check time (e.g. a value edited after checking): one buzz each,
+        // under the SAME event id the live path uses, so nothing is rewarded twice.
+        var unrewarded = false
+        for (ex, line) in zip(finished.exercises, built.exercises) {
+            guard !line.records.isEmpty, !rewardedExercises.contains(ex.id) else { continue }
+            rewardedExercises.insert(ex.id)
+            cues.reward(eventId: Self.prEventId(sessionId: finished.id, exerciseId: ex.id))
+            unrewarded = true
         }
+        if unrewarded { TelosHaptics.play(.reward, action: "lift.pr.\(finished.id)") }
         clearJournal()
         phase = .finished
         return built
@@ -547,6 +608,8 @@ final class LiftSessionRecorder: ObservableObject {
     /// The workout was deleted: drop the session everywhere.
     func discard() {
         stopRest()
+        rewardedExercises = []
+        prFlash = nil
         let id = session?.id
         session = nil
         context = [:]
@@ -567,6 +630,8 @@ final class LiftSessionRecorder: ObservableObject {
     /// After the finish screen is dismissed.
     func reset() {
         stopRest()
+        rewardedExercises = []
+        prFlash = nil
         session = nil
         context = [:]
         summary = nil
@@ -748,7 +813,8 @@ final class LiftSessionRecorder: ObservableObject {
             stepKg: increment.observed ? increment.kg : nil)
         return (prefill: prefill,
                 context: ExerciseContext(prefillSource: prefill.source, lastTime: prefill.lastTime,
-                                         lastTimeTitle: prefill.lastTimeTitle, proposal: proposal))
+                                         lastTimeTitle: prefill.lastTimeTitle, proposal: proposal,
+                                         priorBest: LiftPriorBest(sets: history.flatMap { $0.sets(of: plan.name) })))
     }
 
     /// `StrengthProgression`'s reading of one exercise, in the proposal's input shape.

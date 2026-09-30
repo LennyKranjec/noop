@@ -349,7 +349,7 @@ private struct WhatItDoesStep: View {
                             .fill(slide.tint.opacity(0.14))
                             .frame(width: 46, height: 46)
                         Image(systemName: slide.icon)
-                            .font(.system(size: 20, weight: .semibold))
+                            .font(TelosType.title2)
                             .foregroundStyle(slide.tint)
                     }
                     VStack(alignment: .leading, spacing: 4) {
@@ -384,7 +384,7 @@ private struct ExpectationsStep: View {
                 ForEach(Array(AppChangelog.expectations.enumerated()), id: \.element.id) { index, e in
                     HStack(alignment: .top, spacing: 14) {
                         Image(systemName: e.icon)
-                            .font(.system(size: 18, weight: .medium))
+                            .font(TelosType.headline)
                             .foregroundStyle(StrandPalette.accent)
                             .frame(width: 26)
                             .padding(.top, 2)
@@ -427,7 +427,7 @@ private struct ExpectationsStep: View {
     private func expectationRow(icon: String, title: String, body: String) -> some View {
         HStack(alignment: .top, spacing: 14) {
             Image(systemName: icon)
-                .font(.system(size: 18, weight: .medium))
+                .font(TelosType.headline)
                 .foregroundStyle(StrandPalette.accent)
                 .frame(width: 26)
                 .padding(.top, 2)
@@ -469,7 +469,7 @@ private struct BluetoothStep: View {
                         .fill(StrandPalette.accentMuted.opacity(0.5))
                         .frame(width: 86, height: 86)
                     Image(systemName: "wave.3.right")
-                        .font(.system(size: 34, weight: .semibold))
+                        .font(TelosType.numeral(size: 34, relativeTo: .largeTitle, cap: 1.3, weight: .semibold))
                         .foregroundStyle(StrandPalette.accent)
                 }
                 .frame(height: 130)
@@ -500,12 +500,11 @@ private struct WearStep: View {
                   subtitle: String(localized: "And make sure it's charged.")) {
             VStack(spacing: 22) {
                 ZStack {
-                    Circle()
-                        .fill(StrandPalette.accent.opacity(0.16))
-                        .frame(width: 130, height: 130)
-                        .blur(radius: 24)
+                    // Cost: one static radial gradient (was a live 24 pt blur).
+                    TelosRadialGlow(color: StrandPalette.accent, intensity: 0.22, radius: 90)
+                        .frame(width: 180, height: 180)
                     Image(systemName: "applewatch.side.right")
-                        .font(.system(size: 58, weight: .regular))
+                        .font(TelosType.numeral(size: 58, relativeTo: .largeTitle, cap: 1.3, weight: .regular))
                         .foregroundStyle(StrandPalette.textPrimary)
                 }
                 .frame(height: 140)
@@ -681,18 +680,16 @@ private struct BondedStep: View {
             VStack(spacing: 26) {
                 Spacer()
                 ZStack {
-                    Circle()
-                        .fill(StrandPalette.statusPositive)
-                        .frame(width: 160, height: 160)
-                        .blur(radius: 70)
-                        .opacity(bloom ? 0.5 : 0.0)
-                        .blendMode(.plusLighter)
+                    // Cost: one static radial gradient faded in once with the bloom (was a 70 pt blur).
+                    TelosRadialGlow(color: TelosColor.positive, intensity: 0.5, radius: 150)
+                        .frame(width: 300, height: 300)
+                        .opacity(bloom ? 1 : 0.0)
                     // A ring materialises — a taste of the signature component.
                     RecoveryRing(score: 100, supporting: nil, diameter: 200, lineWidth: 14, showsLabel: false)
                         .scaleEffect(bloom ? 1 : 0.7)
                         .opacity(bloom ? 1 : 0)
                     Image(systemName: "checkmark")
-                        .font(.system(size: 44, weight: .bold))
+                        .font(TelosType.numeral(size: 44, relativeTo: .largeTitle, cap: 1.3, weight: .bold))
                         .foregroundStyle(StrandPalette.statusPositive)
                         .scaleEffect(bloom ? 1 : 0.4)
                         .opacity(bloom ? 1 : 0)
@@ -845,7 +842,7 @@ private struct ImportStep: View {
                         .fill(StrandPalette.accentMuted.opacity(0.45))
                         .frame(width: 96, height: 96)
                     Image(systemName: "square.and.arrow.down")
-                        .font(.system(size: 40, weight: .regular))
+                        .font(TelosType.numeral(size: 40, relativeTo: .largeTitle, cap: 1.3, weight: .regular))
                         .foregroundStyle(StrandPalette.accent)
                 }
 
@@ -982,7 +979,7 @@ private struct NotificationsStep: View {
                         .fill(StrandPalette.accentMuted.opacity(0.5))
                         .frame(width: 86, height: 86)
                     Image(systemName: "bell.badge")
-                        .font(.system(size: 32, weight: .semibold))
+                        .font(TelosType.numeral(size: 32, relativeTo: .largeTitle, cap: 1.3, weight: .semibold))
                         .foregroundStyle(StrandPalette.accent)
                 }
                 .frame(height: 130)
@@ -1033,14 +1030,12 @@ private struct DoneStep: View {
             VStack(spacing: 22) {
                 Spacer()
                 ZStack {
-                    Circle()
-                        .fill(StrandPalette.recovery100)
-                        .frame(width: 120, height: 120)
-                        .blur(radius: 64)
-                        .opacity(appear ? 0.5 : 0)
-                        .blendMode(.plusLighter)
+                    // Cost: one static radial gradient faded in once (was a 64 pt blur).
+                    TelosRadialGlow(color: StrandPalette.recovery100, intensity: 0.5, radius: 120)
+                        .frame(width: 240, height: 240)
+                        .opacity(appear ? 1 : 0)
                     Image(systemName: "point.topleft.down.curvedto.point.bottomright.up")
-                        .font(.system(size: 52, weight: .light))
+                        .font(TelosType.numeral(size: 52, relativeTo: .largeTitle, cap: 1.3, weight: .light))
                         .foregroundStyle(
                             LinearGradient(gradient: StrandPalette.recoveryGradient,
                                            startPoint: .topLeading, endPoint: .bottomTrailing)
@@ -1085,7 +1080,7 @@ private struct AppearanceStep: View {
                   subtitle: String(localized: "Choose how NOOP looks. The whole app updates as you tap. You can change this any time in Settings → Appearance.")) {
             VStack(spacing: 28) {
                 Image(systemName: "circle.lefthalf.filled")
-                    .font(.system(size: 56, weight: .light))
+                    .font(TelosType.numeral(size: 56, relativeTo: .largeTitle, cap: 1.3, weight: .light))
                     .foregroundStyle(StrandPalette.accent)
                     .frame(height: 96)
                 SegmentedPillControl(AppearanceMode.allCases, selection: binding) { $0.label }
@@ -1198,7 +1193,14 @@ private struct RadarSweep: View {
             ping = true
         }
         .onChangeCompat(of: active) { isActive in
-            if isActive { startSweep() }
+            if isActive {
+                startSweep()
+            } else {
+                // Nothing loops once the scan stops: the endless rotation is replaced by a still pose.
+                var still = Transaction()
+                still.disablesAnimations = true
+                withTransaction(still) { angle = 0 }
+            }
         }
         .animation(StrandMotion.breathe(reduced: poseStill), value: ping)
     }
@@ -1271,7 +1273,7 @@ private struct InfoCard: View {
                         .fill(tint.opacity(0.14))
                         .frame(width: 40, height: 40)
                     Image(systemName: icon)
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(TelosType.headline)
                         .foregroundStyle(tint)
                 }
                 VStack(alignment: .leading, spacing: 5) {
@@ -1295,7 +1297,7 @@ private struct Checkline: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 14))
+                .font(TelosType.glyphRow)
                 .foregroundStyle(StrandPalette.statusPositive)
                 .padding(.top, 1)
             Text(text)
@@ -1349,13 +1351,13 @@ private struct ImportActionButton: View {
         Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 14, weight: .semibold))
+                    .font(TelosType.glyphRow)
                     .frame(width: 18)
                 Text(title)
                     .font(StrandFont.subhead.weight(.semibold))
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .bold))
+                    .font(TelosType.glyphDelta)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -1377,7 +1379,7 @@ private struct PrimaryButton: View {
             HStack(spacing: 8) {
                 Text(title).font(StrandFont.headline)
                 if let systemImage {
-                    Image(systemName: systemImage).font(.system(size: 14, weight: .semibold))
+                    Image(systemName: systemImage).font(TelosType.glyphRow)
                 }
             }
         }
@@ -1389,7 +1391,7 @@ private struct PrimaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .frame(maxWidth: .infinity)
-            .foregroundStyle(Color.white)
+            .foregroundStyle(TelosColor.onAccent)
             .padding(.vertical, 14)
             .padding(.horizontal, 20)
             .background(

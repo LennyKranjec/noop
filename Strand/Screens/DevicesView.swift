@@ -685,7 +685,7 @@ private struct DeviceSyncStatusCard: View {
         NoopCard(tint: tint) {
             HStack(alignment: .center, spacing: NoopMetrics.space3) {
                 Image(systemName: systemImage)
-                    .font(.system(size: 18, weight: .semibold))
+                    .font(TelosType.headline)
                     .foregroundStyle(tint)
                     .frame(width: 24)
                     .accessibilityHidden(true)
@@ -913,9 +913,9 @@ private struct DeviceCard: View {
                     if let hint = primaryActionHint {
                         Text("·").font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
                         Text(hint)
-                            .font(StrandFont.overlineScaled(10)).tracking(1.0)
+                            .font(TelosType.scale).tracking(TelosType.Tracking.scale)
                             .foregroundStyle(StrandPalette.accent)
-                        Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
+                        Image(systemName: "chevron.right").font(TelosType.glyphDelta)
                             .foregroundStyle(StrandPalette.accent)
                             .accessibilityHidden(true)
                     }

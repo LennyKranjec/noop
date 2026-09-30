@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import StrandDesign
 import StrandAnalytics
 
@@ -13,7 +14,8 @@ import StrandAnalytics
 //   • `HomeVitalsStrip`       — the glass strip of three compact metrics.
 //
 // NARROW OBSERVATION (§2.1 rule 5). Each leaf observes only the store it draws: the Level row the
-// `LevelBarModel` (publishes a few times a day), the ring the `QuestStore`, the pills `BedroomClimate`.
+// `LevelBarModel` (publishes a few times a day), the ring the `QuestStore`, the pills only the room
+// reading (`BedroomClimate.$latest`, de-duplicated).
 // Nothing here observes AppModel, LiveState or Repository — the slow per-day figures come in as values.
 //
 // COST (§2.1 rule 8): ONE frame clock on the whole screen — the orb's, `.whileVisible` (owner direction),
@@ -96,10 +98,14 @@ struct HomeLevelOrbRow: View {
 
     /// Cost: TelosOrb — one async Canvas, ≤ 30 fps only while visible (see the file header).
     private func orb(_ inputs: TelosOrbInputs) -> some View {
-        ZStack {
-            // The glow the orb sits in: one pre-composited radial gradient, no blur.
-            TelosRadialGlow(color: TelosColor.glow, intensity: inputs.charge.map { 0.10 + 0.20 * min(max($0, 0), 100) / 100 } ?? 0.10,
-                            radius: Self.orbSide * 0.62)
+        // The glow the orb sits in: one pre-composited radial gradient, no blur. Brighter with today's
+        // Charge (0.10 → 0.30), the dim floor without one.
+        let glow: Double = inputs.charge.map { (c: Double) -> Double in
+            let clamped: Double = min(max(c, 0), 100)
+            return 0.10 + 0.20 * clamped / 100
+        } ?? 0.10
+        return ZStack {
+            TelosRadialGlow(color: TelosColor.glow, intensity: glow, radius: Self.orbSide * 0.62)
             TelosOrb(inputs: inputs, tint: .green, style: .hero, clock: .whileVisible)
         }
     }
@@ -250,7 +256,9 @@ struct HomeContextPillRow: View {
     let weather: WeatherNow?
     let onPickDay: () -> Void
 
-    @ObservedObject private var climate = BedroomClimate.shared
+    /// The last room reading, through a de-duplicated publisher: the sensor's other publishes (scan state,
+    /// the heard list) never re-render this row.
+    @State private var room: ClimateReading?
 
     var body: some View {
         HStack(spacing: 0) {
@@ -285,6 +293,7 @@ struct HomeContextPillRow: View {
         .padding(.horizontal, TelosSpace.l)
         .frame(maxWidth: .infinity)
         .background(NoopPanelSurface(cornerRadius: 24))
+        .onReceive(BedroomClimate.shared.$latest.removeDuplicates()) { room = $0 }
     }
 
     private var divider: some View {
@@ -293,7 +302,7 @@ struct HomeContextPillRow: View {
 
     @ViewBuilder
     private var temperature: some View {
-        if let r = climate.latest {
+        if let r = room {
             segment(glyph: "thermometer.medium", tint: TelosColor.amber, text: String(format: "%.1f°", r.temperatureC))
                 .accessibilityLabel(Text(String(format: String(localized: "Room %.1f degrees"), r.temperatureC)))
         } else if let w = weather {
@@ -307,7 +316,7 @@ struct HomeContextPillRow: View {
 
     @ViewBuilder
     private var humidity: some View {
-        if let r = climate.latest {
+        if let r = room {
             segment(glyph: "humidity.fill", tint: TelosColor.amber, text: String(format: "%.0f%%", r.humidityPct))
                 .accessibilityLabel(Text(String(format: String(localized: "Room humidity %.0f percent"), r.humidityPct)))
         } else {
@@ -339,13 +348,15 @@ struct HomeContextPillRow: View {
 struct HomeWindowAdvicePill: View {
     let onSetUp: () -> Void
 
-    @ObservedObject private var climate = BedroomClimate.shared
+    /// The last room reading, de-duplicated (see `HomeContextPillRow`).
+    @State private var room: ClimateReading?
     @State private var showRoom = false
 
     var body: some View {
         HStack(spacing: TelosSpace.s) {
             HomeDottedTrail(leading: true)
-            if climate.isConfigured {
+            // Read, not observed: it changes only in the sensor setup, and a reading follows it.
+            if BedroomClimate.shared.isConfigured {
                 Button { showRoom = true } label: {
                     // Once a minute: the advice counts down and flips at its boundary without a new reading.
                     // A `.periodic` label clock, not a frame clock.
@@ -363,10 +374,11 @@ struct HomeWindowAdvicePill: View {
             }
             HomeDottedTrail(leading: false)
         }
+        .onReceive(BedroomClimate.shared.$latest.removeDuplicates()) { room = $0 }
     }
 
     private func face(now: Date) -> some View {
-        let advice = WindowAdvicePlan.advice(for: climate.latest, now: now)
+        let advice = WindowAdvicePlan.advice(for: room, now: now)
         let phrase = advice.chipPhrase(now: now)
         return pill(text: phrase ?? String(localized: "No window action now"), active: phrase != nil)
             .accessibilityLabel(Text(advice.actionLine(now: now)))

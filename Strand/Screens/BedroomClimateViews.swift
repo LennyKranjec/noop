@@ -85,7 +85,8 @@ struct BedroomClimateTileView: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(StrandPalette.surfaceRaised)
+        // V2 faux glass (fill + luminous hairline + a rest-tinted top glow). No material, no shadow.
+        .background(NoopPanelSurface(tint: StrandPalette.restColor, cornerRadius: NoopMetrics.cardRadius))
         .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
     }
 

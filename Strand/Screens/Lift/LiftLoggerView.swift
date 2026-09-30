@@ -279,6 +279,12 @@ struct LiftLoggerView: View {
                  : String(localized: "Step \(LiftCopy.kg(ex.increment.kg)) kg · default, no history yet"))
                 .font(TelosType.caption)
                 .foregroundStyle(TelosColor.textTertiary)
+            // The bar a PR has to clear today — only when there IS one (a first session sets the baseline).
+            if let best = ctx?.priorBest, let w = best.bestSetWeightKg, let r = best.bestSetReps {
+                Text("Best before today: \(LiftCopy.kg(w)) kg × \(r) · e1RM \(LiftCopy.e1rm(best.e1rmKg))")
+                    .font(TelosType.caption)
+                    .foregroundStyle(TelosColor.bestGold.opacity(TelosOpacity.secondary))
+            }
 
             if !firstWorkDone, let ctx, let line = LiftCopy.proposalLine(ctx.proposal) {
                 proposalCard(ex, proposal: ctx.proposal, line: line)
@@ -415,6 +421,7 @@ struct LiftLoggerView: View {
 
     private func setRow(_ ex: LiftLoggedExercise, set: LiftLoggedSet, index: Int, active: Bool) -> some View {
         let done = set.status == .done
+        let flashing = recorder.prFlash?.setId == set.id
         return HStack(spacing: TelosSpace.s) {
             Text(verbatim: LiftCopy.rowLabel(kind: set.kind, index: index))
                 .font(TelosType.numeralXS)
@@ -440,6 +447,13 @@ struct LiftLoggerView: View {
         }
         .padding(.vertical, TelosSpace.xxs)
         .opacity(set.status == .notDone ? TelosOpacity.disabled : 1)
+        // The in-the-moment PR reward on THIS row (decision 17): gold wash + "PR" + one gold burst, ≤ 1.5 s,
+        // cleared by the recorder. A fade in and out — which is also the Reduce Motion form (the burst itself
+        // stands down under Reduce Motion / Low Power).
+        .overlay {
+            if flashing { LiftPRFlash().transition(.opacity) }
+        }
+        .animation(TelosMotion.fade, value: flashing)
         .contextMenu {
             ForEach(LiftSetKind.allCases, id: \.self) { kind in
                 Button(LiftCopy.setKind(kind)) { recorder.setKind(exerciseId: ex.id, setId: set.id, to: kind) }
@@ -495,7 +509,8 @@ struct LiftLoggerView: View {
     private func checkButton(_ ex: LiftLoggedExercise, set: LiftLoggedSet, active: Bool) -> some View {
         let done = set.status == .done
         return Button {
-            // The phone haptic (`commit`) is played ONCE by the recorder's `check` — never a second pattern here.
+            // The phone haptic (`success`, or `reward` on a PR) is played ONCE by the recorder's `check` — never
+            // a second pattern here.
             if done { recorder.uncheck(exerciseId: ex.id, setId: set.id) }
             else if set.status == .pending { recorder.check(exerciseId: ex.id, setId: set.id) }
         } label: {
@@ -608,7 +623,7 @@ struct LiftLoggerView: View {
 /// The set's check — the logger's most-pressed control, made to feel like a commit. On pending → done it
 /// POPS (scale 1 → 1.22 → 1, a short spring: the wearer's own press, so the gentle overshoot is allowed)
 /// and throws ONE luminous ripple ring outward that fades (≈0.5 s), then rests. The phone haptic is the
-/// recorder's single `commit` for the same tap — nothing is added here.
+/// recorder's single `success` (or `reward` on a PR) for the same tap — nothing is added here.
 ///
 /// Cost (§2.1 rule 8): two transforms on a ≤ 40 pt element, only on the change; nothing runs between
 /// checks, nothing loops. Reduce Motion / Low Power / "Reduce motion in NOOP" (`NoopMotionState.poseStill`):
@@ -668,6 +683,37 @@ private struct LiftCheckMark: View {
         .onChangeCompat(of: done) { nowDone in
             if nowDone && !motion.poseStill(reduceMotion) { celebrate &+= 1 }
         }
+    }
+}
+
+// MARK: - PR flash
+
+/// The row overlay while a just-checked set is a personal record: a gold wash and hairline, a "PR" tag beside
+/// the check, and ONE `TelosMomentBurst` in gold from the check (≤ 30 fps, 1.4 s, then it draws nothing; it
+/// stands down under Reduce Motion / Low Power). Not hit-testable, so the row stays usable underneath.
+private struct LiftPRFlash: View {
+    var body: some View {
+        ZStack(alignment: .trailing) {
+            RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
+                .fill(TelosColor.bestGold.opacity(TelosOpacity.wash))
+                .overlay {
+                    RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
+                        .strokeBorder(TelosColor.bestGold.opacity(TelosOpacity.secondary), lineWidth: TelosStroke.line)
+                }
+            TelosMomentBurst(style: .celebration, color: TelosColor.bestGold)
+                .frame(width: 160, height: 110)
+                .offset(x: 58)
+            Text("PR")
+                .font(TelosType.scale.weight(.bold))
+                .foregroundStyle(TelosColor.onAccent)
+                .padding(.horizontal, TelosSpace.s)
+                .padding(.vertical, TelosSpace.xxs)
+                .background(Capsule().fill(TelosColor.bestGold))
+                .padding(.trailing, TelosSpace.hitTarget + TelosSpace.xs)
+        }
+        .allowsHitTesting(false)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("Personal record"))
     }
 }
 

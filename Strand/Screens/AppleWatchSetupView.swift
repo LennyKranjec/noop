@@ -81,7 +81,7 @@ struct AppleWatchSetupView: View {
             Spacer()
             Button(action: onClose) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 22))
+                    .font(TelosType.title2)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             .buttonStyle(.plain)
@@ -147,7 +147,7 @@ struct AppleWatchSetupView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     HStack(spacing: 10) {
                         Image(systemName: "applewatch")
-                            .font(.system(size: 18, weight: .semibold))
+                            .font(TelosType.headline)
                             .foregroundStyle(StrandPalette.accent)
                             .frame(width: 34, height: 34)
                             .background(StrandPalette.accent.opacity(0.14),
@@ -212,7 +212,7 @@ struct AppleWatchSetupView: View {
     private func bullet(_ icon: String, _ title: String, _ detail: String) -> some View {
         HStack(alignment: .top, spacing: 12) {
             Image(systemName: icon)
-                .font(.system(size: 15, weight: .semibold))
+                .font(TelosType.glyphRow)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .frame(width: 22)
                 .accessibilityHidden(true)
@@ -239,7 +239,7 @@ struct AppleWatchSetupView: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 10) {
                     Image(systemName: "heart.text.square.fill")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(TelosType.glyphField)
                         .foregroundStyle(StrandPalette.metricCyan)
                         .frame(width: 30, height: 30)
                         .background(StrandPalette.metricCyan.opacity(0.14),
@@ -323,7 +323,7 @@ struct AppleWatchSetupView: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
                     Image(systemName: "iphone")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(TelosType.glyphField)
                         .foregroundStyle(StrandPalette.metricCyan)
                         .accessibilityHidden(true)
                     Text("Set this up on your iPhone")

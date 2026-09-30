@@ -110,7 +110,7 @@ struct JournalLogCard: View {
                     .onChangeCompat(of: dayOffset) { _ in proxy.scrollTo(dayOffset, anchor: .center) }
                 }
             }
-            NoopCard(tint: StrandPalette.restColor) {
+            NoopCard(tint: TelosColor.violet) {
                 VStack(alignment: .leading, spacing: 10) {
                     Text(editing
                          ? "Rename, regroup, or remove an item to tidy your list. Renaming keeps the original question behind the scenes, so a WHOOP import still lines up. Custom items are deleted; built-in ones are hidden and can be restored below."
@@ -391,13 +391,15 @@ struct JournalLogCard: View {
         Button(action: action) {
             Text(label)
                 .font(StrandFont.footnote)
-                .foregroundStyle(selected ? StrandPalette.surfaceBase : StrandPalette.textSecondary)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 5)
-                .background(selected ? StrandPalette.restColor : StrandPalette.surfaceInset,
+                .foregroundStyle(selected ? TelosColor.textPrimary : TelosColor.textSecondary)
+                .padding(.horizontal, TelosSpace.m)
+                .frame(minHeight: 32)
+                .background(selected ? TelosColor.violet.opacity(TelosOpacity.fill) : TelosColor.glassFill,
                             in: Capsule())
-                .overlay(Capsule().stroke(selected ? StrandPalette.restColor : StrandPalette.hairline,
-                                          lineWidth: 1))
+                .overlay(Capsule().strokeBorder(selected ? TelosColor.violetInk : TelosColor.line,
+                                                lineWidth: TelosStroke.line))
+                .frame(minHeight: TelosSpace.hitTarget)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }

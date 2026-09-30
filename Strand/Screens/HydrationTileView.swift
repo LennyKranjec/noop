@@ -86,7 +86,8 @@ struct HydrationTileView: View {
         }
         .frame(maxWidth: .infinity)
         .frame(height: waterTileHeight)
-        .background(StrandPalette.surfaceRaised)
+        // V2 faux glass (fill + luminous hairline + top glow). No material, no shadow.
+        .background(NoopPanelSurface(tint: StrandPalette.metricCyan, cornerRadius: NoopMetrics.cardRadius))
         .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
         .task(id: "\(repo.refreshSeq)-\(repo.hydrationSeq)-\(refreshKey)") { await load() }
     }
@@ -175,6 +176,12 @@ private struct WaterFill: View {
     private var still: Bool { motion.poseStill(reduceMotion) }
     /// Scrolled fully out of view (iOS 18 / macOS 15+; always false before) — the frame loop stands down.
     @State private var offscreen = false
+    /// TELOS 2.0 (§2.1 rule 1, "one orb clock on Today"): the water moves only while a new level SETTLES
+    /// (≤ 1.2 s after a logged drink changes `fraction`), then rests on its still frame. It used to run a
+    /// 30 fps loop for as long as the tile was on screen.
+    @State private var settling = false
+    /// Cost: one Canvas, ≤ 30 fps, only inside the settle window; paused by poseStill / covered / offscreen.
+    private var live: Bool { settling && !still && !covered && !offscreen }
 
     /// The water's own blue. Deeper than the palette's cyan and with a lift at the surface, because a
     /// flat fill reads as a coloured rectangle — the gradient is what makes it read as a body of liquid
@@ -183,9 +190,9 @@ private struct WaterFill: View {
     private var bright: Color { Color(.sRGB, red: 0.30, green: 0.71, blue: 0.96, opacity: 1) }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: still ? nil : 1.0 / 30, paused: still || covered || offscreen)) { timeline in
+        TimelineView(.animation(minimumInterval: 1.0 / 30, paused: !live)) { timeline in
             Canvas { context, size in
-                let t = still ? 0 : timeline.date.timeIntervalSinceReferenceDate
+                let t = live ? timeline.date.timeIntervalSinceReferenceDate : 0
                 let clamped = min(max(fraction, 0), 1)
                 let surfaceY = size.height * (1 - clamped)
                 let amplitude = still ? 0 : size.height * 0.03
@@ -256,5 +263,6 @@ private struct WaterFill: View {
         }
         .allowsHitTesting(false)
         .liquidOffscreen { offscreen = $0 }
+        .telosSettleWindow(on: fraction, active: $settling)
     }
 }

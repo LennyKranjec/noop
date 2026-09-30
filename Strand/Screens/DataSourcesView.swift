@@ -1241,7 +1241,7 @@ struct DataSourcesView: View {
     private func generationRow(title: String, detail: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "checkmark.circle.fill")
-                .font(.system(size: 12, weight: .semibold))
+                .font(TelosType.glyphChevron)
                 .foregroundStyle(DomainTheme.effort.color)
                 .padding(.top, 1)
                 .accessibilityHidden(true)
@@ -1300,7 +1300,7 @@ struct DataSourcesView: View {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                 HStack(spacing: NoopMetrics.space2 + 2) {
                     Image(systemName: icon)
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(TelosType.glyphField)
                         .foregroundStyle(tint)
                         .frame(width: 30, height: 30)
                         .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 9, style: .continuous))

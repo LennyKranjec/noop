@@ -55,7 +55,7 @@ struct RoutinesView: View {
                                 SystemHaptics.play(.select)
                             } label: {
                                 Image(systemName: "trash")
-                                    .font(.system(size: 14, weight: .semibold))
+                                    .font(TelosType.glyphRow)
                                     .foregroundStyle(StrandPalette.statusCritical)
                                     .frame(width: 34, height: 34)
                             }

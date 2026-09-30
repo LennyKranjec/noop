@@ -6,15 +6,18 @@ import StrandDesign
 ///
 /// LLM chat replies (OpenAI / Anthropic / Gemini) arrive as GitHub-flavored
 /// Markdown — overwhelmingly bold, bullet/numbered lists, `###` headings, and the
-/// occasional table for a weekly plan. This theme renders that set in the Strand
-/// look, sized for a chat bubble: headings are capped near body size (a `#` must
-/// not shout inside a 560pt bubble), and tables get hairline borders.
+/// occasional table for a weekly plan. This theme renders that set in the Telos 2.0
+/// voice (§6.9): prose at `body` (SF Pro 17), headings at `headline` (17 semibold —
+/// a `#` must not shout inside a reply), code in SF Mono on `surfaceInset`, and
+/// tables in the qualifier voice (SF Mono at ≈ `scaleNumber`) with `lineSoft`
+/// hairlines. MarkdownUI sizes are points, so they follow the token sizes at the
+/// Large text size.
 extension Theme {
     static let strand = Theme()
-        // Base body text — mirrors StrandFont.body (15 / regular).
+        // Base body text — `TelosType.body` (SF Pro 17 / regular).
         .text {
-            ForegroundColor(StrandPalette.textPrimary)
-            FontSize(15)
+            ForegroundColor(TelosColor.textPrimary)
+            FontSize(17)
         }
         .strong {
             FontWeight(.semibold)
@@ -24,22 +27,22 @@ extension Theme {
         }
         .code {
             FontFamilyVariant(.monospaced)
-            FontSize(.em(0.88))
-            ForegroundColor(StrandPalette.accentHover)
-            BackgroundColor(StrandPalette.surfaceInset)
+            FontSize(.em(0.85))
+            ForegroundColor(TelosColor.textPrimary)
+            BackgroundColor(TelosColor.surfaceInset)
         }
         .link {
             ForegroundColor(StrandPalette.accent)
         }
-        // Headings: h1/h2 land at headline (17 / semibold), h3 just above body,
-        // h4–h6 as overline-ish small caps labels.
+        // Headings: h1–h3 land at `headline` (17 / semibold), h4 at `subhead` weight,
+        // h5–h6 as the secondary small labels.
         .heading1 { configuration in
             configuration.label
                 .markdownMargin(top: 14, bottom: 6)
                 .markdownTextStyle {
                     FontWeight(.semibold)
                     FontSize(17)
-                    ForegroundColor(StrandPalette.textPrimary)
+                    ForegroundColor(TelosColor.textPrimary)
                 }
         }
         .heading2 { configuration in
@@ -48,7 +51,7 @@ extension Theme {
                 .markdownTextStyle {
                     FontWeight(.semibold)
                     FontSize(17)
-                    ForegroundColor(StrandPalette.textPrimary)
+                    ForegroundColor(TelosColor.textPrimary)
                 }
         }
         .heading3 { configuration in
@@ -56,8 +59,8 @@ extension Theme {
                 .markdownMargin(top: 12, bottom: 4)
                 .markdownTextStyle {
                     FontWeight(.semibold)
-                    FontSize(16)
-                    ForegroundColor(StrandPalette.textPrimary)
+                    FontSize(17)
+                    ForegroundColor(TelosColor.textPrimary)
                 }
         }
         .heading4 { configuration in
@@ -66,7 +69,7 @@ extension Theme {
                 .markdownTextStyle {
                     FontWeight(.semibold)
                     FontSize(15)
-                    ForegroundColor(StrandPalette.textPrimary)
+                    ForegroundColor(TelosColor.textPrimary)
                 }
         }
         .heading5 { configuration in
@@ -75,7 +78,7 @@ extension Theme {
                 .markdownTextStyle {
                     FontWeight(.semibold)
                     FontSize(13)
-                    ForegroundColor(StrandPalette.textSecondary)
+                    ForegroundColor(TelosColor.textSecondary)
                 }
         }
         .heading6 { configuration in
@@ -84,7 +87,7 @@ extension Theme {
                 .markdownTextStyle {
                     FontWeight(.semibold)
                     FontSize(12)
-                    ForegroundColor(StrandPalette.textSecondary)
+                    ForegroundColor(TelosColor.textSecondary)
                 }
         }
         .paragraph { configuration in
@@ -100,12 +103,12 @@ extension Theme {
             configuration.label
                 .padding(.leading, 12)
                 .markdownTextStyle {
-                    ForegroundColor(StrandPalette.textSecondary)
+                    ForegroundColor(TelosColor.textSecondary)
                 }
                 .overlay(alignment: .leading) {
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(StrandPalette.accent.opacity(0.6))
-                        .frame(width: 3)
+                    Rectangle()
+                        .fill(TelosColor.lineStrong)
+                        .frame(width: TelosStroke.data)
                 }
                 .markdownMargin(top: 4, bottom: 8)
         }
@@ -117,17 +120,17 @@ extension Theme {
                         FontFamilyVariant(.monospaced)
                         FontSize(.em(0.88))
                     }
-                    .padding(10)
+                    .padding(TelosSpace.s)
             }
-            .background(StrandPalette.surfaceInset)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(StrandPalette.hairline, lineWidth: 1))
+            .background(TelosColor.surfaceInset)
+            .clipShape(RoundedRectangle(cornerRadius: TelosRadius.plate, style: .continuous))
+            .overlay(RoundedRectangle(cornerRadius: TelosRadius.plate, style: .continuous)
+                .strokeBorder(TelosColor.line, lineWidth: TelosStroke.line))
             .markdownMargin(top: 4, bottom: 8)
         }
         .thematicBreak {
-            StrandPalette.hairline
-                .frame(height: 1)
+            TelosColor.lineSoft
+                .frame(height: TelosStroke.line)
                 .markdownMargin(top: 10, bottom: 10)
         }
         // Compact on a phone: smaller cell text and tighter padding, and a table wider than the bubble
@@ -137,20 +140,22 @@ extension Theme {
             ScrollView(.horizontal, showsIndicators: false) {
                 configuration.label
                     .fixedSize(horizontal: false, vertical: true)
-                    .markdownTableBorderStyle(.init(color: StrandPalette.hairline))
+                    .markdownTableBorderStyle(.init(color: TelosColor.lineSoft))
                     .markdownTableBackgroundStyle(
-                        .alternatingRows(Color.clear, StrandPalette.surfaceInset)
+                        .alternatingRows(Color.clear, TelosColor.surfaceInset)
                     )
             }
             .markdownMargin(top: 4, bottom: 8)
         }
         .tableCell { configuration in
             configuration.label
+                // The qualifier voice (`scaleNumber`: SF Mono ≈ 11–12 pt): tables in a reply are figures.
                 .markdownTextStyle {
+                    FontFamilyVariant(.monospaced)
                     if configuration.row == 0 {
                         FontWeight(.semibold)
                     }
-                    FontSize(.em(0.8))
+                    FontSize(.em(0.7))
                 }
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.vertical, 3)

@@ -236,7 +236,7 @@ private struct EnergyArc: View {
                                style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
             }
             VStack(spacing: 0) {
-                Text(kcal.map { "\(Int($0.rounded()))" } ?? "–")
+                Text(kcal.map { "\(Int($0.rounded()))" } ?? TelosType.absent)
                     .font(.system(size: 22, weight: .semibold, design: .rounded))
                     .monospacedDigit()
                     .foregroundStyle(kcal == nil ? StrandPalette.textTertiary : StrandPalette.textPrimary)

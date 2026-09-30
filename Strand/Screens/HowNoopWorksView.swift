@@ -139,7 +139,7 @@ struct HowNoopWorksView: View {
             Spacer()
             Button(action: onClose) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 22))
+                    .font(TelosType.title2)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             .buttonStyle(.plain)
@@ -186,7 +186,7 @@ struct HowNoopWorksView: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
                     Image(systemName: section.icon)
-                        .font(.system(size: 18))
+                        .font(TelosType.body)
                         .foregroundStyle(section.tint)
                         .frame(width: 24)
                         .accessibilityHidden(true)
@@ -273,7 +273,7 @@ struct HowNoopWorksView: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack(spacing: 10) {
                     Image(systemName: "function")
-                        .font(.system(size: 18))
+                        .font(TelosType.body)
                         .foregroundStyle(DomainTheme.charge.color)
                         .frame(width: 24)
                         .accessibilityHidden(true)

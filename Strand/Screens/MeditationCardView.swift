@@ -106,7 +106,7 @@ struct MeditationCardView: View {
             VStack(alignment: .leading, spacing: TelosSpace.xxs) {
                 PGOverline("Meditation", ink: TelosColor.violetInk)
                 HStack(alignment: .firstTextBaseline, spacing: TelosSpace.xs) {
-                    Text(verbatim: TelosFormat.integer(practice?.totalMinutes ?? 0))
+                    Text(verbatim: practice.map { TelosFormat.integer($0.totalMinutes) } ?? TelosType.absent)
                         .telosNumeral(.numeralL)
                         .foregroundStyle(TelosColor.textPrimary)
                         .lineLimit(1)
@@ -741,7 +741,7 @@ struct MeditationWeekField: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("Minutes per week, last 12 weeks"))
-        .accessibilityValue(Text("This week \(TelosFormat.integer(weeks.last?.minutes ?? 0)) minutes"))
+        .accessibilityValue(Text("This week \(weeks.last.map { TelosFormat.integer($0.minutes) } ?? TelosType.absent) minutes"))
     }
 
     private func draw(_ ctx: inout GraphicsContext, _ size: CGSize) {

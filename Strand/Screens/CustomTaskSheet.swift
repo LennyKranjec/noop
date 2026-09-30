@@ -93,7 +93,7 @@ struct CustomTaskSheet: View {
 
             Button(action: send) {
                 Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 30, weight: .semibold))
+                    .font(TelosType.title)
                     .foregroundStyle(canSend ? StrandPalette.accent : StrandPalette.textTertiary)
             }
             .buttonStyle(.plain)
@@ -188,7 +188,7 @@ struct CustomTaskSheet: View {
     private func detailRow(_ icon: String, _ text: String) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: icon)
-                .font(.system(size: 12, weight: .semibold))
+                .font(TelosType.glyphChevron)
                 .foregroundStyle(StrandPalette.accent)
                 .frame(width: 16)
             Text(text)
@@ -219,7 +219,7 @@ struct CustomTaskSheet: View {
     private func taskRow(_ task: Quest) -> some View {
         HStack(spacing: 10) {
             Image(systemName: stateIcon(task.state))
-                .font(.system(size: 15, weight: .semibold))
+                .font(TelosType.glyphRow)
                 .foregroundStyle(stateTint(task.state))
             VStack(alignment: .leading, spacing: 2) {
                 Text(task.title)
@@ -242,7 +242,7 @@ struct CustomTaskSheet: View {
                     store.checkOff(id: task.id)
                 } label: {
                     Image(systemName: "checkmark.circle")
-                        .font(.system(size: 18, weight: .regular))
+                        .font(TelosType.body)
                         .foregroundStyle(StrandPalette.accent)
                 }
                 .buttonStyle(.plain)
@@ -253,7 +253,7 @@ struct CustomTaskSheet: View {
                 store.removeCustom(id: task.id)
             } label: {
                 Image(systemName: "trash")
-                    .font(.system(size: 15, weight: .regular))
+                    .font(TelosType.glyphRow)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             .buttonStyle(.plain)

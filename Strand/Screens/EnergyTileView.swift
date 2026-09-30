@@ -174,7 +174,7 @@ struct EnergyTileView: View {
     }
 
     private func weakLine(_ v: EnergyCalibration.Verdict) -> String {
-        let rho = v.decidingAgreement.map { String(format: "%.2f", $0.rho) } ?? "–"
+        let rho = v.decidingAgreement.map { String(format: "%.2f", $0.rho) } ?? TelosType.absent
         return String(localized: "This doesn't track how you say you feel (agreement \(rho) over \(v.usable) check-ins, even after fitting), so it is a load estimate from your data, not your energy.")
     }
 

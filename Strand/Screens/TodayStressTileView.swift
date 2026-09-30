@@ -43,7 +43,11 @@ struct TodayStressTileView: View {
 
     /// The app's whole-day 0–3 score, for when no hour has been scored yet.
     let dailyFallback: Double?
+    /// The Stress screen (the long-press menu; the energy tile and "Your cards" open it too).
     let onOpen: () -> Void
+    /// A tap: the full-screen stress diagnostic with BREATHE / IGNORE (HEALTH_V2 H1 hand-off — the alert
+    /// that pops up on its own is off by default from 2.0, so this tile is the way in). The shell hosts it.
+    let onDiagnostic: () -> Void
     /// Handed each successful live ten-minute read and when it was taken — the host passes it on to the
     /// lock-screen strip, so the widget shows the reading this dial does.
     var onLive: ((Double, Date) -> Void)? = nil
@@ -102,7 +106,10 @@ struct TodayStressTileView: View {
     }
 
     var body: some View {
-        Button(action: onOpen) {
+        Button {
+            TelosHaptics.play(.select)
+            onDiagnostic()
+        } label: {
             HStack(alignment: .center, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 8) {
@@ -140,7 +147,8 @@ struct TodayStressTileView: View {
             }
             .padding(16)
             .frame(maxWidth: .infinity)
-            .background(StrandPalette.surfaceRaised)
+            // V2 faux glass: translucent fill + luminous hairline + a stress-tinted top glow. No material.
+            .background(NoopPanelSurface(tint: StrandPalette.stressColor, cornerRadius: NoopMetrics.cardRadius))
             .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
         }
         // Was `.plain`, which on a touchscreen is no feedback at all: a full-width card with an arrow
@@ -150,6 +158,10 @@ struct TodayStressTileView: View {
         .buttonStyle(StrandPressableButtonStyle(cornerRadius: NoopMetrics.cardRadius))
         .accessibilityElement(children: .combine)
         .accessibilityLabel(Text("Today's stress, \(shown.map { String(format: "%.1f", $0) } ?? "no reading")"))
+        .accessibilityHint(Text("Opens the stress check"))
+        .contextMenu {
+            Button(action: onOpen) { Label("Stress", systemImage: "chart.xyaxis.line") }
+        }
         // KEYED ON THE SCENE PHASE, so the loop is torn down when the app leaves the foreground and
         // started again when it comes back. `.task` captures the view as it was when it started, so a
         // phase read INSIDE the loop would never change.
@@ -191,7 +203,7 @@ struct TodayStressTileView: View {
 
     private func stat(_ label: String, _ value: Double?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(value.map { String(format: "%.1f", $0) } ?? "–")
+            Text(value.map { String(format: "%.1f", $0) } ?? TelosType.absent)
                 .font(StrandFont.bodyNumber)
                 .foregroundStyle(value == nil ? StrandPalette.textTertiary : StrandPalette.textPrimary)
             Text(label)
@@ -242,7 +254,7 @@ private struct StressTickDial: View {
                                    style: StrokeStyle(lineWidth: stroke, lineCap: .round))
                 }
             }
-            Text(level.map { String(format: "%.1f", $0) } ?? "–")
+            Text(level.map { String(format: "%.1f", $0) } ?? TelosType.absent)
                 .font(StrandFont.number(level == nil ? 18 : 22))
                 .foregroundStyle(level == nil ? StrandPalette.textTertiary : StrandPalette.textPrimary)
         }

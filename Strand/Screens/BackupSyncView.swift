@@ -81,7 +81,7 @@ struct BackupSyncView: View {
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(StrandPalette.statusWarning)
-                        .font(.system(size: 12))
+                        .font(TelosType.footnote)
                         .accessibilityHidden(true)
                     Text("These backups are unencrypted too. If this folder syncs to Drive, Dropbox or iCloud, the readable file goes there as well — only point it at a service you trust.")
                         .font(StrandFont.caption).foregroundStyle(StrandPalette.statusWarning)
@@ -150,7 +150,7 @@ struct BackupSyncView: View {
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
                             .foregroundStyle(StrandPalette.statusWarning)
-                            .font(.system(size: 12))
+                            .font(TelosType.footnote)
                             .accessibilityHidden(true)
                         Text("Auto-backup hasn't run in a few days. Check the backup folder is still available — a moved or disconnected cloud folder stops backups silently.")
                             .font(StrandFont.caption).foregroundStyle(StrandPalette.statusWarning)

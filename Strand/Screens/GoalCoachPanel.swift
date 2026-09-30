@@ -66,42 +66,58 @@ struct GoalCoachPanel: View {
     @State private var failure: String?
 
     var body: some View {
-        StrandCard(padding: 12) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Coach").strandOverline()
+        StrandCard(tint: TelosColor.mint) {
+            VStack(alignment: .leading, spacing: TelosSpace.s) {
+                PGGlyphHeader(systemImage: "sparkles", title: Text("Coach"), tint: TelosColor.mint,
+                              trailing: answer.map { Text(verbatim: "ANSWERED \($0.day)") })
                 if let a = answer {
                     Text(a.text)
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textPrimary)
+                        .font(TelosType.subhead)
+                        .foregroundStyle(TelosColor.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
-                    Text("answered \(a.day)")
-                        .font(StrandFont.mono(11))
-                        .foregroundStyle(StrandPalette.textTertiary)
                 } else {
                     Text("Ask the coach to plan toward your goals and to judge how realistic they are.")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textSecondary)
+                        .font(TelosType.footnote)
+                        .foregroundStyle(TelosColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                HStack(spacing: 8) {
+                HStack(alignment: .center, spacing: TelosSpace.s) {
                     TextField("Ask about your goals", text: $question, axis: .vertical)
                         .lineLimit(1...3)
-                        .font(StrandFont.footnote)
-                        .textFieldStyle(.roundedBorder)
+                        .font(TelosType.footnote)
+                        .foregroundStyle(TelosColor.textPrimary)
+                        .textFieldStyle(.plain)
+                        .padding(.horizontal, TelosSpace.m)
+                        .padding(.vertical, TelosSpace.s)
+                        .frame(minHeight: TelosSpace.hitTarget)
+                        .pgInsetBand()
                     if asking {
                         ProgressView().controlSize(.small)
+                            .frame(width: TelosSpace.hitTarget, height: TelosSpace.hitTarget)
                     } else {
-                        NoopButton("Ask", kind: .secondary) {
+                        Button {
+                            TelosHaptics.play(.commit)
                             Task { await ask() }
+                        } label: {
+                            Image(systemName: "arrow.up")
+                                .font(TelosType.glyphControl)
+                                .foregroundStyle(TelosColor.onAccent)
+                                .frame(width: 36, height: 36)
+                                .background(Circle().fill(TelosColor.mint))
+                                .frame(width: TelosSpace.hitTarget, height: TelosSpace.hitTarget)
+                                .contentShape(Circle())
                         }
+                        .buttonStyle(TelosPressButtonStyle())
+                        .accessibilityLabel(Text("Ask"))
                         .disabled(assessments.isEmpty || question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .opacity(assessments.isEmpty ? TelosOpacity.disabled : 1)
                     }
                 }
                 if let failure {
                     Text(failure)
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.statusWarning)
+                        .font(TelosType.caption)
+                        .foregroundStyle(TelosColor.warning)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

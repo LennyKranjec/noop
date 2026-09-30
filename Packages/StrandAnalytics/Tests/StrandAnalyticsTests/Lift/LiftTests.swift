@@ -424,6 +424,92 @@ final class LiftTests: XCTestCase {
         XCTAssertFalse(summary.achievements.contains { if case .longHaul = $0 { return true } else { return false } })
     }
 
+    // MARK: - Live PR detection (set-check time)
+
+    private func pressHistory() -> [LiftHistorySet] {
+        [LiftHistorySet(exercise: "Beinpresse", weightKg: 60, reps: 10, isWarmup: true),
+         LiftHistorySet(exercise: "Beinpresse", weightKg: 100, reps: 10),
+         LiftHistorySet(exercise: "Beinpresse", weightKg: 95, reps: 12),
+         LiftHistorySet(exercise: "Beinpresse", weightKg: 102.5, reps: 20)]
+    }
+
+    func testPriorBestIsTheBestBeforeThisSession() {
+        let best = LiftPriorBest(sets: pressHistory())
+        XCTAssertEqual(best.e1rmKg!, 100 * (1 + 10.0 / 30), accuracy: 1e-9, "20 reps is outside the window")
+        XCTAssertEqual(best.bestSetWeightKg, 100)
+        XCTAssertEqual(best.bestSetReps, 10)
+        XCTAssertEqual(best.heaviestKg, 102.5, "a heavy set counts as a load even outside the e1RM window")
+        XCTAssertTrue(best.hasHistory)
+        let bodyweight = LiftPriorBest(sets: [LiftHistorySet(exercise: "Hyperextensions", weightKg: 10, reps: 12,
+                                                             addedToBodyweight: true)])
+        XCTAssertFalse(bodyweight.hasHistory, "an added load is not an absolute best")
+        XCTAssertFalse(LiftPriorBest(sets: []).hasHistory)
+    }
+
+    private func loggedPress(_ sets: [(Double?, Int?, LiftSetStatus)], bodyweight: Bool = false) -> LiftLoggedExercise {
+        LiftLoggedExercise(id: "press", name: "Beinpresse", equipment: nil, targetReps: 10, restSeconds: nil,
+                           isBodyweight: bodyweight,
+                           sets: sets.enumerated().map { i, v in
+                               LiftLoggedSet(id: "s\(i)", kind: .working, weightKg: v.0, reps: v.1, status: v.2)
+                           },
+                           increment: LiftIncrement.resolve(weightsKg: []))
+    }
+
+    func testFirstEverSessionIsNeverAPR() {
+        let ex = loggedPress([(80, 10, .done), (200, 10, .done)])
+        XCTAssertEqual(LiftRecordCheck.liveRecords(setId: "s1", in: ex, prior: LiftPriorBest()), [],
+                       "no previous best, no record — however heavy")
+    }
+
+    func testACheckedSetThatBeatsThePriorBestIsAPR() {
+        let prior = LiftPriorBest(sets: pressHistory())
+        let heavier = loggedPress([(105, 10, .done)])
+        XCTAssertEqual(LiftRecordCheck.liveRecords(setId: "s0", in: heavier, prior: prior),
+                       [.e1rm(newKg: 105 * (1 + 10.0 / 30), previousBestKg: 100 * (1 + 10.0 / 30)),
+                        .heaviest(newKg: 105, previousBestKg: 102.5)])
+        let oneMoreRep = loggedPress([(100, 11, .done)])
+        XCTAssertEqual(LiftRecordCheck.liveRecords(setId: "s0", in: oneMoreRep, prior: prior),
+                       [.e1rm(newKg: 100 * (1 + 11.0 / 30), previousBestKg: 100 * (1 + 10.0 / 30))],
+                       "a rep PR raises the e1RM, not the load")
+        let same = loggedPress([(100, 10, .done)])
+        XCTAssertEqual(LiftRecordCheck.liveRecords(setId: "s0", in: same, prior: prior), [], "equalling is not beating")
+    }
+
+    func testTheBarRisesWithinTheSession() {
+        let prior = LiftPriorBest(sets: pressHistory())
+        let ex = loggedPress([(105, 10, .done), (105, 10, .done), (107.5, 10, .pending)])
+        let first = loggedPress([(105, 10, .done), (105, 10, .pending), (107.5, 10, .pending)])
+        XCTAssertEqual(LiftRecordCheck.liveRecords(setId: "s0", in: first, prior: prior).count, 2, "the first 105 is a PR")
+        XCTAssertEqual(LiftRecordCheck.liveRecords(setId: "s1", in: ex, prior: prior), [],
+                       "a repeat of this session's PR does not flash again")
+        let later = loggedPress([(105, 10, .done), (105, 10, .done), (107.5, 10, .done)])
+        XCTAssertEqual(LiftRecordCheck.liveRecords(setId: "s2", in: later, prior: prior).count, 2,
+                       "a heavier set after it still does")
+        // Pending sets do not raise the bar: only what was done counts.
+        let pending = loggedPress([(110, 10, .pending), (105, 10, .done)])
+        XCTAssertEqual(LiftRecordCheck.liveRecords(setId: "s1", in: pending, prior: prior).count, 2)
+    }
+
+    func testWarmupsAndBodyweightLoadsAreNeverRecords() {
+        let prior = LiftPriorBest(sets: pressHistory())
+        var warm = loggedPress([(150, 10, .done)])
+        warm.sets[0].kind = .warmup
+        XCTAssertEqual(LiftRecordCheck.liveRecords(setId: "s0", in: warm, prior: prior), [])
+        let added = loggedPress([(150, 10, .done)], bodyweight: true)
+        XCTAssertEqual(LiftRecordCheck.liveRecords(setId: "s0", in: added, prior: prior), [],
+                       "an added load has no absolute e1RM or weight to compare")
+    }
+
+    func testLiveAndFinishAgreeOnRecords() {
+        let prior = [LiftHistorySession(id: "lifting-a", start: date(2026, 9, 15), title: "Lower A (Di)",
+                                        sets: pressHistory())]
+        let s = finished([("Beinpresse", 105, 10)], start: date(2026, 9, 22))
+        let summary = LiftSummaryBuilder.build(session: s, history: prior, musclesFor: muscles, calendar: calendar)
+        let live = LiftRecordCheck.liveRecords(setId: s.exercises[0].sets[0].id, in: s.exercises[0],
+                                               prior: LiftPriorBest(sets: pressHistory()))
+        XCTAssertEqual(summary.exercises[0].records, live)
+    }
+
     // MARK: - Store bridge + dedupe
 
     func testHistoryFromStoredRowsReadsTheMarkers() {

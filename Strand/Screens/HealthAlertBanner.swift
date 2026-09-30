@@ -1,36 +1,73 @@
 import SwiftUI
+import Combine
 import StrandDesign
 import StrandAnalytics
 import Foundation
 
-/// Strain/illness early-warning banner. Observes AppModel in isolation so the ~1 Hz HR stream
-/// re-renders only this small view, not the whole screen. Renders nothing when there's no alert.
+/// The strain/illness heads-up on Today, titled "Body off baseline" (HEALTH_V2 H8: the old "early
+/// warning" implied a prediction). Wording and gating are the health package's (`localizedHealthAlertCopy`
+/// below, `AppModel.healthAlert`); the layout is Today's: a critical-railed glass card (DESIGN_V2 §6.2
+/// item 4, the §5.14 container) — a red rail, the title, the plain copy. Renders nothing when there is no
+/// alert.
+///
+/// NARROW OBSERVATION (§2.1 rule 5): AppModel publishes 1–3×/s while a strap streams, and this banner needs
+/// one field — so it reads `healthAlert` through a de-duplicated publisher into @State instead of observing
+/// the whole model. The root is an always-present VStack so the subscription outlives an empty banner.
 struct HealthAlertBanner: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appModelRef) private var appModelRef
+    @State private var alert: AppModel.HealthAlert?
+
     var body: some View {
-        if let alert = model.healthAlert {
-            let copy = localizedHealthAlertCopy(alert)
-            // A frosted, warning-tinted alert card (not a flat coloured bar) — prominent but on-brand.
-            // The amber wash + a glyph in a soft amber chip read as an early-warning without a hard rule.
-            NoopCard(padding: 14, tint: StrandPalette.statusWarning) {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(StrandPalette.statusWarning)
-                        .frame(width: 30, height: 30)
-                        .background(StrandPalette.statusWarning.opacity(0.16), in: Circle())
-                        .accessibilityHidden(true)
-                    Text(copy)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 0)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(spacing: 0) {
+            if let alert {
+                card(alert)
             }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(copy)
         }
+        .onReceive(alertPublisher) { next in
+            if next != alert { alert = next }
+        }
+    }
+
+    private var alertPublisher: AnyPublisher<AppModel.HealthAlert?, Never> {
+        guard let model = resolvedAppModel(appModelRef) else { return Empty().eraseToAnyPublisher() }
+        return model.$healthAlert.removeDuplicates().eraseToAnyPublisher()
+    }
+
+    private func card(_ alert: AppModel.HealthAlert) -> some View {
+        let copy = localizedHealthAlertCopy(alert)
+        let shape = RoundedRectangle(cornerRadius: TelosRadius.card, style: .continuous)
+        return HStack(alignment: .top, spacing: TelosSpace.m) {
+            // The rail: the one thing that makes this card read as "attention", without an alarm glyph wall.
+            Capsule()
+                .fill(TelosColor.critical)
+                .frame(width: TelosStroke.rail)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: TelosSpace.xs) {
+                HStack(spacing: TelosSpace.s) {
+                    Image(systemName: "waveform.path.ecg")
+                        .font(TelosType.glyphRow)
+                        .foregroundStyle(TelosColor.critical)
+                        .accessibilityHidden(true)
+                    Text("Body off baseline")
+                        .telosScale()
+                        .textCase(.uppercase)
+                        .foregroundStyle(TelosColor.critical)
+                }
+                Text(copy)
+                    .font(TelosType.subhead)
+                    .foregroundStyle(TelosColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(TelosSpace.l)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Faux glass with a critical wash — no material, no shadow (§2.1).
+        .background(shape.fill(TelosColor.criticalWash))
+        .background(NoopPanelSurface(tint: TelosColor.critical, cornerRadius: TelosRadius.card))
+        .clipShape(shape)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text("Body off baseline. \(copy)"))
     }
 }
 

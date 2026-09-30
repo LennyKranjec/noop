@@ -44,7 +44,7 @@ struct WhoopCloudCard: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     Image(systemName: "icloud")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(TelosType.glyphRow)
                         .foregroundStyle(StrandPalette.accent)
                     VStack(alignment: .leading, spacing: 1) {
                         Text("WHOOP cloud")

@@ -269,7 +269,7 @@ struct AddDeviceWizard: View {
             Spacer()
             Button(action: { stopAllScans(); onClose() }) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 20))
+                    .font(TelosType.title2)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             .buttonStyle(.plain)
@@ -410,7 +410,7 @@ struct AddDeviceWizard: View {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 14) {
                     Image(systemName: typeIcon(type))
-                        .font(.system(size: 30))
+                        .font(TelosType.title)
                         .foregroundStyle(StrandPalette.accent)
                         .accessibilityHidden(true)
                     Text(typeTitle(type)).font(StrandFont.title2)
@@ -537,7 +537,7 @@ struct AddDeviceWizard: View {
             if ouraStep == .gate || ouraStep == .prep {
                 HStack(spacing: 14) {
                     Image(systemName: "circle.circle")
-                        .font(.system(size: 30))
+                        .font(TelosType.title)
                         .foregroundStyle(StrandPalette.accent)
                         .accessibilityHidden(true)
                     Text("Oura ring").font(StrandFont.title2)
@@ -805,7 +805,7 @@ struct AddDeviceWizard: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
                     Image(systemName: "circle.circle")
-                        .font(.system(size: 22))
+                        .font(TelosType.title2)
                         .foregroundStyle(StrandPalette.accent)
                         .accessibilityHidden(true)
                     Text(gen.displayName).font(StrandFont.headline)
@@ -1000,10 +1000,10 @@ struct AddDeviceWizard: View {
     /// One "·"-free bullet line for the get/lose columns.
     private func ouraBullet(_ text: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "circle.fill")
-                .font(.system(size: 5))
-                .foregroundStyle(StrandPalette.textTertiary)
-                .padding(.top, 6)
+            Circle()
+                .fill(TelosColor.textTertiary)
+                .frame(width: 5, height: 5)
+                .padding(.top, 7)
                 .accessibilityHidden(true)
             Text(text)
                 .font(StrandFont.subhead)

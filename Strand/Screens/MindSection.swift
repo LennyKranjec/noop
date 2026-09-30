@@ -64,7 +64,7 @@ struct MindSection: View {
 
     @ViewBuilder
     private var checkInCard: some View {
-        NoopCard(tint: StrandPalette.restColor) {
+        NoopCard(tint: TelosColor.violet) {
             if let mood = todayMood, !editing {
                 answeredRow(mood)
             } else {
@@ -101,9 +101,9 @@ struct MindSection: View {
                 .padding(.vertical, 8)
                 .frame(maxWidth: .infinity)
                 .background(Capsule().fill(
-                    selected ? StrandPalette.restColor.opacity(0.16) : StrandPalette.surfaceInset))
+                    selected ? TelosColor.violet.opacity(0.16) : StrandPalette.surfaceInset))
                 .overlay(Capsule().strokeBorder(
-                    selected ? StrandPalette.restBright : StrandPalette.hairline,
+                    selected ? TelosColor.violetInk : StrandPalette.hairline,
                     lineWidth: selected ? 1.5 : 1))
         }
         // Liquid tap response: the same physical settle-inward every tappable liquid control gets.
@@ -130,7 +130,7 @@ struct MindSection: View {
             Button("Edit") { editing = true }
                 .buttonStyle(.plain)
                 .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.restBright)
+                .foregroundStyle(TelosColor.violetInk)
                 .accessibilityLabel("Edit today's mood")
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -156,12 +156,12 @@ struct MindSection: View {
             // Each correlation as its own frosted Rest-tinted insight card. The indigo wash is
             // calm and carries no valence — a link is just a link, never framed as good or bad.
             ForEach(lines) { line in
-                NoopCard(tint: StrandPalette.restColor) {
+                NoopCard(tint: TelosColor.violet) {
                     HStack(alignment: .top, spacing: 12) {
                         // A small liquid vessel filled to the link's strength (|r|) marks the row and reads
                         // its magnitude at a glance — the leading-gauge idiom Insights' effect cards use.
                         // Rest-tinted so it carries no valence (a link is just a link, never good or bad).
-                        LiquidVessel(value: line.strength, tint: StrandPalette.restBright, animated: false)
+                        LiquidVessel(value: line.strength, tint: TelosColor.violetInk, animated: false)
                             .frame(width: 22, height: 22)
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 4) {

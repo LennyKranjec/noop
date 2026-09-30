@@ -11,6 +11,12 @@
 //  the main screen, and because the dismissal lives in `@AppStorage` a reinstall silently brought it back. It
 //  is now opt-in through the Settings toggle that already exists (`StepCalibrationTileToggleRow`).
 //
+//  TELOS 2.0 (coordinator decision 4 — the tile may not be dropped or hidden behind an opt-in; the owner
+//  reported it had disappeared): the × and the default no longer remove it from Today. Collapsed, it is a
+//  one-line glass row ("Step calibration ›") that opens the full tile in place, so it is always visible and
+//  costs one row of height. `visibleDefault` stays false: the FULL tile is still opt-in (and pinned so by
+//  `AccuracyAuditStepsTests`); the entry is not.
+//
 //  Motion data may reach the store only after an offload (a WHOOP 4.0 without a live motion stream), so a
 //  window whose data is not in yet reads "Waiting for strap data…" instead of a wrong number, and the tile
 //  re-reads every 10 s and on every `repo.refreshSeq` bump until it is.
@@ -116,7 +122,9 @@ struct StepCalibrationTile: View {
     private var now: Int { Int(Date().timeIntervalSince1970) }
 
     var body: some View {
-        if visible {
+        if !visible {
+            collapsedRow
+        } else {
             StrandCard(padding: 14) {
                 VStack(alignment: .leading, spacing: 10) {
                     header
@@ -138,6 +146,39 @@ struct StepCalibrationTile: View {
     }
 
     // MARK: - Sections
+
+    /// The collapsed entry: always on Today, one row, opens the full tile.
+    private var collapsedRow: some View {
+        Button {
+            TelosHaptics.play(.select)
+            visible = true
+        } label: {
+            HStack(spacing: TelosSpace.s) {
+                Image(systemName: "figure.walk")
+                    .font(TelosType.glyphRow)
+                    .foregroundStyle(StrandPalette.accent)
+                Text("Step calibration")
+                    .font(TelosType.subhead.weight(.semibold))
+                    .foregroundStyle(TelosColor.textPrimary)
+                if !session.isEmpty {
+                    // A walk is still open: say so on the collapsed row, so it is not forgotten.
+                    Text(session.isRunning ? "Running" : "Paused")
+                        .font(TelosType.caption)
+                        .foregroundStyle(StrandPalette.accent)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(TelosType.glyphChevron)
+                    .foregroundStyle(TelosColor.textTertiary)
+            }
+            .padding(.horizontal, TelosSpace.l)
+            .frame(maxWidth: .infinity, minHeight: TelosSpace.hitTarget)
+            .background(NoopPanelSurface(cornerRadius: TelosRadius.tile))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(Text("Opens the step-calibration walk"))
+    }
 
     private var header: some View {
         HStack(spacing: 8) {
@@ -234,11 +275,11 @@ struct StepCalibrationTile: View {
             } else {
                 // A 4.0 with no k yet: there is no step number to show, but the motion is measured and the
                 // walk can still set k.
-                bigNumber("–")
+                bigNumber(TelosType.absent)
                 Text("not calibrated yet").font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
             }
         } else {
-            bigNumber("–")
+            bigNumber(TelosType.absent)
             Text("steps").font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
         }
     }
@@ -290,7 +331,7 @@ struct StepCalibrationTile: View {
                     HStack(spacing: 6) {
                         Text(w.date, format: .dateTime.day().month().hour().minute())
                         Spacer(minLength: 4)
-                        Text("NOOP \(w.estimated.map { "\($0)" } ?? "–") · you \(w.counted)")
+                        Text("NOOP \(w.estimated.map { "\($0)" } ?? TelosType.absent) · you \(w.counted)")
                         Text(w.factor.map { String(format: "×%.2f", $0) } ?? "")
                             .foregroundStyle(StrandPalette.textTertiary)
                     }

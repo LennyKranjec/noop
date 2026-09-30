@@ -142,7 +142,7 @@ struct ScoringGuideView: View {
             Spacer()
             Button(action: onClose) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 22))
+                    .font(TelosType.title2)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             .buttonStyle(.plain)
@@ -213,7 +213,7 @@ struct ScoringGuideView: View {
                     VStack(alignment: .leading, spacing: 8) {
                         HStack(spacing: 8) {
                             Image(systemName: section.icon)
-                                .font(.system(size: 16))
+                                .font(TelosType.callout)
                                 .foregroundStyle(section.accent)
                                 .accessibilityHidden(true)
                             Text(section.displayName)

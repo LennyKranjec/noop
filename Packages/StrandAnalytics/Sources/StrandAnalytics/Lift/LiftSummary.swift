@@ -103,6 +103,105 @@ public struct LiftSessionSummary: Equatable, Sendable {
     public static let improvementEpsilonKg = 0.5
 }
 
+// MARK: - Personal records (shared by the live check and the finish screen)
+
+/// What an exercise had reached BEFORE this session — the bar a PR has to clear.
+///
+/// A metric the history never produced stays nil, and a nil bar can never be cleared: the first session of an
+/// exercise sets its baseline, it is not a record (decision 16's honesty rule — no comparison, no claim).
+public struct LiftPriorBest: Equatable, Sendable {
+    /// Best Epley estimate over usable working sets (1–12 reps, absolute load).
+    public var e1rmKg: Double?
+    /// Heaviest absolute working load with at least one rep.
+    public var heaviestKg: Double?
+    /// The set that produced `e1rmKg` — "best: 100 kg × 10" on screen.
+    public var bestSetWeightKg: Double?
+    public var bestSetReps: Int?
+
+    public init(e1rmKg: Double? = nil, heaviestKg: Double? = nil, bestSetWeightKg: Double? = nil,
+                bestSetReps: Int? = nil) {
+        self.e1rmKg = e1rmKg
+        self.heaviestKg = heaviestKg
+        self.bestSetWeightKg = bestSetWeightKg
+        self.bestSetReps = bestSetReps
+    }
+
+    /// From this exercise's sets in earlier sessions.
+    public init(sets: [LiftHistorySet]) {
+        self.init()
+        for set in sets { absorb(set) }
+    }
+
+    public var hasHistory: Bool { e1rmKg != nil || heaviestKg != nil }
+
+    /// Raise the bar with a set — but only for metrics that ALREADY have a bar. A metric with no history stays
+    /// nil through a whole first session, so no set of that session can be called a record against another.
+    public mutating func raise(with set: LiftHistorySet) {
+        if let bar = e1rmKg, let e = set.e1rmKg, e > bar {
+            e1rmKg = e
+            bestSetWeightKg = set.weightKg
+            bestSetReps = set.reps
+        }
+        if let bar = heaviestKg, let w = LiftRecordCheck.absoluteLoad(set), w > bar { heaviestKg = w }
+    }
+
+    /// History absorption: every metric may start here.
+    mutating func absorb(_ set: LiftHistorySet) {
+        if let e = set.e1rmKg, e > (e1rmKg ?? -1) {
+            e1rmKg = e
+            bestSetWeightKg = set.weightKg
+            bestSetReps = set.reps
+        }
+        if let w = LiftRecordCheck.absoluteLoad(set), w > (heaviestKg ?? -1) { heaviestKg = w }
+    }
+}
+
+public enum LiftRecordCheck {
+
+    /// The absolute working load of a set, or nil for a warm-up, a set with no reps, or a load added to bodyweight.
+    public static func absoluteLoad(_ set: LiftHistorySet) -> Double? {
+        guard !set.isWarmup, !set.addedToBodyweight, (set.reps ?? 0) > 0, let w = set.weightKg, w > 0 else { return nil }
+        return w
+    }
+
+    /// Records for a candidate e1RM / heaviest load against a bar. e1RM must beat the bar by more than the
+    /// half-kilo noise floor (`LiftSessionSummary.improvementEpsilonKg`); a load must simply be heavier.
+    public static func records(e1rmKg: Double?, heaviestKg: Double?,
+                               against bar: LiftPriorBest) -> [LiftSessionSummary.Record] {
+        var out: [LiftSessionSummary.Record] = []
+        if let e = e1rmKg, let prev = bar.e1rmKg, e > prev + LiftSessionSummary.improvementEpsilonKg {
+            out.append(.e1rm(newKg: e, previousBestKg: prev))
+        }
+        if let w = heaviestKg, let prev = bar.heaviestKg, w > prev + 0.01 {
+            out.append(.heaviest(newKg: w, previousBestKg: prev))
+        }
+        return out
+    }
+
+    /// The live check when a set is ticked: is THIS set a new best right now?
+    ///
+    /// The bar is the pre-session best raised by the exercise's OTHER done sets this session, so a second heavier
+    /// set still flashes but an equal or lighter one after a PR does not. Returns [] on an exercise with no
+    /// history (first session = baseline, not a record).
+    public static func liveRecords(setId: String, in exercise: LiftLoggedExercise,
+                                   prior: LiftPriorBest) -> [LiftSessionSummary.Record] {
+        guard prior.hasHistory, let set = exercise.sets.first(where: { $0.id == setId }),
+              !set.kind.isWarmup else { return [] }
+        var bar = prior
+        for other in exercise.sets where other.id != setId && other.status == .done {
+            bar.raise(with: historySet(other, in: exercise))
+        }
+        let candidate = historySet(set, in: exercise)
+        return records(e1rmKg: candidate.e1rmKg, heaviestKg: absoluteLoad(candidate), against: bar)
+    }
+
+    static func historySet(_ set: LiftLoggedSet, in exercise: LiftLoggedExercise) -> LiftHistorySet {
+        LiftHistorySet(exercise: exercise.name, weightKg: set.weightKg, reps: set.reps,
+                       isWarmup: set.kind.isWarmup,
+                       addedToBodyweight: exercise.isBodyweight && (set.weightKg ?? 0) > 0)
+    }
+}
+
 public enum LiftSummaryBuilder {
 
     /// Build the summary for a FINISHED session.
@@ -124,23 +223,15 @@ public enum LiftSummaryBuilder {
             let key = LiftDedupe.exerciseKey(ex.name)
             let mine = current.filter { LiftDedupe.exerciseKey($0.exercise) == key }
             let best = mine.compactMap(\.e1rmKg).max()
-            let heaviest = mine.filter { !$0.isWarmup && !$0.addedToBodyweight && ($0.reps ?? 0) > 0 }
-                .compactMap(\.weightKg).max()
-
             let priorSets = prior.flatMap { $0.sets(of: ex.name) }
-            let prevBest = priorSets.compactMap(\.e1rmKg).max()
-            let prevHeaviest = priorSets.filter { !$0.isWarmup && !$0.addedToBodyweight && ($0.reps ?? 0) > 0 }
-                .compactMap(\.weightKg).max()
             let previousSession = prior.reversed().first { s in s.sets(of: ex.name).contains { $0.e1rmKg != nil } }
             let prevSessionBest = previousSession?.sets(of: ex.name).compactMap(\.e1rmKg).max()
-
-            var records: [LiftSessionSummary.Record] = []
-            if let best, let prevBest, best > prevBest + LiftSessionSummary.improvementEpsilonKg {
-                records.append(.e1rm(newKg: best, previousBestKg: prevBest))
-            }
-            if let heaviest, let prevHeaviest, heaviest > prevHeaviest + 0.01 {
-                records.append(.heaviest(newKg: heaviest, previousBestKg: prevHeaviest))
-            }
+            // The SAME rule the logger applies live at check time (`LiftRecordCheck`), so the finish screen and
+            // the in-set reward can never disagree about what was a record.
+            let records = LiftRecordCheck.records(
+                e1rmKg: best,
+                heaviestKg: mine.compactMap(LiftRecordCheck.absoluteLoad).max(),
+                against: LiftPriorBest(sets: priorSets))
             lines.append(LiftSessionSummary.ExerciseLine(
                 name: ex.name,
                 setsDone: ex.sets.filter { $0.status == .done }.count,

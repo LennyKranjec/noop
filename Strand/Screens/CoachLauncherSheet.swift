@@ -40,7 +40,8 @@ struct CoachLauncherSheet: View {
             // Without either, focusing this composer left send-or-nothing as the only way out of a
             // keyboard covering the suggestion list it was typed from.
             .scrollDismissesKeyboard(.interactively)
-            .background(StrandPalette.surfaceBase.ignoresSafeArea())
+            // V2 sheet (§5.12): solid canvas, no material.
+            .background(TelosColor.canvas.ignoresSafeArea())
             .navigationTitle(Text("Coach"))
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -53,6 +54,8 @@ struct CoachLauncherSheet: View {
         }
         #if os(iOS)
         .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(TelosColor.canvas)
         #endif
     }
 
@@ -61,8 +64,9 @@ struct CoachLauncherSheet: View {
     @ViewBuilder
     private var configured: some View {
         Text("Ask about your charge, effort, rest and workouts, grounded in your own numbers.")
-            .font(StrandFont.footnote)
-            .foregroundStyle(StrandPalette.textTertiary)
+            .font(TelosType.footnote)
+            .foregroundStyle(TelosColor.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
 
         // Deliberately no "Try asking" heading: the line above already frames the list, and a new
         // literal would be the only string in this card needing translation into ten locales. The whole
@@ -70,13 +74,22 @@ struct CoachLauncherSheet: View {
 
         ForEach(CoachPrompts.suggestions, id: \.self) { prompt in
             Button { hand(off: prompt) } label: {
-                Text(prompt)
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                    .padding(.horizontal, 12).padding(.vertical, 8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(FrostedCardSurface(cornerRadius: NoopMetrics.cardRadius))
-                    .contentShape(Rectangle())
+                // A list row (§5.8): the prompt in `body`, a chevron because it navigates.
+                HStack(spacing: TelosSpace.m) {
+                    Text(prompt)
+                        .font(TelosType.body)
+                        .foregroundStyle(TelosColor.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: TelosSpace.s)
+                    Image(systemName: "chevron.right")
+                        .font(TelosType.glyphChevron)
+                        .foregroundStyle(TelosColor.textTertiary)
+                        .accessibilityHidden(true)
+                }
+                .padding(.horizontal, TelosSpace.m)
+                .frame(maxWidth: .infinity, minHeight: TelosSpace.rowMinHeight, alignment: .leading)
+                .background(FrostedCardSurface(cornerRadius: NoopMetrics.cardRadius))
+                .contentShape(Rectangle())
             }
             // These chips ARE the sheet: tapping one dismisses and hands the question over, so the
             // only feedback `.plain` gave was the sheet vanishing. Shared press-down style.
@@ -88,8 +101,13 @@ struct CoachLauncherSheet: View {
             TextField("Ask your coach…", text: $draft, axis: .vertical)
                 .textFieldStyle(.plain)
                 .lineLimit(1...3)
-                .padding(.horizontal, 12).padding(.vertical, 9)
-                .background(FrostedCardSurface(cornerRadius: NoopMetrics.cardRadius))
+                .font(TelosType.body)
+                .padding(.horizontal, TelosSpace.m).padding(.vertical, 10)
+                .frame(minHeight: TelosSpace.hitTarget)
+                .background(TelosColor.surfaceInset,
+                            in: RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
+                    .strokeBorder(TelosColor.line, lineWidth: TelosStroke.line))
                 .focused($composerFocused)
                 .onSubmit { submitDraft() }
                 // iOS only: macOS has no software keyboard to dismiss, and `.keyboard` placement
@@ -109,12 +127,16 @@ struct CoachLauncherSheet: View {
             Button {
                 submitDraft()
             } label: {
-                Image(systemName: "arrow.up.circle.fill")
-                    .font(.system(size: 26, weight: .semibold))
-                    .foregroundStyle(StrandPalette.accent)
+                Image(systemName: "arrow.up")
+                    .font(TelosType.glyphControl)
+                    .foregroundStyle(TelosColor.onAccent)
+                    .frame(width: TelosSpace.hitTarget, height: TelosSpace.hitTarget)
+                    .background(StrandPalette.accent,
+                                in: RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous))
             }
-            .buttonStyle(.plain)
+            .buttonStyle(TelosPressButtonStyle())
             .disabled(trimmedDraft.isEmpty)
+            .opacity(trimmedDraft.isEmpty ? TelosOpacity.disabled : 1)
             .accessibilityLabel(Text("Send"))
         }
         .padding(.top, 4)
@@ -127,22 +149,17 @@ struct CoachLauncherSheet: View {
         // The SAME explanation the Coach screen shows, so the bring-your-own-key model is described
         // once. The button routes to that screen, which stays the only place a key is entered.
         Text("Coach uses your own API key. Pick a provider, paste a key, and choose a model. Your key is stored securely in the Keychain and never leaves \(Platform.deviceNounPhrase) except as the request you make.")
-            .font(StrandFont.footnote)
-            .foregroundStyle(StrandPalette.textTertiary)
+            .font(TelosType.footnote)
+            .foregroundStyle(TelosColor.textSecondary)
+            .fixedSize(horizontal: false, vertical: true)
 
         Button {
             dismiss()
             router.openCoach()
         } label: {
             Text("Connect a provider")
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textPrimary)
-                .padding(.horizontal, 14).padding(.vertical, 10)
-                .frame(maxWidth: .infinity)
-                .background(FrostedCardSurface(cornerRadius: NoopMetrics.cardRadius))
-                .contentShape(Rectangle())
         }
-        .buttonStyle(StrandPressableButtonStyle(cornerRadius: NoopMetrics.cardRadius))
+        .buttonStyle(NoopButtonStyle(.primary, fullWidth: true))
     }
 
     // MARK: Handoff
