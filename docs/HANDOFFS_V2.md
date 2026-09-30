@@ -64,3 +64,15 @@ Views:
 - [ ] TonightCardView (new, SLEEP): reads current, abstention.reason, needLine, paybackLine, insomniaLine
 - [ ] H10, H11, H13, H15 view-only items open (BODY/PROGRESS)
 Findings for owner: load term = training done not adaptation (uncapped by decision); sleep duration uncapped; one sleep need applied to whole history; meditation era from log (≥180 d read)
+
+## Strap cues (done — exact code in the agent report, summary here)
+- [ ] AppModel init next to wake-buzz wiring: `let cues = StrapCueEngine.shared; cues.buzzPulse = { [weak self] loops in self?.buzz(loops: loops) }; cues.strapReady = { [weak self] in self?.ble.commandChannelReady ?? false }; cues.bondRefused = { [weak self] in self?.live.strapWritesRefused ?? false }; cues.strapLog = { [live] line in live.append(log: line) }; cues.sleepPlan = { day in SleepScheduleProvider.shared.plan(wakingOn: day) }; cues.isWorkoutActive = { [weak self] in self?.activeWorkout != nil }; cues.onMeditationCompleted = { [weak self] secs in guard let self else { return }; Task { await self.repo.logMeditation(seconds: secs) } }`; `cues.start()` where `wakeBuzz.reschedule()` runs at end of setup
+- [ ] AppModel `ingestHR` after `foldSmoothing(inst)`: `StrapCueEngine.shared.ingestHeartRate(Int(inst.rounded()))`
+- [ ] StrandiOSApp scenePhase .active: `StrapCueEngine.shared.tick()`
+- [ ] RootTabView: `.onChange(of: showMorning) { _, v in StrapCueEngine.shared.morningFlowActive = v }`
+- [ ] HD breathing recorder: `cues.onBreathPhase`, `cues.onBreathingCancelled`, `cues.isExternalMindfulSessionActive`
+- [ ] Settings/More: `NavigationLink { StrapCuesSettingsView(engine: StrapCueEngine.shared) }`
+- [ ] Optional BLE: HISTORY_COMPLETE hook → `StrapCueEngine.shared.reconcileStrapSteps(samples)` from last ~3 h of stepSamples
+- [ ] project.yml NSMotionUsageDescription copy update (suggested text in report)
+- [ ] COORDINATOR DECISION: the sitting-break nudge, reward and penalty cues must work by default (owner asked for them). Change the gate so these cues are governed by their own switches, NOT by the Wrist-alerts master (`notif.masterEnabled`, default off, which stays in charge of HR/strain wrist alerts); update the master's copy so it no longer promises "quiet no matter what else is on" but names what it controls. Keep quiet hours, sleep window and the daily budget.
+- API: `StrapCueEngine.shared.fire(.restOver)`, `.fire(.reward, eventId:)`, `.fire(.penalty, eventId:)` → StrapCueFireResult
