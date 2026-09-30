@@ -417,10 +417,15 @@ final class AppModel: ObservableObject {
         // Re-arm the next day's firmware alarm the moment the strap reports it fired (if/when the
         // firmware pushes STRAP_DRIVEN_ALARM_EXECUTED). Gated on enabled inside applySmartAlarm.
         live.onSmartAlarmFired = { [weak self] in
-            guard let self, self.behavior.smartAlarmEnabled else { return }
+            guard let self else { return }
+            // THE STRAP'S ALARM WAKES THE APP'S RING. The event arrives over BLE, which is what lets iOS run a
+            // suspended Telos at all — so this is the moment the app-driven wake buzz can start its repeating
+            // cadence. `reschedule` rings a just-missed instant once (catch-up window) and arms the next day.
+            if WakeBuzzAlarm.isEnabled() { self.wakeBuzz.reschedule() }
+            guard self.behavior.smartAlarmEnabled || WakeBuzzAlarm.isEnabled() else { return }
             // PR #577 (iOS): mirror the strap's wake buzz to a local notification so a phone-in-pocket
             // user still gets woken; no-op on macOS / when wrist alerts are off.
-            AppModel.postSmartAlarm()
+            if self.behavior.smartAlarmEnabled { AppModel.postSmartAlarm() }
             self.applySmartAlarm()
         }
         // Strap battery alerts (#368): low-battery warning + full-charge note. The notifier self-gates
@@ -504,7 +509,8 @@ final class AppModel: ObservableObject {
         // `disarmPending` latches exactly that dropped write, so this stays a no-op for the many users who
         // never armed one (re-running unconditionally would put a DISABLE_ALARM on every connect).
         live.$connectSettled.dropFirst().sink { [weak self] _ in
-            guard let self, self.behavior.smartAlarmEnabled || self.ble.disarmPending else { return }
+            guard let self, self.behavior.smartAlarmEnabled || WakeBuzzAlarm.isEnabled() || self.ble.disarmPending
+            else { return }
             self.applySmartAlarm()
         }.store(in: &hrCancellables)
         // The firmware alarm is a single absolute instant with no recurrence, and was re-armed ONLY on
@@ -515,6 +521,11 @@ final class AppModel: ObservableObject {
         // The wake buzz is scheduled the same way, from the same persisted settings: arm it at launch.
         // `scheduleDailySmartAlarmRearm`'s just-after-midnight tick re-runs it for the day rollover, and
         // the iOS foreground hook re-runs it for every resume (a suspended app cannot run its timer).
+        // Every change of the wake buzz's next instant (settings edit, day rollover, a ring) re-arms the
+        // strap's own alarm as its backstop — the one part that fires with Telos suspended.
+        wakeBuzz.$nextFire.removeDuplicates().dropFirst().sink { [weak self] _ in
+            Task { @MainActor in self?.applySmartAlarm() }
+        }.store(in: &hrCancellables)
         wakeBuzz.reschedule()
         // Re-apply "Continuous HRV capture" on every (re)bond: if on, the strap should hold the dense
         // realtime stream armed even with no Live screen open, so it banks beat-to-beat R-R 24/7 for
@@ -2109,21 +2120,29 @@ final class AppModel: ObservableObject {
     /// to `nextSmartAlarmEpochSec`, and `SmartAlarmScheduler.arm` which reads `targetOverrides`.
     func applySmartAlarm() {
         let overrides = WindDownNudge.perDayWakeOverrides
+        // ONE firmware alarm register, TWO alarms that want it: the smart alarm and the wake buzz's backstop.
+        // The earliest upcoming instant wins; the other re-arms after it fires (event 57, the daily tick, a
+        // reconnect or a foreground all re-run this).
+        let wakeNext: Date? = WakeBuzzAlarm.isEnabled() ? wakeBuzz.nextFire : nil
         guard behavior.smartAlarmEnabled else {
-            ble.disableStrapAlarm()
             Self.cancelSmartAlarmBackupNotification()
+            if let wakeNext { ble.armStrapAlarm(at: wakeNext, allowUnconfirmed5MG: true) } else { ble.disableStrapAlarm() }
             return
         }
-        guard let next = Self.nextSmartAlarmDate(minutes: behavior.smartAlarmMinutes,
-                                                 weekdays: behavior.smartAlarmWeekdays,
-                                                 overrides: overrides) else {
+        guard let smartNext = Self.nextSmartAlarmDate(minutes: behavior.smartAlarmMinutes,
+                                                      weekdays: behavior.smartAlarmWeekdays,
+                                                      overrides: overrides) else {
             // No enabled weekday in the next week (only possible from a corrupted set) , disarm rather
             // than arm a misleading time the user never asked for.
-            ble.disableStrapAlarm()
             Self.cancelSmartAlarmBackupNotification()
+            if let wakeNext { ble.armStrapAlarm(at: wakeNext, allowUnconfirmed5MG: true) } else { ble.disableStrapAlarm() }
             return
         }
-        ble.armStrapAlarm(at: next)
+        if let wakeNext, wakeNext < smartNext {
+            ble.armStrapAlarm(at: wakeNext, allowUnconfirmed5MG: true)
+        } else {
+            ble.armStrapAlarm(at: smartNext)
+        }
         // Replace (remove + re-add by stable identifier) on every re-arm so the backup never stacks.
         // The log sink hops to the main actor because the auth check completes off-main and LiveState is
         // @MainActor - the same Task hop the importTraceSink uses.

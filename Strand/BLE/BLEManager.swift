@@ -5351,7 +5351,12 @@ public final class BLEManager: NSObject, ObservableObject {
     /// Android rev-4 frame has been ACKed by a real 5/MG when arming, but a strap-driven wake fire
     /// has NOT been captured on our side (no STRAP_DRIVEN_ALARM_EXECUTED event observed yet) — do
     /// not present the 5/MG alarm as guaranteed until one is.
-    func armStrapAlarm(at date: Date) {
+    /// `allowUnconfirmed5MG`: the WAKE BUZZ's hardware backstop. The app-driven wake buzz can only ring while
+    /// iOS lets Telos run, and overnight it usually does not — the owner's report: the notification arrived,
+    /// the band stayed still. So the wake buzz arms the strap's own alarm for the same instant even on a 5/MG
+    /// without Experimental: the worst case is the same silent strap as before (the notification stays), and
+    /// the best case is a strap that fires by itself and, through its event 57, wakes Telos to run the ring.
+    func armStrapAlarm(at date: Date, allowUnconfirmed5MG: Bool = false) {
         // Log the wake time in the user's LOCAL zone. `Date` prints in UTC by default, so an alarm
         // for (say) 07:00 in New York logged as "11:00:00 +0000" reads like a timezone bug — but it
         // isn't: SET_ALARM_TIME carries the absolute instant of the chosen local time, and the strap
@@ -5363,9 +5368,12 @@ public final class BLEManager: NSObject, ObservableObject {
             // verified), so only arm it when the user has opted into Experimental — matching the Android
             // client, which refuses to arm it otherwise. Without this a normal 5/MG user is silently
             // armed onto an alarm that may never fire.
-            guard PuffinExperiment.isEnabled else {
+            guard PuffinExperiment.isEnabled || allowUnconfirmed5MG else {
                 log("Alarm: 5/MG firmware alarm needs the Experimental toggle (unconfirmed) — not armed")
                 return
+            }
+            if !PuffinExperiment.isEnabled {
+                log("Alarm: arming the 5/MG firmware alarm as the wake buzz's backstop (unverified on 5/MG — look for 'strap-driven wake fired' in this log)")
             }
             // 5/MG SET_ALARM_TIME is REVISION_4: [04][id][u32 sec][u16 subsec][12-byte 47/152
             // pattern, overallLoop 7, 30 s]. No SET_CLOCK preamble (see doc comment above).
