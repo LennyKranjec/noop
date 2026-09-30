@@ -308,7 +308,7 @@ public struct OverviewHRChart: View {
         Self.workoutBands(workouts, clippedTo: xDomain)
     }
 
-    /// Series ids: the luminous halo copy and the line itself (two series so they never join).
+    /// Series ids. `haloSeries` is retired (decision 19: no halo copy is drawn); kept as a name only.
     static let haloSeries = "halo"
     static let lineSeries = "hr"
 
@@ -381,15 +381,7 @@ public struct OverviewHRChart: View {
                     )
                 )
         }
-        // Telos luminous line: ONE wide faint halo series under the crisp line (no blur). Same points.
-        ForEach(displayPoints) { p in
-            LineMark(x: .value("Time", p.date), y: .value("BPM", p.value),
-                     series: .value("Series", Self.haloSeries))
-                .interpolationMethod(.monotone)
-                .lineStyle(StrokeStyle(lineWidth: 7, lineCap: .round, lineJoin: .round))
-                .foregroundStyle(valueGradient)
-                .opacity(0.16)
-        }
+        // One crisp line — no halo copy under it (decision 19).
         ForEach(displayPoints) { p in
             LineMark(x: .value("Time", p.date), y: .value("BPM", p.value),
                      series: .value("Series", Self.lineSeries))

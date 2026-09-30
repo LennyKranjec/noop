@@ -107,15 +107,12 @@ enum LiquidRender {
         for r in runs { appendRun(&line, r.lowerBound, r.upperBound) }
 
         var ctx = base
-        ctx.stroke(line, with: .color(tint.opacity(0.22)),
-                   style: StrokeStyle(lineWidth: 6.5, lineCap: .round, lineJoin: .round))
+        // One crisp line, no halo (decision 19: professional, no glow).
         ctx.stroke(line, with: .color(tint.opacity(0.95)),
-                   style: StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
-        // The latest sample: a glowing dot (static — it moves because the data moved).
+                   style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
+        // The latest sample: a flat dot (static — it moves because the data moved).
         let ex = px(n - 1), ey = py(values[n - 1])
-        ctx.fill(Path(ellipseIn: CGRect(x: ex - 7, y: ey - 7, width: 14, height: 14)), with: .color(tint.opacity(0.22)))
-        ctx.fill(Path(ellipseIn: CGRect(x: ex - 3.2, y: ey - 3.2, width: 6.4, height: 6.4)), with: .color(tint))
-        ctx.fill(Path(ellipseIn: CGRect(x: ex - 1.2, y: ey - 1.2, width: 2.4, height: 2.4)), with: .color(.white))
+        ctx.fill(Path(ellipseIn: CGRect(x: ex - 3, y: ey - 3, width: 6, height: 6)), with: .color(tint))
     }
 }
 
@@ -178,10 +175,10 @@ struct LiquidVessel: View {
             ZStack {
                 TelosRing(value: fraction, scale: 1, color: tint, diameter: d,
                           showsValue: false, animatesChanges: animated)
-                // Tap response: a one-shot glow ring that fades out (cost: one stroke, ≤ 0.6 s).
+                // Tap response: a brief, faint hairline acknowledgement — no glow (decision 19).
                 Circle()
-                    .stroke(tint.opacity(flash ? 0.40 : 0), lineWidth: max(2, d * 0.12))
-                    .padding(d * 0.07)
+                    .stroke(TelosColor.textTertiary.opacity(flash ? 0.35 : 0), lineWidth: 1)
+                    .padding(d * 0.02)
                     .allowsHitTesting(false)
             }
             .frame(width: d, height: d)

@@ -119,7 +119,7 @@ public struct TrendChart: View {
     /// Optional human-readable series name for VoiceOver (e.g. "HRV trend"). When nil the
     /// element falls back to a generic "Trend" label so it's never unlabeled.
     public var accessibilityLabel: String?
-    /// When set, draws a glowing "now" end-cap on the most-recent point — IN the chart's own
+    /// When set, draws a flat "now" marker on the most-recent point — IN the chart's own
     /// coordinate space (via the overlay proxy), so it sits exactly on the line. nil = no cap.
     /// (#458: an earlier sibling-overlay cap guessed the plot insets and floated off the line.)
     public var nowCapColor: Color?
@@ -192,7 +192,7 @@ public struct TrendChart: View {
     /// The x-position the cursor is hovering, in chart-local coordinates.
     @State private var hoverX: CGFloat? = nil
 
-    /// Series-id prefix for the luminous halo copy of each segment (kept distinct from real ids).
+    /// Series-id prefix of the retired halo copy (decision 19: no halo is drawn; kept as a name only).
     static let haloSeriesPrefix = "\u{2063}halo\u{2063}"
     /// Point marks are drawn only for series this short (§5.7).
     static let pointMarkLimit = 14
@@ -360,20 +360,7 @@ public struct TrendChart: View {
                         )
                     }
                 }
-                // Telos luminous line: ONE wide faint halo series under the crisp line - the glow without a
-                // blur. Same points, same segment breaks (its own series ids, so a gap in the data is a gap
-                // in the halo too). Cost: one extra static mark series; nothing animates.
-                ForEach(displayPoints) { p in
-                    LineMark(
-                        x: .value("Date", p.date),
-                        y: .value("Value", p.value),
-                        series: .value("Segment", Self.haloSeriesPrefix + p.segment)
-                    )
-                    .interpolationMethod(.monotone)
-                    .lineStyle(StrokeStyle(lineWidth: 7, lineCap: .round, lineJoin: .round))
-                    .foregroundStyle(valueGradient)
-                    .opacity(0.16)
-                }
+                // One crisp line per segment — no halo copy under it (decision 19).
                 ForEach(displayPoints) { p in
                     LineMark(
                         x: .value("Date", p.date),

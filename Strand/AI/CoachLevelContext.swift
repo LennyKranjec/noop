@@ -102,8 +102,8 @@ enum CoachLevelContext {
         s += "- level = (sum of part score × weight, weights re-shared over the parts that have data) × step multiplier − meditation deduction. Not clamped: all five parts at their own 100 with no step penalty and no deduction is a level of 100, more is more.\n"
         s += "- Weights: " + LevelPart.allCases.map { "\($0.rawValue) \(Int(($0.weight * 100).rounded()))%" }
             .joined(separator: ", ") + ".\n"
-        s += "- A LEVEL OF STATE: every physiological input is a 7-day mean, wake regularity a 14-night spread, strength a 12-week best, training load a 42-day chronic figure — one bad day barely moves it.\n"
-        s += "- sleep = \(share(sleep.duration)) × sleep duration against their need (7-night mean of asleep ÷ need, not capped) + \(share(sleep.regularity)) × wake-time regularity (spread of wake times over 14 nights, needs 7; lower is better) + \(share(sleep.restorative)) × deep+REM minutes. HRV is not in sleep; it counts once, in heart.\n"
+        s += "- A LEVEL OF STATE: every physiological input is a 7-day mean, strength a 12-week best, training load a 42-day chronic figure — one bad day barely moves it.\n"
+        s += "- sleep = \(share(sleep.restorative)) × deep+REM minutes + \(share(sleep.hrv)) × night HRV + \(share(sleep.regularity)) × bed/wake regularity (how far bedtime and wake time moved against the night before; lower is better). 7-night means.\n"
         s += "- heart = \(share(heart.hrv)) × HRV + \(share(heart.rhr)) × resting HR (lower is better).\n"
         s += "- lungs = \(share(lungs.vo2max)) × VO2max (NOOP's own estimate: runs and walks — speed against heart-rate reserve — blended with the HUNT model from the weekly training days, minutes and zone-4–5 share) + \(share(lungs.respRate)) × respiratory rate (lower is better).\n"
         s += "- muscle = \(share(muscle.strength)) × strength (estimated-1RM index: each exercise's best e1RM over 12 weeks as a ratio of its own median) + \(share(muscle.load)) × chronic training load (42-day exponentially weighted volume, not capped: it measures training done, not adaptation).\n"

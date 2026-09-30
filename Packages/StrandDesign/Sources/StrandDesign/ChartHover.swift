@@ -235,14 +235,11 @@ struct CrosshairRule: View {
 /// A small accented dot used to mark the highlighted sample on a line.
 struct HighlightDot: View {
     var color: Color
-    /// §5.7: a 7 pt point with a 2 pt `surface` ring and a faint luminous halo (no blur).
+    /// §5.7: a 7 pt point with a 2 pt `surface` ring. No halo (decision 19).
     var diameter: CGFloat = 7
 
     var body: some View {
         ZStack {
-            Circle()
-                .fill(color.opacity(0.25))
-                .frame(width: diameter * 2.6, height: diameter * 2.6)
             Circle()
                 .fill(TelosColor.surface)
                 .frame(width: diameter + 4, height: diameter + 4)
@@ -256,17 +253,16 @@ struct HighlightDot: View {
 
 // MARK: - "Now" end-cap
 
-/// The crisp "now" marker pinned to a trend line's latest point: a soft tinted outer ring, a brighter
-/// mid-ring, and a white core — flat, no bloom (WHOOP). Positioned by `TrendChart` inside its own plot
-/// coordinate space so it sits exactly on the curve (#458).
+/// The crisp "now" marker pinned to a trend line's latest point: a flat dot in the line colour on a
+/// 2 pt `surface` ring — no tinted outer rings, no bright core (decision 19). Positioned by `TrendChart`
+/// inside its own plot coordinate space so it sits exactly on the curve (#458).
 struct NowCapDot: View {
     var color: Color
 
     var body: some View {
         ZStack {
-            Circle().fill(color.opacity(0.30)).frame(width: 18, height: 18)
-            Circle().fill(color.opacity(0.65)).frame(width: 11, height: 11)
-            Circle().fill(StrandPalette.tipCore).frame(width: 5, height: 5)
+            Circle().fill(TelosColor.surface).frame(width: 11, height: 11)
+            Circle().fill(color).frame(width: 7, height: 7)
         }
         .allowsHitTesting(false)
     }

@@ -3,8 +3,9 @@ import SwiftUI
 // MARK: - TelosRing — the thin luminous ring (docs/DESIGN_V2.md §5.6 "Ring", VISUAL DIRECTION)
 //
 // The reference's REST / CHARGE / EFFORT rings, the "87 % OPTIMAL" ring, the Training Coach "ZONE 2"
-// ring and Mind & Focus: a thin track in the metric's own hue, a luminous progress arc from 12 o'clock
+// ring and Mind & Focus: a thin track in the metric's own hue, a crisp thin progress arc from 12 o'clock
 // clockwise, a light numeral in the centre and an optional caption word ("OPTIMAL") in the hue.
+// Decision 19 (clinical restraint): no halo stroke and no glowing tip — the arc alone carries the value.
 //
 // HONEST OVERFLOW (coordinator decision 9). `scale` is ONE LAP, not a maximum: a value of 134 on a
 // scale of 100 draws a completed first lap (dimmed) plus a second, brighter lap inset inside it to
@@ -16,8 +17,8 @@ import SwiftUI
 // absent (dashed bare track + "—"; never a zero arc) · negative values draw no arc (a ring cannot show
 // below zero) while the numeral still prints the real number.
 //
-// Cost (§2.1 rule 8): shapes only — no Canvas, no clock, no blur, no shadow. The glow is ONE wider,
-// faint halo stroke under the arc. The arc animates with `TelosMotion.settle` ONLY when the value
+// Cost (§2.1 rule 8): shapes only — no Canvas, no clock, no blur, no shadow, no halo (decision 19).
+// The arc animates with `TelosMotion.settle` ONLY when the value
 // changes (never on appear — §7.4), and instantly under Reduce Motion. Idle cost: zero.
 // Watch-safe (plain shapes), so widgets and the watch can use it.
 
@@ -69,8 +70,8 @@ public enum TelosRingMath {
         lineWidth * 1.9
     }
 
-    /// Centre-line radius of lap `index` inside a square of side `diameter`. The outermost lap leaves
-    /// room for its own halo (1.3 × lineWidth) so the glow is never cut by the frame.
+    /// Centre-line radius of lap `index` inside a square of side `diameter`. The outermost lap keeps a
+    /// 1.3 × lineWidth margin (it once held a halo; kept so every ring's layout is unchanged).
     public static func radius(forLap index: Int, diameter: CGFloat, lineWidth: CGFloat) -> CGFloat {
         let outer = diameter / 2 - lineWidth * 1.3
         return max(0, outer - CGFloat(max(0, index)) * lapStep(lineWidth: lineWidth))
@@ -81,7 +82,7 @@ public enum TelosRingMath {
         (-90 + 360 * fraction) * Double.pi / 180
     }
 
-    /// Where the arc of `laps` ends (its luminous tip), in a square of side `diameter`.
+    /// Where the arc of `laps` ends (its tip), in a square of side `diameter`.
     public static func tipPoint(laps: Double, diameter: CGFloat, lineWidth: CGFloat,
                                 maxDrawn: Int = maxDrawnLaps) -> CGPoint {
         let drawn = lapFractions(laps, maxDrawn: maxDrawn)
@@ -119,7 +120,8 @@ struct TelosLapArc: Shape {
     }
 }
 
-/// The luminous tip dot at the end of the innermost drawn lap.
+/// A dot at the end of the innermost drawn lap. No longer drawn by `TelosRing` (decision 19: no
+/// glowing tip); kept for callers that mark an arc's end deliberately.
 struct TelosRingTip: Shape {
     var laps: Double
     let lineWidth: CGFloat
@@ -202,7 +204,7 @@ public struct TelosRing: View {
     ///   - value: the reading (nil / non-finite = absent: dashed bare track + "—").
     ///   - scale: the value that makes ONE lap (100 for a 0–100 score, 21 for WHOOP Effort; for the
     ///     unbounded Level, 100 = the wearer's own 95th percentile). Values beyond it draw more laps.
-    ///   - color: the metric identity hue (track at 16 %, arc, halo, tip, caption).
+    ///   - color: the metric identity hue (track at 16 %, arc, caption).
     ///   - diameter: the ring's square frame.
     ///   - lineWidth: nil = `TelosRingMath.defaultLineWidth(diameter:)` (thin).
     ///   - format: the centre numeral (count-up on a NEW value only).
@@ -299,25 +301,15 @@ public struct TelosRing: View {
                     let isLast = index == drawnCount - 1
                     // Completed earlier laps dim so the live lap reads on top.
                     let lapOpacity = (isLast ? 1.0 : 0.5) * arcOpacity
-                    // Halo: ONE wider faint stroke of the same arc — the glow, without a blur.
+                    // ONE crisp arc in the metric hue — no halo, no gradient sheen (decision 19).
                     TelosLapArc(laps: laps, lapIndex: index, lineWidth: lineWidth)
-                        .stroke(color.opacity(0.20 * lapOpacity),
-                                style: StrokeStyle(lineWidth: lineWidth * 2.6, lineCap: .round))
-                    TelosLapArc(laps: laps, lapIndex: index, lineWidth: lineWidth)
-                        .stroke(AngularGradient(colors: [color.opacity(0.55 * lapOpacity), color.opacity(lapOpacity)],
-                                                center: .center,
-                                                startAngle: .degrees(-90), endAngle: .degrees(270)),
-                                style: arcStyle)
+                        .stroke(color.opacity(lapOpacity), style: arcStyle)
                 }
                 if TelosRingMath.overflows(settledLaps) {
                     // The lap tick at 12 o'clock: the arc wrapped, it was not clipped.
                     TelosRingTick(fraction: 0, lineWidth: lineWidth,
                                   depthLaps: CGFloat(min(drawnCount - 1, TelosRingMath.maxDrawnLaps - 1)))
                         .stroke(TelosColor.textPrimary.opacity(0.7), lineWidth: 1)
-                }
-                if !calibrating {
-                    TelosRingTip(laps: laps, lineWidth: lineWidth, dotDiameter: lineWidth * 0.8)
-                        .fill(TelosColor.textPrimary.opacity(0.9 * arcOpacity))
                 }
             }
             if let target, let targetFraction = TelosRingMath.laps(value: target, scale: scale) {

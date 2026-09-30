@@ -6,10 +6,9 @@ import StrandImport
 
 // LiftStyle.swift — the Telos Lift screens' shared look and copy (DESIGN_V2 "VISUAL DIRECTION" + decision 16).
 //
-// FAUX GLASS, NEVER LIVE BLUR (the performance rule in the visual direction): a translucent token fill, the 1 pt
-// luminous gradient hairline (`TelosColor.glassEdge`, brighter top-left) and the faint top glow
-// (`TelosColor.glassTopGlow`). No `.ultraThinMaterial` behind the scrolling set table, no stacked shadows — the
-// only glow is one `.shadow` on the small, static check button and rest ring.
+// FAUX GLASS, NEVER LIVE BLUR (the performance rule in the visual direction): a translucent token fill and the
+// 1 pt neutral hairline (`TelosColor.glassEdge`). No top glow, no `.ultraThinMaterial` behind the scrolling set
+// table, no shadows, no glow anywhere (decision 19 — clinical restraint).
 //
 // Tokens only: every colour below is a `TelosColor` name, so the design-system agent's final values flow in.
 
@@ -22,10 +21,6 @@ struct LiftGlass: ViewModifier {
             .background {
                 RoundedRectangle(cornerRadius: radius, style: .continuous)
                     .fill(raised ? TelosColor.glassRaised : TelosColor.glassFill)
-                    .overlay {
-                        RoundedRectangle(cornerRadius: radius, style: .continuous)
-                            .fill(TelosColor.glassTopGlow)
-                    }
                     .overlay {
                         RoundedRectangle(cornerRadius: radius, style: .continuous)
                             .strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line)

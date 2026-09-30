@@ -291,16 +291,17 @@ struct QuestLedgerChip: View {
         let shape = Capsule(style: .continuous)
         return Button(action: onTap) {
             HStack(spacing: TelosSpace.xs) {
-                Image(systemName: "star.circle")
+                // Neutral marks, not game icons (decision 19): the balance and the run length.
+                Image(systemName: "plusminus.circle")
                     .font(TelosType.glyphChevron)
-                    .foregroundStyle(inRed ? TelosColor.critical : TelosColor.mint)
+                    .foregroundStyle(inRed ? TelosColor.critical : TelosColor.textSecondary)
                 Text(verbatim: ledger.balanceText)
                     .font(TelosType.numeralXS)
                     .foregroundStyle(inRed ? TelosColor.critical : TelosColor.textSecondary)
                 if ledger.streak > 0 {
-                    Image(systemName: "flame")
+                    Image(systemName: "repeat")
                         .font(TelosType.glyphChevron)
-                        .foregroundStyle(TelosColor.amber)
+                        .foregroundStyle(TelosColor.textTertiary)
                     Text(verbatim: "\(ledger.streak)")
                         .font(TelosType.numeralXS)
                         .foregroundStyle(TelosColor.textSecondary)

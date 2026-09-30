@@ -488,10 +488,10 @@ enum TelosOrbGeometry {
             }
             radii = next
         }
-        let t = min(max(turbulence.isFinite ? turbulence : 0, 0), 1)
+        let ripple = min(max(turbulence.isFinite ? turbulence : 0, 0), 1)
         for k in 0..<n {
             let a = angle(k, n)
-            radii[k] *= 1 + t * (0.05 * sin(6 * a + 0.7) + 0.028 * sin(11 * a + 2.3))
+            radii[k] *= 1 + ripple * (0.05 * sin(6 * a + 0.7) + 0.028 * sin(11 * a + 2.3))
         }
         return (radii, owner)
     }
@@ -881,7 +881,7 @@ struct TelosOrbLayer: View, Animatable {
         let restTime = self.restTime
         let burst = self.burst
         let pulsePeriod = appearance.pulsePeriod
-        let turbulence = self.turbulence
+        let sway = turbulence
         let accent = palette.accent
         let hero = style == .hero
         let orbitSpeed = appearance.orbitSpeed
@@ -891,7 +891,7 @@ struct TelosOrbLayer: View, Animatable {
             TimelineView(.animation(minimumInterval: TelosOrb.frameInterval, paused: !live)) { timeline in
                 let elapsed: Double = live ? max(0, timeline.date.timeIntervalSince(epoch)) : 0
                 let pose = TelosOrbPose.at(elapsed: elapsed, burst: burst, pulsePeriod: pulsePeriod,
-                                           turbulence: turbulence)
+                                           turbulence: sway)
                 let dots = orbits.map { $0.dot(center: .zero, time: restTime + elapsed) }
                 ZStack {
                     TelosOrbBackdropCanvas(key: key).equatable()

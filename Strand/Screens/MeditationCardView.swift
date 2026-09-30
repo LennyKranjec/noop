@@ -18,7 +18,7 @@ import WhoopStore
 // In the Mind & Focus register (violet / magenta light on the dark ground):
 //   1. the 28-day ring (days that met their minimum) beside everything ever sat, today's minutes against
 //      today's minimum, and the play button;
-//   2. a luminous 28-day calendar: each day a glowing dot sized by its minutes against THAT day's minimum
+//   2. a 28-day calendar: each day a flat dot sized by its minutes against THAT day's minimum
 //      (5 min before 2026-09-29, 10 min from it — `MeditationLog.isDayDone(minutes:day:)` per day), missed
 //      days marked plainly with their level cost, days without data "not measured", days before the first
 //      session "not tracked yet" (never missed);
@@ -28,8 +28,9 @@ import WhoopStore
 //      level, exactly as the level engine computed it, and the rule behind it;
 //   6. the recent sessions; "Whole practice" opens the time-of-day pattern and the era's month grids.
 //
-// COST: all static. One read per data refresh; one Canvas for the bar field; the particle texture is a
-// single still frame (`animated: false`). No clock anywhere.
+// COST: all static. One read per data refresh; one Canvas for the bar field. No clock anywhere.
+// DECISION 19 (clinical restraint): no particle texture, no glow behind the ring, no halo caps, no
+// gradient sheens — flat violet for the practice's data, neutral hairlines elsewhere.
 
 /// The start button's drawn diameter AND its reach — 44, the HIG minimum.
 private let playButtonSize: CGFloat = 44
@@ -104,12 +105,6 @@ struct MeditationCardView: View {
     private var header: some View {
         HStack(alignment: .center, spacing: TelosSpace.m) {
             ZStack {
-                // Cost: one still Canvas frame (animated: false) — texture, not motion.
-                TelosParticleField(color: TelosColor.magenta, count: 36, seed: 0x3ED17A7E,
-                                   sizes: 0.6...1.6, drift: 0, animated: false)
-                    .frame(width: 92, height: 92)
-                    .clipShape(Circle())
-                    .opacity(0.7)
                 TelosRing(value: practice.map { Double($0.daysInWindow) },
                           scale: Double(MeditationPractice.windowDays),
                           color: TelosColor.violet,
@@ -118,7 +113,7 @@ struct MeditationCardView: View {
                           captionColor: TelosColor.violetInk,
                           accessibilityLabel: Text("Days meditated, last \(MeditationPractice.windowDays)"))
             }
-            .background(TelosRadialGlow(color: TelosColor.violet, intensity: 0.28, radius: 60))
+            .frame(width: 92, height: 92)
 
             VStack(alignment: .leading, spacing: TelosSpace.xxs) {
                 PGOverline("Meditation", ink: TelosColor.violetInk)
@@ -163,10 +158,8 @@ struct MeditationCardView: View {
                 .foregroundStyle(TelosColor.violetInk)
                 .frame(width: playButtonSize, height: playButtonSize)
                 .background(Circle().fill(TelosColor.violet.opacity(TelosOpacity.fill)))
-                .overlay(Circle().strokeBorder(
-                    LinearGradient(colors: [TelosColor.violetInk.opacity(0.9), TelosColor.violet.opacity(0.25)],
-                                   startPoint: .topLeading, endPoint: .bottomTrailing),
-                    lineWidth: TelosStroke.line))
+                .overlay(Circle().strokeBorder(TelosColor.violetInk.opacity(TelosOpacity.border),
+                                               lineWidth: TelosStroke.line))
                 .contentShape(Circle())
         }
         .buttonStyle(TelosPressButtonStyle())
@@ -471,8 +464,7 @@ private struct TimeOfDayBar: View {
                 Capsule(style: .continuous).fill(TelosColor.violet.opacity(TelosOpacity.whisper))
                 if lit {
                     Capsule(style: .continuous)
-                        .fill(LinearGradient(colors: [TelosColor.violet, TelosColor.magenta],
-                                             startPoint: .leading, endPoint: .trailing))
+                        .fill(TelosColor.violet)
                         .frame(width: max(6, geo.size.width * min(max(fraction, 0), 1)))
                 }
             }
@@ -480,10 +472,10 @@ private struct TimeOfDayBar: View {
     }
 }
 
-// MARK: - The glowing day dot
+// MARK: - The day dot
 
-/// One day. Done: a violet→magenta core sized by minutes against that day's minimum, inside a soft
-/// pre-composited glow (no blur); twice the minimum or more adds a thin outer ring. Missed: a hollow
+/// One day. Done: a flat violet dot sized by minutes against that day's minimum (no glow, no sheen —
+/// decision 19); twice the minimum or more adds a thin outer ring. Missed: a hollow
 /// critical ring carrying its level cost. Not measured: a dashed ring. Before the era: a faint speck.
 /// Today open: a ring filled to today's share of the minimum.
 struct MeditationGlowDot: View {
@@ -518,11 +510,8 @@ struct MeditationGlowDot: View {
     private var doneDot: some View {
         let core: CGFloat = cell * CGFloat(min(0.62, 0.30 + 0.16 * sqrt(ratio)))
         return ZStack {
-            RadialGradient(colors: [TelosColor.violet.opacity(0.45), TelosColor.magenta.opacity(0.10), .clear],
-                           center: .center, startRadius: 0, endRadius: cell * 0.55)
             Circle()
-                .fill(RadialGradient(colors: [TelosColor.magentaInk, TelosColor.violet],
-                                     center: .topLeading, startRadius: 0, endRadius: core))
+                .fill(TelosColor.violet)
                 .frame(width: core, height: core)
             if ratio >= 2 {
                 Circle()
@@ -711,12 +700,8 @@ struct MeditationBarField: View {
                 let rect = CGRect(x: cx - barW / 2, y: topY, width: barW, height: h - topY)
                 let bar = Path(roundedRect: rect, cornerRadius: min(barW / 2, 3), style: .continuous)
                 if d.state == .done {
-                    ctx.fill(bar, with: .linearGradient(Gradient(colors: [TelosColor.magentaInk, TelosColor.violet.opacity(0.55)]),
-                                                        startPoint: CGPoint(x: cx, y: topY),
-                                                        endPoint: CGPoint(x: cx, y: h)))
-                    // The luminous cap: one small halo dot, no blur.
-                    let halo = CGRect(x: cx - barW * 0.7, y: topY - barW * 0.7, width: barW * 1.4, height: barW * 1.4)
-                    ctx.fill(Path(ellipseIn: halo), with: .color(TelosColor.magenta.opacity(0.22)))
+                    // A flat bar in the practice's hue — no gradient sheen, no halo cap (decision 19).
+                    ctx.fill(bar, with: .color(TelosColor.violet))
                 } else {
                     ctx.fill(bar, with: .color(TelosColor.textTertiary.opacity(0.4)))
                 }

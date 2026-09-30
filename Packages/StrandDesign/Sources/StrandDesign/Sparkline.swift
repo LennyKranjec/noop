@@ -96,15 +96,8 @@ public struct Sparkline: View {
                             )
                     }
                     if pts.count > 1 {
-                        // Telos luminous line: ONE wide faint halo stroke under the crisp gradient core
-                        // (no blur, no shadow). Straight segments between REAL samples — no interpolation,
-                        // so the line can never pass beyond the data.
-                        linePath(pts)
-                            .stroke(
-                                LinearGradient(gradient: gradient, startPoint: .leading, endPoint: .trailing),
-                                style: StrokeStyle(lineWidth: lineWidth * 3, lineCap: .round, lineJoin: .round)
-                            )
-                            .opacity(0.22)
+                        // One crisp line — no halo stroke (decision 19). Straight segments between REAL
+                        // samples — no interpolation, so the line can never pass beyond the data.
                         linePath(pts)
                             .stroke(
                                 LinearGradient(gradient: gradient, startPoint: .leading, endPoint: .trailing),
@@ -112,12 +105,8 @@ public struct Sparkline: View {
                             )
                     }
                     if showsHead, let head = pts.last {
-                        // Luminous head: a faint wide dot in the line colour under a small bright core.
-                        Circle().fill(headColor.opacity(0.30)).frame(width: lineWidth * 4.5, height: lineWidth * 4.5)
-                            .position(head)
+                        // The latest reading: one flat dot in the line colour (no halo, no bright core).
                         Circle().fill(headColor).frame(width: lineWidth * 2.2, height: lineWidth * 2.2)
-                            .position(head)
-                        Circle().fill(StrandPalette.tipCore).frame(width: lineWidth * 1.0, height: lineWidth * 1.0)
                             .position(head)
                     }
                 }

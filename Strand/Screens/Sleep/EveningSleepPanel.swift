@@ -3,7 +3,7 @@ import Combine
 import StrandDesign
 import StrandAnalytics
 
-// EveningSleepPanel.swift — the compact, glowing "tonight" panel for the TOP of Today in the evening
+// EveningSleepPanel.swift — the compact "tonight" panel for the TOP of Today in the evening
 // (coordinator decision 15: a dynamic Today). TODAY decides WHEN it shows (18:00 or the plan's wind-down
 // start if earlier, until the morning); this file decides WHAT it shows:
 //
@@ -21,7 +21,7 @@ import StrandAnalytics
 // OBSERVATION (§2.1 rule 5): no AppModel / LiveState / Repository. The schedule provider publishes only
 // its plan and its abstention; the room reading arrives through a de-duplicated publisher into @State.
 //
-// Cost (§2.1 rule 8): shapes and text; one static radial gradient for the glow (no blur, no shadow);
+// Cost (§2.1 rule 8): shapes and text; no glow, no gradient edge (decision 19), no blur, no shadow;
 // a `TimelineView(.everyMinute)` so "next step" and the room window follow the clock — a periodic minute
 // tick, not a frame clock.
 //
@@ -60,22 +60,9 @@ struct EveningSleepPanel: View {
         }
         .padding(TelosSpace.cardPadding)
         .frame(maxWidth: .infinity, alignment: .leading)
-        // The glow: ONE static radial gradient in the violet of the night, anchored top-leading, over the
-        // faux-glass fill; both clipped to the panel.
-        .background(alignment: .topLeading) {
-            TelosRadialGlow(color: TelosColor.violet, intensity: 0.30, radius: 190)
-                .frame(width: 380, height: 380)
-                .offset(x: -150, y: -170)
-        }
+        // The plain faux-glass card (decision 19: no violet glow behind it, no luminous gradient edge).
         .background(FrostedCardSurface(tint: TelosColor.violet, cornerRadius: TelosRadius.card))
         .clipShape(shape)
-        .overlay(
-            // A violet luminous edge over the glass hairline — the panel reads as the lit thing on Today.
-            shape.strokeBorder(
-                LinearGradient(colors: [TelosColor.violetInk.opacity(0.55), TelosColor.violet.opacity(0.08)],
-                               startPoint: .topLeading, endPoint: .bottomTrailing),
-                lineWidth: TelosStroke.line)
-        )
         .contentShape(shape)
     }
 }

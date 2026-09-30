@@ -349,17 +349,12 @@ public enum BackgroundFillMode: String, CaseIterable, Identifiable, Sendable {
 
 // MARK: - Light-idiom helpers
 
-/// An additive glow (ring blooms, sparkline heads, hero halos) only reads on a DARK canvas —
-/// `.plusLighter` blending on white produces no visible glow and just muddies edges. On dark this
-/// applies the additive blend; on light it hides the layer. Self-contained (reads the scheme itself)
-/// so every glow becomes a one-token swap from `.blendMode(.plusLighter)` → `.additiveBloom()`.
+/// RETIRED (decision 19 — no glows): an additive glow layer (ring blooms, sparkline heads, hero
+/// halos) is now hidden in BOTH schemes. The modifier is kept so any remaining call site compiles; the
+/// layer it wraps simply does not show.
 private struct AdditiveBloom: ViewModifier {
-    @Environment(\.colorScheme) private var scheme
     func body(content: Content) -> some View {
-        // Dialed back (0.55) — the full-strength additive bloom read as too much glow against the
-        // crisper design language. Still present on dark for depth, just restrained.
-        if scheme == .dark { content.blendMode(.plusLighter).opacity(0.55) }
-        else { content.opacity(0) }
+        content.opacity(0)
     }
 }
 
@@ -380,7 +375,7 @@ private struct NoopElevation: ViewModifier {
 }
 
 public extension View {
-    /// Apply the additive glow only on dark; hide it on light. See `AdditiveBloom`.
+    /// Retired glow layer: hidden in both schemes (decision 19). See `AdditiveBloom`.
     func additiveBloom() -> some View { modifier(AdditiveBloom()) }
 
     /// Apply the per-scheme card/surface elevation (shadow on light, lighter-fill idiom on dark).

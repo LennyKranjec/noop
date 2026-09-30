@@ -16,7 +16,7 @@ import StrandAnalytics
 //
 // The timeline is a SEQUENCE, not a scale: the four steps sit evenly spaced with their clock times under
 // them, because a proportional axis would crush wind-down / lights-out into one corner next to a noon
-// caffeine cutoff. The step that is next glows; the ones already passed dim.
+// caffeine cutoff. The step that is next is marked (a violet ring); the ones already passed dim.
 //
 // Cost (§2.1 rule 8): shapes and text only. One `TimelineView(.everyMinute)` so "next" moves with the
 // clock — a periodic minute tick, not a frame clock; no Canvas, no blur, no shadow.
@@ -111,7 +111,7 @@ struct TonightCardView: View {
             TonightCardContent(provider: provider, now: timeline.date, compact: false, navigates: false)
                 .padding(TelosSpace.cardPadding)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                // Faux glass with a violet top glow (three static fills; no material, no shadow).
+                // Plain faux glass (static fills; no top glow, no material, no shadow — decision 19).
                 .background(FrostedCardSurface(tint: TelosColor.violet, cornerRadius: TelosRadius.card))
         }
     }
@@ -259,8 +259,8 @@ private struct TonightNoteRow: View {
 
 // MARK: - Timeline
 
-/// The evening's steps as glowing nodes on one luminous thread. Evenly spaced (a sequence, not a scale);
-/// the next step glows, passed steps dim. At accessibility text sizes the thread becomes a list.
+/// The evening's steps as nodes on one thin thread. Evenly spaced (a sequence, not a scale); the next
+/// step is marked, passed steps dim. At accessibility text sizes the thread becomes a list.
 struct TonightTimeline: View {
     let steps: [TonightStep]
     let next: TonightStep.Kind?
@@ -314,7 +314,7 @@ struct TonightTimeline: View {
                     .accessibilityElement(children: .combine)
                 }
             }
-            // The luminous thread behind the nodes, at the node centre line (node 28 → y 14).
+            // The thread behind the nodes, at the node centre line (node 28 → y 14).
             .background(alignment: .top) {
                 TonightThread()
                     .padding(.horizontal, TelosSpace.xl)
@@ -324,22 +324,18 @@ struct TonightTimeline: View {
     }
 }
 
-/// The connecting thread: a violet → rest-blue hairline with one faint halo stroke (no blur).
+/// The connecting thread: one neutral hairline (no halo, no gradient — decision 19). The 4.5 pt frame is
+/// kept so the node row's layout is unchanged.
 private struct TonightThread: View {
     var body: some View {
-        let gradient = LinearGradient(colors: [TelosColor.violet.opacity(0.35), TelosColor.rest.opacity(0.8)],
-                                      startPoint: .leading, endPoint: .trailing)
-        ZStack {
-            Capsule().fill(TelosColor.violet.opacity(0.12)).frame(height: 4.5)
-            Capsule().fill(gradient).frame(height: 1.5)
-        }
-        .frame(height: 4.5)
-        .accessibilityHidden(true)
+        Capsule().fill(TelosColor.lineStrong).frame(height: 1)
+            .frame(height: 4.5)
+            .accessibilityHidden(true)
     }
 }
 
-/// One node: a small glass disc with the step's glyph. The next step is lit (violet ring + a small radial
-/// glow, a static gradient); passed steps dim.
+/// One node: a small glass disc with the step's glyph. The next step is marked with a violet ring and
+/// a faint violet fill (no glow — decision 19); passed steps dim.
 private struct TonightNode: View {
     static let diameter: CGFloat = 28
     let symbol: String
@@ -349,10 +345,6 @@ private struct TonightNode: View {
         let lit = state == .next
         let ink: Color = state == .passed ? TelosColor.textTertiary : (lit ? TelosColor.violetInk : TelosColor.restInk)
         ZStack {
-            if lit {
-                TelosRadialGlow(color: TelosColor.violet, intensity: 0.45, radius: Self.diameter)
-                    .frame(width: Self.diameter * 2, height: Self.diameter * 2)
-            }
             Circle()
                 .fill(TelosColor.canvas)
             Circle()

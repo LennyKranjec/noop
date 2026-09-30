@@ -211,20 +211,19 @@ private struct GearChip: View {
 
     var body: some View {
         let shape = Capsule(style: .continuous)
+        // A flat, neutral read-out chip (decision 19): no tinted wash, no gradient edge.
         HStack(spacing: TelosSpace.xs) {
             Image(systemName: symbol)
                 .font(TelosType.glyphChevron)
-                .foregroundStyle(TelosColor.mint)
+                .foregroundStyle(TelosColor.textSecondary)
             Text(difficulty.title.uppercased())
                 .telosScale()
-                .foregroundStyle(TelosColor.mint)
+                .foregroundStyle(TelosColor.textPrimary)
         }
         .padding(.horizontal, TelosSpace.m)
         .frame(minHeight: 32)
-        .background(shape.fill(TelosColor.mintMuted))
-        .overlay(shape.strokeBorder(LinearGradient(colors: [TelosColor.mint.opacity(0.9), TelosColor.mint.opacity(0.25)],
-                                                   startPoint: .topLeading, endPoint: .bottomTrailing),
-                                    lineWidth: TelosStroke.line))
+        .background(shape.fill(TelosColor.glassFill))
+        .overlay(shape.strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line))
         .frame(minHeight: TelosSpace.hitTarget)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("Today's gear: \(difficulty.title)"))
@@ -293,7 +292,7 @@ struct QuestReviewSheet: View {
     private var coach: AICoachEngine { requireCoach(coachRef) }
     @EnvironmentObject private var router: NavRouter
 
-    /// How much of the taunt has been typed. See `TypewriterText`.
+    /// How much of the taunt is shown (always all of it since decision 19). See `TypewriterText`.
     @State private var typed = 0
 
     private var isCustom: Bool { quest.kind == .custom }
@@ -338,7 +337,7 @@ struct QuestReviewSheet: View {
                 onClose()
                 router.openCoach()
             } label: {
-                Label("Ask the system about this", systemImage: "sparkles")
+                Label("Ask the system about this", systemImage: "text.bubble")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.noopSecondary)
@@ -494,62 +493,24 @@ struct QuestRewardGlyph: View {
     }
 }
 
-// MARK: - The typewriter
+// MARK: - The (retired) typewriter
 //
-// The shared letter-by-letter reveal, with a haptic tick per letter. It lives here rather than inside the
-// pop-up because every surface that shows a taunt types it: the pop-up that issues a quest, and the
-// review sheet that revisits one. A line that typed itself when issued and simply appeared when reopened
-// would read as two different systems.
-//
-// SPACES GET NO TICK. The finger feels a gap between words, which is what a space is.
-//
-// SKIPPABLE. Tapping finishes the line at once — a wearer who has read it already must never be made to
-// sit through the animation.
-//
-// THE FULL STRING IS LAID OUT INVISIBLY UNDERNEATH, so the block does not change height as it fills.
-// Text that reflows while it types is the thing that makes a typewriter effect feel cheap.
-
-/// How long between letters. ~25/s: fast enough not to be a wait, slow enough to read as typing.
-private let typewriterInterval: TimeInterval = 0.038
+// DECISION 19 (owner, 2026-09-30 — clinical restraint): no typewriter effect, no per-letter haptic ticks.
+// The type keeps its name and API (every surface that shows a taunt uses it), but the whole line is shown
+// at once, in every mode, from the first frame. `shown` is still set to the full length so callers that
+// gate a button on "the line has been shown" keep working.
 
 struct TypewriterText: View {
     let text: String
     @Binding var shown: Int
 
-    @State private var hapticsOn = SystemHaptics.enabled
-    /// Reduce Motion (DESIGN_V2 §5.12 / §7.5): the full line, at once, with no per-letter ticks.
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
     var body: some View {
-        ZStack(alignment: .topLeading) {
-            Text(text).foregroundStyle(Color.clear)
-            Text(String(text.prefix(shown)))
-        }
-        .contentShape(Rectangle())
-        .onTapGesture { shown = text.count }
-        .task(id: text) { await run() }
+        Text(text)
+            .task(id: text) { await run() }
     }
 
+    /// Mark the whole line as shown — no per-letter reveal, no ticks (decision 19).
     private func run() async {
-        if reduceMotion {
-            shown = text.count
-            return
-        }
-        shown = 0
-        let letters = Array(text)
-        // HELD OPEN FOR THE LINE. The engine idles out between letters otherwise, and each restart
-        // costs more than the gap between two of them — which is most of why the ticks were not there.
-        // `defer` rather than a close at the end: the sheet can be dismissed mid-type, and the task is
-        // cancelled rather than finished.
-        if hapticsOn { SystemHaptics.holdTickEngine(true) }
-        defer { if hapticsOn { SystemHaptics.holdTickEngine(false) } }
-        while shown < letters.count {
-            try? await Task.sleep(nanoseconds: UInt64(typewriterInterval * 1_000_000_000))
-            if Task.isCancelled { return }
-            guard shown < letters.count else { return }
-            let next = letters[shown]
-            shown += 1
-            if hapticsOn, !next.isWhitespace { SystemHaptics.tick() }
-        }
+        shown = text.count
     }
 }

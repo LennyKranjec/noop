@@ -13,11 +13,11 @@ import StrandImport
 /// Every figure comes from `LiftSessionSummary` and is honest by construction: a PR has a previous best, an e1RM
 /// change has a previous session, a muscle's % change has a previous session of the SAME day — otherwise "—".
 ///
-/// MOTION (≤ 1.5 s, then rest — decision 17 and the performance rules): the design system's `TelosMomentBurst`
-/// (one `Canvas`, ≤ 30 fps, 1.4 s, then it draws nothing) behind the badge — GOLD when the session holds a PR,
-/// bioluminescent green otherwise; the badge springs in from 0.6 × with its luminous halo ring (one transform,
-/// once); the "N personal records" pill is the one glowing pill on screen. Reduce Motion / Low Power / "Reduce
-/// motion in NOOP" get no particles, no spring — a cross-fade. The strap reward buzz AND the phone `reward`
+/// LOOK (decision 19 — clinical restraint): a calm, factual card. The session number sits in a thin neutral
+/// ring (no star, no burst, no glow, no gold halo); a personal record is stated in a flat neutral pill with a
+/// small gold medal mark — gold is only ever a small flat mark for a PR. MOTION: the content fades and rises
+/// once (`TelosMotion.screen`), then rests; Reduce Motion / Low Power / "Reduce motion in NOOP" get a
+/// cross-fade. The strap reward buzz AND the phone `reward`
 /// haptic for a PR are fired by the recorder once per session (`StrapCueEngine.fire(.reward, eventId:
 /// "pr:<session>")`); a session without a PR gets one `success` haptic here, keyed on the session so a
 /// re-appear never repeats it.
@@ -29,11 +29,8 @@ struct LiftFinishView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject private var motion = NoopMotionState.shared
     @State private var entered = false
-    /// The badge's one-shot spring-in (0.6 → 1). Posed at 1 under the quiet-motion gate.
-    @State private var badgeLanded = false
 
     private var hasRecords: Bool { summary.recordCount > 0 }
-    private var celebrationColor: Color { hasRecords ? TelosColor.bestGold : TelosColor.mint }
 
     var body: some View {
         ScrollView {
@@ -54,58 +51,35 @@ struct LiftFinishView: View {
             .offset(y: entered || reduceMotion ? 0 : TelosMomentStyle.entranceRise)
         }
         .background {
-            ZStack {
-                TelosColor.canvas
-                // The celebration's light pooled at the top: ONE static radial gradient (gold for a PR).
-                RadialGradient(colors: [celebrationColor.opacity(0.16), .clear], center: .top,
-                               startRadius: 0, endRadius: 420)
-            }
-            .ignoresSafeArea()
+            // The plain ground — no pooled celebration light (decision 19).
+            TelosColor.canvas.ignoresSafeArea()
         }
         .onAppear {
             let still = motion.poseStill(reduceMotion)
             withAnimation(still ? TelosMotion.fade : TelosMotion.screen) { entered = true }
-            if still {
-                badgeLanded = true
-            } else {
-                withAnimation(TelosMotion.release.delay(0.08)) { badgeLanded = true }
-            }
             // One phone haptic per finished session: a PR's `reward` is the recorder's; otherwise `success`.
             if !hasRecords { TelosHaptics.play(.success, action: "lift.finish.\(session.id)") }
         }
     }
 
-    // MARK: - Badge + celebration
+    // MARK: - Session read-out
 
+    /// The session number in a thin neutral ring — an instrument read-out, not a trophy (decision 19).
     private var badge: some View {
         ZStack {
-            // The design system's ONE celebration burst (≤ 30 fps, 1.4 s, then nothing; suppressed under Reduce
-            // Motion / Low Power / "Reduce motion in NOOP"). Gold when the session holds a PR.
-            TelosMomentBurst(style: .celebration, color: celebrationColor)
-                .frame(width: 320, height: 300)
-            // The badge's bioluminescence + a thin luminous halo ring (one halo stroke — no blur).
-            TelosRadialGlow(color: celebrationColor, intensity: 0.28, radius: 120)
-                .frame(width: 260, height: 260)
             Circle()
-                .telosLuminousStroke(celebrationColor.opacity(0.8), lineWidth: TelosStroke.strong, haloOpacity: 0.25)
-                .frame(width: 184, height: 184)
-            ZStack {
-                LiftStarShape()
-                    .fill(LinearGradient(colors: [TelosColor.bestGold, TelosColor.amber],
-                                         startPoint: .top, endPoint: .bottom))
-                    .shadow(color: TelosColor.bestGold.opacity(0.45), radius: 14)
-                LiftStarShape()
-                    .stroke(TelosColor.onDarkPrimary.opacity(TelosOpacity.border), lineWidth: TelosStroke.line)
+                .stroke(TelosColor.lineStrong, lineWidth: TelosStroke.line)
+            VStack(spacing: TelosSpace.xxs) {
+                Text("Session").liftOverline()
                 Text(verbatim: "\(summary.templateSessionNumber)")
-                    .font(TelosType.numeralFont(size: 40, weight: .bold))
-                    .foregroundStyle(TelosColor.onAccent)
-                    .offset(y: 6)
+                    .font(TelosType.numeralFont(size: 40, weight: .light))
+                    .foregroundStyle(TelosColor.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
             }
-            .frame(width: 140, height: 134)
-            .scaleEffect(badgeLanded ? 1 : 0.6)
-            .opacity(badgeLanded ? 1 : 0)
+            .padding(.horizontal, TelosSpace.m)
         }
-        .frame(height: 220)
+        .frame(width: 132, height: 132)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(badgeAccessibility))
     }
@@ -117,15 +91,17 @@ struct LiftFinishView: View {
         return String(localized: "Session \(summary.templateSessionNumber)")
     }
 
-    /// "3 personal records" — the gold glowing pill under the badge (the screen's one glowing pill).
+    /// "3 personal records" — a flat neutral pill; gold only on the small medal mark (decision 19).
     private var recordsPill: some View {
         HStack(spacing: TelosSpace.xs) {
-            Image(systemName: "medal.fill").accessibilityHidden(true)
+            Image(systemName: "medal.fill")
+                .foregroundStyle(TelosColor.bestGold)
+                .accessibilityHidden(true)
             Text("\(summary.recordCount) personal records")
+                .foregroundStyle(TelosColor.textPrimary)
         }
         .font(TelosType.headline)
-        .foregroundStyle(TelosColor.bestGold)
-        .telosGlowingPill(TelosColor.bestGold)
+        .telosGlowingPill(TelosColor.line, isActive: false)
         .accessibilityElement(children: .combine)
     }
 
@@ -340,7 +316,7 @@ struct LiftFinishView: View {
                 HStack(spacing: TelosSpace.s) {
                     Image(systemName: copy.icon)
                         .font(TelosType.glyphRow)
-                        .foregroundStyle(TelosColor.bestGold)
+                        .foregroundStyle(TelosColor.textSecondary)
                         .frame(width: 28)
                     VStack(alignment: .leading, spacing: TelosSpace.xxs) {
                         Text(verbatim: copy.title).font(TelosType.body).foregroundStyle(TelosColor.textPrimary)
@@ -385,7 +361,7 @@ struct LiftFinishView: View {
     }
 }
 
-// MARK: - Star shape
+// MARK: - Star shape (no longer drawn on the finish screen — decision 19; kept for any other caller)
 
 struct LiftStarShape: Shape {
     func path(in rect: CGRect) -> Path {

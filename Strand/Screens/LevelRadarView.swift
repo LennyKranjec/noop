@@ -17,9 +17,10 @@ import StrandDesign
 // middle default: an unmeasured part is a hole in the shape, and filling it in would draw a body we did
 // not measure.
 //
-// TELOS 2.0 (§5.6, FRAME): the plate is `surfaceRaised` with the `raised` elevation; the web is luminous
-// bioluminescent green (a crisp core over one faint halo stroke — no blur); each measured vertex carries a
-// dot in its part's identity colour; the personal best is dashed `bestGold`. The level counts up with ONE
+// TELOS 2.0 (§5.6, FRAME) + DECISION 19 (clinical restraint): the plate is `surfaceRaised` with the `raised`
+// elevation; the web is a crisp NEUTRAL line over a whisper fill (no green, no halo stroke); each measured
+// vertex carries a dot in its part's identity colour (colour is for data); the personal best is a thin
+// dashed `bestGold` line — the one flat gold mark. The level counts up with ONE
 // `Animatable` numeral (no dispatch queue), posed at its value under Reduce Motion / Low Power / quiet
 // motion. THE LEVEL IS UNBOUNDED (decision 9): a part past the plate's reach shrinks the whole scale — the
 // wearer's own-100 ring included — so the shape stays honest instead of clipping at the edge.
@@ -197,11 +198,9 @@ struct LevelRadarView: View {
                            style: StrokeStyle(lineWidth: TelosStroke.strong, dash: [3, 3]))
         }
 
-        // The web: a faint fill, then the luminous line — one wide faint halo under a crisp core.
-        context.fill(web, with: .color(TelosColor.mint.opacity(0.14)))
-        context.stroke(web, with: .color(TelosColor.mint.opacity(0.22)),
-                       style: StrokeStyle(lineWidth: TelosStroke.strong * 3, lineJoin: .round))
-        context.stroke(web, with: .color(TelosColor.mint.opacity(0.9)),
+        // The web: a neutral whisper fill, then ONE crisp neutral line — no halo, no green (decision 19).
+        context.fill(web, with: .color(TelosColor.textPrimary.opacity(TelosOpacity.whisper)))
+        context.stroke(web, with: .color(TelosColor.textPrimary.opacity(0.85)),
                        style: StrokeStyle(lineWidth: TelosStroke.strong, lineJoin: .round))
 
         // Vertex dots in each part's identity colour; an unmeasured part is a HOLLOW dot at the centre.

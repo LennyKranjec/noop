@@ -3,7 +3,7 @@ import SwiftUI
 import StrandDesign
 import StrandAnalytics
 
-/// The floating rest pill ("2:26"): a luminous ring draining toward zero, the time, and −15 s / +15 s / skip.
+/// The floating rest pill ("2:26"): a thin ring draining toward zero, the time, and −15 s / +15 s / skip.
 ///
 /// The number is `endsAt − now`, redrawn by a 1 s `TimelineView` — never a counter — so it is right after the
 /// phone has been in a pocket (see `LiftRestTimer`). The ring animates only by being redrawn each second; nothing
@@ -19,8 +19,7 @@ struct LiftRestTimerPill: View {
                 HStack(spacing: TelosSpace.s) {
                     adjustButton(delta: -LiftRestTimer.adjustStepSeconds, symbol: "minus")
                     HStack(spacing: TelosSpace.s) {
-                        // The draining ring: a crisp core over ONE faint halo stroke (no blur, no shadow — it is
-                        // redrawn once a second, so the glow must cost nothing).
+                        // The draining ring: one crisp stroke (no halo, no blur, no shadow — decision 19).
                         ZStack {
                             Circle().stroke(TelosColor.mintMuted, lineWidth: TelosStroke.data)
                             Circle()

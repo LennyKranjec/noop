@@ -44,9 +44,11 @@ final class TelosTokenMappingTests: XCTestCase {
         // The ground: near-black with a green-teal depth (VISUAL DIRECTION: ≈ #05090A → #0B1214).
         XCTAssertEqual(Spec.canvas, Pair(dark: "#05090A", light: "#EEF3F1"))
         XCTAssertEqual(Spec.canvasDeep, Pair(dark: "#0B1214", light: "#E7EEEB"))
-        // Glass: translucent white (≈ 6–10 %) with a luminous green-white edge.
+        // Glass: translucent white (≈ 6–10 %) with a NEUTRAL edge (decision 19: no green-white glow).
         XCTAssertEqual(Spec.glassFill, Pair(dark: "#FFFFFF14", light: "#FFFFFFE0"))
-        XCTAssertEqual(Spec.glassEdgeHigh, Pair(dark: "#BFFFE666", light: "#FFFFFFFF"))
+        XCTAssertEqual(Spec.glassEdgeHigh, Pair(dark: "#FFFFFF1F", light: "#0B12141A"))
+        // The top glow is retired: fully transparent in both schemes.
+        XCTAssertEqual(Spec.glassGlow, Pair(dark: "#FFFFFF00", light: "#FFFFFF00"))
         XCTAssertEqual(Spec.surface, Pair(dark: "#131A1B", light: "#FFFFFF"))
         XCTAssertEqual(Spec.surfaceRaised, Pair(dark: "#1B2425", light: "#FFFFFF"))
         XCTAssertEqual(Spec.surfaceInset, Pair(dark: "#030607", light: "#E4EBE8"))
@@ -63,7 +65,8 @@ final class TelosTokenMappingTests: XCTestCase {
 
     func testAccentAndStatusTableMatchesTheReferencePalette() {
         XCTAssertEqual(Spec.mint.dark, "#3CF0A0")          // bioluminescent green
-        XCTAssertEqual(Spec.glow.dark, "#2BD98B")
+        // Decision 19: `glow` is a neutral grey-teal (the tertiary ink), never the old green #2BD98B.
+        XCTAssertEqual(Spec.glow, Spec.textTertiary)
         XCTAssertEqual(Spec.onAccent, Pair(dark: "#03140C", light: "#FFFFFF"))
         XCTAssertEqual(Spec.positive.dark, "#3CF0A0")
         XCTAssertEqual(Spec.warning.dark, "#FFC94A")       // sun-yellow

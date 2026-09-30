@@ -177,6 +177,40 @@ final class TelosBehaviourTests: XCTestCase {
         XCTAssertEqual(TelosMoment.Kind.trialVerdict.defaultEntrance, .standard)
     }
 
+    // MARK: Decision 19 — clinical restraint (no glimmer, no bursts, no gold glow)
+
+    func testRetiredBurstDrawsNothingAndPenaltyFlashIsGone() {
+        XCTAssertFalse(TelosMomentBurst.drawsAnything)
+        XCTAssertEqual(TelosMomentStyle.celebrationParticles, 0)
+        XCTAssertEqual(TelosMomentStyle.penaltyParticles, 0)
+        XCTAssertEqual(TelosMomentStyle.penaltyFlashOpacity, 0)
+    }
+
+    func testMomentLiquidIsNeutralForNeutralAndGoldTones() {
+        // No decorative green (neutral) and no gold fill (a PR): both liquids are the neutral ink.
+        XCTAssertEqual(TelosMomentStyle.liquidColor(.neutral), TelosColor.textTertiary)
+        XCTAssertEqual(TelosMomentStyle.liquidColor(.gold), TelosColor.textTertiary)
+        // Data tones keep their hue (colour is for data).
+        XCTAssertEqual(TelosMomentStyle.liquidColor(.heart), TelosColor.heart)
+        XCTAssertEqual(TelosMomentStyle.liquidColor(.critical), TelosColor.critical)
+    }
+
+    func testParticleTextureIsNeutralAndBarelyThere() {
+        XCTAssertEqual(TelosParticleField.dotColor, TelosColor.textTertiary)
+        XCTAssertLessThanOrEqual(TelosParticleField.maxDotOpacity, 0.04)
+        let dots = TelosParticleField.makeParticles(count: 400, seed: 7, sizes: 1...2)
+        XCTAssertTrue(dots.allSatisfy { TelosParticleField.dotOpacity($0.alpha) <= TelosParticleField.maxDotOpacity + 1e-12 })
+        XCTAssertTrue(dots.allSatisfy { TelosParticleField.dotOpacity($0.alpha) >= 0 })
+        XCTAssertEqual(TelosParticleField.dotOpacity(.nan), 0)
+        XCTAssertLessThanOrEqual(TelosParticleField.dotOpacity(5), TelosParticleField.maxDotOpacity)
+    }
+
+    func testGlassHasNoTopGlowOrTintedGlow() {
+        XCTAssertEqual(NoopPanelSurface.tintGlowOpacity, 0)
+        XCTAssertEqual(TelosColor.Spec.glassGlow.dark.suffix(2), "00", "the retired top glow is transparent")
+        XCTAssertEqual(TelosColor.Spec.glassGlow.light.suffix(2), "00")
+    }
+
     func testMomentBurstIsShortAndEnds() {
         XCTAssertLessThanOrEqual(TelosMomentStyle.burstDuration, 1.5)
         XCTAssertEqual(TelosMomentStyle.burstProgress(elapsed: 0), 0)

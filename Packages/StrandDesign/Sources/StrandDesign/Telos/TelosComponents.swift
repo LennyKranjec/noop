@@ -671,8 +671,9 @@ public struct TelosPressButtonStyle: ButtonStyle {
 // MARK: - Chip (selectable)
 
 /// A selectable capsule (§5.5 in the glass look): 32 pt visual / 44 pt hit, `subhead` semibold, 12 pt
-/// side padding. Off: glass fill + luminous glass edge, `textSecondary`. On: the accent-lit pill (muted
-/// accent fill + accent gradient hairline) with a `textPrimary` label. Plays the `select` haptic.
+/// side padding. Off: glass fill + the neutral glass edge, `textSecondary`. On: a flat selected pill
+/// (raised neutral fill + a flat accent hairline — no gradient, no glow; decision 19) with a
+/// `textPrimary` label. Plays the `select` haptic.
 public struct TelosChip: View {
     private let title: Text
     private let isOn: Bool
@@ -702,14 +703,14 @@ public struct TelosChip: View {
                 .foregroundStyle(isOn ? TelosColor.textPrimary : TelosColor.textSecondary)
                 .padding(.horizontal, TelosSpace.m)
                 .frame(minHeight: 32)
-                .background(shape.fill(isOn ? StrandPalette.accentMuted : TelosColor.glassFill))
-                .overlay(
-                    shape.strokeBorder(
-                        isOn ? LinearGradient(colors: [StrandPalette.accent.opacity(0.9), StrandPalette.accent.opacity(0.25)],
-                                              startPoint: .topLeading, endPoint: .bottomTrailing)
-                             : TelosColor.glassEdge,
-                        lineWidth: TelosStroke.line)
-                )
+                .background(shape.fill(isOn ? TelosColor.glassRaised : TelosColor.glassFill))
+                .overlay {
+                    if isOn {
+                        shape.strokeBorder(StrandPalette.accent.opacity(0.5), lineWidth: TelosStroke.line)
+                    } else {
+                        shape.strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line)
+                    }
+                }
                 .frame(minHeight: TelosSpace.hitTarget)
                 .contentShape(Rectangle())
         }

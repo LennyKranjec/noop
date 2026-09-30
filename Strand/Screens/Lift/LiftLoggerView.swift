@@ -173,7 +173,6 @@ struct LiftLoggerView: View {
                     Capsule().strokeBorder(TelosColor.mint.opacity(prominent ? 0 : TelosOpacity.border),
                                            lineWidth: TelosStroke.line)
                 }
-                .shadow(color: prominent ? TelosColor.glow.opacity(0.5) : .clear, radius: 8)
         }
         .buttonStyle(TelosPressButtonStyle())
         .animation(TelosMotion.gated(TelosMotion.settle, reduced: reduceMotion), value: prominent)
@@ -223,7 +222,7 @@ struct LiftLoggerView: View {
         return ZStack {
             Circle().stroke(TelosColor.line, lineWidth: TelosStroke.strong)
             // The exercise's progress ring settles to each new check (≈0.45 s, then rest; instant under
-            // Reduce Motion). A completed exercise lights with one halo stroke — no blur, no shadow.
+            // Reduce Motion). One crisp arc — no halo, no glow (decision 19).
             Circle()
                 .trim(from: 0, to: CGFloat(done) / CGFloat(total))
                 .rotation(.degrees(-90))
@@ -356,13 +355,12 @@ struct LiftLoggerView: View {
         }
         .padding(TelosSpace.m)
         .background {
+            // A plain raised panel with a neutral hairline — no tinted wash, no gradient edge (decision 19).
             RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
-                .fill(TelosColor.mintMuted)
+                .fill(TelosColor.glassRaised)
                 .overlay {
                     RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
-                        .strokeBorder(LinearGradient(colors: [TelosColor.mint.opacity(0.7), TelosColor.mint.opacity(0.1)],
-                                                     startPoint: .topLeading, endPoint: .bottomTrailing),
-                                      lineWidth: TelosStroke.line)
+                        .strokeBorder(TelosColor.lineStrong, lineWidth: TelosStroke.line)
                 }
         }
     }
@@ -447,9 +445,8 @@ struct LiftLoggerView: View {
         }
         .padding(.vertical, TelosSpace.xxs)
         .opacity(set.status == .notDone ? TelosOpacity.disabled : 1)
-        // The in-the-moment PR reward on THIS row (decision 17): gold wash + "PR" + one gold burst, ≤ 1.5 s,
-        // cleared by the recorder. A fade in and out — which is also the Reduce Motion form (the burst itself
-        // stands down under Reduce Motion / Low Power).
+        // The PR marker on THIS row while the recorder holds it: a neutral hairline + a small flat gold "PR"
+        // (decision 19: no wash, no burst). A fade in and out — also the Reduce Motion form.
         .overlay {
             if flashing { LiftPRFlash().transition(.opacity) }
         }
@@ -618,26 +615,16 @@ struct LiftLoggerView: View {
     }
 }
 
-// MARK: - Check mark (the logger's reward micro-moment)
+// MARK: - Check mark
 
-/// The set's check — the logger's most-pressed control, made to feel like a commit. On pending → done it
-/// POPS (scale 1 → 1.22 → 1, a short spring: the wearer's own press, so the gentle overshoot is allowed)
-/// and throws ONE luminous ripple ring outward that fades (≈0.5 s), then rests. The phone haptic is the
-/// recorder's single `success` (or `reward` on a PR) for the same tap — nothing is added here.
+/// The set's check — the logger's most-pressed control. Decision 19 (clinical restraint): the state change
+/// itself is the feedback — the fill changes, the recorder plays its single `success` (or `reward` on a PR)
+/// haptic for the same tap. No pop, no ripple ring, no glow on the next set.
 ///
-/// Cost (§2.1 rule 8): two transforms on a ≤ 40 pt element, only on the change; nothing runs between
-/// checks, nothing loops. Reduce Motion / Low Power / "Reduce motion in NOOP" (`NoopMotionState.poseStill`):
-/// no pop and no ripple — the fill change alone.
+/// Cost (§2.1 rule 8): static shapes; nothing animates between checks, nothing loops.
 private struct LiftCheckMark: View {
     let status: LiftSetStatus
     let active: Bool
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @ObservedObject private var motion = NoopMotionState.shared
-    /// Bumped once per pending → done change; drives the two one-shot phase animations.
-    @State private var celebrate = 0
-
-    private enum Ripple: CaseIterable { case idle, lit, out }
 
     var body: some View {
         let done = status == .done
@@ -650,9 +637,7 @@ private struct LiftCheckMark: View {
                     .font(TelosType.glyphRow.weight(.bold))
                     .foregroundStyle(TelosColor.mint)
             } else if active {
-                // The next set to do glows: ONE static radial gradient (no shadow on a table row).
-                TelosRadialGlow(color: TelosColor.glow, intensity: 0.45, radius: 30)
-                    .frame(width: 64, height: 64)
+                // The next set to do: a solid accent disc (no glow — decision 19).
                 Circle().fill(TelosColor.mint)
                 Image(systemName: "checkmark")
                     .font(TelosType.glyphControl)
@@ -664,51 +649,24 @@ private struct LiftCheckMark: View {
             }
         }
         .frame(width: size, height: size)
-        .background {
-            Circle()
-                .stroke(TelosColor.mint, lineWidth: TelosStroke.data)
-                .phaseAnimator(Ripple.allCases, trigger: celebrate) { ring, phase in
-                    ring
-                        .scaleEffect(phase == .out ? 1.9 : 1)
-                        .opacity(phase == .lit ? 0.9 : 0)
-                } animation: { phase in
-                    phase == .out ? Animation.easeOut(duration: 0.5) : Animation.linear(duration: 0.01)
-                }
-        }
-        .phaseAnimator([CGFloat(1), CGFloat(1.22)], trigger: celebrate) { mark, scale in
-            mark.scaleEffect(scale)
-        } animation: { scale in
-            scale > 1 ? Animation.spring(response: 0.16, dampingFraction: 0.6) : TelosMotion.release
-        }
-        .onChangeCompat(of: done) { nowDone in
-            if nowDone && !motion.poseStill(reduceMotion) { celebrate &+= 1 }
-        }
     }
 }
 
 // MARK: - PR flash
 
-/// The row overlay while a just-checked set is a personal record: a gold wash and hairline, a "PR" tag beside
-/// the check, and ONE `TelosMomentBurst` in gold from the check (≤ 30 fps, 1.4 s, then it draws nothing; it
-/// stands down under Reduce Motion / Low Power). Not hit-testable, so the row stays usable underneath.
+/// The row overlay while a just-checked set is a personal record: a neutral hairline around the row and a
+/// small flat "PR" mark in gold beside the check (decision 19: gold only as a small flat mark — no wash, no
+/// filled gold tag, no burst). Not hit-testable, so the row stays usable underneath.
 private struct LiftPRFlash: View {
     var body: some View {
         ZStack(alignment: .trailing) {
             RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
-                .fill(TelosColor.bestGold.opacity(TelosOpacity.wash))
-                .overlay {
-                    RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
-                        .strokeBorder(TelosColor.bestGold.opacity(TelosOpacity.secondary), lineWidth: TelosStroke.line)
-                }
-            TelosMomentBurst(style: .celebration, color: TelosColor.bestGold)
-                .frame(width: 160, height: 110)
-                .offset(x: 58)
+                .strokeBorder(TelosColor.lineStrong, lineWidth: TelosStroke.line)
             Text("PR")
                 .font(TelosType.scale.weight(.bold))
-                .foregroundStyle(TelosColor.onAccent)
+                .foregroundStyle(TelosColor.bestGold)
                 .padding(.horizontal, TelosSpace.s)
                 .padding(.vertical, TelosSpace.xxs)
-                .background(Capsule().fill(TelosColor.bestGold))
                 .padding(.trailing, TelosSpace.hitTarget + TelosSpace.xs)
         }
         .allowsHitTesting(false)

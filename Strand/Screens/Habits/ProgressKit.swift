@@ -40,12 +40,13 @@ struct PGOverline: View {
     }
 }
 
-/// A thin glyph in a luminous accent beside an overline — the reference's card headers
-/// ("⚡ Recommendation", "◎ Mind & Focus").
+/// A thin glyph beside an overline — the reference's card headers ("⚡ Recommendation", "◎ Mind & Focus").
+/// The glyph defaults to a neutral ink (decision 19: no decorative green); pass a part's hue when the
+/// header names a measured part.
 struct PGGlyphHeader: View {
     let systemImage: String
     let title: Text
-    var tint: Color = TelosColor.mint
+    var tint: Color = TelosColor.textSecondary
     var trailing: Text? = nil
 
     var body: some View {

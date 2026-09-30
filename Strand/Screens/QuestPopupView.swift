@@ -8,16 +8,15 @@ import StrandDesign
 // one button — the wearer has to answer it, which is the entire mechanism: a nudge that can be scrolled
 // past is a nudge that is scrolled past.
 //
-// THE TAUNT TYPES ITSELF on the OFFER, one letter at a time, with a tick of haptic per letter — the moment
-// the wearer asked for. SKIPPABLE: tapping anywhere while it types finishes the line at once; under Reduce
-// Motion the line is simply there.
+// THE TAUNT IS SHOWN WHOLE (decision 19 — clinical restraint: no typewriter effect, no per-letter ticks).
+// The summon haptic and the strap buzz still mark the arrival, once.
 //
 // IT DOES NOT FILL THE SCREEN. The card sits over a scrim so the app underneath stays visible around it.
 //
 // TELOS 2.0 (PROGRESS part B): restyled WITHOUT restructuring — the one host (`QuestHostModifier`) still
 // decides what is on screen, in the same order (completion, failure, offer). Cards are the overlay-elevation
-// glass card (radius 24, one shadow, a pre-composited radial glow behind — no blur); the quest world's hue is
-// the effort blue.
+// card (radius 24, one neutral elevation shadow, a flat neutral hairline — no glow, no tinted top wash,
+// decision 19); the quest world's hue is the effort blue, used only on its symbol and inset band.
 //
 // THE FAILURE CARD (HEALTH_V2 H3b/d, DESIGN_V2 §5.14 + coordinator decision 1): one card per day, red and
 // consequential through its rail, its critical cost ink and its exact numbers — NOT through alarm: no
@@ -30,9 +29,6 @@ private let questScreenMargin: CGFloat = 24
 /// The modal cards' maximum width (§5.14: 360).
 private let questCardMaxWidth: CGFloat = 360
 
-/// How long between letters on the OFFER. ~25/s: fast enough not to be a wait, slow enough to read.
-private let typeInterval: TimeInterval = 0.038
-
 /// The quest world's hue: the effort blue.
 private var questBlue: Color { TelosColor.effort }
 
@@ -41,8 +37,9 @@ private var questScrim: some View {
     TelosColor.diagField.opacity(0.5).ignoresSafeArea()
 }
 
-/// The overlay-elevation glass card every quest pop-up shares: opaque `surface` (the app shows around it,
-/// not through it), a luminous edge in the card's hue, a faint top glow, one shadow (§4.6 overlay).
+/// The overlay-elevation card every quest pop-up shares: opaque `surface` (the app shows around it, not
+/// through it), a flat neutral hairline and one neutral elevation shadow (§4.6 overlay). Decision 19: no
+/// luminous hue edge, no tinted top glow, no radial glow behind. `hue` is kept for source compatibility.
 private struct QuestCardSurface: ViewModifier {
     let hue: Color
 
@@ -51,16 +48,8 @@ private struct QuestCardSurface: ViewModifier {
         return content
             .padding(TelosSpace.l)
             .frame(maxWidth: questCardMaxWidth)
-            .background(
-                shape.fill(TelosColor.surface)
-                    .overlay(shape.fill(LinearGradient(colors: [hue.opacity(0.14), Color.clear],
-                                                       startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.4))))
-            )
-            .overlay(shape.strokeBorder(LinearGradient(colors: [hue.opacity(0.75), hue.opacity(0.15)],
-                                                       startPoint: .topLeading, endPoint: .bottomTrailing),
-                                        lineWidth: TelosStroke.line))
-            // The glow is a pre-composited radial fill behind the card — no blur, no coloured shadow.
-            .background(TelosRadialGlow(color: hue, intensity: 0.22, radius: 260))
+            .background(shape.fill(TelosColor.surface))
+            .overlay(shape.strokeBorder(TelosColor.lineStrong, lineWidth: TelosStroke.line))
             .telosElevation(.overlay)
     }
 }
@@ -78,9 +67,6 @@ struct QuestPopupView: View {
     var onSummonStrap: () -> Void = {}
 
     @State private var typed = 0
-    /// Read ONCE, held for the whole animation: a preference lookup per letter would stutter the type.
-    @State private var hapticsOn = SystemHaptics.enabled
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// NOT observed: the coach publishes on every streamed chunk, and this view only calls it from
     /// actions. Observing it re-rendered the whole view per chunk while any generation ran.
@@ -94,8 +80,8 @@ struct QuestPopupView: View {
     var body: some View {
         ZStack {
             questScrim
-                // Tap anywhere to finish the typing early; once finished, taps do nothing (the button is
-                // the only way out, because this is a decision and not a toast).
+                // Taps on the scrim do nothing: the button is the only way out, because this is a decision
+                // and not a toast.
                 .contentShape(Rectangle())
                 .onTapGesture { if !done { typed = full.count } }
 
@@ -105,30 +91,12 @@ struct QuestPopupView: View {
         .task(id: quest.id) { await run() }
     }
 
-    /// The summon, then the typing. One task keyed on the quest's id, so a re-render cannot re-summon.
+    /// The summon, and the whole line at once (decision 19: no typewriter). One task keyed on the quest's
+    /// id, so a re-render cannot re-summon.
     private func run() async {
         SystemHaptics.play(.summon)
         onSummonStrap()
-        if reduceMotion {
-            typed = full.count
-            return
-        }
-        typed = 0
-        let letters = Array(full)
-        // See `TypewriterText.run` — the engine is held open for the length of the line, or it idles
-        // out between letters and the restarts swallow the ticks.
-        if hapticsOn { SystemHaptics.holdTickEngine(true) }
-        defer { if hapticsOn { SystemHaptics.holdTickEngine(false) } }
-        while typed < letters.count {
-            try? await Task.sleep(nanoseconds: UInt64(typeInterval * 1_000_000_000))
-            if Task.isCancelled { return }
-            // A tap may have skipped ahead while this was sleeping.
-            guard typed < letters.count else { return }
-            let next = letters[typed]
-            typed += 1
-            // Spaces get no tick: the finger feels a gap between words, which is what a space is.
-            if hapticsOn, !next.isWhitespace { SystemHaptics.tick() }
-        }
+        typed = full.count
     }
 
     private var card: some View {
@@ -150,7 +118,7 @@ struct QuestPopupView: View {
                 QuestOfferParking.shared.parkedOfferId = quest.id
                 router.openCoach()
             } label: {
-                Label("Ask about this", systemImage: "sparkles")
+                Label("Ask about this", systemImage: "text.bubble")
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.noopGhost)
@@ -203,7 +171,7 @@ struct QuestPopupView: View {
         }
         .frame(maxWidth: .infinity)
         .padding(TelosSpace.m)
-        .pgInsetBand(tint: questBlue)
+        .pgInsetBand()   // neutral well — no tinted wash (decision 19)
     }
 
     /// What finishing it is worth: the systems it touches. The icons are a claim about WHICH systems,
@@ -250,26 +218,18 @@ struct QuestPopupView: View {
     }
 }
 
-/// The taunt, mid-type.
-///
-/// The full string is laid out invisibly underneath so the block does not change height as it fills —
-/// text that reflows while it types is the thing that makes a typewriter effect feel cheap.
+/// The taunt. Shown whole since decision 19.
 private struct TypedLine: View {
     let text: String
     let shown: Int
 
     var body: some View {
-        ZStack {
-            Text(text)
-                .font(TelosType.subhead)
-                .foregroundStyle(Color.clear)
-                .multilineTextAlignment(.center)
-            Text(String(text.prefix(shown)))
-                .font(TelosType.subhead)
-                .foregroundStyle(TelosColor.textSecondary)
-                .multilineTextAlignment(.center)
-                .frame(maxWidth: .infinity, alignment: .center)
-        }
+        // Always the whole line (decision 19); `shown` is accepted for source compatibility.
+        Text(text)
+            .font(TelosType.subhead)
+            .foregroundStyle(TelosColor.textSecondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity, alignment: .center)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(text))
     }
@@ -497,9 +457,9 @@ struct QuestFailedPopupView: View {
 // line under it, one white button and a quieter second choice. The stress alarm uses it (opt-in).
 //
 // TELOS 2.0 (DESIGN_V2 §5.12): tokens only (`diagField`, `diagAlarm` = critical, `diagText`/`diagMuted`,
-// `diagnostic`/`diagnosticS`, the `scale` overline); the grid is `hair` critical @ 0.07; ONE shadow (the
-// symbol's, radius 12) — the glowing title shadow and the button glow are gone; no summon haptic; the
-// typewriter shows the full text under Reduce Motion (`TypewriterText`). API unchanged.
+// `diagnostic`/`diagnosticS`, the `scale` overline); the grid is `hair` critical @ 0.07. Decision 19: no
+// radial glow, no red symbol shadow, no typewriter (`TypewriterText` shows the whole line); no summon
+// haptic. API unchanged.
 
 struct DiagnosticAlertView: View {
     let overline: String
@@ -522,9 +482,6 @@ struct DiagnosticAlertView: View {
                 .ignoresSafeArea()
             DiagnosticGrid()
                 .stroke(red.opacity(0.07), lineWidth: TelosStroke.hair)
-                .ignoresSafeArea()
-            TelosRadialGlow(color: red, intensity: 0.22, radius: 220)
-                .offset(y: -120)
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
@@ -612,15 +569,12 @@ struct DiagnosticAlertView: View {
     private var symbolView: some View {
         if ringed {
             ZStack {
-                TelosRadialGlow(color: red, intensity: 0.18, radius: 130)
                 Circle()
                     .strokeBorder(red.opacity(0.7), lineWidth: TelosStroke.data)
                 Image(systemName: symbol)
                     .font(TelosType.numeralFont(size: 92, weight: .light))
                     .symbolRenderingMode(.monochrome)
                     .foregroundStyle(red)
-                    // The ONE shadow on this screen (§5.12).
-                    .shadow(color: red.opacity(0.8), radius: 12)
             }
             .frame(width: 250, height: 250)
             .accessibilityHidden(true)
@@ -628,7 +582,6 @@ struct DiagnosticAlertView: View {
             Image(systemName: symbol)
                 .font(TelosType.numeralFont(size: 130, weight: .ultraLight))
                 .foregroundStyle(red)
-                .shadow(color: red.opacity(0.8), radius: 12)
                 .accessibilityHidden(true)
         }
     }
@@ -677,7 +630,7 @@ struct QuestCompletedPopupView: View {
         return "+\(quest.xp) XP"
     }
 
-    /// The typed explanation: what was read, then how it was read.
+    /// The explanation (shown whole): what was read, then how it was read.
     private var explanation: String {
         completion.summary + " Closed automatically — the system read it off your data, so there is "
             + "nothing for you to confirm."
@@ -697,9 +650,10 @@ struct QuestCompletedPopupView: View {
                         .accessibilityHidden(true)
                     PGOverline("QUEST COMPLETE", ink: TelosColor.positive)
                     Spacer(minLength: TelosSpace.s)
+                    // A neutral figure, not a celebratory one (decision 19).
                     Text(verbatim: xpText)
                         .font(TelosType.numeralS)
-                        .foregroundStyle(TelosColor.positive)
+                        .foregroundStyle(TelosColor.textPrimary)
                 }
                 .accessibilityElement(children: .combine)
 
@@ -718,7 +672,7 @@ struct QuestCompletedPopupView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(TelosSpace.m)
-                .pgInsetBand(tint: TelosColor.positive)
+                .pgInsetBand()   // neutral well — no green wash (decision 19)
 
                 HStack(spacing: TelosSpace.m) {
                     ForEach(quest.rewards, id: \.rawValue) { reward in

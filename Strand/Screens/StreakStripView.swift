@@ -2,13 +2,13 @@ import SwiftUI
 import StrandAnalytics
 import StrandDesign
 
-// StreakStripView.swift — four numbers, each a flame.
+// StreakStripView.swift — four numbers, each with a plain status mark.
 //
 // SwiftUI twin of the Android `StreakCard`. The flame is the whole point: a digit is information, a lit
 // flame is something you do not want to put out, and that difference is why streaks work at all.
 //
-// THE FLAME SAYS WHETHER TODAY IS BANKED. Lit and glowing = today already counts. Dim = the streak is
-// running but today is not secured yet, which is a nudge that costs no words. Cold = nothing running.
+// THE MARK SAYS WHETHER TODAY IS BANKED. A filled check = today already counts. An open ring = the run is
+// going but today is not secured yet, which is a nudge that costs no words. Faint ring = nothing running.
 // A streak UI that looks identical whether or not today is done is a streak UI that cannot tell you the one
 // thing you open it for.
 //
@@ -16,9 +16,8 @@ import StrandDesign
 //
 // THE LABEL IS THE RULE, not the metric's name: "consistency > 80%" says what holds the flame lit.
 //
-// TELOS 2.0: a compact glass strip; a secured flame is lit in the amber with a pre-composited radial glow
-// behind it (no blur). The old repeat-forever "breathing" flicker is gone — §2.1 rule 1 / §7.4: nothing
-// loops on an idle Today; the glow carries "secured" without a clock. COST: static.
+// TELOS 2.0 + DECISION 19 (clinical restraint): a compact glass strip of neutral marks — no amber flames,
+// no glow, nothing that loops. The glyph's fill and ink carry "secured / running / none". COST: static.
 
 struct StreakStripView: View {
     let streaks: [Streak]
@@ -43,26 +42,23 @@ private struct StreakFlame: View {
     private var lit: Bool { streak.days > 0 }
 
     private var tint: Color {
-        if streak.todaySecured { return TelosColor.amber }
-        if lit { return TelosColor.amber.opacity(0.5) }
+        if streak.todaySecured { return TelosColor.textPrimary }
+        if lit { return TelosColor.textSecondary }
         return TelosColor.textTertiary.opacity(0.4)
+    }
+
+    private var symbol: String {
+        if streak.todaySecured { return "checkmark.circle.fill" }
+        return "circle"
     }
 
     var body: some View {
         VStack(spacing: TelosSpace.xxs) {
-            // The flame and the count sit on ONE line: the strip is meant to be glanced at, not read.
+            // The mark and the count sit on ONE line: the strip is meant to be glanced at, not read.
             HStack(spacing: TelosSpace.xs) {
-                Image(systemName: streak.todaySecured ? "flame.fill" : "flame")
+                Image(systemName: symbol)
                     .font(TelosType.glyphChevron)
                     .foregroundStyle(tint)
-                    .background(
-                        Group {
-                            if streak.todaySecured {
-                                TelosRadialGlow(color: TelosColor.amber, intensity: 0.35, radius: 14)
-                                    .frame(width: 28, height: 28)
-                            }
-                        }
-                    )
                 Text(verbatim: lit ? "\(streak.days) d" : TelosType.absent)
                     .font(TelosType.numeralXS)
                     .foregroundStyle(lit ? TelosColor.textPrimary : TelosColor.textTertiary)

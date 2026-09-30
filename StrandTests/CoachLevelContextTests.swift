@@ -23,9 +23,9 @@ final class CoachLevelContextTests: XCTestCase {
         for part in LevelPart.allCases {
             XCTAssertTrue(r.contains("\(part.rawValue) \(Int((part.weight * 100).rounded()))%"), r)
         }
-        XCTAssertTrue(r.contains("sleep = 0.50 × sleep duration"), r)
-        XCTAssertTrue(r.contains("0.30 × wake-time regularity"), r)
-        XCTAssertTrue(r.contains("0.20 × deep+REM"), r)
+        XCTAssertTrue(r.contains("sleep = 0.60 × deep+REM"), r)
+        XCTAssertTrue(r.contains("0.25 × night HRV"), r)
+        XCTAssertTrue(r.contains("0.15 × bed/wake regularity"), r)
         XCTAssertTrue(r.contains("heart = 0.50 × HRV + 0.50 × resting HR"), r)
         XCTAssertTrue(r.contains("lungs = 0.75 × VO2max"), r)
         XCTAssertTrue(r.contains("muscle = 0.60 × strength"), r)

@@ -155,14 +155,12 @@ public struct TelosBezel: View {
                                style: StrokeStyle(lineWidth: 0.8, lineCap: .round))
             }
 
-            // Value caret — 2 × 8 pt, with a faint halo. Hollow + notch when beyond the scale.
+            // Value caret — 2 × 8 pt, crisp (no halo — decision 19). Hollow + notch when beyond the scale.
             if let position {
                 let deg = startDegrees + spanDegrees * position.fraction
                 var caret = Path()
                 caret.move(to: point(deg, outer + 0.5))
                 caret.addLine(to: point(deg, outer - 8.5))
-                context.stroke(caret, with: .color(color.opacity(0.25)),
-                               style: StrokeStyle(lineWidth: 6, lineCap: .round))
                 if position.outOfRange {
                     context.stroke(caret, with: .color(color), style: StrokeStyle(lineWidth: 2.5, lineCap: .round))
                     context.stroke(caret, with: .color(TelosColor.canvas),

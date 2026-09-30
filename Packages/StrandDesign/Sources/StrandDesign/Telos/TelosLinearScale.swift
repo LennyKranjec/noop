@@ -7,7 +7,8 @@ import SwiftUI
 //   • `TelosGradientBar`        — Metabolic Engine "Glucose / Fat / Ketones": a gradient fill with a
 //                                 luminous head.
 //   • `TelosLoadWave`           — Environment "Environmental Load": an organic filled wave.
-//   • `TelosLuminousSparkline`  — the glowing micro-sparkline under compact numbers (125 bpm ⌇).
+//   • `TelosLuminousSparkline`  — the crisp micro-sparkline under compact numbers (125 bpm ⌇); no
+//                                 halo, no glowing head (decision 19).
 //
 // Shared honesty rules (§2.3, coordinator decision 9):
 //   • absent (nil / non-finite) → an empty track; the caller prints "—" + reason. Never a zero fill.
@@ -165,8 +166,8 @@ struct TelosBarFill: Shape {
     }
 }
 
-/// A gradient fill with a luminous head (Metabolic Engine). `colors` run left → right across the
-/// WHOLE track (so a fuller bar shows more of the ramp); the head dot glows in the last colour.
+/// A gradient fill (Metabolic Engine). `colors` run left → right across the WHOLE track (so a fuller
+/// bar shows more of the ramp). No glowing head dot (decision 19) — the fill's end is the reading.
 public struct TelosGradientBar: View {
     private let value: Double?
     private let scale: Double
@@ -200,15 +201,6 @@ public struct TelosGradientBar: View {
                 if bar != nil {
                     TelosBarFill(fraction: fill)
                         .fill(LinearGradient(colors: colors, startPoint: .leading, endPoint: .trailing))
-                    // Luminous head: a faint wide dot under a small bright core — no blur, no shadow.
-                    if fill > 0.001 {
-                        Circle().fill(head.opacity(0.28))
-                            .frame(width: height * 2.4, height: height * 2.4)
-                            .position(x: max(height / 2, w * CGFloat(min(fill, 1)) - height / 2), y: height / 2)
-                        Circle().fill(TelosColor.textPrimary.opacity(0.9))
-                            .frame(width: height * 0.7, height: height * 0.7)
-                            .position(x: max(height / 2, w * CGFloat(min(fill, 1)) - height / 2), y: height / 2)
-                    }
                 }
                 if let bar, bar.overflow > 0 {
                     // The second lap: a thin bright line along the top edge, to the overflow fraction.
@@ -298,25 +290,21 @@ public struct TelosLoadWave: View {
             context.fill(area, with: .linearGradient(
                 Gradient(colors: [color.opacity(0.32), color.opacity(0.0)]),
                 startPoint: CGPoint(x: 0, y: 0), endPoint: CGPoint(x: 0, y: size.height)))
-            context.stroke(crest, with: .color(color.opacity(0.22)),
-                           style: StrokeStyle(lineWidth: TelosStroke.data * 2.5, lineCap: .round, lineJoin: .round))
             context.stroke(crest, with: .color(color),
                            style: StrokeStyle(lineWidth: TelosStroke.strong, lineCap: .round, lineJoin: .round))
         }
-        // The glowing head on the latest reading (only when the series ENDS on a real value).
+        // A flat dot on the latest reading (only when the series ENDS on a real value). No halo.
         if let lastValue = values.last, lastValue.isFinite, let head = runs.last?.last {
-            context.fill(Path(ellipseIn: CGRect(x: head.x - 5, y: head.y - 5, width: 10, height: 10)),
-                         with: .color(color.opacity(0.25)))
             context.fill(Path(ellipseIn: CGRect(x: head.x - 2, y: head.y - 2, width: 4, height: 4)),
-                         with: .color(TelosColor.textPrimary))
+                         with: .color(color))
         }
     }
 }
 
 // MARK: - Luminous micro-sparkline
 
-/// The glowing micro-sparkline (Training Coach "125 bpm ⌇", Mind & Focus band readouts): a faint wide
-/// halo under a crisp 1.5 pt line and a glowing last-point dot. Straight segments between REAL points
+/// The micro-sparkline (Training Coach "125 bpm ⌇", Mind & Focus band readouts): a crisp 1.5 pt line
+/// and a flat last-point dot — no halo, no glow (decision 19). Straight segments between REAL points
 /// (no interpolation, no overshoot); non-finite values break the line (shared geometry with the P1
 /// `TelosMicroSparkline`, so both agree on every point). Scale is the series' own min…max.
 public struct TelosLuminousSparkline: View {
@@ -333,14 +321,9 @@ public struct TelosLuminousSparkline: View {
     public var body: some View {
         ZStack {
             TelosSparklinePath(values: values)
-                .stroke(color.opacity(0.22),
-                        style: StrokeStyle(lineWidth: lineWidth * 3, lineCap: .round, lineJoin: .round))
-            TelosSparklinePath(values: values)
                 .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
-            TelosSparklineHead(values: values, diameter: lineWidth * 4.5)
-                .fill(color.opacity(0.3))
             TelosSparklineHead(values: values, diameter: lineWidth * 2)
-                .fill(TelosColor.textPrimary)
+                .fill(color)
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)

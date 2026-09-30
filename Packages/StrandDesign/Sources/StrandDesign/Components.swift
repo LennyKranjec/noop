@@ -495,8 +495,8 @@ public struct SegmentedPillControl<T: Hashable>: View {
 
     private func track(equalWidth: Bool) -> some View {
         // V2 (§5.11 + VISUAL DIRECTION): a glass capsule track 44 high (36 segment + 4 inner padding) with
-        // the luminous edge. Selected segment: an accent-lit capsule (muted accent fill + accent gradient
-        // hairline, NO shadow — it lives in content) with a `textPrimary` label; unselected
+        // the neutral glass edge. Selected segment: a flat capsule (raised neutral fill + flat accent
+        // hairline, NO gradient, NO shadow — decision 19) with a `textPrimary` label; unselected
         // `textSecondary`; disabled `textDisabled` (and the system "dimmed" trait via `.disabled`).
         // Selection slides with `select`; Reduce Motion: instant.
         HStack(spacing: TelosSpace.xs) {
@@ -525,14 +525,13 @@ public struct SegmentedPillControl<T: Hashable>: View {
                         .background {
                             if sel {
                                 let selectedShape = Capsule(style: .continuous)
+                                // Flat selected segment (decision 19): raised neutral fill + a flat
+                                // accent hairline — no gradient edge, no tinted glow.
                                 selectedShape
-                                    .fill(StrandPalette.accentMuted)
+                                    .fill(TelosColor.glassRaised)
                                     .overlay(
-                                        selectedShape.strokeBorder(
-                                            LinearGradient(colors: [StrandPalette.accent.opacity(0.9),
-                                                                    StrandPalette.accent.opacity(0.25)],
-                                                           startPoint: .topLeading, endPoint: .bottomTrailing),
-                                            lineWidth: TelosStroke.line)
+                                        selectedShape.strokeBorder(StrandPalette.accent.opacity(0.5),
+                                                                   lineWidth: TelosStroke.line)
                                     )
                             }
                         }
