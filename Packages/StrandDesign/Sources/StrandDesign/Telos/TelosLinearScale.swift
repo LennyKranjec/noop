@@ -174,6 +174,7 @@ public struct TelosGradientBar: View {
     private let height: CGFloat
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var motion = NoopMotionState.shared
     @State private var shown: Double? = nil
 
     public init(value: Double?, scale: Double = 100, colors: [Color], height: CGFloat = 6) {
@@ -222,7 +223,7 @@ public struct TelosGradientBar: View {
         .onAppear { shown = bar?.fill ?? 0 }
         .onChangeCompat(of: bar?.fill) { newFill in
             let next = newFill ?? 0
-            if reduceMotion || shown == nil {
+            if motion.poseStill(reduceMotion) || shown == nil {
                 var tx = Transaction()
                 tx.disablesAnimations = true
                 withTransaction(tx) { shown = next }

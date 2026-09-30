@@ -1,14 +1,15 @@
 //  LiquidCore.swift
 //  NOOP · Liquid design language (experimental redesign)
 //
-//  The physics + motion foundation shared by every liquid element. Ported from the
-//  HTML design prototype: a spring-damped surface that stays level with the world
-//  as the device tilts, layered travelling waves, suspended metal flake, and splash
-//  droplets. Pure value maths in a reference type so a SwiftUI Canvas can step it
-//  each frame without writing @State during a view update.
+//  The physics + motion foundation shared by the liquid elements: a spring-damped surface that stays
+//  level with the world as the device tilts, and a level that chases its target. Pure value maths in a
+//  reference type so a SwiftUI Canvas can step it each frame without writing @State during a view update.
 //
-//  Locked material: liquid glass carrying metal flake. Translucent colour, flake
-//  that drifts and re-catches the light, a reflection that follows the tilt.
+//  TELOS 2.0 (INS): the sim now only ever runs inside a SETTLE WINDOW (≤ 1.2 s after a value change,
+//  `telosSettleWindow` + `TelosFrameGate`) — the tube sloshes into its new level and then rests on a
+//  still frame. The vessel no longer uses a sim at all (it is a luminous ring that animates its arc on a
+//  value change), which fixes the spec finding that the vessel ran a 60 fps loop while ignoring its own
+//  simulation. The metal flake and splash droplets are gone with the old material.
 
 import SwiftUI
 import StrandDesign   // NoopMotionState / QuietMotionPrefs — the shared quiet-motion gate
@@ -203,12 +204,6 @@ final class LiquidSim {
     var energy: Double
     var p1: Double
     var p2: Double
-    // suspended flake, in R-normalised circle coords
-    struct Fleck { var x, y, z, ph, sp: Double; var kind: Int }
-    var flecks: [Fleck] = []
-    // splash droplets, R-normalised
-    struct Drop { var x, y, vy, r, w, life: Double }
-    var drops: [Drop] = []
 
     private var nudge: Double
     private var lastTime: Double?
@@ -221,12 +216,6 @@ final class LiquidSim {
         self.p1 = Double.random(in: 0..<7)
         self.p2 = Double.random(in: 0..<7)
         self.nudge = 2 + Double.random(in: 0..<5)
-        for _ in 0..<28 {   // fewer flecks per vessel: ~40% cheaper per-frame render, imperceptible at gauge size
-            let k = Double.random(in: 0..<1) < 0.2 ? 2 : (Double.random(in: 0..<1) < 0.44 ? 1 : 0)
-            flecks.append(Fleck(x: .random(in: -1...1), y: .random(in: -1...1),
-                                z: 0.35 + Double.random(in: 0..<0.65),
-                                ph: .random(in: 0..<7), sp: 0.4 + Double.random(in: 0..<1.4), kind: k))
-        }
     }
 
     // material constants (the locked "liquid glass + flake")
@@ -257,7 +246,9 @@ final class LiquidSim {
         }
         let d = target - level
         if abs(d) > 0.0004 {
-            level += d * min(1, dt * 2.6)
+            // Rate 4.0/s: within the 1.2 s settle window the level closes ~99 % of the gap, so the hand-off
+            // to the posed still frame at the window's end is invisible.
+            level += d * min(1, dt * 4.0)
             energy = min(1.2, energy + abs(d) * dt * 6)
         }
         let speed = (1 + energy * 2.2) * phaseMul
@@ -265,35 +256,6 @@ final class LiquidSim {
         p2 += dt * 3.3 * speed
         energy *= exp(-dt * 1.5)
         if !reduceMotion && energy < 0.025 { energy = 0.025 }
-
-        for i in drops.indices {
-            drops[i].y -= drops[i].vy * dt
-            drops[i].x += sin(drops[i].y * 7 + drops[i].w) * 0.12 * dt
-            drops[i].life -= dt
-        }
-        drops.removeAll { $0.life <= 0 || $0.y <= 0.03 }
-
-        for i in flecks.indices {
-            flecks[i].x += (-av * 0.30 * flecks[i].z + sin(now * 0.35 + flecks[i].ph) * 0.015) * dt
-            flecks[i].y += cos(now * 0.28 + flecks[i].ph * 1.3) * 0.012 * dt
-            if flecks[i].x > 1.05 { flecks[i].x = -1.05 } else if flecks[i].x < -1.05 { flecks[i].x = 1.05 }
-            if flecks[i].y > 1.05 { flecks[i].y = -1.05 } else if flecks[i].y < -1.05 { flecks[i].y = 1.05 }
-        }
-    }
-
-    func splash(_ n: Int) {
-        let count = reduceMotion ? min(n, 4) : n
-        let depth = max(0.10, 2 * level * 0.9)
-        for _ in 0..<count {
-            drops.append(Drop(x: Double.random(in: -1...1) * 0.5,
-                              y: depth * (0.45 + Double.random(in: 0..<0.5)),
-                              vy: 0.22 + Double.random(in: 0..<0.34),
-                              r: 0.012 + Double.random(in: 0..<0.03),
-                              w: Double.random(in: 0..<7),
-                              life: 1.2 + Double.random(in: 0..<1.4)))
-        }
-        if drops.count > 40 { drops.removeFirst(drops.count - 40) }
-        energy = min(1.2, energy + 0.5)
     }
 
     /// True once the liquid has effectively stopped moving — lets a paused
@@ -302,10 +264,8 @@ final class LiquidSim {
         abs(av) < 0.01 && abs(abv) < 0.01 && abs(target - level) < 0.001 && energy < 0.03
     }
 
-    /// A non-animating sim posed at its fill line, surface flat and still — for the small
-    /// gauges/tubes that render ONCE (no TimelineView → CoreAnimation caches the layer, zero
-    /// per-frame cost). The home screen has ~10 of these; only the hero vessels + HR thread
-    /// need to actually slosh. Same static-raster principle as LiquidSkyStatic.
+    /// A non-animating sim posed at its fill line, surface flat and still. (The static tube no longer
+    /// needs one — it draws the posed geometry directly — but a caller that wants a posed sim can.)
     static func posed(_ target: Double) -> LiquidSim {
         let s = LiquidSim(target: target, reduceMotion: true)
         let t = max(0, min(1, target))

@@ -522,11 +522,26 @@ final class LiftSessionRecorder: ObservableObject {
         summary = built
         if built.recordCount > 0 {
             cues.reward(eventId: "pr:\(finished.id)")
-            TelosHaptics.play(.success)
+            TelosHaptics.play(.reward, action: "lift.pr.\(finished.id)")
         }
         clearJournal()
         phase = .finished
         return built
+    }
+
+    /// The finished session's one-line note for its workout row — the same wording an imported session carries
+    /// ("Lower A (Di): Strength · volume load 12,400 kg · 18 sets · 5 exercises"). Hand-off: `AppModel.endWorkout`.
+    var finishedWorkoutNote: String? {
+        guard phase == .finished, let s = session, let summary, summary.setsDone > 0 else { return nil }
+        let lifting = LiftingSession(
+            start: s.start, end: s.end ?? s.start,
+            volumeLoadKg: summary.volumeKg,
+            setCount: summary.workingSetsDone,
+            exerciseCount: summary.exercises.filter { $0.setsDone > 0 }.count,
+            totalReps: 0,
+            topSetKg: nil,
+            title: s.templateName)
+        return lifting.volumeLoadNote()
     }
 
     /// The workout was deleted: drop the session everywhere.

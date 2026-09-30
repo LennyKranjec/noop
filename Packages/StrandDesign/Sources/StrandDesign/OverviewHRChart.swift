@@ -308,6 +308,10 @@ public struct OverviewHRChart: View {
         Self.workoutBands(workouts, clippedTo: xDomain)
     }
 
+    /// Series ids: the luminous halo copy and the line itself (two series so they never join).
+    static let haloSeries = "halo"
+    static let lineSeries = "hr"
+
     /// Workout span fill / edge-rule tint: the badge tint at low opacity, so the band reads as "this
     /// stretch was training" in both appearances without competing with the data line drawn over it.
     private static let workoutBandOpacity: Double = 0.15
@@ -362,23 +366,35 @@ public struct OverviewHRChart: View {
                 .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
         }
 
+        // `.monotone`, not `.catmullRom`: a monotone cubic never overshoots past the real samples, so the
+        // curve cannot draw a heart rate the strap never recorded.
         ForEach(displayPoints) { p in
             AreaMark(x: .value("Time", p.date), y: .value("BPM", p.value))
-                .interpolationMethod(.catmullRom)
+                .interpolationMethod(.monotone)
                 .foregroundStyle(
                     LinearGradient(
                         colors: [
-                            StrandPalette.sample(stops: gradient.toStops(), at: unit(averageValue)).opacity(0.28),
+                            StrandPalette.sample(stops: gradient.toStops(), at: unit(averageValue)).opacity(0.18),
                             Color.clear
                         ],
                         startPoint: .top, endPoint: .bottom
                     )
                 )
         }
+        // Telos luminous line: ONE wide faint halo series under the crisp line (no blur). Same points.
         ForEach(displayPoints) { p in
-            LineMark(x: .value("Time", p.date), y: .value("BPM", p.value))
-                .interpolationMethod(.catmullRom)
-                .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+            LineMark(x: .value("Time", p.date), y: .value("BPM", p.value),
+                     series: .value("Series", Self.haloSeries))
+                .interpolationMethod(.monotone)
+                .lineStyle(StrokeStyle(lineWidth: 7, lineCap: .round, lineJoin: .round))
+                .foregroundStyle(valueGradient)
+                .opacity(0.16)
+        }
+        ForEach(displayPoints) { p in
+            LineMark(x: .value("Time", p.date), y: .value("BPM", p.value),
+                     series: .value("Series", Self.lineSeries))
+                .interpolationMethod(.monotone)
+                .lineStyle(StrokeStyle(lineWidth: TelosStroke.dataHero, lineCap: .round, lineJoin: .round))
                 .foregroundStyle(valueGradient)
         }
 
@@ -475,10 +491,13 @@ public struct OverviewHRChart: View {
             let color = StrandPalette.sample(stops: gradient.toStops(), at: unit(p.value))
             CrosshairRule(x: cx, height: container.height)
             HighlightDot(color: color).position(x: cx, y: cy)
+            // Callout pinned to the plot's top edge beside the point (§5.7) — never covering it.
             PositionedTooltip(
                 anchor: CGPoint(x: cx, y: cy),
                 container: container,
-                tooltip: ChartTooltip(value: valueFormat(p.value), label: hoverLabel(for: p.date), accent: color)
+                tooltip: ChartTooltip(value: valueFormat(p.value), label: hoverLabel(for: p.date), accent: color),
+                pinnedTop: true,
+                plotTop: plot.minY
             )
         }
     }
@@ -521,21 +540,25 @@ public struct OverviewHRChart: View {
         Chart { marks }
         .chartXScale(domain: xDomain)
         .chartYScale(domain: valueRange)
-        // catmullRom overshoots past the data on sharp turns and the area gradient draws
-        // unclipped — clip the plot so a spiky HR curve doesn't bleed past the chart (see TrendChart).
-        .chartPlotStyle { plotArea in plotArea.clipped() }
+        // The area gradient draws unclipped — clip the plot so a spiky HR curve doesn't bleed past the
+        // chart (see TrendChart). The plot sits on the faint dark glass well (a flat fill, no material).
+        .chartPlotStyle { plotArea in
+            plotArea
+                .background(TelosChartStyle.plotWell)
+                .clipped()
+        }
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 5)) { _ in
-                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.4))
-                AxisValueLabel().foregroundStyle(StrandPalette.textTertiary)
-                    .font(StrandFont.footnote)
+                AxisGridLine(stroke: TelosChartStyle.gridStroke).foregroundStyle(TelosChartStyle.gridInk)
+                AxisValueLabel().foregroundStyle(TelosColor.textTertiary)
+                    .font(TelosType.scaleNumber)
             }
         }
         .chartYAxis {
-            AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { _ in
-                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.4))
-                AxisValueLabel().foregroundStyle(StrandPalette.textTertiary)
-                    .font(StrandFont.footnote)
+            AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { _ in
+                AxisGridLine(stroke: TelosChartStyle.gridStroke).foregroundStyle(TelosChartStyle.gridInk)
+                AxisValueLabel().foregroundStyle(TelosColor.textTertiary)
+                    .font(TelosType.scaleNumber)
             }
         }
         .chartOverlay { proxy in
@@ -672,7 +695,6 @@ private struct WorkoutBadge: View {
                 RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(tint)
             )
-            .shadow(color: tint.opacity(0.5), radius: 4, y: 1)
             .allowsHitTesting(false)
     }
 }

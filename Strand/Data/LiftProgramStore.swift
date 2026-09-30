@@ -20,7 +20,7 @@ final class LiftProgramStore: ObservableObject {
 
     static let shared = LiftProgramStore()
 
-    static let fileName = "lift-programs.json"
+    nonisolated static let fileName = "lift-programs.json"
 
     @Published private(set) var library: LiftLibrary
 
@@ -33,12 +33,12 @@ final class LiftProgramStore: ObservableObject {
 
     // MARK: - Storage
 
-    static func defaultFileURL() -> URL? {
+    nonisolated static func defaultFileURL() -> URL? {
         guard let path = try? StorePaths.defaultDatabasePath() else { return nil }
         return URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent(fileName)
     }
 
-    static func load(_ url: URL?) -> LiftLibrary {
+    nonisolated static func load(_ url: URL?) -> LiftLibrary {
         guard let url, let data = try? Data(contentsOf: url) else { return LiftLibrary() }
         if let lib = try? JSONDecoder().decode(LiftLibrary.self, from: data) { return lib }
         // Unreadable (a future version, or damage): keep the bytes aside rather than overwrite the wearer's plan

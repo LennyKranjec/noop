@@ -231,6 +231,13 @@ pentagon radar. *Package* means one implementation agent's unit of work (§8).
 >    a reward pattern and a heavier penalty pattern, counted in the strap-cue daily budget, never during sleep,
 >    never twice for one event. Everyday UI is more alive too — values count up when they change, cards settle
 >    in, charts draw in — but nothing animates without a data change, and nothing loops offscreen.
+> 18. **The Home blob is a data object, not decoration (owner's direction).** The organic particle orb from the
+>    reference image is driven by real numbers: its size and particle density grow with the Level (unbounded —
+>    a slow soft curve plus extra shells at high levels, never a hard cap); its colour mix shows each Level part's
+>    share (sleep/heart/muscle/lungs/focus tints); surface turbulence follows today's stress; its pulse follows
+>    heart rate (slowed visually); glow follows Charge; the orbiting dots' speed follows effort vs target. A
+>    calibrating/building level renders as a sparser, dimmer "assembling" orb; absent inputs give a neutral dim
+>    still orb — never a fabricated state. Transitions animate only when a value changes; performance rules apply.
 > 8. **Haptic, organic feel (owner's direction for 2.0).** Define ONE haptic vocabulary in the design system
 >    (P1 owns `Haptics.swift`): named patterns — select (light tick), settle (soft), commit (rigid), success,
 >    warning, failure/penalty (a heavier two-beat), level-settle (a slow three-step rise), and a subtle

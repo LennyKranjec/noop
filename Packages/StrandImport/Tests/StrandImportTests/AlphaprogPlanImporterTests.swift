@@ -52,7 +52,7 @@ final class AlphaprogPlanImporterTests: XCTestCase {
         XCTAssertEqual(upperA[7].equipment, "Kabelzug")
         XCTAssertEqual(upperA[8].name, "Hyperextensions")
         XCTAssertEqual(upperA[8].equipment, "Körpergewicht")
-        XCTAssertEqual(upperA.map(\.position), Array(1...11))
+        XCTAssertEqual(upperA.compactMap(\.position), Array(1...11))
         XCTAssertTrue(p.programs.flatMap(\.days).flatMap(\.exercises).allSatisfy { $0.targetRepsLow == 10 })
         let equipment = Set(p.programs.flatMap(\.days).flatMap(\.exercises).compactMap(\.equipment))
         XCTAssertEqual(equipment, ["Maschine", "Kabelzug", "Körpergewicht"])

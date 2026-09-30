@@ -13,9 +13,9 @@ import StrandImport
 /// Every figure comes from `LiftSessionSummary` and is honest by construction: a PR has a previous best, an e1RM
 /// change has a previous session, a muscle's % change has a previous session of the SAME day — otherwise "—".
 ///
-/// MOTION (≤ 1.5 s, then rest — decision 17 and the performance rules): a star-burst of particles from the badge,
-/// drawn by one `Canvas` in a `drawingGroup`, at ≤ 30 fps, for 1.4 s; then the timeline pauses and the layer is
-/// still. Reduce Motion gets no particles and a cross-fade. The strap reward buzz for a PR is fired by the
+/// MOTION (≤ 1.5 s, then rest — decision 17 and the performance rules): the design system's `TelosMomentBurst`
+/// (one `Canvas`, ≤ 30 fps, 1.4 s, then it draws nothing) behind the badge. Reduce Motion / Low Power get no
+/// particles and a cross-fade. The strap reward buzz for a PR is fired by the
 /// recorder once per session (`StrapCueEngine.fire(.reward, eventId: "pr:<session>")`), never here.
 struct LiftFinishView: View {
     let summary: LiftSessionSummary
@@ -58,13 +58,11 @@ struct LiftFinishView: View {
 
     private var badge: some View {
         ZStack {
-            if !reduceMotion {
-                LiftStarBurst(seed: UInt64(bitPattern: Int64(session.start.timeIntervalSince1970)),
-                              intense: summary.recordCount > 0)
-                    .frame(width: 320, height: 260)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
-            }
+            // The design system's ONE celebration burst (≤ 30 fps, 1.4 s, then nothing; suppressed under Reduce
+            // Motion / Low Power / "Reduce motion in NOOP"). Gold when the session holds a PR.
+            TelosMomentBurst(style: .celebration,
+                             color: summary.recordCount > 0 ? TelosColor.bestGold : TelosColor.mint)
+                .frame(width: 320, height: 300)
             ZStack {
                 LiftStarShape()
                     .fill(LinearGradient(colors: [TelosColor.bestGold, TelosColor.amber],
@@ -352,78 +350,4 @@ struct LiftStarShape: Shape {
     }
 }
 
-// MARK: - Star-burst particles
-
-/// One burst, 1.4 s, ≤ 30 fps, then still. Deterministic per session (a seeded generator), so a redraw never
-/// reshuffles the field. `intense` (a PR) doubles the count and adds gold.
-struct LiftStarBurst: View {
-    let seed: UInt64
-    let intense: Bool
-
-    static let duration: Double = 1.4
-
-    @State private var startedAt = Date()
-    @State private var finished = false
-
-    private struct Particle {
-        let angle: Double
-        let speed: Double
-        let size: Double
-        let colorIndex: Int
-        let delay: Double
-    }
-
-    private var particles: [Particle] {
-        var state = seed | 1
-        func next() -> Double {
-            // xorshift64*: cheap, deterministic, good enough for a sparkle.
-            state ^= state >> 12
-            state ^= state << 25
-            state ^= state >> 27
-            let v = state &* 2_685_821_657_736_338_717
-            return Double(v >> 11) / Double(1 << 53)
-        }
-        let count = intense ? 90 : 48
-        return (0..<count).map { _ in
-            Particle(angle: next() * 2 * .pi,
-                     speed: 60 + next() * 120,
-                     size: 1.5 + next() * 3,
-                     colorIndex: Int(next() * 4),
-                     delay: next() * 0.25)
-        }
-    }
-
-    var body: some View {
-        let field = particles
-        let colors: [Color] = intense
-            ? [TelosColor.bestGold, TelosColor.mint, TelosColor.amber, TelosColor.teal]
-            : [TelosColor.mint, TelosColor.teal, TelosColor.glow, TelosColor.bestGold]
-        TimelineView(.animation(minimumInterval: 1.0 / 30.0, paused: finished)) { context in
-            Canvas { gc, size in
-                let t = context.date.timeIntervalSince(startedAt)
-                let centre = CGPoint(x: size.width / 2, y: size.height / 2)
-                for p in field {
-                    let local = t - p.delay
-                    guard local > 0, local < Self.duration else { continue }
-                    let progress = local / Self.duration
-                    // Critically damped outward travel: fast out, settling — never a bounce.
-                    let travel = p.speed * (1 - pow(1 - progress, 3))
-                    let x = centre.x + CGFloat(cos(p.angle) * travel)
-                    let y = centre.y + CGFloat(sin(p.angle) * travel)
-                    let alpha = 1 - progress
-                    let r = CGFloat(p.size * (1 - 0.4 * progress))
-                    gc.opacity = alpha
-                    gc.fill(Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)),
-                            with: .color(colors[p.colorIndex % colors.count]))
-                }
-            }
-        }
-        .drawingGroup()
-        .onAppear {
-            startedAt = Date()
-            finished = false
-            DispatchQueue.main.asyncAfter(deadline: .now() + Self.duration + 0.3) { finished = true }
-        }
-    }
-}
 #endif

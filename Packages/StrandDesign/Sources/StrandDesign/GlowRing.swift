@@ -38,6 +38,7 @@ public struct GlowRing: View {
     }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var motion = NoopMotionState.shared
 
     /// The centre-number font for a ring of the given diameter — the light Telos numeral at
     /// `diameter * 0.34`. Exposed so an EMPTY / carried / "No data" ring (which doesn't draw a
@@ -76,7 +77,7 @@ public struct GlowRing: View {
                 .padding(.horizontal, lineWidth + 4)
         }
         .frame(width: diameter, height: diameter)
-        .animation(reduceMotion ? nil : TelosMotion.settle, value: clamped)
+        .animation(motion.poseStill(reduceMotion) ? nil : TelosMotion.settle, value: clamped)
     }
 }
 

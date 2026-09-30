@@ -190,9 +190,11 @@ public struct TelosRing: View {
     private let confidence: TelosConfidence
     private let isCarried: Bool
     private let showsValue: Bool
+    private let animatesChanges: Bool
     private let axLabel: Text?
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var motion = NoopMotionState.shared
     /// The laps currently drawn. nil until first appear (then set WITHOUT animation — no draw-in).
     @State private var shownLaps: Double? = nil
 
@@ -210,6 +212,7 @@ public struct TelosRing: View {
     ///   - confidence: `.calibrating` draws a dotted (provisional) arc.
     ///   - isCarried: a value carried from an earlier day — arc at half opacity.
     ///   - showsValue: false = no centre content (the caller overlays its own).
+    ///   - animatesChanges: false = a value change jumps (small static gauges in rows).
     ///   - accessibilityLabel: what VoiceOver names the ring (the value is read as its value).
     public init(value: Double?,
                 scale: Double = 100,
@@ -224,6 +227,7 @@ public struct TelosRing: View {
                 confidence: TelosConfidence = .solid,
                 isCarried: Bool = false,
                 showsValue: Bool = true,
+                animatesChanges: Bool = true,
                 accessibilityLabel: Text? = nil) {
         self.value = value.flatMap { $0.isFinite ? $0 : nil }
         self.scale = scale
@@ -238,6 +242,7 @@ public struct TelosRing: View {
         self.confidence = confidence
         self.isCarried = isCarried
         self.showsValue = showsValue
+        self.animatesChanges = animatesChanges
         self.axLabel = accessibilityLabel
     }
 
@@ -253,7 +258,8 @@ public struct TelosRing: View {
         .onAppear { shownLaps = targetLaps ?? 0 }
         .onChangeCompat(of: targetLaps) { newLaps in
             let next = newLaps ?? 0
-            if reduceMotion || shownLaps == nil {
+            // Reduce Motion / Low Power / quiet motion (§7.5): fills jump to value.
+            if !animatesChanges || motion.poseStill(reduceMotion) || shownLaps == nil {
                 var tx = Transaction()
                 tx.disablesAnimations = true
                 withTransaction(tx) { shownLaps = next }
