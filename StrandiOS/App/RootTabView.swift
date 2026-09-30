@@ -2,6 +2,7 @@
 import SwiftUI
 import Combine
 import StrandDesign
+import StrandAnalytics
 
 /// iOS navigation shell. macOS uses a `NavigationSplitView` sidebar (`RootView`); on iPhone the
 /// natural analogue is a `TabView` with the most-used screens as tabs and everything else under a

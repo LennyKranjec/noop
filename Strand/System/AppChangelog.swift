@@ -7,7 +7,7 @@ enum AppChangelog {
 
     /// Bump this when you add a release below. The "What's New" sheet shows automatically when the
     /// stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
-    static let currentVersion = "11.7.0"
+    static let currentVersion = "12.0.0"
 
     struct Release: Identifiable {
         let version: String
@@ -19,6 +19,22 @@ enum AppChangelog {
 
     /// Newest first.
     static let releases: [Release] = [
+        Release(
+            version: "12.0.0",
+            title: "Telos 2.0: a living, bioluminescent redesign, an in-app strength logger, goals that look ahead, and habits you can test",
+            date: "September 2026",
+            items: [
+                "**A new look, everywhere.** Dark, organic and bioluminescent: faux-glass tiles, thin luminous rings that draw extra laps instead of capping, a floating tab bar (Home · Biometrics · Focus · System · More), and full-screen moments for the big wins and misses. Glass and glows are drawn cheaply, and animations pause offscreen, under Reduce Motion and in Low Power Mode.",
+                "**Home, rebuilt.** Your Level beside a living orb that is drawn from your own numbers: it grows with the Level (with no ceiling), takes its colours from the parts that carry it, roughens with stress, pulses with your resting heart rate and brightens with Charge. Below it: Rest, Charge and Effort rings, skin temperature, HRV and UV, the window advice, and today's mission. From 18:00 until the morning the sleep panel moves to the top.",
+                "**Telos Lift.** Log strength sessions inside the live workout: your Alphaprog plans imported and editable, sets with kg, reps and e1RM, a 2:30 rest timer that buzzes the strap, progression proposals, a gold flash and a strap buzz for a new record, and a finish screen with the change per muscle group.",
+                "**Look ahead and Goals.** See where each metric is heading on your current path and on the plan, set a target on a date, and get an honest verdict on whether it is realistic, with a short coach panel to plan it with you.",
+                "**Habits you can test.** A habit hub with the patterns in your own nights, plus n-of-1 trials that alternate a harmless habit on and off and report an effect only when it is statistically real.",
+                "**Quests with consequences.** Missed quests now cost Level points on a red daily card that stays visible, with make-up quests to earn them back. The Level itself is unbounded, and meditation counts only as a deduction for a missed daily minimum (10 minutes from 29 September).",
+                "**Strap cues.** A sitting-break nudge (movement from the iPhone), a paced-breathing buzz, a wind-down cue, focus blocks and a meditation timer, all within a daily buzz budget and never during sleep. The stress alert screen is now off by default.",
+                "**An alarm the band can ring on its own.** The wake buzz now also arms the strap's built-in alarm for the same minute, so the band can wake you even when iOS has suspended the app. When the strap reports that it fired, the app's repeating buzz takes over until you double-tap.",
+                "**Smaller things.** A richer meditation history, a Tonight card with a timeline to lights-out, an energy estimate that learns from your own check-ins, a week plan and review, and a coach that sees your habits and goals while staying within the free-tier token budget.",
+            ]
+        ),
         Release(
             version: "11.7.0",
             title: "A stress screen that keeps up, WHOOP 5 readings in the units the strap sends, and a ring that stops repeating itself",

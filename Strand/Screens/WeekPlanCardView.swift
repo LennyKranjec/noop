@@ -165,11 +165,17 @@ struct WeekPlanCardView: View {
         }
     }
 
+    @ViewBuilder
     private func stepsRow(_ plan: WeekPlan) -> some View {
-        guard let target = plan.stepsTarget else {
-            return line(String(localized: "Steps"), "\u{2014}",
-                        caption: String(localized: "Steps not calibrated — calibrate with a walk to get a step target"))
+        if let target = plan.stepsTarget {
+            stepsTargetRow(plan, target: target)
+        } else {
+            line(String(localized: "Steps"), "\u{2014}",
+                 caption: String(localized: "Steps not calibrated — calibrate with a walk to get a step target"))
         }
+    }
+
+    private func stepsTargetRow(_ plan: WeekPlan, target: Double) -> some View {
         let mean = source.progress?.stepsMeanReliable.map { Int($0.rounded()).formatted() } ?? "\u{2014}"
         var caption = plan.stepsMedian.map { String(localized: "your median \(Int($0.rounded()).formatted())") } ?? ""
         if !plan.ageKnown && target >= plan.stepsPlateau {

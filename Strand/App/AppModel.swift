@@ -405,6 +405,8 @@ final class AppModel: ObservableObject {
         cues.strapLog = { [live] line in live.append(log: line) }
         cues.sleepPlan = { day in SleepScheduleProvider.shared.plan(wakingOn: day) }
         cues.isWorkoutActive = { [weak self] in self?.activeWorkout != nil }
+        // Strap-paced breathing sessions are recorded (before/after HRV) even when the Breathe screen never opens.
+        StrapBreathSessionBridge.shared.attach(to: cues)
         cues.onMeditationCompleted = { [weak self] secs in
             guard let self else { return }
             Task { await self.repo.logMeditation(seconds: secs) }

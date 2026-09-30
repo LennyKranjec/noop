@@ -357,6 +357,11 @@ final class StateCoachController: ObservableObject {
         let hourly = (curve?.result.hours ?? []).compactMap { h -> (hour: Int, level: Double)? in
             h.level.map { (hour: h.hour, level: $0) }
         }
+        // The wearer's active goals, so the tile's advice points the same way the Goals screen does.
+        let goalDay = Repository.localDayKey(now)
+        let goalAssessments = GoalStore.shared.activeGoals.map { ProjectionSource.shared.assess($0, today: goalDay) }
+        let goalsFull: String? = goalAssessments.isEmpty ? nil : GoalCoachSummary.block(goalAssessments, asOf: goalDay)
+        let goalsShortText: String? = goalAssessments.isEmpty ? nil : GoalCoachSummary.shortBlock(goalAssessments, asOf: goalDay)
         let blocks = StateGrounding.blocks(
             dayFrame: CoachDayFrame.compactBlock(now: now),
             training: training(Self.recentWorkoutsListed),
@@ -370,7 +375,9 @@ final class StateCoachController: ObservableObject {
             routines: CoachRoutines.promptSection(),
             memory: CoachMemory.shared.promptSection(),
             closing: CoachDayFrame.closingRule,
-            weekPlan: WeekPlanSource.shared.guidance(for: day).map { "WEEK PLAN, TODAY (\($0.day)): " + $0.line })
+            weekPlan: WeekPlanSource.shared.guidance(for: day).map { "WEEK PLAN, TODAY (\($0.day)): " + $0.line },
+            goals: goalsFull,
+            goalsShort: (goalsShortText?.isEmpty ?? true) ? nil : goalsShortText)
         // Measured rather than guessed: a budget that under-reserves the asking overruns by exactly its own
         // error, which is how a request sized for 8,000 came to ask for 8,646.
         let reserved = coach.reservedTokens(framing: framing, question: question, now: now)
