@@ -164,16 +164,7 @@ final class WeekPlanSource: ObservableObject {
         for d in repo.days { metrics[d.day] = d }
 
         // Steps, resolved exactly as Today resolves them.
-        var phoneByDay: [String: Int] = [:]
-        for r in await repo.appleDailyRows(days: Self.windowDays + 7) {
-            if let s = r.steps { phoneByDay[r.day] = max(phoneByDay[r.day] ?? 0, s) }
-        }
-        var estByDay: [String: Double] = [:]
-        for p in await repo.exploreSeries(key: "steps_est", source: "my-whoop", days: Self.windowDays + 7) {
-            estByDay[p.day] = p.value
-        }
-        let estimateFitted = profile.stepsCalibrationManual
-            || profile.stepsCalibrationSampleDays >= StepsEstimateEngine.minCalibrationDays
+        let resolveSteps = await Self.stepResolver(repo: repo, profile: profile, readDays: Self.windowDays + 7)
 
         let denom = StrainScorer.logMapDenominator(method: PuffinExperiment.effortMethod, sex: profile.sex)
         effortDenominator = denom
@@ -188,16 +179,7 @@ final class WeekPlanSource: ObservableObject {
         for key in keys {
             let c = cache[key]
             let m = metrics[key]
-            let src = TodayView.stepsTileSource(strapCounter: m?.steps,
-                                                counterCalibrated: profile.stepCounterCalibrated,
-                                                phoneSameDay: phoneByDay[key],
-                                                motionEstimate: estByDay[key].map { Int($0.rounded()) })
-            let reliable: Bool
-            switch src {
-            case .some(.measured): reliable = true
-            case .some(.motionEstimate): reliable = estimateFitted
-            default: reliable = false
-            }
+            let steps = resolveSteps(key)
             let trimp: Double? = m?.strain.map { StrainScorer.strainToTRIMP($0, denominator: denom) }
             days.append(DayActivity(
                 day: key,
@@ -206,8 +188,8 @@ final class WeekPlanSource: ObservableObject {
                 vigorousMin: c.flatMap { $0.abstained ? nil : $0.vigorous },
                 hardSession: c.map { $0.hardSession },
                 strengthSession: c.map { $0.strength },
-                steps: src.map { Double($0.steps) },
-                stepsReliable: reliable,
+                steps: steps.steps,
+                stepsReliable: steps.reliable,
                 trimp: trimp,
                 wearCoverage: c?.wear,
                 unmeasuredSessions: c?.unmeasured ?? 0,
@@ -273,6 +255,42 @@ final class WeekPlanSource: ObservableObject {
         todayGuidance = guidance
         progress = WeekPlanEngine.progress(plan: plan, days: days, today: calendarToday)
         lastReview = review
+    }
+
+    /// A day's steps resolved exactly as Today resolves them (`TodayView.stepsTileSource`), and whether the
+    /// total is RELIABLE: a measurement (calibrated counter or phone) always is; a fitted 4.0 estimate is
+    /// only with ≥ `StepsEstimateEngine.minCalibrationDays` phone-calibrated days or a manual k; an
+    /// uncalibrated counter total ("est.") never is. Reads the phone rows and the estimate series for the
+    /// last `readDays` once, then resolves any local day key. The ONE resolution the week plan and Look ahead
+    /// (`ProjectionSource`) share, so the S3 step gate cannot see two different step histories.
+    static func stepResolver(repo: Repository, profile: ProfileStore,
+                             readDays: Int) async -> (String) -> (steps: Double?, reliable: Bool) {
+        var phoneByDay: [String: Int] = [:]
+        for r in await repo.appleDailyRows(days: readDays) {
+            if let s = r.steps { phoneByDay[r.day] = max(phoneByDay[r.day] ?? 0, s) }
+        }
+        var estByDay: [String: Double] = [:]
+        for p in await repo.exploreSeries(key: "steps_est", source: "my-whoop", days: readDays) {
+            estByDay[p.day] = p.value
+        }
+        var counterByDay: [String: Int] = [:]
+        for d in repo.days { counterByDay[d.day] = d.steps }   // last row wins, as `metrics` does
+        let estimateFitted = profile.stepsCalibrationManual
+            || profile.stepsCalibrationSampleDays >= StepsEstimateEngine.minCalibrationDays
+        let counterCalibrated = profile.stepCounterCalibrated
+        return { key in
+            let src = TodayView.stepsTileSource(strapCounter: counterByDay[key],
+                                                counterCalibrated: counterCalibrated,
+                                                phoneSameDay: phoneByDay[key],
+                                                motionEstimate: estByDay[key].map { Int($0.rounded()) })
+            let reliable: Bool
+            switch src {
+            case .some(.measured): reliable = true
+            case .some(.motionEstimate): reliable = estimateFitted
+            default: reliable = false
+            }
+            return (src.map { Double($0.steps) }, reliable)
+        }
     }
 
     private static func guidance(plan: WeekPlan, _ a: GuidanceArgs) -> DayGuidance {

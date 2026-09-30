@@ -78,11 +78,12 @@ final class LevelEngineTests: XCTestCase {
         let b = try XCTUnwrap(LevelEngine.compute(inputs: high, baselines: allUnit))
         let muscle = try XCTUnwrap(b.components.first { $0.part == .muscle }?.score)
         XCTAssertEqual(muscle, 0.6 * 100 + 0.4 * 400, accuracy: 1e-9, "the load term is not capped")
-        let expected = 0.30 * (0.5 * 180 + 0.3 * 100 + 0.2 * 100)
-            + 0.23 * (0.5 * 250 + 0.5 * 100)
-            + 0.12 * 100
-            + 0.24 * muscle
-            + 0.11 * 220
+        let sleepPart: Double = 0.30 * (0.5 * 180 + 0.3 * 100 + 0.2 * 100)
+        let heartPart: Double = 0.23 * (0.5 * 250 + 0.5 * 100)
+        let lungsPart: Double = 0.12 * 100
+        let musclePart: Double = 0.24 * muscle
+        let focusPart: Double = 0.11 * 220
+        let expected: Double = sleepPart + heartPart + lungsPart + musclePart + focusPart
         XCTAssertEqual(b.level, expected, accuracy: 1e-9)
         XCTAssertGreaterThan(b.level, 150)
     }

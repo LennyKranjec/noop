@@ -1,7 +1,13 @@
 import SwiftUI
 
-// MARK: - BevelGauge (NEW) — the layered ring gauge primitive
+// MARK: - BevelGauge — the open 240° gauge primitive, Telos 2.0 luminous look
 //
+// TELOS 2.0 (INS): same geometry and public API; the material is now the bioluminescent instrument —
+// a thin track in the gauge's own hue, ONE faint halo stroke under a thinner crisp ramp arc (no blur,
+// no shadow, no frosted disc), a luminous tip dot, and light numerals. The arc still animates only via
+// the caller's `animatedFraction` (callers settle it on a value change). Idle cost: zero.
+//
+// Original notes (geometry unchanged):
 // The shared instrument behind RecoveryRing and StrainGauge: a 240° open gauge with
 //   • a soft frosted inner disc (subtle radial fill, hairline rim)
 //   • a faint full-span track ring carved from `surfaceInset` (the Titanium "well")
@@ -72,6 +78,8 @@ public struct BevelGauge: View {
     private var endAngle: Angle { .degrees(150 + arcSpanDegrees) }
 
     private var gradient: Gradient { Gradient(stops: stops) }
+    /// The luminous core arc is thinner than the footprint `lineWidth` (the halo fills the rest).
+    private var coreWidth: CGFloat { max(2, lineWidth * 0.55) }
 
     public var body: some View {
         ZStack {
@@ -95,22 +103,26 @@ public struct BevelGauge: View {
     private var staticBackdrop: some View {
         ZStack {
             innerDisc
-            // Faint full-span track — the inset "well" the score arc sits in.
+            // Thin full-span track in the gauge's own hue.
             arcShape(to: 1.0)
-                .stroke(StrandPalette.surfaceInset,
-                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                .stroke(tipColor.opacity(TelosOpacity.fill),
+                        style: StrokeStyle(lineWidth: coreWidth, lineCap: .round))
         }
     }
 
     /// The live layer: the filled gradient arc + its clean end-cap dot (both driven by animatedFraction).
     private var animatedArc: some View {
         ZStack {
-            // Filled gradient arc.
+            // Halo: one wider faint stroke of the same arc (the glow, no blur).
+            arcShape(to: animatedFraction)
+                .stroke(tipColor.opacity(0.20),
+                        style: StrokeStyle(lineWidth: lineWidth * 1.3, lineCap: .round))
+            // The luminous ramp arc.
             arcShape(to: animatedFraction)
                 .stroke(
                     AngularGradient(gradient: gradient, center: .center,
                                     startAngle: startAngle, endAngle: endAngle),
-                    style: StrokeStyle(lineWidth: lineWidth, lineCap: .round)
+                    style: StrokeStyle(lineWidth: coreWidth, lineCap: .round)
                 )
 
             // Clean end-cap dot at the arc tip.
@@ -118,16 +130,15 @@ public struct BevelGauge: View {
         }
     }
 
-    // Frosted inner disc behind the arc — gives the gauge a glassy "well".
+    // A faint pre-composited glow in the gauge's hue behind the read-out (no blur, no frosted rim).
     private var innerDisc: some View {
         Circle()
             .fill(
                 RadialGradient(
-                    colors: [StrandPalette.surfaceInset.opacity(0.0), StrandPalette.surfaceInset.opacity(0.55)],
-                    center: .center, startRadius: diameter * 0.10, endRadius: diameter * 0.5
+                    colors: [tipColor.opacity(0.10), tipColor.opacity(0.03), Color.clear],
+                    center: .center, startRadius: 0, endRadius: diameter * 0.42
                 )
             )
-            .overlay(Circle().strokeBorder(StrandPalette.hairlineSoft, lineWidth: 1))
             .padding(lineWidth * 1.4)
     }
 
@@ -143,25 +154,26 @@ public struct BevelGauge: View {
             let tipAngle = startAngle.radians + (arcSpanDegrees * .pi / 180) * animatedFraction
             let pt = CGPoint(x: center.x + radius * cos(tipAngle),
                              y: center.y + radius * sin(tipAngle))
-            // Clean Material tip: a single small solid dot at the arc end. The large
-            // blurred halo is gone; only a very faint shadow keeps it from looking pasted on.
-            Circle().fill(StrandPalette.tipCore)
-                .frame(width: lineWidth * 0.7, height: lineWidth * 0.7)
-                .overlay(Circle().fill(tipColor).opacity(0.35))
-                .shadow(color: tipColor.opacity(0.35), radius: lineWidth * 0.18)
-                .position(pt)
+            // Luminous tip: a faint wide dot in the hue under a small bright core — no shadow, no blur.
+            ZStack {
+                Circle().fill(tipColor.opacity(0.30))
+                    .frame(width: lineWidth * 1.3, height: lineWidth * 1.3)
+                Circle().fill(TelosColor.textPrimary.opacity(0.92))
+                    .frame(width: coreWidth * 0.7, height: coreWidth * 0.7)
+            }
+            .position(pt)
         }
     }
 
     private var centerLabel: some View {
         VStack(spacing: 2) {
             Text(numberText)
-                .font(StrandFont.rounded(diameter * 0.30, weight: .bold))
+                .font(TelosType.numeralFont(size: diameter * 0.30, weight: .light))
                 .foregroundStyle(StrandPalette.textPrimary)
                 .contentTransition(.numericText())
             if let captionText {
                 Text(captionText)
-                    .font(StrandFont.rounded(diameter * 0.085, weight: .medium))
+                    .font(TelosType.numeralFont(size: diameter * 0.085, weight: .medium))
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             if let stateText {

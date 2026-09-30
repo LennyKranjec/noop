@@ -318,38 +318,19 @@ final class ProjectionSource: ObservableObject {
             + "needed in the last \(gate.windowDays)) — no projection until they are measured"
     }
 
-    /// Days with steps resolved exactly as Today and the week plan resolve them (the S3 gate's input).
+    /// Days with steps resolved exactly as Today and the week plan resolve them (the S3 gate's input) —
+    /// through the week plan's own resolver, so the two can never drift apart.
     private func stepActivity(repo: Repository, profile: ProfileStore, now: Date,
                               calendar: Calendar) async -> [DayActivity] {
         let span = Self.historyWeeks * 7 + 7
-        var phoneByDay: [String: Int] = [:]
-        for r in await repo.appleDailyRows(days: span) {
-            if let s = r.steps { phoneByDay[r.day] = max(phoneByDay[r.day] ?? 0, s) }
-        }
-        var estByDay: [String: Double] = [:]
-        for p in await repo.exploreSeries(key: "steps_est", source: "my-whoop", days: span) {
-            estByDay[p.day] = p.value
-        }
-        let estimateFitted = profile.stepsCalibrationManual
-            || profile.stepsCalibrationSampleDays >= StepsEstimateEngine.minCalibrationDays
-        var metrics: [String: DailyMetric] = [:]
-        for d in repo.days { metrics[d.day] = d }
+        let resolve = await WeekPlanSource.stepResolver(repo: repo, profile: profile, readDays: span)
         let todayStart = calendar.startOfDay(for: now)
         var out: [DayActivity] = []
         for offset in stride(from: span, through: 1, by: -1) {
             guard let date = calendar.date(byAdding: .day, value: -offset, to: todayStart) else { continue }
             let key = Repository.localDayKey(date)
-            let src = TodayView.stepsTileSource(strapCounter: metrics[key]?.steps,
-                                                counterCalibrated: profile.stepCounterCalibrated,
-                                                phoneSameDay: phoneByDay[key],
-                                                motionEstimate: estByDay[key].map { Int($0.rounded()) })
-            let reliable: Bool
-            switch src {
-            case .some(.measured): reliable = true
-            case .some(.motionEstimate): reliable = estimateFitted
-            default: reliable = false
-            }
-            out.append(DayActivity(day: key, steps: src.map { Double($0.steps) }, stepsReliable: reliable))
+            let steps = resolve(key)
+            out.append(DayActivity(day: key, steps: steps.steps, stepsReliable: steps.reliable))
         }
         return out
     }

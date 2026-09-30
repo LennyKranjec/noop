@@ -62,9 +62,55 @@ struct LiveWorkoutView: View {
     private var zoneSet: HRZoneSet { model.profile.hrZoneSet }
     private var zone: Int { model.bpm.map { zoneSet.zoneNumber(forBPM: Double($0)) } ?? 0 }
 
+    // TELOS LIFT (DESIGN_V2 decision 16). A strength sport opens the in-app logger INSIDE this screen, above the
+    // live HR / zone / Effort blocks, which keep running underneath. The finish screen then replaces the whole
+    // screen in place (decision 7: no cover of its own). Everything lift-specific lives in `Screens/Lift/*` and
+    // `Data/LiftSessionRecorder.swift`; these few hooks only host it.
+    @ObservedObject private var lift = LiftSessionRecorder.shared
+    @ObservedObject private var liftPrograms = LiftProgramStore.shared
+    @Environment(\.scenePhase) private var scenePhase
+
+    private var isLift: Bool {
+        #if os(iOS)
+        return LiftSessionRecorder.isStrengthSport(model.activeWorkout?.sport)
+        #else
+        return false
+        #endif
+    }
+
     var body: some View {
+        #if os(iOS)
+        if lift.phase == .finished, let summary = lift.summary, let session = lift.session {
+            LiftFinishView(summary: summary, session: session) {
+                lift.reset()
+                onClose()
+            }
+        } else {
+            workoutBody
+        }
+        #else
+        workoutBody
+        #endif
+    }
+
+    /// Finish the lift (unchecked sets → not done), then end the workout. In THAT order: ending the workout
+    /// first would clear `activeWorkout` while the logger is still up, and the close-on-end hook would tear the
+    /// screen down before the finish screen could show.
+    private func finishLift() {
+        Task {
+            await lift.finish()
+            model.endWorkout()
+        }
+    }
+
+    private var workoutBody: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+                #if os(iOS)
+                if isLift {
+                    LiftLoggerView(recorder: lift, programs: liftPrograms, onFinish: finishLift)
+                }
+                #endif
                 // Listed directly (not an [AnyView] walked by a ForEach): SwiftUI keeps each card's static
                 // type, so it can diff them instead of rebuilding type-erased boxes on every live tick.
                 heroRow.staggeredAppear(index: 0)
@@ -114,7 +160,12 @@ struct LiveWorkoutView: View {
         // the bar can never sit under the indicator. That is why the controls must NOT be in the scrolling
         // column, and why the column's own bottom padding stays small (see above).
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            bottomControlRow
+            VStack(spacing: NoopMetrics.space2) {
+                #if os(iOS)
+                if isLift { LiftRestTimerPill(recorder: lift) }
+                #endif
+                bottomControlRow
+            }
         }
         // A scenic Effort-tinted backdrop behind the whole in-exercise screen, fading to the base — the
         // live workout reads as an Effort-world hero, not a flat panel.
@@ -123,7 +174,22 @@ struct LiveWorkoutView: View {
                 .ignoresSafeArea()
         }
         // If the workout ended elsewhere (process restart cleared it), close the screen.
-        .onChangeCompat(of: model.activeWorkout == nil) { gone in if gone { onClose() } }
+        .onChangeCompat(of: model.activeWorkout == nil) { gone in if gone && lift.phase != .finished { onClose() } }
+        // Attach the lift logger to this workout (idempotent), with today's Charge and the week plan's easy-week
+        // flag for the progression proposal.
+        .task(id: model.activeWorkout?.start) {
+            guard isLift, let start = model.activeWorkout?.start else { return }
+            let repo = model.repo
+            let todayKey = Repository.localDayKey(Date())
+            await lift.attach(workoutStart: start,
+                              storeProvider: { await repo.storeHandle() },
+                              charge: repo.days.first { $0.day == todayKey }?.recovery,
+                              holdLoads: WeekPlanSource.shared.currentPlan?.strength.holdLoads ?? false)
+        }
+        // The rest timer's local-notification backup is armed only while the app is in the background.
+        .onChangeCompat(of: scenePhase == .background) { background in
+            if isLift { lift.sceneDidChange(background: background) }
+        }
         // Arm the realtime HR stream while the in-exercise screen is up (#681). On a WHOOP 5/MG live HR
         // only flows while the puffin realtime stream is armed; previously only the Live tab armed it, so
         // starting a manual workout straight from Workouts (Live never opened) left `model.bpm == nil` —
@@ -148,8 +214,14 @@ struct LiveWorkoutView: View {
                isPresented: $showEndConfirm) {
             Button("Cancel", role: .cancel) { }
             Button("End", role: .destructive) {
-                model.endWorkout()
-                onClose()
+                if isLift, lift.session != nil {
+                    // Ending a strength workout IS finishing the lift: unchecked sets are recorded as not
+                    // done and the finish screen shows.
+                    finishLift()
+                } else {
+                    model.endWorkout()
+                    onClose()
+                }
             }
         } message: {
             Text("This stops recording and saves what's captured so far. It can't be resumed.")
@@ -157,6 +229,7 @@ struct LiveWorkoutView: View {
         .confirmationDialog("Delete", isPresented: $showDeleteConfirm,
                             titleVisibility: .visible) {
             Button("Delete", role: .destructive) {
+                if isLift { lift.discard() }
                 model.discardWorkout()
                 onClose()
             }

@@ -120,7 +120,7 @@ final class HabitTrialStore: ObservableObject {
         }
     }
 
-    static func defaultFileURL() -> URL? {
+    nonisolated static func defaultFileURL() -> URL? {
         guard let path = try? StorePaths.defaultDatabasePath() else { return nil }
         return URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent(fileName)
     }

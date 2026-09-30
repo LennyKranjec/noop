@@ -174,7 +174,10 @@ enum QuestIssuer {
             recent: Array(days.suffix(14)),
             existingToday: sideBudgetQuests(existingToday))
         else { return }
+        // A RUNNING n-of-1 TRIAL'S METRICS ARE TAKEN TOO: a side quest pushing the trial's own behaviour
+        // (or its outcome's obvious lever) would contaminate both arms of the experiment.
         let taken = takenMetrics(existingToday: existingToday, all: store.quests)
+            .union(HabitTrialQuestBridge.conflictingMetrics())
         if let metric = trigger.goal?.metric, taken.contains(metric) { return }
         store.upsert(await QuestGenerator.fromTrigger(trigger, coach: coach, dayKey: dayKey))
     }
@@ -329,8 +332,12 @@ enum QuestPlanComposer {
     ///   - An illness heads-up (`baseline.dayState == .rest`, from `QuestDayState.standIn`) makes the day a
     ///     rest day whatever the week plan said: the heads-up can be newer than the plan.
     ///   - Otherwise the plan runs with the stand-in state `QuestBaselineReader` put on the baseline.
+    ///
+    /// `excluding` (the running trial's conflicting metrics) is removed before the gear's count is cut, in
+    /// both branches, so a trial never gets a quest that pushes its own behaviour.
     static func targets(baseline: QuestBaseline, difficulty: QuestDifficulty, focus: LevelPart?,
-                        day: String, guidance: DayGuidance?, charge: Double?) -> [QuestPlanTarget] {
+                        day: String, guidance: DayGuidance?, charge: Double?,
+                        excluding: Set<QuestMetric> = []) -> [QuestPlanTarget] {
         var dayGuidance = guidance
         if baseline.dayState == .rest, guidance?.kind != .rest {
             dayGuidance = DayGuidance(day: day, kind: .rest, notes: [.illness],
@@ -345,10 +352,11 @@ enum QuestPlanComposer {
             bridgeActs = false
         }
         guard bridgeActs else {
-            return QuestDayPlan.plan(baseline: baseline, difficulty: difficulty, focus: focus, day: day)
+            return QuestDayPlan.plan(baseline: baseline, difficulty: difficulty, focus: focus, day: day,
+                                     excluding: excluding)
         }
         let raw = QuestDayPlan.plan(baseline: baseline, difficulty: difficulty, focus: focus, day: day,
-                                    dayState: .asPlanned)
+                                    dayState: .asPlanned, excluding: excluding)
         return WeekPlanQuestBridge.apply(raw, guidance: dayGuidance, difficulty: difficulty, charge: charge)
     }
 
@@ -358,7 +366,8 @@ enum QuestPlanComposer {
                         day: String, repo: Repository) -> [QuestPlanTarget] {
         targets(baseline: baseline, difficulty: difficulty, focus: focus, day: day,
                 guidance: WeekPlanSource.shared.guidance(for: day),
-                charge: repo.days.first { $0.day == day }?.recovery)
+                charge: repo.days.first { $0.day == day }?.recovery,
+                excluding: HabitTrialQuestBridge.conflictingMetrics())
     }
 }
 

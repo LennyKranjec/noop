@@ -20,13 +20,23 @@ import WhoopStore
 // and the sleep-anchor plan keeps only the current plans; judging old nights against today's target would
 // be a fabricated comparison, so that habit stays unobserved until a per-night target history exists.
 // `dayStressMean` has no stored daily series (only high-stress minutes are banked), so it is absent.
+//
+// BREATHING MINUTES (`breath_session_min`, source `noop-habits`, written by `BreathSessionLog`). The habit is
+// timed ("a ≥ 5-min session ended between 17:00 and onset"), so the timed sessions in `breath-sessions.json`
+// stay its source. The day series adds the days the JSON cannot see (it is in the database backup, the JSON
+// is not; the JSON is also bounded): such an UNTIMED day counts toward "active in the last 14 days" when it
+// lies wholly inside that window, and it WITHDRAWS a "no" for a night whose evening it could have covered
+// (clock time unknown ⇒ neither yes nor no is honest ⇒ absent). It never creates a "yes". There is no
+// zero-filling: a day without a row is simply not a breathing day, exactly as before.
 
 @MainActor
 enum HabitLedgerSource {
 
     static let lookbackDays = 120
     static let habitsSource = "noop-habits"
-    static let breathingActiveDays = 14
+    nonisolated static let breathingActiveDays = 14
+    /// `HabitRules.breathingSession`'s floor for one session. An untimed day totalling less cannot hold one.
+    nonisolated static let breathingMinSessionMinutes = 5.0
 
     /// Everything the association analysis and the trials read.
     struct Snapshot {
@@ -123,18 +133,25 @@ enum HabitLedgerSource {
             let minutes = (w.durationS ?? Double(w.endTs - w.startTs)) / 60
             sessions.append((endEpochSec: Int64(w.endTs), minutes: minutes))
         }
+        let breathSeries = await repo.series(key: BreathSessionLog.key, source: BreathSessionLog.source,
+                                             days: lookbackDays)
+        let untimed = untimedBreathMinutes(series: breathSeries,
+                                           timedDays: Set(BreathSessionLog.shared.sessions.map(\.day)))
         for (wakeDay, onset) in onsets {
             guard let evening = HabitDay.adding(-1, to: wakeDay),
                   let eveningStart = localDate(day: evening, minute: 17 * 60, calendar: calendar) else { continue }
             let eveningSec = Int64(eveningStart.timeIntervalSince1970)
             let activeFrom = eveningSec - Int64(breathingActiveDays) * 86_400
             let active = sessions.contains { $0.endEpochSec >= activeFrom && $0.endEpochSec < eveningSec }
-            if let s = HabitRules.breathingSession(activeInLast14Days: active, sessions: sessions,
-                                                   eveningStartEpochSec: eveningSec,
-                                                   onsetEpochSec: Int64(onset.timeIntervalSince1970)) {
-                obs.append(HabitObservation(nightKey: wakeDay, habit: HabitCatalog.breathingSession, state: s,
-                                            source: .breathLog))
-            }
+                || untimedBreathActive(untimed, evening: evening)
+            guard let s = HabitRules.breathingSession(activeInLast14Days: active, sessions: sessions,
+                                                      eveningStartEpochSec: eveningSec,
+                                                      onsetEpochSec: Int64(onset.timeIntervalSince1970)) else { continue }
+            let onsetAfterMidnight = timings[wakeDay].map { $0.onsetMinute <= $0.wakeMinute } ?? false
+            if s == .no, untimedBreathMayCoverNight(untimed, evening: evening, wakeDay: wakeDay,
+                                                    onsetAfterMidnight: onsetAfterMidnight) { continue }
+            obs.append(HabitObservation(nightKey: wakeDay, habit: HabitCatalog.breathingSession, state: s,
+                                        source: .breathLog))
         }
 
         // 7. WiZ wind-down: 1 ran / 0 enabled-but-not-by-onset / no row when disabled.
@@ -195,6 +212,34 @@ enum HabitLedgerSource {
     /// sensitivity analysis).
     static func alcoholNights(_ inputs: HabitLedgerInputs) -> Set<String> {
         Set(inputs.observations.filter { $0.habit == HabitCatalog.alcohol && $0.state == .yes }.map { $0.nightKey })
+    }
+
+    // MARK: Untimed breathing days (pure)
+
+    /// Days with banked breathing minutes (`breath_session_min`) but no timed session in the JSON log.
+    /// Only positive, finite totals count; a day without a row stays absent (never 0).
+    nonisolated static func untimedBreathMinutes(series: [(day: String, value: Double)],
+                                                 timedDays: Set<String>) -> [String: Double] {
+        var out: [String: Double] = [:]
+        for p in series where p.value.isFinite && p.value > 0 && !timedDays.contains(p.day) {
+            out[p.day] = p.value
+        }
+        return out
+    }
+
+    /// Whether an untimed day makes the wearer "active" before `evening`: only days WHOLLY inside the
+    /// 14 days before that evening's 17:00 (evening − 13 … evening − 1) qualify, whatever their clock time.
+    nonisolated static func untimedBreathActive(_ untimed: [String: Double], evening: String) -> Bool {
+        (1..<breathingActiveDays).contains { k in HabitDay.adding(-k, to: evening).map { untimed[$0] != nil } ?? false }
+    }
+
+    /// Whether an untimed day could hold the ≥ 5-min session that would turn this night's "no" into a
+    /// "yes": the evening's own day, or the wake day when onset fell after midnight (the window then runs
+    /// past 00:00). The clock time is unknown, so such a night is left unobserved.
+    nonisolated static func untimedBreathMayCoverNight(_ untimed: [String: Double], evening: String,
+                                                       wakeDay: String, onsetAfterMidnight: Bool) -> Bool {
+        if (untimed[evening] ?? 0) >= breathingMinSessionMinutes { return true }
+        return onsetAfterMidnight && (untimed[wakeDay] ?? 0) >= breathingMinSessionMinutes
     }
 
     // MARK: Time helpers

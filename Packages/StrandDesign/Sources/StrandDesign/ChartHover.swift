@@ -36,10 +36,11 @@ public struct ChartTooltip: View {
     public var body: some View {
         HStack(alignment: .center, spacing: 8) {
             if let accent {
-                Circle()
-                    .fill(accent)
-                    .frame(width: 7, height: 7)
-                    .shadow(color: accent.opacity(0.8), radius: 3)
+                // Luminous swatch: a faint wide dot under the solid one (no shadow).
+                ZStack {
+                    Circle().fill(accent.opacity(0.3)).frame(width: 12, height: 12)
+                    Circle().fill(accent).frame(width: 7, height: 7)
+                }
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text(value)
@@ -55,7 +56,16 @@ public struct ChartTooltip: View {
         }
         .padding(.horizontal, 9)
         .padding(.vertical, 6)
-        .background(NoopPanelSurface(cornerRadius: 8, elevated: true))
+        // Telos callout (§5.7): opaque `surfaceRaised` + a 1 pt luminous glass hairline, radius 10. No
+        // shadow and no material — it sits over a live chart.
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(TelosColor.surfaceRaised)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line)
+                )
+        )
         .fixedSize()
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label != nil ? "\(value), \(label!)" : value)
@@ -92,6 +102,25 @@ public struct ChartTooltipPlacement {
         var x = anchor.x
         x = min(max(x, halfW), max(halfW, container.width - halfW))
 
+        return CGPoint(x: x, y: y)
+    }
+
+    /// The callout PINNED TO THE TOP EDGE of the plot (§5.7): vertically it sits just inside
+    /// `plotTop`; horizontally it sits beside the anchor (right by default, flipped left when it would
+    /// spill past the right edge), so it never covers the scrubbed point. Clamped inside `container`.
+    public static func pinnedTop(
+        anchorX: CGFloat,
+        tooltipSize: CGSize,
+        in container: CGSize,
+        plotTop: CGFloat = 0,
+        gap: CGFloat = 10
+    ) -> CGPoint {
+        let halfW = tooltipSize.width / 2
+        let halfH = tooltipSize.height / 2
+        let y = min(max(plotTop + halfH + 2, halfH), max(halfH, container.height - halfH))
+        var x = anchorX + gap + halfW
+        if x + halfW > container.width { x = anchorX - gap - halfW }
+        x = min(max(x, halfW), max(halfW, container.width - halfW))
         return CGPoint(x: x, y: y)
     }
 }
@@ -188,17 +217,15 @@ public enum ChartHoverMath {
 struct CrosshairRule: View {
     var x: CGFloat
     var height: CGFloat
-    var color: Color = StrandPalette.hairlineStrong
+    /// §5.7: a solid 1 pt rule in `textSecondary` (softened so it never outshines the data line).
+    var color: Color = TelosColor.textSecondary.opacity(0.7)
 
     var body: some View {
         Path { p in
             p.move(to: CGPoint(x: x, y: 0))
             p.addLine(to: CGPoint(x: x, y: height))
         }
-        .stroke(
-            color,
-            style: StrokeStyle(lineWidth: 1, dash: [3, 3])
-        )
+        .stroke(color, style: StrokeStyle(lineWidth: 1))
         .allowsHitTesting(false)
     }
 }
@@ -208,14 +235,17 @@ struct CrosshairRule: View {
 /// A small accented dot used to mark the highlighted sample on a line.
 struct HighlightDot: View {
     var color: Color
-    var diameter: CGFloat = 9
+    /// §5.7: a 7 pt point with a 2 pt `surface` ring and a faint luminous halo (no blur).
+    var diameter: CGFloat = 7
 
     var body: some View {
-        // Design Reset (WHOOP): a crisp solid dot with a clean surface ring, no blurred bloom halo.
         ZStack {
             Circle()
-                .fill(StrandPalette.surfaceBase)
-                .frame(width: diameter + 3, height: diameter + 3)
+                .fill(color.opacity(0.25))
+                .frame(width: diameter * 2.6, height: diameter * 2.6)
+            Circle()
+                .fill(TelosColor.surface)
+                .frame(width: diameter + 4, height: diameter + 4)
             Circle()
                 .fill(color)
                 .frame(width: diameter, height: diameter)
@@ -250,8 +280,22 @@ struct PositionedTooltip: View {
     var anchor: CGPoint
     var container: CGSize
     var tooltip: ChartTooltip
+    /// true = the §5.7 callout pinned to the plot's top edge beside the point (TrendChart,
+    /// OverviewHRChart); false = the legacy above/below-the-anchor placement (rings, sparklines, strips).
+    var pinnedTop: Bool = false
+    /// The plot's top edge in `container` coordinates (pinned placement only).
+    var plotTop: CGFloat = 0
 
     @State private var measured: CGSize = .zero
+
+    private var placement: CGPoint {
+        let size = measured == .zero ? CGSize(width: 90, height: 40) : measured
+        if pinnedTop {
+            return ChartTooltipPlacement.pinnedTop(anchorX: anchor.x, tooltipSize: size,
+                                                   in: container, plotTop: plotTop)
+        }
+        return ChartTooltipPlacement.position(anchor: anchor, tooltipSize: size, in: container)
+    }
 
     var body: some View {
         tooltip
@@ -262,13 +306,7 @@ struct PositionedTooltip: View {
                         .onChangeCompat(of: g.size) { measured = $0 }
                 }
             )
-            .position(
-                ChartTooltipPlacement.position(
-                    anchor: anchor,
-                    tooltipSize: measured == .zero ? CGSize(width: 90, height: 40) : measured,
-                    in: container
-                )
-            )
+            .position(placement)
             .transition(.opacity)
             .allowsHitTesting(false)
     }

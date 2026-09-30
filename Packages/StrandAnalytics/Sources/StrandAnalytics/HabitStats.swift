@@ -383,11 +383,11 @@ public enum HabitStats {
         } else if df == 2 {
             q = (2 / (pTwo * (2 - pTwo)) - 2).squareRoot()
         } else {
-            let a = 1 / (n - 0.5)
-            let b = 48 / (a * a)
-            var c = ((20_700 * a / b - 98) * a - 16) * a + 96.36
-            let d = ((94.5 / (b + c) - 3) / b + 1) * (a * Double.pi / 2).squareRoot() * n
-            var y = pow(d * pTwo, 2 / n)
+            let a: Double = 1 / (n - 0.5)
+            let b: Double = 48 / (a * a)
+            var c: Double = ((20_700 * a / b - 98) * a - 16) * a + 96.36
+            let d: Double = ((94.5 / (b + c) - 3) / b + 1) * (a * Double.pi / 2).squareRoot() * n
+            var y: Double = pow(d * pTwo, 2 / n)
             if y > 0.05 + a {
                 let x = normalQuantile(0.5 * pTwo)
                 y = x * x
@@ -396,15 +396,19 @@ public enum HabitStats {
                 y = (((((0.4 * y + 6.3) * y + 36) * y + 94.5) / c - y - 3) / b + 1) * x
                 y = expm1(a * y * y)
             } else {
-                y = ((1 / (((n + 6) / (n * y) - 0.089 * d - 0.822) * (n + 2) * 3) + 0.5 / (n + 4)) * y - 1)
-                    * (n + 1) / (n + 2) + 1 / y
+                let inner: Double = (n + 6) / (n * y) - 0.089 * d - 0.822
+                let bracket: Double = 1 / (inner * (n + 2) * 3) + 0.5 / (n + 4)
+                let scaled: Double = (bracket * y - 1) * (n + 1) / (n + 2)
+                y = scaled + 1 / y
             }
             q = (n * y).squareRoot()
         }
         // One Newton step on P(T ≤ q) = 1 − pTwo/2 (upper quantile), using the t density.
         let target = 1 - pTwo / 2
-        let density = exp(lgamma((n + 1) / 2) - lgamma(n / 2)) / (n * Double.pi).squareRoot()
-            * pow(1 + q * q / n, -(n + 1) / 2)
+        let logNorm: Double = lgamma((n + 1) / 2) - lgamma(n / 2)
+        let norm: Double = exp(logNorm) / (n * Double.pi).squareRoot()
+        let kernel: Double = pow(1 + q * q / n, -(n + 1) / 2)
+        let density: Double = norm * kernel
         if density > 0, density.isFinite {
             let step = (studentTCDF(q, df: n) - target) / density
             if step.isFinite, abs(step) < 0.5 * Swift.max(1, q) { q -= step }

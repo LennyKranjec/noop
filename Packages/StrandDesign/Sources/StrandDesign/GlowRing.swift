@@ -1,24 +1,30 @@
 import SwiftUI
 
-// MARK: - GlowRing — crisp WHOOP-style score ring
+// MARK: - GlowRing — the thin luminous score ring (Telos 2.0, docs/DESIGN_V2.md §5.6 "Ring")
 //
-// Quality here is CRISPNESS, not blur. A clean solid arc with rounded caps over a clearly-visible
-// full-circle track (so the ring reads as "X% of a circle"), a bold centred number that counts up, and
-// only a TIGHT, low-opacity glow hugging the arc (additive on dark, hidden on light) — never a wide
-// fuzzy bloom. The arc springs in from 12 o'clock and re-animates when the value changes (day nav).
-// Theme-aware (number + track follow light/dark). Motion gated on Reduce Motion; macOS-13 / iOS-17 safe.
+// The legacy initialiser (fraction / value / format / color / diameter / lineWidth) now draws the
+// Telos luminous look: a track in the metric hue at 16 %, ONE faint halo stroke under a crisp core arc
+// (no blur, no shadow), a luminous tip dot, and a light centre numeral. Watch-safe (plain shapes).
+//
+// `fraction` is still clamped to 0…1 here, because every existing caller passes a bounded 0–100 score
+// already divided by its maximum. An UNBOUNDED value (the Level) must use `TelosRing`, which draws the
+// overflow as further laps instead of clipping.
+//
+// Motion: the arc settles (`TelosMotion.settle`) only when the fraction CHANGES — never a draw-in on
+// appear (§7.4) — and snaps under Reduce Motion. Idle cost: zero.
 
 public struct GlowRing: View {
 
     /// Target fill, 0...1.
     public var fraction: Double
-    /// The number shown in the centre — rolls up to this.
+    /// The number shown in the centre.
     public var value: Double
-    /// Formats the (animated) value into the centre string.
+    /// Formats the value into the centre string.
     public var format: (Double) -> String
-    /// The arc colour (solid, saturated — the domain accent).
+    /// The arc colour (the metric identity hue).
     public var color: Color
     public var diameter: CGFloat
+    /// The ring's footprint width. The luminous core arc is drawn thinner inside it (halo + core).
     public var lineWidth: CGFloat
 
     public init(fraction: Double, value: Double, format: @escaping (Double) -> String,
@@ -32,33 +38,35 @@ public struct GlowRing: View {
     }
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @State private var appeared = false
 
-    /// The centre-number font for a ring of the given diameter — the house numeral at `diameter * 0.36`,
-    /// bold. Exposed so an EMPTY / carried / "No data" ring (which doesn't draw a `GlowRing`) can render
-    /// its centre text in the EXACT same size + weight as a filled ring, keeping the hero trio's three
-    /// centre read-outs visually consistent regardless of state.
+    /// The centre-number font for a ring of the given diameter — the light Telos numeral at
+    /// `diameter * 0.34`. Exposed so an EMPTY / carried / "No data" ring (which doesn't draw a
+    /// `GlowRing`) renders its centre text in the exact same size + weight as a filled ring.
     public static func centerFont(diameter: CGFloat) -> Font {
-        StrandFont.rounded(diameter * 0.36, weight: .bold)
+        TelosType.numeralFont(size: diameter * 0.34, weight: .light)
     }
 
-    private var clamped: CGFloat { CGFloat(min(max(fraction, 0), 1)) }
-    private var filled: CGFloat { appeared ? clamped : 0 }
-    private var shown: Double { appeared ? value : 0 }
-    private var drawSpring: Animation { .spring(response: 0.9, dampingFraction: 0.86) }
+    private var clamped: Double {
+        guard fraction.isFinite else { return 0 }
+        return min(max(fraction, 0), 1)
+    }
+    private var coreWidth: CGFloat { max(1.5, lineWidth * 0.6) }
 
     public var body: some View {
         ZStack {
-            // Clearly-visible full-circle track, so the arc reads as a fraction of a circle (like WHOOP).
             Circle()
-                .stroke(StrandPalette.textPrimary.opacity(0.10),
-                        style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
+                .stroke(color.opacity(TelosOpacity.fill), lineWidth: coreWidth)
+            // Halo: one wider faint stroke of the same arc — the glow without a blur.
+            GlowRingArc(fraction: clamped)
+                .stroke(color.opacity(0.22), style: StrokeStyle(lineWidth: lineWidth * 1.5, lineCap: .round))
+            GlowRingArc(fraction: clamped)
+                .stroke(AngularGradient(colors: [color.opacity(0.6), color], center: .center,
+                                        startAngle: .degrees(-90), endAngle: .degrees(270)),
+                        style: StrokeStyle(lineWidth: coreWidth, lineCap: .round))
+            GlowRingTipDot(fraction: clamped, diameter: coreWidth * 0.8)
+                .fill(TelosColor.textPrimary.opacity(0.9))
 
-            // Design Reset: NO glow. A flat, crisp solid arc only — the clean Material-style look.
-            arc.stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-
-            // Centred rolling number.
-            Text(format(shown))
+            Text(format(value))
                 .font(Self.centerFont(diameter: diameter))
                 .foregroundStyle(StrandPalette.textPrimary)
                 .monospacedDigit()
@@ -66,15 +74,46 @@ public struct GlowRing: View {
                 .minimumScaleFactor(0.5)
                 .contentTransition(.numericText())
                 .padding(.horizontal, lineWidth + 4)
-                .animation(reduceMotion ? nil : .easeOut(duration: 0.85), value: shown)
         }
         .frame(width: diameter, height: diameter)
-        .animation(reduceMotion ? nil : drawSpring, value: filled)
-        .onAppear { appeared = true }
+        .animation(reduceMotion ? nil : TelosMotion.settle, value: clamped)
+    }
+}
+
+/// The arc from 12 o'clock clockwise, on the frame's inscribed circle (the legacy geometry).
+private struct GlowRingArc: Shape {
+    var fraction: Double
+    var animatableData: Double {
+        get { fraction }
+        set { fraction = newValue }
     }
 
-    /// The trimmed arc, drawn from 12 o'clock clockwise.
-    private var arc: some Shape {
-        Circle().trim(from: 0, to: max(0.0001, filled)).rotation(.degrees(-90))
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let f = min(max(fraction, 0), 1)
+        guard f > 0.0005 else { return p }
+        p.addArc(center: CGPoint(x: rect.midX, y: rect.midY), radius: min(rect.width, rect.height) / 2,
+                 startAngle: .degrees(-90), endAngle: .degrees(-90 + 360 * f), clockwise: false)
+        return p
+    }
+}
+
+/// The luminous tip at the arc's end.
+private struct GlowRingTipDot: Shape {
+    var fraction: Double
+    let diameter: CGFloat
+    var animatableData: Double {
+        get { fraction }
+        set { fraction = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        guard fraction > 0.004 else { return p }
+        let r = min(rect.width, rect.height) / 2
+        let a = (-90 + 360 * min(max(fraction, 0), 1)) * Double.pi / 180
+        let x = rect.midX + r * CGFloat(cos(a)), y = rect.midY + r * CGFloat(sin(a))
+        p.addEllipse(in: CGRect(x: x - diameter / 2, y: y - diameter / 2, width: diameter, height: diameter))
+        return p
     }
 }

@@ -1,7 +1,11 @@
 import SwiftUI
 
-// MARK: - BrandMark — the NOOP logo mark (Titanium & Gold)
+// MARK: - BrandMark — the Telos logo mark (Telos 2.0 bioluminescent re-skin; API unchanged)
 //
+// TELOS 2.0 (INS): a near-black disc with a faint green depth glow and the luminous glass hairline, a
+// thin luminous open ring (halo + core stroke, no blur) and a glowing core dot. Static; no clock.
+//
+// Original notes:
 // The app's identity glyph, rendered natively for use as a hero on onboarding,
 // "about", and empty states. Per the design handoff ("Engraved" app-icon
 // direction + the brand glyph spec):
@@ -30,90 +34,71 @@ public struct BrandMark: View {
         self.size = size
     }
 
-    // The open ring sweeps ~80% of a full turn (≈291° of 364, per the logo spec),
-    // starting at 12 o'clock and going clockwise — the same orientation as the
-    // hero recovery ring, so the two read as one family.
+    // The open ring sweeps ~80% of a full turn, starting at 12 o'clock and going clockwise — the same
+    // orientation as the score rings, so the two read as one family.
     private let openFraction: Double = 0.80
     private var startAngle: Angle { .degrees(-90) }
 
     // Proportions derived from `size` so the mark is resolution-independent.
-    private var ringInset: CGFloat { size * 0.20 }          // tile edge → ring band
-    private var ringWidth: CGFloat { size * 0.13 }          // THICK gold stroke (matches the icon)
+    private var ringInset: CGFloat { size * 0.20 }
+    /// The luminous core stroke — thin, like every Telos ring.
+    private var ringWidth: CGFloat { max(1.5, size * 0.065) }
     private var ringDiameter: CGFloat { size - ringInset * 2 }
-    private var coreDiameter: CGFloat { size * 0.18 }       // centre core dot
-    private var rimWidth: CGFloat { max(1, size * 0.008) }  // ~1px hairline rim
+    private var coreDiameter: CGFloat { size * 0.16 }
+    private var rimWidth: CGFloat { max(1, size * 0.008) }
 
     public var body: some View {
         ZStack {
-            navyTile
-            goldRing
-            coreDot
+            groundDisc
+            luminousRing
+            core
         }
         .frame(width: size, height: size)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text("NOOP"))
+        .accessibilityLabel(Text(verbatim: "Telos"))
         .accessibilityAddTraits(.isImage)
     }
 
-    // MARK: Deep-navy tile
+    // MARK: Ground disc
 
-    /// The navy disc the gold mark sits on — a deep-navy vertical ramp (lifted at
-    /// the top, deeper at the bottom) with a faint cool top sheen and a soft
-    /// hairline rim, matching the app icon. No shadow — flat and clean.
-    private var navyTile: some View {
+    /// The near-black bioluminescent ground with a faint green depth glow and the luminous glass
+    /// hairline (bright top-leading). Pre-composited gradients only — no blur, no shadow.
+    private var groundDisc: some View {
         Circle()
-            .fill(
-                LinearGradient(
-                    colors: [Color(hex: "#1A1E24"), Color(hex: "#0E1116")],
-                    startPoint: .top,
-                    endPoint: .bottom
+            .fill(TelosColor.canvas)
+            .overlay(
+                Circle().fill(
+                    RadialGradient(colors: [TelosColor.glow.opacity(0.18), Color.clear],
+                                   center: .center, startRadius: 0, endRadius: size * 0.5)
                 )
             )
-            // Faint cool top sheen — a soft light catch across the upper third (flat, no bloom).
-            .overlay(
-                Circle()
-                    .fill(
-                        LinearGradient(
-                            colors: [Color(hex: "#2A2F37").opacity(0.5), .clear],
-                            startPoint: .top,
-                            endPoint: .center
-                        )
-                    )
-                    .opacity(0.6)
-            )
-            // 1px hairline rim so the disc reads cleanly on the navy canvas.
-            .overlay(
-                Circle().strokeBorder(StrandPalette.hairline, lineWidth: rimWidth)
-            )
+            .overlay(Circle().strokeBorder(TelosColor.glassEdge, lineWidth: rimWidth))
     }
 
-    // MARK: Open gold recovery ring
+    // MARK: Luminous open ring
 
-    /// The open ~80% gold arc — round-capped, stroked with the gold ramp via an
-    /// AngularGradient so the metal shifts along the sweep (light → gold → deep),
-    /// matching how the hero recovery ring fills.
-    private var goldRing: some View {
+    /// The open ~80% arc: one wide faint halo stroke under the crisp core stroke (`telosLuminousStroke`).
+    private var luminousRing: some View {
         RecoveryArc(
             startAngle: startAngle,
             spanDegrees: 360 * openFraction,
             fraction: 1,
             lineWidth: ringWidth
         )
-        .stroke(
-            StrandPalette.chargeColor,
-            style: StrokeStyle(lineWidth: ringWidth, lineCap: .round)
-        )
+        .telosLuminousStroke(TelosColor.mint, lineWidth: ringWidth, haloOpacity: 0.24)
         .frame(width: ringDiameter, height: ringDiameter)
     }
 
-    // MARK: Solid gold core
+    // MARK: Core
 
-    /// The "on-device core" — a solid gold dot at the exact centre, completing the
-    /// open-ring + core-dot lock-up.
-    private var coreDot: some View {
-        Circle()
-            .fill(Color.white)
-            .frame(width: coreDiameter, height: coreDiameter)
+    /// The "on-device core" — a glowing dot at the exact centre: a faint wide dot under a bright core.
+    private var core: some View {
+        ZStack {
+            Circle().fill(TelosColor.mint.opacity(0.28))
+                .frame(width: coreDiameter * 1.9, height: coreDiameter * 1.9)
+            Circle().fill(TelosColor.textPrimary)
+                .frame(width: coreDiameter, height: coreDiameter)
+        }
     }
 }
 
@@ -129,7 +114,7 @@ public struct BrandMark: View {
     }
     .padding(48)
     .frame(width: 420, height: 460)
-    .background(StrandPalette.surfaceBase)
+    .background(TelosColor.canvas)
     .preferredColorScheme(.dark)
 }
 #endif

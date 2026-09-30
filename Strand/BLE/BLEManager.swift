@@ -5575,6 +5575,11 @@ public final class BLEManager: NSObject, ObservableObject {
             // Sleep & Rest test mode (Group E): bank the live gravity window for the readout's coverage
             // figure. Gated on the zero-cost active() Bool, so this is a no-op when the mode is off.
             if TestCentre.active(.sleep) { state.recordSleepLiveGravity(gravity) }
+            // Telos 2.0: while the strap-cue sitting-break nudge can fire, it is the ONE movement nudge
+            // (budgeted, quiet hours, sleep window). Stand down entirely — no buzz, no notification, no
+            // de-dup state write — so the wearer never gets two "move" buzzes. Read live each offload; when
+            // the nudge is off (or cannot run) this path behaves exactly as before.
+            if StrapCueEngine.shared.supersedesLegacyInactivityBuzz { return }
 
             let decision = SedentaryDetector.evaluate(
                 gravity, state: InactivityPrefs.loadState(),

@@ -111,6 +111,34 @@ final class SleepScheduleProvider: ObservableObject {
         plan(wakingOn: date, calendar: calendar).map { SleepClock.wrap($0.anchorMin + Self.morningRitualLeadMin) }
     }
 
+    // MARK: - Week review inputs (HEALTH_V2 S3 hand-off)
+
+    /// The measured wake-time spread and usual wake time over the last `SleepRegularity.windowNights` (14)
+    /// main sleeps, one per wake day. BOTH are nil below `SleepRegularity.minNights` (7) nights — the same
+    /// minimum the anchor and the level's regularity part use. The usual wake is the circular median rounded
+    /// to five minutes (the anchor's own rule), and is also nil when the spread is over
+    /// `SleepAnchor.irregularWakeSdMin` (120 min): a median of a schedule that scattered describes no actual
+    /// morning. The wearer's target wake is NOT a measurement and never stands in for either figure.
+    nonisolated static func wakeRegularity(_ nights: [SleepTimingNight]) -> (wakeSdMin: Double?, usualWakeMinute: Int?) {
+        guard let sd = SleepRegularity.wakeSdMin(nights) else { return (nil, nil) }
+        guard sd <= SleepAnchor.irregularWakeSdMin,
+              let median = SleepClock.circularMedian(SleepAnchor.recentNights(nights).map(\.wakeMin)) else {
+            return (sd, nil)
+        }
+        return (sd, SleepClock.wrap(SleepClock.round5(Double(median))))
+    }
+
+    /// What `WeekPlanSource.sleepInputsProvider` hands the weekly review: wake SD and usual wake from the
+    /// nights last read from the store (nil until this launch's first store read, and below 7 nights), and
+    /// the weekday asleep-by target — the same figure the bedtime quest is judged against
+    /// (`QuestBaseline.bedtimeTargetMin`); weekend nights may sit up to the weekend offset later. Nil while
+    /// the anchor abstains.
+    var weekReviewSleepInputs: (wakeSdMin: Double?, typicalWakeMinute: Int?, bedtimeTargetMinute: Int?) {
+        let r = Self.wakeRegularity(lastInputs?.nights ?? [])
+        // Monday's wake day: no weekend offset (weekdays 2…6 share one plan).
+        return (r.wakeSdMin, r.usualWakeMinute, plans[2]?.asleepByMin)
+    }
+
     // MARK: - Refreshing
 
     /// A days republish: refresh at most every `refreshInterval`.

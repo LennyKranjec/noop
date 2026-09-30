@@ -38,21 +38,36 @@ import UIKit
 
 /// The two strap cues the logger asks for. `StrapCueEngine` already implements both (`fire(.restOver)`,
 /// `fire(.reward, eventId:)`); this seam exists so the recorder can be driven in a test without a strap.
+/// Where a rest-over cue ended up, as the strap-cue engine reported it (never what was hoped).
+enum LiftCueDelivery: Equatable {
+    /// Written to the strap.
+    case strap
+    /// The engine's own phone fallback buzzed (strap unreachable, app in front).
+    case phone
+    /// Nobody felt it (strap unreachable and the app not in front, cues off, held by a rule).
+    case notDelivered
+    /// The motor was busy: the engine re-fires within about a minute and logs the outcome then.
+    case deferred
+}
+
 @MainActor
 protocol LiftCueing {
-    /// Buzz the strap for the end of a rest. Returns true when the PHONE already buzzed as the engine's own
-    /// fallback (strap unreachable, app in front) — the caller then does not add a second phone haptic.
-    func restOver() -> Bool
+    /// Buzz the strap for the end of a rest.
+    func restOver() -> LiftCueDelivery
     /// The PR reward buzz, once per event id (the engine holds a repeat as `.duplicate`).
     func reward(eventId: String)
 }
 
 @MainActor
 struct StrapCueLiftCueing: LiftCueing {
-    func restOver() -> Bool {
-        let result = StrapCueEngine.shared.fire(.restOver)
-        if case .attempted(let outcome) = result, case .phone = outcome { return true }
-        return false
+    func restOver() -> LiftCueDelivery {
+        switch StrapCueEngine.shared.fire(.restOver) {
+        case .attempted(.strap): return .strap
+        case .attempted(.phone): return .phone
+        case .attempted(.notDelivered): return .notDelivered
+        case .scheduled: return .deferred
+        case .held: return .notDelivered
+        }
     }
 
     func reward(eventId: String) {
@@ -85,11 +100,11 @@ final class LiftSessionRecorder: ObservableObject {
         var proposal: LiftProposal.Result
     }
 
-    static let deviceId = LiftingImporter.sourceId
-    static let sport = LiftingImporter.sport
-    static let journalFileName = "lift-active.json"
-    static let restNotificationId = "telos.lift.restOver"
-    static let notificationAskedKey = "lift.restNotificationAsked"
+    nonisolated static let deviceId = LiftingImporter.sourceId
+    nonisolated static let sport = LiftingImporter.sport
+    nonisolated static let journalFileName = "lift-active.json"
+    nonisolated static let restNotificationId = "telos.lift.restOver"
+    nonisolated static let notificationAskedKey = "lift.restNotificationAsked"
 
     @Published private(set) var phase: Phase = .idle
     @Published private(set) var session: LiftLoggedSession?
@@ -127,16 +142,16 @@ final class LiftSessionRecorder: ObservableObject {
         self.defaults = defaults
     }
 
-    static func defaultJournalURL() -> URL? {
+    nonisolated static func defaultJournalURL() -> URL? {
         guard let path = try? StorePaths.defaultDatabasePath() else { return nil }
         return URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent(journalFileName)
     }
 
     /// The strength sports that open the logger (the catalogue names are stored data, never localised).
-    static let strengthSports: Set<String> = ["Strength", "Bodybuilding", "Weightlifting", "Powerlifting",
+    nonisolated static let strengthSports: Set<String> = ["Strength", "Bodybuilding", "Weightlifting", "Powerlifting",
                                               LiftingImporter.sport]
 
-    static func isStrengthSport(_ sport: String?) -> Bool {
+    nonisolated static func isStrengthSport(_ sport: String?) -> Bool {
         guard let sport else { return false }
         return strengthSports.contains(sport.trimmingCharacters(in: .whitespaces))
     }
@@ -156,7 +171,12 @@ final class LiftSessionRecorder: ObservableObject {
         self.holdLoads = holdLoads
         if self.workoutStart == workoutStart, phase != .idle { return }
         self.workoutStart = workoutStart
+        // A different workout: nothing of the previous one may leak in (its rows are already stored).
+        stopRest()
+        session = nil
+        context = [:]
         summary = nil
+        phase = .idle
         loading = true
         defer { loading = false }
 
@@ -188,7 +208,8 @@ final class LiftSessionRecorder: ObservableObject {
     /// Start (or restart, before the first checked set) from a day template; nil = freehand.
     func start(templateId: String?) {
         guard let workoutStart else { return }
-        if let s = session, s.doneCount > 0 { return }   // never throw away logged work by switching
+        // Never throw away logged work by switching templates mid-session.
+        if let s = session, s.start == workoutStart, s.doneCount > 0 { return }
         let template = templateId.flatMap { programs.library.template(id: $0) }
         var exercises: [LiftLoggedExercise] = []
         var ctx: [String: ExerciseContext] = [:]
@@ -208,6 +229,18 @@ final class LiftSessionRecorder: ObservableObject {
         stopRest()
         phase = .logging
         writeJournal()
+    }
+
+    /// A plan was just imported from the empty state: pick today's template from it and start.
+    func restartAfterPlanImport() {
+        guard let workoutStart, (session?.doneCount ?? 0) == 0 else { return }
+        let templates = programs.library.allTemplates
+        let weekday = Calendar.current.component(.weekday, from: workoutStart)
+        guard let pick = LiftTemplatePicker.pick(templates: templates, weekday: weekday,
+                                                 lastCompletedTemplateId: lastCompletedTemplateId(templates))
+        else { return }
+        pickReason = pick.reason
+        start(templateId: pick.template.id)
     }
 
     /// The templates the header can switch to.
@@ -399,8 +432,19 @@ final class LiftSessionRecorder: ObservableObject {
             scheduleRestCue()
             return
         case .dueNow:
-            let phoneAlreadyBuzzed = cues.restOver()
-            if !phoneAlreadyBuzzed, isForeground { TelosHaptics.play(.warning) }
+            let delivery = cues.restOver()
+            // A phone haptic when in front — unless the engine's fallback already buzzed the phone (one action,
+            // one pattern).
+            if delivery != .phone, isForeground { TelosHaptics.play(.warning) }
+            // Suspended-but-alive with an unreachable strap: the local notification is the only cue left, so
+            // it is NOT removed here.
+            if delivery == .notDelivered, !isForeground {
+                restTask = nil
+                rest.stop()
+                restExerciseName = nil
+                writeJournal()
+                return
+            }
         case .late:
             break
         }
@@ -463,21 +507,21 @@ final class LiftSessionRecorder: ObservableObject {
         stopRest()
         writeJournal()
 
-        let final = s
-        enqueueStoreWrite(replacing: true, finalDelete: final.doneCount == 0)
+        let finished = s
+        enqueueStoreWrite(replacing: true, finalDelete: finished.doneCount == 0)
         await writeChain?.value
         if let store = await storeProvider?() {
             await LiftDerivedSeries.rebuild(store: store)
         }
 
         let built = LiftSummaryBuilder.build(
-            session: final,
+            session: finished,
             history: history,
             musclesFor: { MuscleAttribution.muscles(for: $0).map(\.rawValue) },
             calendar: .current)
         summary = built
         if built.recordCount > 0 {
-            cues.reward(eventId: "pr:\(final.id)")
+            cues.reward(eventId: "pr:\(finished.id)")
             TelosHaptics.play(.success)
         }
         clearJournal()
@@ -693,7 +737,7 @@ final class LiftSessionRecorder: ObservableObject {
     }
 
     /// `StrengthProgression`'s reading of one exercise, in the proposal's input shape.
-    static func proposalInput(_ ex: StrengthProgression.Exercise?) -> LiftProposal.Input? {
+    nonisolated static func proposalInput(_ ex: StrengthProgression.Exercise?) -> LiftProposal.Input? {
         guard let ex else { return nil }
         if let abstained = ex.abstained {
             switch abstained {

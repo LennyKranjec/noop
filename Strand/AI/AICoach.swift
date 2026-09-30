@@ -1545,9 +1545,10 @@ final class AICoachEngine: ObservableObject {
             out.append(CoachContextBlock(name: "the week plan", value: 60, full: weekPlan,
                                          short: weekPlanShort.isEmpty ? nil : weekPlanShort))
         }
-        // EVERYTHING ELSE THE APP HOLDS about the day and the week — journal, water, energy, streaks, stress
-        // now and by the hour, quests, meditation, the level's gaps, VO₂max, strength, the bedroom and the
-        // lights. See `CoachExtraContext`.
+        // EVERYTHING ELSE THE APP HOLDS about the day and the week — water, energy, streaks, stress now and
+        // by the hour, quests, meditation, the level's gaps, VO₂max, strength, the bedroom and the lights.
+        // See `CoachExtraContext`. The journal is NOT in it any more: the habit summary below carries what
+        // the journal means (HEALTH_V2 S1-A.6), in a fifth of the tokens the raw 7-day dump took.
         //
         // THE DREAM JOURNAL IS ITS OWN BLOCK, and a cheaper one. It is the largest single piece of that
         // section and the only part of the whole context whose size the wearer controls by typing, so the
@@ -1558,6 +1559,29 @@ final class AICoachEngine: ObservableObject {
         let extra = await CoachExtraContext.block(repo: repo, includeDreams: false)
         if !extra.isEmpty {
             out.append(CoachContextBlock(name: "the day's other figures", value: 40, full: extra))
+        }
+        // THE HABIT SUMMARY (HEALTH_V2 S1-A.6, H12): the possible links from the wearer's own journal, the
+        // running trial (so the coach never advises on its behaviour) and recent verdicts, dated and at
+        // most 900 characters. It replaces the raw 7-day journal dump and the EffectRanker lines.
+        let habitStore = HabitAnalysisStore.shared
+        if let habits = CoachHabitContext.block(
+            full: habitStore.coachBlock(),
+            short: habitStore.coachBlock(maxChars: CoachHabitContext.shortMaxChars)) {
+            out.append(habits)
+        }
+        // THE WEARER'S GOALS (DESIGN_V2 decision 14): target, date, current value, the weekly change
+        // needed and the computed verdict, so the coach plans toward them and says plainly when one is too
+        // ambitious. Absent when no goal is active. The Goals screen's panel replaces this block by NAME
+        // with its own at a higher value, so the name is the panel's.
+        let goalDay = Repository.localDayKey(Date())
+        let goalAssessments = GoalStore.shared.activeGoals.map {
+            ProjectionSource.shared.assess($0, today: goalDay)
+        }
+        if !goalAssessments.isEmpty {
+            let goalsFull = GoalCoachSummary.block(goalAssessments, asOf: goalDay)
+            let goalsShort = GoalCoachSummary.shortBlock(goalAssessments, asOf: goalDay)
+            out.append(CoachContextBlock(name: GoalCoachPrompt.blockName, value: 60, full: goalsFull,
+                                         short: goalsShort.isEmpty ? nil : goalsShort))
         }
         let dreams = CoachDreamContext.block(entries: DreamJournalStore.shared.entries)
         if !dreams.isEmpty {
@@ -1578,7 +1602,7 @@ final class AICoachEngine: ObservableObject {
         if includeOnDeviceSignals {
             let block = await onDeviceSignalsBlock()
             if !block.isEmpty {
-                out.append(CoachContextBlock(name: "on-device signals and lab book", value: 35, full: block))
+                out.append(CoachContextBlock(name: "the lab book", value: 35, full: block))
             }
         }
         // AFTER the figures, not in the middle of them: what the wearer told the coach about their week and
@@ -1668,38 +1692,18 @@ final class AICoachEngine: ObservableObject {
         "Stress (SI): \(Int(si.rounded())) (Baevsky Stress Index, median of 5-minute windows today; higher means more sympathetic / under load; an autonomic-balance proxy, not a clinical figure)."
     }
 
-    /// A SUMMARY-ONLY block of the new on-device signals, the user's strongest n-of-1 correlations
-    /// (lag-aware EffectRanker) and a one-line roll-up of their Lab Book markers. Plain sentences, never
-    /// raw readings: this rides the same text channel as the metrics summary, so the no-raw-egress posture
-    /// holds. Gated by the caller on the second opt-in; returns "" when there's nothing worth adding.
+    /// A SUMMARY-ONLY roll-up of the wearer's Lab Book markers. Plain sentences, never raw readings: this
+    /// rides the same text channel as the metrics summary, so the no-raw-egress posture holds. Gated by the
+    /// caller on the second opt-in; returns "" when there's nothing worth adding.
+    ///
+    /// THE PERSONAL PATTERNS ARE GONE FROM HERE (HEALTH_V2 H12). The EffectRanker lines kept whichever lag
+    /// had the biggest effect and labelled lags wrongly; the habit summary (`CoachHabitContext`, from
+    /// `HabitAnalysisStore`) now carries the wearer's patterns, with intervals and the "possible link, never a
+    /// cause" rule, as its own budgeted block.
     func onDeviceSignalsBlock() async -> String {
         var lines: [String] = []
 
-        // 1. Strongest behaviour→outcome associations (EffectRanker over the journal × Charge).
-        let entries = await repo.journalEntries()
-        // Yes days and NO days, kept apart. A day with no journal row for the question lands in
-        // neither, so an unanswered day is never counted as a No (BehaviorInsights.effect).
-        var byBehaviour: [String: Set<String>] = [:]
-        var controls: [String: Set<String>] = [:]
-        for e in entries {
-            if e.answeredYes { byBehaviour[e.question, default: []].insert(e.day) }
-            else { controls[e.question, default: []].insert(e.day) }
-        }
-        if !byBehaviour.isEmpty {
-            let outcomeByDay = Dictionary(
-                repo.days.compactMap { d in d.recovery.map { (d.day, $0) } },
-                uniquingKeysWith: { _, last in last })
-            let ranked = EffectRanker.rank(behaviors: byBehaviour, controls: controls,
-                                           outcomeByDay: outcomeByDay, outcome: "Charge")
-                .filter { $0.effect.significant }
-                .prefix(3)
-            if !ranked.isEmpty {
-                lines.append("STRONGEST PERSONAL PATTERNS (the user's own data — association, not cause):")
-                for r in ranked { lines.append("  • " + r.sentence()) }
-            }
-        }
-
-        // 2. Lab Book markers roll-up (count + latest of a few, never the full history).
+        // Lab Book markers roll-up (count + latest of a few, never the full history).
         if let store = await repo.storeHandle() {
             var markerSummaries: [String] = []
             for category in LabMarkerCategory.allCases {
@@ -1713,7 +1717,6 @@ final class AICoachEngine: ObservableObject {
                 }
             }
             if !markerSummaries.isEmpty {
-                lines.append("")
                 lines.append("LAB BOOK (the user's own logged health numbers — not medical advice; do not interpret as clinical findings):")
                 lines.append("  " + markerSummaries.prefix(8).joined(separator: ", "))
             }

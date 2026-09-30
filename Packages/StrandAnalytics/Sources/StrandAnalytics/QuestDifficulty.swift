@@ -480,11 +480,17 @@ public enum QuestDayPlan {
 
     /// The day's quests: `targets(...)` cut to the chosen mode's count, plus Relentless's wind-down
     /// directive on top when the day has a bedtime.
+    ///
+    /// `excluding` removes metrics BEFORE the cut, so the next directive in order takes the freed slot.
+    /// It carries the running n-of-1 trial's conflicting metrics (`HabitTrialCatalog`'s
+    /// `conflictingMetrics`): a quest that pushes the trial's own behaviour or its outcome's obvious lever
+    /// would contaminate both arms of the experiment. Default empty, so the plan is unchanged without one.
     public static func plan(baseline: QuestBaseline, difficulty: QuestDifficulty,
                             focus: LevelPart? = nil, day: String,
-                            dayState: QuestDayState? = nil) -> [QuestPlanTarget] {
+                            dayState: QuestDayState? = nil,
+                            excluding: Set<QuestMetric> = []) -> [QuestPlanTarget] {
         let all = targets(baseline: baseline, difficulty: difficulty, focus: focus, day: day,
-                          dayState: dayState)
+                          dayState: dayState).filter { !excluding.contains($0.goal.metric) }
         let measured = all.filter { $0.goal.metric != .journal }
         var cut = Array(measured.prefix(difficulty.questCount))
         if let windDown = all.first(where: { $0.goal.metric == .journal }) { cut.append(windDown) }

@@ -243,6 +243,28 @@ final class StrapCueEngine: ObservableObject {
     /// switches alone (coordinator decision — see `StrapCueGate`).
     var wristAlertsOn: Bool { defaults.object(forKey: AppModel.wristAlertsMasterKey) as? Bool ?? false }
 
+    // MARK: - One movement nudge, not two
+
+    /// Whether the sitting-break nudge owns "move" buzzes right now, so the legacy gravity-based inactivity
+    /// buzz (`BLEManager.maybeBuzzInactivity`, #419) must stand down: the wearer never gets two different
+    /// movement nudges for one sitting stretch, and the legacy one never slips past this engine's budget.
+    ///
+    /// "Owns" means it can actually fire: its switch is on, the engine is running (iOS; on macOS the engine is
+    /// never started) and Motion & Fitness is granted (without it the nudge abstains by design). While any of
+    /// these is false the legacy buzz keeps its old behaviour, so switching to the new nudge never silently
+    /// leaves the wearer with no movement nudge at all. Read live on every call — no latch to clear.
+    var supersedesLegacyInactivityBuzz: Bool {
+        Self.supersedesLegacyInactivityBuzz(sittingBreakEnabled: settings.sittingBreakEnabled,
+                                            engineRunning: tickTimer != nil,
+                                            motionAccess: PhoneMotionSource.access())
+    }
+
+    /// The pure rule behind `supersedesLegacyInactivityBuzz`.
+    nonisolated static func supersedesLegacyInactivityBuzz(sittingBreakEnabled: Bool, engineRunning: Bool,
+                                                           motionAccess: MotionAccess) -> Bool {
+        sittingBreakEnabled && engineRunning && motionAccess == .authorized
+    }
+
     // MARK: - Timers the wearer starts
 
     func startFocusBlock(now: Date = Date()) {

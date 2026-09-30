@@ -70,7 +70,7 @@ struct LiftRestTimerPill: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(TelosPressButtonStyle())
-        .accessibilityLabel(Text(delta > 0 ? "Add 15 seconds" : "Remove 15 seconds"))
+        .accessibilityLabel(delta > 0 ? Text("Add 15 seconds") : Text("Remove 15 seconds"))
     }
 }
 #endif

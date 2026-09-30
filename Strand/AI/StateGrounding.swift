@@ -47,7 +47,9 @@ enum StateGrounding {
                        routines: String?,
                        memory: String?,
                        closing: String,
-                       weekPlan: String? = nil) -> [CoachContextBlock] {
+                       weekPlan: String? = nil,
+                       goals: String? = nil,
+                       goalsShort: String? = nil) -> [CoachContextBlock] {
         var out: [CoachContextBlock] = []
         // Declaration order is READING order, and it is deliberate: which day it is, then today's figures,
         // then the clock, then the background, then the rule to close on.
@@ -66,6 +68,13 @@ enum StateGrounding {
         }
         if let history {
             out.append(CoachContextBlock(name: "the last days' scores", value: 70, full: history))
+        }
+        // THE WEARER'S GOALS (DESIGN_V2 decision 14), so a suggested session can serve one. Cheap (about 150
+        // tokens full, 75 short) but background to the tile's question, so it goes early: after the memory
+        // file, before the routines. Nil or empty means no active goal, and then there is no block at all.
+        if let goals, !goals.isEmpty {
+            let short = goalsShort.flatMap { $0.isEmpty ? nil : $0 }
+            out.append(CoachContextBlock(name: GoalCoachPrompt.blockName, value: 45, full: goals, short: short))
         }
         if let routines {
             out.append(CoachContextBlock(name: "their routines", value: 50, full: routines))

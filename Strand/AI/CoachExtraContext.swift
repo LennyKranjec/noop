@@ -11,6 +11,12 @@ import WhoopStore
 // missing, VO₂max and strength, the bedroom and the lights — was on screen and invisible to the coach.
 // This is that rest, as compact lines, each section present only when there is something in it.
 //
+// THE RAW JOURNAL IS NO LONGER HERE (HEALTH_V2 S1-A.6). Seven days of every yes/no answer and note cost
+// ~0.8-1k tokens and told the model nothing it could reason from honestly; the habit summary
+// (`CoachHabitContext`, below) carries what the journal means — possible links with intervals, the running
+// trial, verdicts — in at most 900 characters. The dream journal and the morning's answers are untouched:
+// they come from `DreamJournalStore` through `CoachDreamContext`, never from this section.
+//
 // ONLY WITH DATA ACCESS. It is appended to the same context `buildFullContext` builds, so it rides the
 // same consent: without it none of this is sent.
 //
@@ -131,28 +137,8 @@ enum CoachExtraContext {
         // makes it answer from the story instead of from the numbers. It is now built at the end of this
         // function, capped, and labelled with the night it belongs to. See `CoachDreamContext`.
 
-        // 2. The journal itself, entry by entry, last seven days.
-        let floor = dayKey(6)
-        let journal = await repo.journalEntries(days: 8).filter { $0.day >= floor && $0.question != "Dream" }
-        if !journal.isEmpty {
-            var lines = ["JOURNAL (logged by them; yes/no, numbers, notes), newest first:"]
-            for day in Set(journal.map(\.day)).sorted(by: >) {
-                let items = journal.filter { $0.day == day }.map { e -> String in
-                    var s = e.question + ": "
-                    if let v = e.numericValue {
-                        s += v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v)
-                    } else {
-                        s += e.answeredYes ? "yes" : "no"
-                    }
-                    if let notes = e.notes?.trimmingCharacters(in: .whitespacesAndNewlines), !notes.isEmpty {
-                        s += " (\"" + String(notes.prefix(200)) + "\")"
-                    }
-                    return s
-                }
-                lines.append("  \(day): " + items.joined(separator: "; "))
-            }
-            sections.append(lines.joined(separator: "\n"))
-        }
+        // 2. The raw 7-day journal dump used to be here. It is replaced by the habit summary, which the
+        // context builder registers as its own budgeted block (`CoachHabitContext`).
 
         // 3. Water. (Food is left out on purpose: water is what they track.)
         var intake: [String] = []
@@ -334,5 +320,37 @@ enum CoachExtraContext {
         }
 
         return sections.joined(separator: "\n\n")
+    }
+}
+
+// MARK: - The habit summary as a budgeted block
+
+/// The habit summary (`HabitAnalysisStore.coachBlock`, HEALTH_V2 S1-A.6) as a coach context block.
+///
+/// PURE: the caller renders both forms and this decides what they are worth. The summary itself truncates
+/// by dropping WHOLE lines from the bottom, so the short form is the same renderer at a smaller cap.
+enum CoachHabitContext {
+
+    /// The block's name, for the trimmed-context note. Plain English: the model reads it.
+    static let blockName = "the habit summary"
+
+    /// A little above the day's other figures (40) and the lab book (35), which is what the journal dump
+    /// and the pattern lines it replaces rode in: the running trial's "do not advise on" line is a
+    /// constraint the answer has to respect.
+    static let value = 45
+
+    /// The short form's cap. NOT 300: the header and the rules line alone are about 215 characters, and the
+    /// running trial's line (about 125) is the one line the short form exists to keep — at 300 the renderer
+    /// would drop it and the coach could advise on the trial's own behaviour. 360 keeps it (about 90 tokens).
+    static let shortMaxChars = 360
+
+    /// nil when there is nothing to send. The short form is left out when it is empty or no shorter than
+    /// the full one, so the budget never "shortens" a block to itself.
+    static func block(full: String, short: String) -> CoachContextBlock? {
+        let full = full.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !full.isEmpty else { return nil }
+        let short = short.trimmingCharacters(in: .whitespacesAndNewlines)
+        let usableShort = !short.isEmpty && short.count < full.count ? short : nil
+        return CoachContextBlock(name: blockName, value: value, full: full, short: usableShort)
     }
 }

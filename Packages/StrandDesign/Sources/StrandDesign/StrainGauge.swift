@@ -123,12 +123,13 @@ public struct StrainGauge: View {
             }
         }
         .onAppear {
-            withAnimation(StrandMotion.drawIn(reduced: reduceMotion)) { animatedFraction = fraction }
-            // Reduce Motion: leave the bloom at its resting opacity instead of breathing.
+            // Telos 2.0 (§7.4): no draw-in on appear — the arc is posed at its value; it only settles
+            // when the value CHANGES (below). `bloomPulse` no longer renders (BevelGauge has no bloom).
+            animatedFraction = fraction
             if !reduceMotion { bloomPulse = true }
         }
         .onChangeCompat(of: strain) { _ in
-            withAnimation(StrandMotion.drawIn(reduced: reduceMotion)) { animatedFraction = fraction }
+            withAnimation(TelosMotion.gated(TelosMotion.settle, reduced: reduceMotion)) { animatedFraction = fraction }
         }
     }
 

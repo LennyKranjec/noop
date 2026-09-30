@@ -192,6 +192,11 @@ public struct TrendChart: View {
     /// The x-position the cursor is hovering, in chart-local coordinates.
     @State private var hoverX: CGFloat? = nil
 
+    /// Series-id prefix for the luminous halo copy of each segment (kept distinct from real ids).
+    static let haloSeriesPrefix = "\u{2063}halo\u{2063}"
+    /// Point marks are drawn only for series this short (§5.7).
+    static let pointMarkLimit = 14
+
     /// Which way the touch drag in progress was resolved. Decided once per drag from its first 8 pt and
     /// reset on lift; `.horizontal` is also the "engaged" flag the engage haptic fires on.
     @State private var scrubAxis: ChartHoverMath.ScrubAxis = .undecided
@@ -318,8 +323,8 @@ public struct TrendChart: View {
         Chart {
             if let baselineValue {
                 RuleMark(y: .value("Baseline", baselineValue))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                    .foregroundStyle(.secondary.opacity(0.45))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [3, 3]))
+                    .foregroundStyle(TelosColor.textTertiary.opacity(0.6))
             }
             if showsBars {
                 // Bar mode: one value-ramp-filled BarMark per (down-sampled) sample, from the baseline.
@@ -341,11 +346,13 @@ public struct TrendChart: View {
                             y: .value("Value", p.value),
                             series: .value("Segment", p.segment)
                         )
-                        .interpolationMethod(.catmullRom)
+                        // `.monotone`, not `.catmullRom`: a monotone cubic never overshoots past the real
+                        // samples, so the curve cannot show a peak or dip the data never contained.
+                        .interpolationMethod(.monotone)
                         .foregroundStyle(
                             LinearGradient(
                                 colors: [
-                                    StrandPalette.sample(stops: gradient.toStops(), at: unit(averageValue)).opacity(0.28),
+                                    StrandPalette.sample(stops: gradient.toStops(), at: unit(averageValue)).opacity(0.18),
                                     Color.clear
                                 ],
                                 startPoint: .top, endPoint: .bottom
@@ -353,20 +360,34 @@ public struct TrendChart: View {
                         )
                     }
                 }
+                // Telos luminous line: ONE wide faint halo series under the crisp line - the glow without a
+                // blur. Same points, same segment breaks (its own series ids, so a gap in the data is a gap
+                // in the halo too). Cost: one extra static mark series; nothing animates.
+                ForEach(displayPoints) { p in
+                    LineMark(
+                        x: .value("Date", p.date),
+                        y: .value("Value", p.value),
+                        series: .value("Segment", Self.haloSeriesPrefix + p.segment)
+                    )
+                    .interpolationMethod(.monotone)
+                    .lineStyle(StrokeStyle(lineWidth: 7, lineCap: .round, lineJoin: .round))
+                    .foregroundStyle(valueGradient)
+                    .opacity(0.16)
+                }
                 ForEach(displayPoints) { p in
                     LineMark(
                         x: .value("Date", p.date),
                         y: .value("Value", p.value),
                         series: .value("Segment", p.segment)
                     )
-                    .interpolationMethod(.catmullRom)
-                    .lineStyle(StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+                    .interpolationMethod(.monotone)
+                    .lineStyle(StrokeStyle(lineWidth: TelosStroke.dataHero, lineCap: .round, lineJoin: .round))
                     .foregroundStyle(valueGradient)
                 }
-                // 18pt dots are invisible on dense series (e.g. a 365-day year) but still cost the
-                // GPU a mark each — hide them past a threshold; the line carries the data there. The gate
-                // stays on the full `points.count` (≤60 is never downsampled, so displayPoints == points).
-                if points.count <= 60 {
+                // Points only for short series (§5.7: n ≤ 14) — past that they crowd the luminous line
+                // and cost the GPU a mark each; the line carries the data. The gate stays on the full
+                // `points.count` (≤ 120 is never downsampled, so displayPoints == points here).
+                if points.count <= Self.pointMarkLimit {
                     ForEach(displayPoints) { p in
                         PointMark(
                             x: .value("Date", p.date),
@@ -389,23 +410,26 @@ public struct TrendChart: View {
         // (or below, should a caller ever plot negatives), matching Android's zero-based BarChart. The
         // upper bound (with the caller's headroom) is unchanged, so the line's domain is untouched.
         .chartYScale(domain: plotYDomain)
-        // Clip the plot to its own bounds. catmullRom interpolation overshoots past the data extremes
-        // on sharp turns, and the AreaMark gradient is drawn UNCLIPPED — so on a spiky HR curve the
-        // rose fill bled down the page behind the cards below the chart. Clipping the plot area bounds
-        // every mark (line, area, points, overshoot) to the chart rectangle.
-        .chartPlotStyle { plotArea in plotArea.clipped() }
+        // Clip the plot to its own bounds. The AreaMark gradient is drawn UNCLIPPED - on a spiky HR
+        // curve the fill once bled down the page behind the cards below the chart. The plot sits on a
+        // faint dark "glass" well (a flat fill - no material, no blur); clipping bounds every mark.
+        .chartPlotStyle { plotArea in
+            plotArea
+                .background(TelosChartStyle.plotWell)
+                .clipped()
+        }
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 5)) { _ in
-                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.4))
-                AxisValueLabel().foregroundStyle(StrandPalette.textTertiary)
-                    .font(StrandFont.footnote)
+                AxisGridLine(stroke: TelosChartStyle.gridStroke).foregroundStyle(TelosChartStyle.gridInk)
+                AxisValueLabel().foregroundStyle(TelosColor.textTertiary)
+                    .font(TelosType.scaleNumber)
             }
         }
         .chartYAxis {
-            AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { _ in
-                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.4))
-                AxisValueLabel().foregroundStyle(StrandPalette.textTertiary)
-                    .font(StrandFont.footnote)
+            AxisMarks(position: .trailing, values: .automatic(desiredCount: 4)) { _ in
+                AxisGridLine(stroke: TelosChartStyle.gridStroke).foregroundStyle(TelosChartStyle.gridInk)
+                AxisValueLabel().foregroundStyle(TelosColor.textTertiary)
+                    .font(TelosType.scaleNumber)
             }
         }
         .chartOverlay { proxy in
@@ -440,7 +464,8 @@ public struct TrendChart: View {
                         HighlightDot(color: color)
                             .position(x: cx, y: cy)
 
-                        // Tooltip near the point, kept in bounds.
+                        // Callout pinned to the top edge of the plot, beside the point (§5.7) - it never
+                        // covers the point it names.
                         PositionedTooltip(
                             anchor: CGPoint(x: cx, y: cy),
                             container: geo.size,
@@ -448,7 +473,9 @@ public struct TrendChart: View {
                                 value: valueFormat(p.value),
                                 label: dateFormat(p.date),
                                 accent: color
-                            )
+                            ),
+                            pinnedTop: true,
+                            plotTop: plot.minY
                         )
                     }
 
@@ -509,6 +536,19 @@ public struct TrendChart: View {
         .accessibilityValue(Text(a11ySummary))
         .accessibilityHidden(!showsHover && accessibilityLabel == nil)
     }
+}
+
+// MARK: - Telos chart style (shared by TrendChart / OverviewHRChart)
+
+/// The luminous chart look (§5.7 + VISUAL DIRECTION): a faint dotted grid and a dark glass plot well.
+/// Stored once (static lets), so no chart builds a new style per render.
+enum TelosChartStyle {
+    /// Faint dotted grid lines.
+    static let gridStroke = StrokeStyle(lineWidth: TelosStroke.hair, dash: [1, 3])
+    static let gridInk = TelosColor.lineStrong
+    /// The plot's dark glass well: a flat translucent inset fill with rounded corners. No material.
+    static let plotWell = RoundedRectangle(cornerRadius: 10, style: .continuous)
+        .fill(TelosColor.surfaceInset.opacity(0.45))
 }
 
 // MARK: - Chart downsampling (pure)

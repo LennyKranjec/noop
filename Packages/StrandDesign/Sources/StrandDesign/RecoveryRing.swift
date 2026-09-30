@@ -125,12 +125,13 @@ public struct RecoveryRing: View {
             }
         }
         .onAppear {
-            withAnimation(StrandMotion.drawIn(reduced: reduceMotion)) { animatedFraction = fraction }
-            // Reduce Motion: leave the bloom at its resting opacity instead of breathing.
+            // Telos 2.0 (§7.4): no draw-in on appear — the arc is posed at its value; it only settles
+            // when the value CHANGES (below). `bloomPulse` no longer renders (BevelGauge has no bloom).
+            animatedFraction = fraction
             if !reduceMotion { bloomPulse = true }
         }
         .onChangeCompat(of: score) { _ in
-            withAnimation(StrandMotion.drawIn(reduced: reduceMotion)) { animatedFraction = fraction }
+            withAnimation(TelosMotion.gated(TelosMotion.settle, reduced: reduceMotion)) { animatedFraction = fraction }
         }
     }
 
@@ -140,14 +141,14 @@ public struct RecoveryRing: View {
 
     // MARK: Brand layers
 
-    /// Micro "NOOP" wordmark above the number — the recovery ring carries the
-    /// lock-up so its centre reads as the "O" in NOOP. ALL-CAPS, tertiary,
+    /// Micro "TELOS" wordmark above the number (Telos 2.0 brand; was "NOOP") — the recovery ring
+    /// carries the lock-up. ALL-CAPS, tertiary,
     /// letter-spacing ≈ .34em (× the cap height per the spec). Nudged up so it
     /// sits clear above BevelGauge's centred number.
     private var wordmark: some View {
         let size = diameter * 0.052
-        return Text("NOOP")
-            .font(StrandFont.rounded(size, weight: .bold))
+        return Text(verbatim: "TELOS")
+            .font(.system(size: size, weight: .semibold))
             .tracking(size * 0.34)                 // ≈ .34em
             .foregroundStyle(StrandPalette.textTertiary)
             .offset(y: -diameter * 0.205)
