@@ -43,7 +43,9 @@ import SwiftUI
 //
 // THE PICTURE (unit space, blob radius ≈ 1 = `baseRadius` × the frame × size)
 //   A core disc plus one disc per part at a fixed angle (sleep upper-left, focus upper-right, heart right,
-//   muscle below, lungs left). The membrane is the union's outline sampled in polar form, box-smoothed
+//   muscle below, lungs left). Each part lobe large enough carries the part's SF Symbol
+//   (`TelosOrbPart.symbolName`, ≥ 10 pt, flat light neutral on a matte plate) so the organs are
+//   recognisable; smaller lobes and thumbnails keep a plain nucleus. The membrane is the union's outline sampled in polar form, box-smoothed
 //   so the creases between lobes round off, then rippled by stress. Lobes are soft radial fills clipped
 //   to the membrane with a faint inner rim; ≤ 150 dots (a membrane row + interior stipple) coloured by
 //   the lobe they sit in; veins + nuclei on their own layer.
@@ -82,6 +84,18 @@ public enum TelosOrbPart: String, CaseIterable, Sendable {
         case .lungs:  return TelosColor.lungs
         case .muscle: return TelosColor.muscle
         case .focus:  return TelosColor.focus
+        }
+    }
+
+    /// The part's SF Symbol — drawn on its lobe and used by every Level surface that names the part
+    /// (the Level radar's set; the heart filled so it reads on the blob).
+    public var symbolName: String {
+        switch self {
+        case .sleep:  return "moon.fill"
+        case .heart:  return "heart.fill"
+        case .lungs:  return "wind"
+        case .muscle: return "figure.strengthtraining.traditional"
+        case .focus:  return "bolt.fill"
         }
     }
 }
@@ -999,7 +1013,7 @@ enum TelosOrbRenderer {
     /// A copy of `context` with the origin at the centre and one unit = the blob's radius, or nil when
     /// the frame is too small to draw.
     private static func unitContext(_ context: GraphicsContext, size: CGSize, scale: Double)
-        -> (context: GraphicsContext, px: Double)? {
+        -> (context: GraphicsContext, px: Double, pointsPerUnit: Double)? {
         let dim = Double(min(size.width, size.height))
         guard dim > 8 else { return nil }
         let r = unitScale(dim: dim, size: scale)
@@ -1007,7 +1021,7 @@ enum TelosOrbRenderer {
         var ctx = context
         ctx.translateBy(x: size.width / 2, y: size.height / 2)
         ctx.scaleBy(x: CGFloat(r), y: CGFloat(r))
-        return (ctx, 1 / r)
+        return (ctx, 1 / r, r)
     }
 
     private static func disc(_ x: Double, _ y: Double, _ r: Double) -> Path {
@@ -1060,13 +1074,44 @@ enum TelosOrbRenderer {
             ctx.stroke(batch.path, with: .color(palette.color(batch.colorIndex).opacity(0.38 * b)),
                        lineWidth: CGFloat(0.8 * px))
         }
-        // Nuclei: plain matte discs with a thin wall — no halo, no highlight.
+        // Nuclei: plain matte discs with a thin wall — no halo, no highlight. A part lobe big enough to hold
+        // its glyph legibly carries the part's SF Symbol on a matte plate instead (flat, light neutral,
+        // no glow), drawn here once per data change — so it breathes and sways with the layer for free.
+        let pointsPerUnit = unit.pointsPerUnit
+        let centre = CGPoint(x: size.width / 2, y: size.height / 2)
         for (i, lobe) in form.lobes.enumerated() {
-            let r = TelosOrbGeometry.nucleusRadius(lobe, isCore: i == 0)
             let ink = palette.color(lobe.colorIndex)
+            if let part = lobe.part, let side = glyphSide(lobeRadiusPoints: lobe.r * pointsPerUnit) {
+                let plate = Double(side) * 0.78 / pointsPerUnit
+                ctx.fill(disc(lobe.x, lobe.y, plate), with: .color(ink.opacity(0.34 * b)))
+                ctx.stroke(disc(lobe.x, lobe.y, plate), with: .color(ink.opacity(0.45 * b)), lineWidth: CGFloat(0.7 * px))
+                var symbol = context.resolve(Image(systemName: part.symbolName))
+                symbol.shading = .color(TelosColor.textPrimary.opacity(0.9))
+                let natural = symbol.size
+                let fit = side / max(max(natural.width, natural.height), 1)
+                let w = natural.width * fit, h = natural.height * fit
+                let at = CGPoint(x: centre.x + CGFloat(lobe.x * pointsPerUnit), y: centre.y + CGFloat(lobe.y * pointsPerUnit))
+                context.draw(symbol, in: CGRect(x: at.x - w / 2, y: at.y - h / 2, width: w, height: h))
+                continue
+            }
+            let r = TelosOrbGeometry.nucleusRadius(lobe, isCore: i == 0)
             ctx.fill(disc(lobe.x, lobe.y, r), with: .color(ink.opacity(0.55 * b)))
             ctx.stroke(disc(lobe.x, lobe.y, r * 1.7), with: .color(ink.opacity(0.26 * b)), lineWidth: CGFloat(0.7 * px))
         }
+    }
+
+    /// Smallest legible lobe glyph, in points.
+    static let minGlyphSide: CGFloat = 10
+    /// Largest lobe glyph, in points (it labels the organ; it must not fill it).
+    static let maxGlyphSide: CGFloat = 20
+
+    /// The glyph's side for a lobe of `lobeRadiusPoints` on screen: 60 % of the radius, capped at
+    /// `maxGlyphSide`; nil (no glyph, the plain nucleus instead) when that is under `minGlyphSide` — a
+    /// small lobe or a small orb (the history thumbnails) never carries an illegible icon.
+    static func glyphSide(lobeRadiusPoints r: Double) -> CGFloat? {
+        guard r.isFinite, r > 0 else { return nil }
+        let side = CGFloat(r * 0.6)
+        return side >= minGlyphSide ? min(side, maxGlyphSide) : nil
     }
 
     static func drawBackdrop(context: GraphicsContext, size: CGSize, key: TelosOrbDrawKey) {

@@ -209,6 +209,31 @@ final class TelosOrbMappingTests: XCTestCase {
         XCTAssertLessThan(form(TelosOrbInputs(level: 80, confidence: .calibrating(done: 1, total: 7))).assembly, 1)
     }
 
+    // MARK: Lobe glyphs
+
+    func testLobeGlyphsAreLegibleOrAbsent() {
+        XCTAssertNil(TelosOrbRenderer.glyphSide(lobeRadiusPoints: 10), "a small lobe keeps its plain nucleus")
+        XCTAssertNil(TelosOrbRenderer.glyphSide(lobeRadiusPoints: .nan))
+        XCTAssertNil(TelosOrbRenderer.glyphSide(lobeRadiusPoints: 0))
+        let side = TelosOrbRenderer.glyphSide(lobeRadiusPoints: 25)
+        XCTAssertNotNil(side)
+        XCTAssertGreaterThanOrEqual(side ?? 0, TelosOrbRenderer.minGlyphSide)
+        XCTAssertEqual(TelosOrbRenderer.glyphSide(lobeRadiusPoints: 500), TelosOrbRenderer.maxGlyphSide)
+    }
+
+    func testThumbnailOrbsCarryNoGlyphsButTheHeroDoes() {
+        // An 84 pt history thumbnail: even a dominant lobe is too small for a legible glyph.
+        let thumbUnit = TelosOrbRenderer.unitScale(dim: 84, size: TelosOrbAppearance.sizeAtReference)
+        XCTAssertNil(TelosOrbRenderer.glyphSide(lobeRadiusPoints: TelosOrbGeometry.lobeRadius(share: 0.3) * thumbUnit))
+        // The 214 pt Home orb at a typical Level: a typical 20 % lobe carries one.
+        let heroUnit = TelosOrbRenderer.unitScale(dim: 214, size: TelosOrbAppearance.from(TelosOrbInputs(level: 64)).size)
+        XCTAssertNotNil(TelosOrbRenderer.glyphSide(lobeRadiusPoints: TelosOrbGeometry.lobeRadius(share: 0.2) * heroUnit))
+    }
+
+    func testEveryPartHasItsOwnSymbol() {
+        XCTAssertEqual(Set(TelosOrbPart.allCases.map(\.symbolName)).count, TelosOrbPart.allCases.count)
+    }
+
     // MARK: Motion — transforms only, eased bursts, ≤ 20 fps
 
     func testTheOrbClockIsCappedAtTwentyFramesPerSecond() {

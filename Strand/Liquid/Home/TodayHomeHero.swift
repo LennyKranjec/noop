@@ -9,7 +9,7 @@ import StrandAnalytics
 // Pieces, top to bottom (the header row and the trio / strip / mission live in LiquidTodayView,
 // TodayTrioHeroView and StateTileViews):
 //   • `HomeLevelOrbRow`       — LEVEL block · the life orb (tap → `OrbExplainerSheet`, what shapes it)
-//                               · today's quest-progress ring.
+//                               · today's small quest ring (its own bottom-trailing column, never on the orb).
 //   • `HomeContextPillRow`    — "☼ Today · date | temperature | humidity".
 //   • `HomeWindowAdvicePill`  — the window-advice pill, ONLY while there is a window instruction.
 //   • `HomeVitalsStrip`       — the glass strip of three compact metrics.
@@ -61,7 +61,10 @@ struct HomeLevelOrbRow: View {
     @State private var openTimelineAfterExplainer = false
 
     private static let orbSide: CGFloat = 214
-    private static let ringSide: CGFloat = 100
+    /// The quest ring: ~2/3 of its old 100 pt, so it sits in a corner instead of beside the blob.
+    private static let ringSide: CGFloat = 66
+    /// The ring's column (the ring plus its two-line label).
+    private static let ringColumn: CGFloat = 76
 
     var body: some View {
         let trend = levelBar.trend
@@ -87,15 +90,24 @@ struct HomeLevelOrbRow: View {
                     orb(inputs).frame(height: Self.orbSide * 0.8).frame(maxWidth: .infinity)
                     block
                     HomeQuestProgressRing(diameter: Self.ringSide)
+                        .frame(width: Self.ringColumn)
+                        .frame(maxWidth: .infinity, alignment: .trailing)
                 }
             } else {
-                ZStack {
-                    orb(inputs).frame(width: Self.orbSide, height: Self.orbSide)
-                    HStack(alignment: .center, spacing: 0) {
-                        block
-                        Spacer(minLength: 0)
-                        HomeQuestProgressRing(diameter: Self.ringSide)
-                    }
+                // THREE COLUMNS, NOTHING STACKED ON THE ORB (owner: the ring overlapped the blob). The Level
+                // block and the small quest ring (bottom-trailing corner) take their widths first; the orb
+                // gets the space between them, up to 214 pt, and aspect-fits inside it — on a 375 pt phone
+                // it draws a little smaller rather than under the ring.
+                HStack(alignment: .center, spacing: TelosSpace.xs) {
+                    block
+                        .layoutPriority(1)
+                    orb(inputs)
+                        .frame(maxWidth: Self.orbSide, maxHeight: Self.orbSide)
+                        .frame(maxWidth: .infinity)
+                    HomeQuestProgressRing(diameter: Self.ringSide)
+                        .frame(width: Self.ringColumn)
+                        .frame(maxHeight: .infinity, alignment: .bottom)
+                        .layoutPriority(1)
                 }
                 .frame(height: Self.orbSide)
             }
@@ -135,6 +147,8 @@ struct HomeLevelOrbRow: View {
         // Stills under its own explainer too (the shell's covered flag only knows the shell's sheets).
         .environment(\.noopBackgroundCovered, covered || showExplainer)
         .accessibilityLabel(Text("Your orb — opens what shapes it"))
+        // The lobe glyphs name the parts visually; VoiceOver hears them here.
+        .accessibilityValue(Text(verbatim: HomeHeroMapping.orbAccessibilityValue(inputs)))
     }
 }
 
@@ -238,7 +252,7 @@ private struct HomeLevelBlock: View {
     }
 }
 
-/// The reference's "87 % OPTIMAL" ring, bound to a real figure: the share of TODAY'S QUESTS the wearer
+/// The reference's "87 % OPTIMAL" ring — small, in the hero's bottom-trailing corner — bound to a real figure: the share of TODAY'S QUESTS the wearer
 /// took on that the data has already closed. Labelled for exactly that ("QUESTS", "2 of 3 done"); with
 /// nothing taken on it shows the honest empty ring, never "0 %".
 struct HomeQuestProgressRing: View {
@@ -247,15 +261,21 @@ struct HomeQuestProgressRing: View {
 
     var body: some View {
         let progress = HomeHeroMapping.questProgress(store.quests, dayKey: DailyMissionStore.dayKey())
-        VStack(spacing: TelosSpace.xs) {
+        VStack(spacing: 2) {
             ZStack {
                 // Static tick bezel around the thin ring (Canvas, redrawn only when the value changes).
                 TelosBezel(value: progress?.percent, range: 0...100, color: TelosColor.mint)
-                TelosRing(value: progress?.percent, color: TelosColor.mint, diameter: diameter * 0.78,
-                          unit: "%", caption: Text("Quests"),
-                          accessibilityLabel: Text("Today's quests"))
+                // Small ring: the word moves out under it, where it stays legible.
+                TelosRing(value: progress?.percent, color: TelosColor.mint, diameter: diameter * 0.82,
+                          unit: "%", accessibilityLabel: Text("Today's quests"))
             }
             .frame(width: diameter, height: diameter)
+            Text("Quests")
+                .telosScale()
+                .textCase(.uppercase)
+                .foregroundStyle(TelosColor.textSecondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
             Group {
                 if let progress {
                     Text("\(progress.done) of \(progress.total) done")
@@ -265,10 +285,12 @@ struct HomeQuestProgressRing: View {
             }
             .font(TelosType.caption)
             .foregroundStyle(TelosColor.textTertiary)
-            .lineLimit(1)
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
             .minimumScaleFactor(0.8)
+            .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(width: diameter)
+        .frame(minWidth: diameter)
     }
 }
 

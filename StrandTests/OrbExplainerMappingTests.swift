@@ -105,6 +105,22 @@ final class OrbExplainerMappingTests: XCTestCase {
         XCTAssertNotEqual(row(solid, "assembly").value, row(partial, "assembly").value)
     }
 
+    func testLegendGlyphsAreTheLobeGlyphs() {
+        let rows = HomeHeroMapping.orbLegend(inputs: TelosOrbInputs(), breakdown: nil, pending: false)
+        for part in TelosOrbPart.allCases {
+            XCTAssertEqual(row(rows, "lobe.\(part.rawValue)").glyph, part.symbolName)
+        }
+    }
+
+    func testVoiceOverNamesTheLobesDrawn() {
+        let inputs = TelosOrbInputs(partShares: [.muscle: 20, .sleep: 30, .heart: 0, .focus: .nan])
+        XCTAssertEqual(HomeHeroMapping.orbLobeNames(inputs),
+                       [HomeHeroMapping.orbPartName(.sleep), HomeHeroMapping.orbPartName(.muscle)],
+                       "lobe order; zero / non-finite shares have no lobe")
+        XCTAssertTrue(HomeHeroMapping.orbAccessibilityValue(inputs).contains(HomeHeroMapping.orbPartName(.sleep)))
+        XCTAssertTrue(HomeHeroMapping.orbLobeNames(TelosOrbInputs()).isEmpty)
+    }
+
     // MARK: The history
 
     private func day(_ key: String, _ level: Double) -> HomeHeroMapping.OrbHistoryDay {

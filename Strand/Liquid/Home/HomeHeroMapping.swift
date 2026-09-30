@@ -149,15 +149,25 @@ enum HomeHeroMapping {
         }
     }
 
-    /// The part's glyph (the same symbols the Level radar uses).
-    static func orbPartGlyph(_ part: TelosOrbPart) -> String {
-        switch part {
-        case .sleep: return "moon.fill"
-        case .heart: return "heart.fill"
-        case .lungs: return "wind"
-        case .muscle: return "figure.strengthtraining.traditional"
-        case .focus: return "bolt.fill"
+    /// The part's glyph: the SAME symbol the orb draws on that part's lobe (`TelosOrbPart.symbolName`).
+    static func orbPartGlyph(_ part: TelosOrbPart) -> String { part.symbolName }
+
+    /// The parts that have a lobe on the orb (a finite, positive share), in lobe order — for VoiceOver,
+    /// which cannot see the lobe glyphs.
+    static func orbLobeNames(_ inputs: TelosOrbInputs) -> [String] {
+        TelosOrbPart.allCases.filter { part in
+            guard let share = inputs.partShares[part] else { return false }
+            return share.isFinite && share > 0
         }
+        .map(orbPartName)
+    }
+
+    /// The orb button's VoiceOver value: "Lobes: Sleep, Heart, Muscle", or "No lobes yet".
+    static func orbAccessibilityValue(_ inputs: TelosOrbInputs) -> String {
+        let names = orbLobeNames(inputs)
+        guard !names.isEmpty else { return String(localized: "No lobes yet") }
+        let list = names.joined(separator: ", ")
+        return String(localized: "Lobes: \(list)")
     }
 
     /// The legend, top to bottom: size (Level) · one lobe per part · surface (stress) · pulse (resting HR)
