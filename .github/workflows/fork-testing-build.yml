@@ -9,6 +9,12 @@ name: Testing build (fork)
 
 on:
   workflow_dispatch:
+    inputs:
+      ios_only:
+        description: "Build only the iOS IPA (skip Android and macOS)"
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: write
@@ -108,6 +114,7 @@ jobs:
 
   android:
     needs: meta
+    if: ${{ !inputs.ios_only }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -141,6 +148,7 @@ jobs:
 
   macos:
     needs: meta
+    if: ${{ !inputs.ios_only }}
     runs-on: macos-15
     timeout-minutes: 40
     steps:

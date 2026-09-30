@@ -70,7 +70,7 @@ final class TelosLogicFollowUpsTests: XCTestCase {
     func testOnlyTheLastFourteenNightsCount() throws {
         // Six old nights at 10:00, then fourteen at 07:00.
         let r = SleepScheduleProvider.wakeRegularity(nights(20) { $0 < 6 ? 10 * 60 : 7 * 60 })
-        XCTAssertEqual(try XCTUnwrap(r.wakeSdMin), 0, accuracy: 1e-6)
+        XCTAssertEqual(try XCTUnwrap(r.wakeSdMin), 0, accuracy: 1e-3)  // circular statistics leave ~1e-6 min of float noise
         XCTAssertEqual(r.usualWakeMinute, 7 * 60)
     }
 
