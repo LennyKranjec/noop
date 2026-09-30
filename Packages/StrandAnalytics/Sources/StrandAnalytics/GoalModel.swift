@@ -145,6 +145,26 @@ public struct GoalAssessment: Equatable, Sendable {
     /// Extra honest notes (e.g. VO₂max change smaller than the estimate's error).
     public let caveats: [String]
 
+    public init(goal: Goal, verdict: GoalVerdict, current: Double?, currentWeek: String?, weeksLeft: Double,
+                requiredPerWeek: Double?, projectedAtDate: ProjectionBand?, noBandReason: String?,
+                plausible: PlausibleRate?, plausiblePerWeek: Double?, realisticDate: String?,
+                realisticValue: Double?, review: GoalReview?, caveats: [String]) {
+        self.goal = goal
+        self.verdict = verdict
+        self.current = current
+        self.currentWeek = currentWeek
+        self.weeksLeft = weeksLeft
+        self.requiredPerWeek = requiredPerWeek
+        self.projectedAtDate = projectedAtDate
+        self.noBandReason = noBandReason
+        self.plausible = plausible
+        self.plausiblePerWeek = plausiblePerWeek
+        self.realisticDate = realisticDate
+        self.realisticValue = realisticValue
+        self.review = review
+        self.caveats = caveats
+    }
+
     /// The reasoning numbers in one line — shown under every verdict and sent to the coach.
     public var numbersLine: String {
         let m = goal.metric
