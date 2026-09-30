@@ -56,8 +56,9 @@ struct StrengthProgressionDetailView: View {
         let values = points.map(\.value)
         // The domain is padded off the data rather than anchored at zero: a bench press moving 82 → 86 kg is
         // invisible on a 0…86 axis, and this chart's whole job is showing that four kilograms.
-        let lo = (values.min() ?? 0) * 0.94
-        let hi = (values.max() ?? 1) * 1.04
+        // Axis bounds only (no value is drawn from them); an empty series draws the chart's empty state.
+        let lo = values.min().map { $0 * 0.94 } ?? 0
+        let hi = values.max().map { $0 * 1.04 } ?? 1
         return ChartCard(
             title: "Estimated one-rep max",
             subtitle: subtitle,

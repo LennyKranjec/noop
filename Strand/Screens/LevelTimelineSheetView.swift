@@ -23,6 +23,12 @@ import StrandDesign
 // THE CHART ANSWERS A TOUCH. Dragging along it names the day and the figure under your finger — a line
 // with three date labels can say the shape of a month and cannot say what happened on the ninth.
 //
+// TELOS 2.0 (FRAME): the Level breakdown also says what the meditation minimum DEDUCTED (decision 10 — its
+// own line, never a contributor), where the level is projected to be in 8 weeks (decision 13, from
+// `ProjectionSource`, a band or an honest abstention — never "you will"), and links to Look ahead and Goals
+// (decision 14). At the accessibility text sizes the strip's trend chips and levers live in this header.
+// The axis follows the level's range (unbounded, decision 9).
+//
 // THE HEAD OF THE PANEL IS THE SYSTEM TALKING, not a label. A title saying "Level over time" says only
 // what the chart underneath already shows; a line naming which parts are carrying the level and which
 // is costing it says the thing the radar cannot.
@@ -62,6 +68,11 @@ struct LevelTimelineSheetView: View {
     let repo: Repository
 
     @EnvironmentObject private var coach: AICoachEngine
+    /// The app model, NOT observed (it publishes 1–3×/s while streaming): only the projection refresh needs it.
+    @Environment(\.appModelRef) private var appModelRef
+    /// The look-ahead projections, for the "in 8 weeks" line. Publishes only when a refresh lands.
+    @ObservedObject private var projections = ProjectionSource.shared
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     @Environment(\.dismiss) private var dismiss
     @State private var span: LevelSpan = .month
@@ -80,9 +91,12 @@ struct LevelTimelineSheetView: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: TelosSpace.m) {
                     radar
                     header
+                    if dynamicTypeSize >= .accessibility1 { accessibleTrendRow }
+                    meditationDeduction
+                    projectionBlock
                     if !model.missing.isEmpty { missingCard }
 
                     Picker("", selection: $span) {
@@ -106,9 +120,9 @@ struct LevelTimelineSheetView: View {
 
                     partsDisclosure
                 }
-                .padding(16)
+                .padding(TelosSpace.pageGutter)
             }
-            .background(StrandPalette.surfaceBase)
+            .background(TelosColor.canvas.ignoresSafeArea())
             .navigationTitle("Level")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -124,6 +138,89 @@ struct LevelTimelineSheetView: View {
         .presentationDetentsCompat()
         .task(id: span.rawValue) { await model.loadHistory(repo: repo, spanDays: span.rawValue) }
         .task(id: model.trend?.now?.level) { await loadNote() }
+        // The "in 8 weeks" line reads the look-ahead projections; refresh them on open (the source guards
+        // against overlapping runs).
+        .task {
+            if let appModel = resolvedAppModel(appModelRef) {
+                await ProjectionSource.shared.refresh(model: appModel)
+            }
+        }
+    }
+
+    // MARK: - 2.0 additions
+
+    /// The strip's trend chips and levers, here instead of in the strip at the accessibility sizes (§6.1).
+    private var accessibleTrendRow: some View {
+        VStack(alignment: .leading, spacing: TelosSpace.s) {
+            LevelTrendCluster(trend: model.trend)
+            LevelLeverCluster(trend: model.trend, alignment: .leading)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// DECISION 10: meditation is a penalty-only input. When the minimum was missed the deduction is its own
+    /// line, in critical ink, with its exact points — and meditation never appears as a contributor.
+    @ViewBuilder private var meditationDeduction: some View {
+        if let breakdown = model.trend?.now, breakdown.meditationPenalty > 0.05 {
+            let points = breakdown.meditationPenalty
+            let figure = points >= 9.95 || abs(points - points.rounded()) < 0.05
+                ? String(Int(points.rounded()))
+                : String(format: "%.1f", points)
+            HStack(spacing: TelosSpace.s) {
+                Image(systemName: "minus.circle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(TelosColor.critical)
+                    .accessibilityHidden(true)
+                Text(verbatim: TelosType.minus + figure)
+                    .font(TelosType.numeralXS)
+                    .foregroundStyle(TelosColor.critical)
+                Text("meditation")
+                    .telosScale()
+                    .textCase(.uppercase)
+                    .foregroundStyle(TelosColor.critical)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text("Missed meditation minimum: minus \(figure) level points"))
+        }
+    }
+
+    /// DECISION 13 + 14: the compact "in 8 weeks" projection (a band, or the reason it abstains) and the way
+    /// to Look ahead and Goals.
+    private var projectionBlock: some View {
+        VStack(alignment: .leading, spacing: TelosSpace.s) {
+            Text("Look ahead")
+                .telosScale()
+                .textCase(.uppercase)
+                .foregroundStyle(TelosColor.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+            Text(verbatim: projections.levelEightWeekLine())
+                .font(TelosType.footnote)
+                .foregroundStyle(TelosColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: TelosSpace.s) {
+                NavigationLink {
+                    LookAheadView()
+                } label: {
+                    Label("Look ahead", systemImage: "chart.line.uptrend.xyaxis")
+                        .font(TelosType.subhead.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: TelosSpace.hitTarget)
+                }
+                .buttonStyle(NoopSecondaryButtonStyle())
+                NavigationLink {
+                    GoalsView()
+                } label: {
+                    Label("Goals", systemImage: "flag.checkered")
+                        .font(TelosType.subhead.weight(.semibold))
+                        .frame(maxWidth: .infinity, minHeight: TelosSpace.hitTarget)
+                }
+                .buttonStyle(NoopSecondaryButtonStyle())
+            }
+        }
+        .padding(TelosSpace.m)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .noopPanel(cornerRadius: TelosRadius.tile)
     }
 
     /// Whose level the missing values belong to, BY THE DAY SHOWN. While today's level is pending the
@@ -137,37 +234,38 @@ struct LevelTimelineSheetView: View {
     /// What the level was computed without, and what would bring each one in.
     private var missingCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
+            HStack(spacing: TelosSpace.s) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(StrandPalette.statusWarning)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(TelosColor.warning)
+                    .accessibilityHidden(true)
                 Text("MISSING VALUES")
-                    .font(StrandFont.overline)
-                    .tracking(1.2)
-                    .foregroundStyle(StrandPalette.statusWarning)
+                    .telosScale()
+                    .foregroundStyle(TelosColor.warning)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             Text(missingSubject + " is computed without these. Their weight goes to the parts that have data, so the level is partial rather than low.")
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textSecondary)
+                .font(TelosType.footnote)
+                .foregroundStyle(TelosColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
             ForEach(model.missing) { item in
-                VStack(alignment: .leading, spacing: 1) {
+                VStack(alignment: .leading, spacing: TelosSpace.xxs) {
                     Text(item.label)
-                        .font(StrandFont.footnote.weight(.semibold))
-                        .foregroundStyle(StrandPalette.textPrimary)
+                        .font(TelosType.footnote.weight(.semibold))
+                        .foregroundStyle(TelosColor.textPrimary)
                     Text(item.hint)
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
+                        .font(TelosType.caption)
+                        .foregroundStyle(TelosColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
-        .padding(12)
+        .padding(TelosSpace.m)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(StrandPalette.statusWarning.opacity(0.08),
-                    in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous)
-            .strokeBorder(StrandPalette.statusWarning.opacity(0.3), lineWidth: 1))
+        .background(TelosColor.warning.opacity(TelosOpacity.wash),
+                    in: RoundedRectangle(cornerRadius: TelosRadius.tile, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: TelosRadius.tile, style: .continuous)
+            .strokeBorder(TelosColor.warning.opacity(TelosOpacity.border), lineWidth: TelosStroke.line))
     }
 
     /// The radar, at its full size, with the personal best around it.
@@ -184,11 +282,12 @@ struct LevelTimelineSheetView: View {
     private var header: some View {
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "sparkles")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(StrandPalette.accent)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(TelosColor.mint)
+                .accessibilityHidden(true)
             Text(note ?? headline)
-                .font(.footnote)
-                .foregroundStyle(StrandPalette.textSecondary)
+                .font(TelosType.footnote)
+                .foregroundStyle(TelosColor.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -198,20 +297,21 @@ struct LevelTimelineSheetView: View {
         HStack {
             if let touched {
                 Text(scrubLabel(touched.day))
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(TelosColor.textSecondary)
                 Spacer()
                 Text("\(Int(touched.level.rounded()))")
-                    .font(StrandFont.bodyNumber)
-                    .foregroundStyle(StrandPalette.textPrimary)
+                    .font(TelosType.numeralS)
+                    .foregroundStyle(TelosColor.textPrimary)
             } else {
                 Text("Touch the line to read a day.")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .font(TelosType.caption)
+                    .foregroundStyle(TelosColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Spacer()
             }
         }
-        .frame(height: 18)
+        .frame(minHeight: 18)
     }
 
     /// The five parts, each as its own line on the same 0–100 axis.
@@ -228,10 +328,12 @@ struct LevelTimelineSheetView: View {
             .padding(.top, 8)
         } label: {
             Text("The five parts")
-                .font(StrandFont.overline)
-                .foregroundStyle(StrandPalette.textSecondary)
+                .telosScale()
+                .textCase(.uppercase)
+                .foregroundStyle(TelosColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .tint(StrandPalette.accent)
+        .tint(TelosColor.mint)
     }
 
     /// Which parts are carrying the level and which is costing it, from the breakdown itself.
@@ -297,12 +399,14 @@ struct LevelTimelineSheetView: View {
                     ForEach(ticks, id: \.self) { tick in
                         HStack(spacing: 4) {
                             Text("\(tick)")
-                                .font(.system(size: 10))
-                                .foregroundStyle(StrandPalette.textSecondary)
+                                .font(TelosType.scaleNumber)
+                                .foregroundStyle(TelosColor.textSecondary)
                                 .frame(width: 22, alignment: .trailing)
+                                .minimumScaleFactor(0.7)
+                                .lineLimit(1)
                             Rectangle()
-                                .fill(StrandPalette.textTertiary.opacity(0.40))
-                                .frame(height: 1)
+                                .fill(TelosColor.textTertiary.opacity(0.30))
+                                .frame(height: TelosStroke.hair)
                         }
                         .offset(y: yFor(Double(tick), in: geo.size.height) - 6)
                     }
@@ -315,18 +419,19 @@ struct LevelTimelineSheetView: View {
                             if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
                         }
                     }
-                    .stroke(StrandPalette.accent, lineWidth: 2)
+                    // The luminous line: one faint halo stroke under the crisp core (no blur).
+                    .telosLuminousStroke(TelosColor.mint, lineWidth: TelosStroke.data)
 
                     // The touched day: a rule down the chart and a dot on the line.
                     if let touched, let index = model.history.firstIndex(where: { $0.day == touched.day }) {
                         let width = geo.size.width - axisGutter
                         let x = axisGutter + width * CGFloat(index) / CGFloat(Swift.max(values.count - 1, 1))
                         Rectangle()
-                            .fill(StrandPalette.textTertiary.opacity(0.45))
+                            .fill(TelosColor.textTertiary.opacity(0.45))
                             .frame(width: 1, height: geo.size.height)
                             .position(x: x, y: geo.size.height / 2)
                         Circle()
-                            .fill(StrandPalette.accent)
+                            .fill(TelosColor.mint)
                             .frame(width: 7, height: 7)
                             .position(x: x, y: yFor(touched.level, in: geo.size.height))
                     }
@@ -351,8 +456,8 @@ struct LevelTimelineSheetView: View {
                 Spacer()
                 Text(dayLabel(model.history[model.history.count - 1].day))
             }
-            .font(.system(size: 9, weight: .semibold))
-            .foregroundStyle(StrandPalette.textTertiary)
+            .font(TelosType.scaleNumber)
+            .foregroundStyle(TelosColor.textTertiary)
             .padding(.leading, axisGutter)
         }
     }
@@ -387,19 +492,20 @@ struct LevelTimelineSheetView: View {
 
     private func placeholder(_ text: String) -> some View {
         Text(text)
-            .font(.caption)
-            .foregroundStyle(StrandPalette.textTertiary)
+            .font(TelosType.caption)
+            .foregroundStyle(TelosColor.textTertiary)
             .frame(maxWidth: .infinity, minHeight: 128)
     }
 
     private func foot(_ label: String, _ value: Int) -> some View {
-        VStack(spacing: 1) {
+        VStack(spacing: TelosSpace.xxs) {
             Text("\(value)")
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(StrandPalette.textPrimary)
+                .font(TelosType.numeralXS)
+                .foregroundStyle(TelosColor.textPrimary)
             Text(label)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(StrandPalette.textTertiary)
+                .telosScale()
+                .textCase(.uppercase)
+                .foregroundStyle(TelosColor.textTertiary)
         }
     }
 
@@ -447,15 +553,19 @@ private struct PartSparkView: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            HStack(spacing: 5) {
+            HStack(spacing: TelosSpace.xs) {
                 Image(systemName: levelPartSymbol(part))
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(levelPartTint(part))
+                    .accessibilityHidden(true)
                 Text(levelPartLabel(part))
-                    .font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .telosScale()
+                    .textCase(.uppercase)
+                    .foregroundStyle(TelosColor.textSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
             }
-            .frame(width: 78, alignment: .leading)
+            .frame(width: 84, alignment: .leading)
 
             GeometryReader { geo in
                 if values.count >= 2 {
@@ -464,7 +574,7 @@ private struct PartSparkView: View {
                         // draws, in the one place a line chart can carry it.
                         if let best {
                             Rectangle()
-                                .fill(radarBestGold.opacity(0.55))
+                                .fill(TelosColor.bestGold.opacity(0.55))
                                 .frame(height: 1)
                                 .position(x: geo.size.width / 2,
                                           y: (1 - CGFloat((best - partDomain.lo) / max(partDomain.hi - partDomain.lo, 1))) * geo.size.height)
@@ -483,17 +593,19 @@ private struct PartSparkView: View {
                     // Said rather than drawn flat: a part with one scored day has no shape, and a level
                     // line across the middle would claim it had been steady.
                     Text("not enough scored days")
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
+                        .font(TelosType.caption)
+                        .foregroundStyle(TelosColor.textTertiary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
                 }
             }
             .frame(height: 28)
 
-            Text(values.last.map { "\(Int($0.rounded()))" } ?? "–")
-                .font(StrandFont.captionNumber)
-                .foregroundStyle(StrandPalette.textPrimary)
-                .frame(width: 26, alignment: .trailing)
+            Text(verbatim: values.last.map { "\(Int($0.rounded()))" } ?? TelosType.absent)
+                .font(TelosType.numeralXS)
+                .foregroundStyle(TelosColor.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+                .frame(width: 32, alignment: .trailing)
         }
     }
 }
@@ -517,7 +629,9 @@ private extension View {
     func presentationBackgroundInteractionCompat() -> some View {
         #if os(iOS)
         if #available(iOS 16.4, *) {
+            // §5.12: a solid canvas sheet — no material.
             self.presentationBackgroundInteraction(.enabled(upThrough: .medium))
+                .presentationBackground(TelosColor.canvas)
         } else {
             self
         }

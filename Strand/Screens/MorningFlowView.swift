@@ -5,14 +5,14 @@ import WhoopStore
 
 // MorningFlowView.swift — the first open of the day: the dream, the night in a few taps, the daily brief.
 //
-// THREE STAGES, ONE SCREEN AT A TIME, in the look of a diagnostic: a thin progress bar under a back
-// chevron, a small grey overline, a heavy wide headline, four option cards with an icon, a title, a line
-// of explanation and a radio, and one blue CONFIRM at the foot.
+// THREE STAGES, ONE SCREEN AT A TIME, in the look of a diagnostic: a segmented progress bar and a step
+// counter beside a glass close/back control, a small wide-tracked overline, a heavy wide headline, four
+// option cards with an icon, a title, a line of explanation and a radio, and one white CONFIRM at the foot.
 //
 //   1. The dream, written down before it fades.
 //   2. The night, as four-option questions (`DreamQuestions`).
-//   3. The daily brief: the level the day starts on, counted up; Rest and Charge; the night's key figures
-//      against yesterday's; and a written brief — light, and how to shape the day.
+//   3. The daily brief: the level the day starts on; Rest and Charge; the night's key figures against
+//      yesterday's; a written brief — light, and how to shape the day; and the gate's checklist.
 //   4. The day's gear: Steady, Push or Relentless, which sets the day's quest targets
 //      (`QuestDifficulty`), with the level still on screen.
 //
@@ -30,21 +30,112 @@ import WhoopStore
 // before the night landed was yesterday's level under the heading "your level today". Now the brief shows
 // a level only once TODAY's entry exists in the ledger, and until then says the night is still syncing —
 // and keeps looking, for a while, as syncs come in.
+//
+// TELOS 2.0 (§6.12): the diagnostic register, dark-only and TOKENISED. Every colour is a
+// `TelosColor.diag*` token (signal = the wearer's accent, alarm = `critical`), every face a `TelosType`
+// token (`diagnostic` / `diagnosticS` ceremonial, `scale` overlines, `scaleNumber` qualifiers). No
+// literal colour or point size lives in this file. Motion: nothing loops; the level counts up only when
+// its value CHANGES (`CountUpText`), Rest / Charge rings settle on a new value only (`TelosRing`), the
+// progress segments step with `TelosMotion.settle`. Reduce Motion is honoured by those components.
 
 // MARK: - The look
 
+/// The morning flow's surfaces, built from the design-system tokens only (§4.1 diagnostic register).
 private enum Diag {
-    static let background = Color.black
-    static let card = Color(.sRGB, red: 0.071, green: 0.071, blue: 0.078, opacity: 1)
-    static let cardBorder = Color(white: 0.17)
-    static let blue = Color(.sRGB, red: 0.18, green: 0.46, blue: 1.0, opacity: 1)
-    static let selectedFill = Color(.sRGB, red: 0.035, green: 0.09, blue: 0.2, opacity: 1)
-    static let track = Color(white: 0.13)
-    static let grey = Color(white: 0.55)
-    static let icon = Color(white: 0.62)
+    static let cardRadius: CGFloat = TelosRadius.tile
+    /// The card shape every surface in the flow uses.
+    static var card: RoundedRectangle { RoundedRectangle(cornerRadius: cardRadius, style: .continuous) }
+    /// The primary (CONFIRM / continue) capsule height — a 44 pt target with room for AX sizes.
+    static let actionHeight: CGFloat = 56
+}
 
-    static func display(_ size: CGFloat) -> Font { .system(size: size, weight: .black).width(.expanded) }
-    static func heavy(_ size: CGFloat) -> Font { .system(size: size, weight: .heavy).width(.expanded) }
+private extension View {
+    /// A diagnostic card: `diagCard` fill + 1 pt `diagLine` hairline. No shadow (§4.6 flat).
+    func diagCard(stroke: Color = TelosColor.diagLine, lineWidth: CGFloat = TelosStroke.line) -> some View {
+        self
+            .background(TelosColor.diagCard, in: Diag.card)
+            .overlay(Diag.card.strokeBorder(stroke, lineWidth: lineWidth))
+    }
+
+    /// Glass role 5 (§4.9): the close / back control on a full-screen cover. iOS 26 Liquid Glass through
+    /// the one helper family; everywhere else the solid fallback surface (no material, no blur).
+    func morningGlassControl() -> some View {
+        self.nativeLiquidGlassButtonChrome(controlSize: .regular) {
+            self
+                .buttonStyle(TelosPressButtonStyle())
+                .nativeLiquidGlassFallbackSurface(Circle())
+        }
+    }
+}
+
+/// The wide-tracked small-caps overline of the register (`scale`, `diagMuted`).
+private struct DiagOverline: View {
+    let text: Text
+
+    init(_ key: LocalizedStringKey) { self.text = Text(key) }
+    init(verbatim: String) { self.text = Text(verbatim: verbatim) }
+
+    var body: some View {
+        text
+            .telosScale()
+            .textCase(.uppercase)
+            .foregroundStyle(TelosColor.diagMuted)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+}
+
+/// The ceremonial primary action: `diagnosticS` on a white capsule (§6.12). Disabled = the same capsule
+/// at `disabled` opacity. No glow: one flat capsule, nothing stacked.
+private struct DiagPrimaryButton: View {
+    let title: LocalizedStringKey
+    let enabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(TelosType.diagnosticS)
+                .tracking(TelosType.Tracking.diagnosticS)
+                .textCase(.uppercase)
+                .foregroundStyle(TelosColor.diagField)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(maxWidth: .infinity)
+                .frame(minHeight: Diag.actionHeight)
+                .background(TelosColor.diagText, in: Capsule(style: .continuous))
+                .opacity(enabled ? TelosOpacity.full : TelosOpacity.disabled)
+                .contentShape(Capsule(style: .continuous))
+        }
+        .buttonStyle(TelosPressButtonStyle())
+        .disabled(!enabled)
+    }
+}
+
+/// One cell per step: `diagSignal` (the accent) up to and including the current step, `diagLine`
+/// after it, plus the "2/7" counter. The segments step with `settle` when the step changes.
+private struct MorningProgress: View {
+    let step: Int
+    let total: Int
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+        HStack(spacing: TelosSpace.s) {
+            HStack(spacing: TelosSpace.xs) {
+                ForEach(0..<max(total, 1), id: \.self) { index in
+                    Capsule(style: .continuous)
+                        .fill(index <= step ? TelosColor.diagSignal : TelosColor.diagLine)
+                        .frame(height: TelosStroke.rail)
+                }
+            }
+            .animation(TelosMotion.gated(TelosMotion.settle, reduced: reduceMotion), value: step)
+            Text("\(min(step + 1, total))/\(total)")
+                .font(TelosType.scaleNumber)
+                .foregroundStyle(TelosColor.diagMuted)
+                .fixedSize()
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("\(min(step + 1, total))/\(total)"))
+    }
 }
 
 // MARK: - The flow
@@ -58,6 +149,7 @@ struct MorningFlowView: View {
 
     @EnvironmentObject private var repo: Repository
     @EnvironmentObject private var coach: AICoachEngine
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @StateObject private var brief = DailyBriefModel()
     @State private var step = 0
@@ -74,31 +166,38 @@ struct MorningFlowView: View {
     /// picked, so the day always leaves here with a gear set or with the wearer having said "not today".
     private var isChoice: Bool { step == total - 1 }
 
+    /// The page swap (`screen` token; a plain fade under Reduce Motion).
+    private var pageAnimation: Animation {
+        reduceMotion ? TelosMotion.fade : TelosMotion.screen
+    }
+
     var body: some View {
         ZStack {
-            Diag.background.ignoresSafeArea()
+            TelosColor.diagField.ignoresSafeArea()
             if isChoice {
-                DifficultyChoiceView(brief: brief, presentedAt: presentedAt, onDone: onDone)
+                DifficultyChoiceView(brief: brief, presentedAt: presentedAt, onDone: onDone,
+                                     step: step, total: total)
                     .transition(.opacity)
             } else if isBrief {
-                DailyBriefView(model: brief, levelBar: levelBar, presentedAt: presentedAt) {
-                    withAnimation(.easeOut(duration: 0.3)) { step = total - 1 }
+                DailyBriefView(model: brief, levelBar: levelBar, presentedAt: presentedAt,
+                               step: step, total: total) {
+                    withAnimation(pageAnimation) { step = total - 1 }
                 }
                 .transition(.opacity)
             } else {
                 VStack(alignment: .leading, spacing: 0) {
                     topBar
-                        .padding(.top, 8)
+                        .padding(.top, TelosSpace.s)
                     ScrollView {
                         VStack(alignment: .leading, spacing: 0) {
                             if step == 0 { dreamStage } else { questionStage(questions[step - 1]) }
                         }
-                        .padding(.top, 36)
+                        .padding(.top, TelosSpace.xxl)
                     }
                     confirmButton
-                        .padding(.bottom, 12)
+                        .padding(.bottom, TelosSpace.m)
                 }
-                .padding(.horizontal, 24)
+                .padding(.horizontal, TelosSpace.xl)
             }
         }
         .preferredColorScheme(.dark)
@@ -118,34 +217,28 @@ struct MorningFlowView: View {
     // MARK: Top bar
 
     private var topBar: some View {
-        HStack(spacing: 20) {
+        HStack(spacing: TelosSpace.m) {
             Button {
+                TelosHaptics.play(.tap)
                 if step == 0 {
                     // Skipping the morning goes straight to the brief rather than out of it.
                     finishEntry()
                 } else {
-                    withAnimation(.easeOut(duration: 0.25)) {
+                    withAnimation(pageAnimation) {
                         step -= 1
                         selection = step == 0 ? nil : answers[questions[step - 1].id]
                     }
                 }
             } label: {
                 Image(systemName: step == 0 ? "xmark" : "chevron.left")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 32, height: 32)
+                    .font(TelosType.glyphControl)
+                    .foregroundStyle(TelosColor.diagText)
+                    .frame(width: TelosSpace.hitTarget, height: TelosSpace.hitTarget)
+                    .contentShape(Circle())
             }
-            .buttonStyle(.plain)
+            .morningGlassControl()
             .accessibilityLabel(step == 0 ? "Skip to the brief" : "Back")
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Diag.track)
-                    Capsule().fill(Diag.blue)
-                        .frame(width: geo.size.width * Double(step + 1) / Double(total))
-                }
-            }
-            .frame(height: 6)
-            .animation(.easeOut(duration: 0.3), value: step)
+            MorningProgress(step: step, total: total)
         }
     }
 
@@ -153,35 +246,30 @@ struct MorningFlowView: View {
 
     private var dreamStage: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text("DREAM JOURNAL")
-                .font(.system(size: 15, weight: .semibold))
-                .tracking(0.6)
-                .foregroundStyle(Diag.grey)
+            DiagOverline("DREAM JOURNAL")
             Text("What did you dream?")
-                .font(Diag.display(38))
-                .foregroundStyle(.white)
+                .font(TelosType.diagnostic)
+                .tracking(TelosType.Tracking.diagnostic)
+                .foregroundStyle(TelosColor.diagText)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 14)
+                .padding(.top, TelosSpace.m)
             ZStack(alignment: .topLeading) {
                 if dream.isEmpty {
                     Text("Write it down before it fades. A few words are enough.")
-                        .font(.system(size: 16))
-                        .foregroundStyle(Diag.grey)
-                        .padding(.horizontal, 18)
-                        .padding(.vertical, 18)
+                        .font(TelosType.callout)
+                        .foregroundStyle(TelosColor.diagMuted)
+                        .padding(TelosSpace.l)
                         .allowsHitTesting(false)
                 }
                 TextEditor(text: $dream)
-                    .font(.system(size: 16))
-                    .foregroundStyle(.white)
+                    .font(TelosType.callout)
+                    .foregroundStyle(TelosColor.diagText)
                     .scrollContentBackground(.hidden)
-                    .padding(12)
+                    .padding(TelosSpace.m)
                     .frame(minHeight: 220)
             }
-            .background(Diag.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Diag.cardBorder, lineWidth: 1))
-            .padding(.top, 32)
+            .diagCard()
+            .padding(.top, TelosSpace.xxl)
         }
     }
 
@@ -189,24 +277,24 @@ struct MorningFlowView: View {
 
     private func questionStage(_ q: DreamQuestion) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            Text(q.overline.uppercased())
-                .font(.system(size: 15, weight: .semibold))
-                .tracking(0.6)
-                .foregroundStyle(Diag.grey)
+            DiagOverline(verbatim: q.overline)
             Text(q.title)
-                .font(Diag.display(38))
-                .foregroundStyle(.white)
+                .font(TelosType.diagnostic)
+                .tracking(TelosType.Tracking.diagnostic)
+                .foregroundStyle(TelosColor.diagText)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.top, 14)
-            VStack(spacing: 14) {
+                .padding(.top, TelosSpace.m)
+            VStack(spacing: TelosSpace.m) {
                 ForEach(Array(q.options.enumerated()), id: \.offset) { index, option in
                     OptionCard(option: option, selected: selection == index) {
-                        SystemHaptics.play(.select)
-                        withAnimation(.easeOut(duration: 0.15)) { selection = index }
+                        TelosHaptics.play(.select)
+                        withAnimation(TelosMotion.gated(TelosMotion.select, reduced: reduceMotion)) {
+                            selection = index
+                        }
                     }
                 }
             }
-            .padding(.top, 32)
+            .padding(.top, TelosSpace.xxl)
         }
     }
 
@@ -215,30 +303,20 @@ struct MorningFlowView: View {
     private var confirmEnabled: Bool { step == 0 || selection != nil }
 
     private var confirmButton: some View {
-        Button {
+        DiagPrimaryButton(title: "CONFIRM", enabled: confirmEnabled) {
             guard confirmEnabled else { return }
-            SystemHaptics.play(.confirm)
+            TelosHaptics.play(.commit)
             if step > 0, let selection { answers[questions[step - 1].id] = selection }
             if step >= questions.count {
                 finishEntry()
             } else {
-                withAnimation(.easeOut(duration: 0.25)) {
+                withAnimation(pageAnimation) {
                     step += 1
                     selection = answers[questions[step - 1].id]
                 }
             }
-        } label: {
-            Text("CONFIRM")
-                .font(Diag.heavy(20))
-                .tracking(1.2)
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 64)
-                .background(Diag.blue.opacity(confirmEnabled ? 1 : 0.35), in: Capsule())
-                .shadow(color: Diag.blue.opacity(confirmEnabled ? 0.55 : 0), radius: 22, y: 6)
         }
-        .buttonStyle(.plain)
-        .padding(.top, 16)
+        .padding(.top, TelosSpace.l)
     }
 
     /// Save the morning's entry (whatever of it was given) and move on to the brief.
@@ -246,12 +324,31 @@ struct MorningFlowView: View {
         let entry = DreamEntry(day: Repository.localDayKey(Date()), text: dream, answers: answers,
                                updatedAt: Date())
         let hasSomething = !dream.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !answers.isEmpty
-        withAnimation(.easeOut(duration: 0.3)) { step = briefStep }
+        withAnimation(pageAnimation) { step = briefStep }
         Task {
             if hasSomething { await DreamJournalStore.shared.save(entry, repo: repo) }
             await brief.writeSummary(coach: coach, repo: repo, levelBar: levelBar,
                                      dream: hasSomething ? entry : nil)
         }
+    }
+}
+
+/// The radio of an option / gear card: a 1.5 pt ring, and when selected a 2 pt accent ring with a
+/// filled accent dot (§6.12 "accent radio").
+private struct DiagRadio: View {
+    let selected: Bool
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .strokeBorder(selected ? TelosColor.diagSignal : TelosColor.diagMuted,
+                              lineWidth: selected ? TelosStroke.data : TelosStroke.strong)
+                .frame(width: 28, height: 28)
+            if selected {
+                Circle().fill(TelosColor.diagSignal).frame(width: 14, height: 14)
+            }
+        }
+        .accessibilityHidden(true)
     }
 }
 
@@ -263,40 +360,32 @@ private struct OptionCard: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 18) {
+            HStack(spacing: TelosSpace.l) {
                 Image(systemName: option.symbol)
-                    .font(.system(size: 22, weight: .regular))
-                    .foregroundStyle(selected ? Diag.blue : Diag.icon)
+                    .font(TelosType.title2)
+                    .foregroundStyle(selected ? TelosColor.diagSignal : TelosColor.diagMuted)
                     .frame(width: 36)
-                VStack(alignment: .leading, spacing: 4) {
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: TelosSpace.xs) {
                     Text(option.title)
-                        .font(Diag.heavy(20))
-                        .foregroundStyle(selected ? .white : Color(white: 0.9))
+                        .font(TelosType.diagnosticS)
+                        .foregroundStyle(TelosColor.diagText)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(option.subtitle)
-                        .font(.system(size: 16))
-                        .foregroundStyle(Diag.grey)
+                        .font(TelosType.subhead)
+                        .foregroundStyle(TelosColor.diagMuted)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer(minLength: 8)
-                ZStack {
-                    Circle()
-                        .strokeBorder(selected ? Diag.blue : Color(white: 0.35), lineWidth: 2)
-                        .frame(width: 32, height: 32)
-                    if selected {
-                        Circle().fill(Diag.blue).frame(width: 16, height: 16)
-                    }
-                }
+                Spacer(minLength: TelosSpace.s)
+                DiagRadio(selected: selected)
             }
-            .padding(.horizontal, 22)
-            .padding(.vertical, 22)
+            .padding(TelosSpace.l)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? Diag.selectedFill : Diag.card,
-                        in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(selected ? Diag.blue : Diag.cardBorder, lineWidth: selected ? 1.5 : 1))
+            .diagCard(stroke: selected ? TelosColor.diagSignal : TelosColor.diagLine,
+                      lineWidth: selected ? TelosStroke.data : TelosStroke.line)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(TelosPressButtonStyle())
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 }
@@ -320,6 +409,9 @@ final class DailyBriefModel: ObservableObject {
     @Published private(set) var ready = false
     @Published private(set) var level: Double?
     @Published private(set) var levelYesterday: Double?
+    /// How much of the level's formula had data behind it, as whole per cent (nil with no level). Shown
+    /// beside the level when below 100, so a partial level never reads like a full one.
+    @Published private(set) var coveragePercent: Int?
     /// Today is settled with NO level: its night was never recorded. Not the same as still syncing.
     @Published private(set) var noNight = false
     @Published private(set) var charge: Double?
@@ -389,12 +481,14 @@ final class DailyBriefModel: ObservableObject {
         guard isToday, let entry = ledger.entry(dayKey) else {
             level = nil
             levelYesterday = nil
+            coveragePercent = nil
             // SETTLED WITH NO ENTRY is a night that was never recorded — no amount of waiting brings it.
             noNight = isToday && ledger.isSettled(dayKey)
             return
         }
         noNight = false
         level = entry.level
+        coveragePercent = Int((min(max(entry.coverage, 0), 1) * 100).rounded())
         levelYesterday = LevelWiring.shift(dayKey, -1, calendar).flatMap { LevelLedger.shared.entry($0)?.level }
     }
 
@@ -481,6 +575,9 @@ struct DailyBriefView: View {
     /// When the flow opened — the moment its forced sync started. The gate's freshness test is anchored
     /// to it, not to when this page appeared. See `MorningGateInputs.flowOpenedAt`.
     var presentedAt: Date = Date()
+    /// Where this page sits in the flow, for the progress strip.
+    var step: Int = 0
+    var total: Int = 1
     let onDone: () -> Void
 
     /// THE GATE. The brief is the last page of figures, and it does not hand the day over until the
@@ -489,31 +586,35 @@ struct DailyBriefView: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            MorningProgress(step: step, total: total)
+                .padding(.horizontal, TelosSpace.xl)
+                .padding(.top, TelosSpace.m)
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    Text("DAILY BRIEF · " + Date().formatted(.dateTime.weekday(.wide).day().month(.wide)).uppercased())
-                        .font(.system(size: 15, weight: .semibold))
-                        .tracking(0.6)
-                        .foregroundStyle(Diag.grey)
-                        .padding(.top, 28)
+                VStack(alignment: .leading, spacing: TelosSpace.l) {
+                    DiagOverline(verbatim: "DAILY BRIEF · "
+                                 + Date().formatted(.dateTime.weekday(.wide).day().month(.wide)))
+                        .padding(.top, TelosSpace.l)
                     levelBlock
-                    HStack(spacing: 12) {
-                        scoreCard("REST", model.rest, StrandPalette.restColor)
-                        scoreCard("CHARGE", model.charge, StrandPalette.statusPositive)
+                    HStack(spacing: TelosSpace.m) {
+                        scoreCard("REST", model.rest, TelosColor.rest)
+                        scoreCard("CHARGE", model.charge, TelosColor.charge)
                     }
+                    // The wearer's own word on their energy, matched later to the first balance Today
+                    // computes (`EnergyCheckInStore.attach`). Renders nothing once answered today.
+                    EnergyCheckInPrompt(slot: .morning, question: "How much energy do you have this morning?")
                     if !model.metrics.isEmpty { metricsGrid }
                     summaryCard
                     daylightCard
                 }
-                .padding(.horizontal, 24)
-                .padding(.bottom, 16)
+                .padding(.horizontal, TelosSpace.xl)
+                .padding(.bottom, TelosSpace.l)
             }
-            VStack(spacing: 12) {
+            VStack(spacing: TelosSpace.m) {
                 if gate.stage != .ready { gateBlock }
                 continueButton
             }
-            .padding(.horizontal, 24)
-            .padding(.bottom, 12)
+            .padding(.horizontal, TelosSpace.xl)
+            .padding(.bottom, TelosSpace.m)
         }
         // The gate asks the brief whether today's level is resolved on every tick: the brief's own poll
         // is what resolves it, and it can land while the gate is waiting. `noNight` counts as resolved —
@@ -527,204 +628,247 @@ struct DailyBriefView: View {
 
     /// WHAT IS HAPPENING AND WHY, while the wearer waits. Named states, the real failure when there is
     /// one, and the only honest progress the protocol offers — a chunk count, never a percentage, because
-    /// the strap never says how much it is holding.
+    /// the strap never says how much it is holding. Under it, the gate's three conditions as a checklist
+    /// (pending ○ / done ●), read from the same inputs the gate decides on.
     private var gateBlock: some View {
-        HStack(alignment: .top, spacing: 14) {
-            if gate.stage == .timedOut {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 20))
-                    .foregroundStyle(StrandPalette.statusWarning)
-                    .frame(width: 24)
-            } else {
-                ProgressView().tint(.white).frame(width: 24)
+        let timedOut = gate.stage == .timedOut
+        let inputs = gate.inputs
+        return VStack(alignment: .leading, spacing: TelosSpace.m) {
+            HStack(alignment: .top, spacing: TelosSpace.m) {
+                if timedOut {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(TelosType.headline)
+                        .foregroundStyle(TelosColor.warning)
+                        .frame(width: 24)
+                        .accessibilityHidden(true)
+                } else {
+                    ProgressView().tint(TelosColor.diagText).frame(width: 24)
+                }
+                VStack(alignment: .leading, spacing: TelosSpace.xs) {
+                    Text(gate.headline)
+                        .telosScale()
+                        .foregroundStyle(timedOut ? TelosColor.warning : TelosColor.diagMuted)
+                    Text(gate.detail)
+                        .font(TelosType.subhead)
+                        .foregroundStyle(TelosColor.diagText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
             }
-            VStack(alignment: .leading, spacing: 4) {
-                Text(gate.headline)
-                    .font(.system(size: 13, weight: .semibold))
-                    .tracking(0.6)
-                    .foregroundStyle(gate.stage == .timedOut ? StrandPalette.statusWarning : Diag.grey)
-                Text(gate.detail)
-                    .font(.system(size: 14))
-                    .foregroundStyle(Color(white: 0.85))
-                    .fixedSize(horizontal: false, vertical: true)
+            VStack(alignment: .leading, spacing: TelosSpace.xs) {
+                gateRow("Strap drained", done: !MorningGate.syncOutstanding(inputs))
+                gateRow("Night scored", done: !MorningGate.analysisOutstanding(inputs))
+                gateRow("Level written", done: inputs.levelResolved)
             }
-            Spacer(minLength: 0)
+            .padding(.leading, 24 + TelosSpace.m)
         }
-        .padding(16)
+        .padding(TelosSpace.l)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Diag.card, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous)
-            .strokeBorder(gate.stage == .timedOut ? StrandPalette.statusWarning.opacity(0.5) : Diag.cardBorder,
-                          lineWidth: 1))
+        .diagCard(stroke: timedOut ? TelosColor.warning : TelosColor.diagLine)
         .accessibilityElement(children: .combine)
+    }
+
+    /// One gate condition: ○ while pending, ● once met. The word carries the state too (never colour alone).
+    private func gateRow(_ title: LocalizedStringKey, done: Bool) -> some View {
+        HStack(spacing: TelosSpace.s) {
+            Image(systemName: done ? "circle.fill" : "circle")
+                .font(TelosType.caption)
+                .foregroundStyle(done ? TelosColor.diagSignal : TelosColor.diagMuted)
+                .accessibilityHidden(true)
+            Text(title)
+                .font(TelosType.scaleNumber)
+                .textCase(.uppercase)
+                .foregroundStyle(done ? TelosColor.diagText : TelosColor.diagMuted)
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(done ? Text("Done") : Text("Pending"))
     }
 
     /// CONTINUE ANYWAY IS NOT THE SAME BUTTON. A gate that ran out says so on the button itself, so the
     /// wearer who goes on knows they are going on early rather than being told everything was fine.
     private var continueButton: some View {
         let enabled = gate.stage.allowsContinue
-        return Button {
+        return DiagPrimaryButton(title: gate.stage == .timedOut ? "CONTINUE ANYWAY" : "SET TODAY'S GEAR",
+                                 enabled: enabled) {
             guard enabled else { return }
-            SystemHaptics.play(.confirm)
+            TelosHaptics.play(.commit)
             onDone()
-        } label: {
-            Text(gate.stage == .timedOut ? "CONTINUE ANYWAY" : "SET TODAY'S GEAR")
-                .font(Diag.heavy(20))
-                .tracking(1.2)
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 64)
-                .background(Diag.blue.opacity(enabled ? 1 : 0.35), in: Capsule())
-                .shadow(color: Diag.blue.opacity(enabled ? 0.55 : 0), radius: 22, y: 6)
         }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
         .accessibilityHint(Text(enabled ? "" : gate.detail))
     }
 
     private var levelBlock: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("YOUR LEVEL TODAY")
-                .font(.system(size: 13, weight: .semibold))
-                .tracking(0.6)
-                .foregroundStyle(Diag.grey)
+        VStack(alignment: .leading, spacing: TelosSpace.xs) {
+            DiagOverline("YOUR LEVEL TODAY")
             if let level = model.level {
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
+                HStack(alignment: .firstTextBaseline, spacing: TelosSpace.m) {
+                    // Counts up only when the value CHANGES (a poll that lands a later figure), never on
+                    // appear — one `Animatable` numeral, no dispatch loop. Unbounded: no clamp.
                     CountUpText(value: level,
                                 format: { "\(Int($0.rounded()))" },
-                                font: Diag.display(88),
-                                color: .white,
-                                animation: .easeOut(duration: 1.6))
+                                font: TelosType.hero,
+                                color: TelosColor.diagText,
+                                animation: TelosMotion.countUp)
                     if let y = model.levelYesterday {
                         trendLabel(level - y, higherIsBetter: true, suffix: " vs yesterday")
                     }
                 }
+                // A level built from part of the formula must not read like one built from all of it.
+                if let pct = model.coveragePercent, pct < 100 {
+                    Text("\(pct)% measured")
+                        .font(TelosType.scaleNumber)
+                        .textCase(.uppercase)
+                        .foregroundStyle(TelosColor.diagMuted)
+                }
             } else {
-                Text(model.ready ? "–" : "…")
-                    .font(Diag.display(88))
-                    .foregroundStyle(.white)
+                Text(model.ready ? TelosType.absent : "…")
+                    .font(TelosType.hero)
+                    .foregroundStyle(TelosColor.diagMuted)
                 Text(model.noNight ? "No level for today: last night wasn't recorded."
                      : model.ready ? "Last night is still syncing. Today's level is set once it lands."
                      : "Scoring the night…")
-                    .font(.system(size: 14))
-                    .foregroundStyle(Diag.grey)
+                    .font(TelosType.subhead)
+                    .foregroundStyle(TelosColor.diagMuted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 
-    private func scoreCard(_ title: String, _ value: Double?, _ tint: Color) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.system(size: 13, weight: .semibold))
-                .tracking(0.6)
-                .foregroundStyle(Diag.grey)
-            Text(value.map { "\(Int($0.rounded()))%" } ?? "–")
-                .font(Diag.display(34))
-                .foregroundStyle(tint)
+    /// Rest / Charge as a thin luminous ring (`TelosRing`): the arc settles on a NEW value only; an
+    /// absent score is a dashed bare track with "—", never an empty-looking 0.
+    private func scoreCard(_ title: LocalizedStringKey, _ value: Double?, _ tint: Color) -> some View {
+        HStack(spacing: TelosSpace.m) {
+            TelosRing(value: value, scale: 100, color: tint, diameter: 56, unit: "%",
+                      accessibilityLabel: Text(title))
+            VStack(alignment: .leading, spacing: TelosSpace.xxs) {
+                Text(title)
+                    .telosScale()
+                    .foregroundStyle(TelosColor.diagMuted)
+                if value == nil {
+                    Text("Not enough data yet")
+                        .font(TelosType.caption)
+                        .foregroundStyle(TelosColor.diagMuted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
         }
-        .padding(18)
+        .padding(TelosSpace.m)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Diag.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Diag.cardBorder, lineWidth: 1))
+        .diagCard()
     }
 
     private var metricsGrid: some View {
         VStack(spacing: 0) {
             ForEach(Array(model.metrics.enumerated()), id: \.element.id) { index, metric in
-                HStack {
+                HStack(alignment: .firstTextBaseline, spacing: TelosSpace.s) {
                     Text(metric.label)
-                        .font(.system(size: 15))
-                        .foregroundStyle(Color(white: 0.8))
-                    Spacer()
+                        .font(TelosType.scaleNumber)
+                        .textCase(.uppercase)
+                        .foregroundStyle(TelosColor.diagMuted)
+                    Spacer(minLength: TelosSpace.s)
                     Text(metric.value)
-                        .font(.system(size: 17, weight: .bold).width(.expanded))
-                        .monospacedDigit()
-                        .foregroundStyle(.white)
-                    if let change = metric.change {
-                        trendLabel(change, higherIsBetter: metric.higherIsBetter, suffix: "")
-                            .frame(width: 64, alignment: .trailing)
-                    } else {
-                        Color.clear.frame(width: 64, height: 1)
+                        .font(TelosType.numeralS)
+                        .foregroundStyle(TelosColor.diagText)
+                    Group {
+                        if let change = metric.change {
+                            trendLabel(change, higherIsBetter: metric.higherIsBetter, suffix: "")
+                        } else {
+                            // No yesterday to compare with: a dash, not a zero change.
+                            Text(TelosType.absent)
+                                .font(TelosType.numeralXS)
+                                .foregroundStyle(TelosColor.diagMuted)
+                        }
                     }
+                    .frame(minWidth: 64, alignment: .trailing)
                 }
-                .padding(.vertical, 12)
+                .padding(.vertical, TelosSpace.m)
+                .accessibilityElement(children: .combine)
                 if index < model.metrics.count - 1 {
-                    Rectangle().fill(Diag.cardBorder).frame(height: 1)
+                    Rectangle().fill(TelosColor.diagLine).frame(height: TelosStroke.line)
                 }
             }
         }
-        .padding(.horizontal, 18)
-        .background(Diag.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Diag.cardBorder, lineWidth: 1))
+        .padding(.horizontal, TelosSpace.l)
+        .diagCard()
     }
 
-    /// An arrow and the change, green when it is good news and amber when it is not.
+    /// An arrow and the SIGNED change (true minus), green when it is good news and amber when it is not.
+    /// Flat reads "±0" so it stays distinguishable from "no comparison" ("—").
     private func trendLabel(_ change: Double, higherIsBetter: Bool?, suffix: String) -> some View {
         let flat = abs(change) < 0.05
         let good: Bool? = flat ? nil : higherIsBetter.map { $0 == (change > 0) }
-        let tint: Color = good == nil ? Diag.grey : (good! ? StrandPalette.statusPositive : StrandPalette.statusWarning)
+        let tint: Color
+        switch good {
+        case .some(true): tint = TelosColor.positive
+        case .some(false): tint = TelosColor.warning
+        case .none: tint = TelosColor.diagMuted
+        }
         let magnitude = abs(change) >= 10 ? String(format: "%.0f", abs(change)) : String(format: "%.1f", abs(change))
-        return HStack(spacing: 2) {
+        let sign = flat ? "±" : (change > 0 ? "+" : TelosType.minus)
+        return HStack(spacing: TelosSpace.xxs) {
             Image(systemName: flat ? "arrow.right" : (change > 0 ? "arrow.up" : "arrow.down"))
-                .font(.system(size: 11, weight: .bold))
-            Text(magnitude + suffix)
-                .font(.system(size: 13, weight: .semibold))
-                .monospacedDigit()
+                .font(TelosType.glyphDelta)
+                .accessibilityHidden(true)
+            Text(verbatim: sign + (flat ? "0" : magnitude) + suffix)
+                .font(TelosType.numeralXS)
         }
         .foregroundStyle(tint)
     }
 
     private var summaryCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 6) {
-                Image(systemName: "sparkles").font(.system(size: 12, weight: .semibold))
-                Text("THE SYSTEM").font(.system(size: 13, weight: .semibold)).tracking(0.6)
+        VStack(alignment: .leading, spacing: TelosSpace.s) {
+            HStack(spacing: TelosSpace.xs) {
+                Image(systemName: "sparkles")
+                    .font(TelosType.caption)
+                    .accessibilityHidden(true)
+                Text("THE SYSTEM").telosScale()
             }
-            .foregroundStyle(Diag.blue)
+            .foregroundStyle(TelosColor.diagSignal)
             if let summary = model.summary {
                 Text(summary)
-                    .font(.system(size: 16))
-                    .foregroundStyle(.white)
+                    .font(TelosType.body)
+                    .foregroundStyle(TelosColor.diagText)
                     .fixedSize(horizontal: false, vertical: true)
             } else if model.summaryUnavailable {
                 Text("No written brief this morning: the coach needs its connection and data access in Settings.")
-                    .font(.system(size: 15))
-                    .foregroundStyle(Diag.grey)
+                    .font(TelosType.subhead)
+                    .foregroundStyle(TelosColor.diagMuted)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                HStack(spacing: 8) {
-                    ProgressView().tint(.white)
+                HStack(spacing: TelosSpace.s) {
+                    ProgressView().tint(TelosColor.diagText)
                     Text("Writing today's brief…")
-                        .font(.system(size: 15))
-                        .foregroundStyle(Diag.grey)
+                        .font(TelosType.subhead)
+                        .foregroundStyle(TelosColor.diagMuted)
                 }
             }
         }
-        .padding(18)
+        .padding(TelosSpace.l)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Diag.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Diag.cardBorder, lineWidth: 1))
+        .diagCard()
     }
 
     private var daylightCard: some View {
-        HStack(alignment: .top, spacing: 14) {
+        HStack(alignment: .top, spacing: TelosSpace.m) {
             Image(systemName: "sun.max.fill")
-                .font(.system(size: 24))
-                .foregroundStyle(StrandPalette.statusWarning)
-            VStack(alignment: .leading, spacing: 4) {
+                .font(TelosType.title2)
+                .foregroundStyle(TelosColor.warning)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: TelosSpace.xs) {
                 Text("Get daylight in the next hour")
-                    .font(Diag.heavy(16))
-                    .foregroundStyle(.white)
+                    .font(TelosType.diagnosticS)
+                    .foregroundStyle(TelosColor.diagText)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text("Ten minutes outside in sun, twenty to thirty under cloud. Morning light sets the clock that decides when you get tired tonight.")
-                    .font(.system(size: 14))
-                    .foregroundStyle(Diag.grey)
+                    .font(TelosType.subhead)
+                    .foregroundStyle(TelosColor.diagMuted)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(18)
+        .padding(TelosSpace.l)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Diag.card, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(Diag.cardBorder, lineWidth: 1))
+        .diagCard()
     }
 }
 
@@ -739,6 +883,11 @@ struct DailyBriefView: View {
 // card shows are the real targets, computed from the real baselines before the wearer commits — so the
 // choice is made against what it will actually ask for rather than against an adjective.
 //
+// PREVIEW == ISSUED. The cards read the SAME composer the issuer does (`QuestPlanComposer.targets`): the
+// week plan's bounds for the day, an illness heads-up, the running trial's excluded metrics, and the
+// gear floor (a day already issued at a higher gear keeps it — `QuestGearFloor`). A card that showed
+// the raw gear table would promise targets the issuer then bounds differently.
+//
 // A GEAR CANNOT INVENT A TARGET. Every card lists only the directives this wearer's data can actually
 // scale and check (`QuestBaselineReader`, `QuestDayPlan`); a metric with no baseline produces no
 // directive, and a card that can offer nothing says so instead of promising three of them.
@@ -751,9 +900,13 @@ struct DifficultyChoiceView: View {
     @ObservedObject var brief: DailyBriefModel
     var presentedAt: Date = Date()
     let onDone: () -> Void
+    /// Where this page sits in the flow, for the progress strip.
+    var step: Int = 0
+    var total: Int = 1
 
     @EnvironmentObject private var repo: Repository
     @EnvironmentObject private var coach: AICoachEngine
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @State private var baseline: QuestBaseline?
     @State private var loaded = false
@@ -774,56 +927,66 @@ struct DifficultyChoiceView: View {
 
     private var focus: LevelPart? { QuestDayPlan.focus(breakdown) }
 
+    /// The gear a pick actually runs at: the pick, unless today's plan already went out higher.
+    private func effectiveGear(_ picked: QuestDifficulty) -> QuestDifficulty {
+        QuestGearFloor.effective(picked: picked, issued: QuestGearFloor.issued(for: dayKey))
+    }
+
     var body: some View {
         VStack(spacing: 0) {
+            MorningProgress(step: step, total: total)
+                .padding(.horizontal, TelosSpace.xl)
+                .padding(.top, TelosSpace.m)
             ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    Text("TODAY'S GEAR")
-                        .font(.system(size: 15, weight: .semibold))
-                        .tracking(0.6)
-                        .foregroundStyle(Diag.grey)
-                        .padding(.top, 28)
+                VStack(alignment: .leading, spacing: TelosSpace.l) {
+                    DiagOverline("TODAY'S GEAR")
+                        .padding(.top, TelosSpace.l)
                     levelStrip
                     Text("How hard is today?")
-                        .font(Diag.display(34))
-                        .foregroundStyle(.white)
+                        .font(TelosType.diagnostic)
+                        .tracking(TelosType.Tracking.diagnostic)
+                        .foregroundStyle(TelosColor.diagText)
                         .fixedSize(horizontal: false, vertical: true)
                     Text(lead)
-                        .font(.system(size: 14))
-                        .foregroundStyle(Diag.grey)
+                        .font(TelosType.subhead)
+                        .foregroundStyle(TelosColor.diagMuted)
                         .fixedSize(horizontal: false, vertical: true)
-                    VStack(spacing: 14) {
+                    VStack(spacing: TelosSpace.m) {
                         ForEach(QuestDifficulty.allCases, id: \.rawValue) { difficulty in
                             DifficultyCard(difficulty: difficulty,
                                            targets: targets(difficulty),
                                            loaded: loaded,
                                            selected: selection == difficulty) {
-                                SystemHaptics.play(.select)
-                                withAnimation(.easeOut(duration: 0.15)) { selection = difficulty }
+                                TelosHaptics.play(.select)
+                                withAnimation(TelosMotion.gated(TelosMotion.select, reduced: reduceMotion)) {
+                                    selection = difficulty
+                                }
                             }
                         }
                     }
+                    downgradeNote
                 }
-                .padding(.horizontal, 24)
-                .padding(.bottom, 16)
+                .padding(.horizontal, TelosSpace.xl)
+                .padding(.bottom, TelosSpace.l)
             }
-            VStack(spacing: 10) {
+            VStack(spacing: TelosSpace.s) {
                 confirmButton
                 // THE WAY OUT. A wearer who wants no directives today must be able to say so; a flow
                 // that cannot be left without accepting a commitment is a flow people force-quit.
                 Button {
-                    SystemHaptics.play(.tap)
+                    TelosHaptics.play(.tap)
                     onDone()
                 } label: {
                     Text("Not today")
-                        .font(.system(size: 15))
-                        .foregroundStyle(Diag.grey)
-                        .frame(maxWidth: .infinity, minHeight: 36)
+                        .font(TelosType.subhead)
+                        .foregroundStyle(TelosColor.diagMuted)
+                        .frame(maxWidth: .infinity, minHeight: TelosSpace.hitTarget)
+                        .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(TelosPressButtonStyle())
             }
-            .padding(.horizontal, 24)
-            .padding(.bottom, 12)
+            .padding(.horizontal, TelosSpace.xl)
+            .padding(.bottom, TelosSpace.m)
         }
         .task {
             baseline = await QuestBaselineReader.read(repo: repo, day: dayKey)
@@ -840,42 +1003,58 @@ struct DifficultyChoiceView: View {
             + "with the most room in it."
     }
 
+    /// A downward re-pick on a day already issued higher keeps the higher gear's targets — said under the
+    /// cards, before LOCK IT IN, rather than discovered afterwards (`QuestGearFloor.downgradeNote`).
+    @ViewBuilder
+    private var downgradeNote: some View {
+        if let picked = selection {
+            let held = effectiveGear(picked)
+            if QuestGearFloor.downgradeNote(picked: picked, held: held) != nil {
+                Text("Today's quests already went out at \(held.title). The gear can go up once the day is issued, not down, so \(held.title)'s targets stand.")
+                    .font(TelosType.footnote)
+                    .foregroundStyle(TelosColor.warning)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
     /// The level, small, so it is in view while the choice is made — the same ledger figure the brief
     /// showed, never a second reading of it.
     private var levelStrip: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Text(brief.level.map { "\(Int($0.rounded()))" } ?? "–")
-                .font(Diag.display(54))
-                .foregroundStyle(.white)
-            VStack(alignment: .leading, spacing: 2) {
-                Text("YOUR LEVEL TODAY")
-                    .font(.system(size: 12, weight: .semibold))
-                    .tracking(0.6)
-                    .foregroundStyle(Diag.grey)
+        HStack(alignment: .firstTextBaseline, spacing: TelosSpace.m) {
+            Text(brief.level.map { "\(Int($0.rounded()))" } ?? TelosType.absent)
+                .telosNumeral(.numeralL)
+                .foregroundStyle(brief.level == nil ? TelosColor.diagMuted : TelosColor.diagText)
+            VStack(alignment: .leading, spacing: TelosSpace.xxs) {
+                DiagOverline("YOUR LEVEL TODAY")
                 if brief.level == nil {
                     Text(brief.noNight ? "Last night wasn't recorded." : "Not set yet.")
-                        .font(.system(size: 13))
-                        .foregroundStyle(Diag.grey)
+                        .font(TelosType.footnote)
+                        .foregroundStyle(TelosColor.diagMuted)
                 }
             }
             Spacer(minLength: 0)
         }
+        .accessibilityElement(children: .combine)
     }
 
+    /// EXACTLY what issuing would produce for this pick: the gear floor applied first, then the week
+    /// plan's bounds, the illness heads-up and the running trial's exclusions (`QuestPlanComposer`).
     private func targets(_ difficulty: QuestDifficulty) -> [QuestPlanTarget] {
         guard let baseline else { return [] }
-        return QuestDayPlan.plan(baseline: baseline, difficulty: difficulty, focus: focus, day: dayKey)
+        return QuestPlanComposer.targets(baseline: baseline, difficulty: effectiveGear(difficulty),
+                                         focus: focus, day: dayKey, repo: repo)
     }
 
     private var confirmButton: some View {
-        let enabled = selection != nil
-        return Button {
+        DiagPrimaryButton(title: "LOCK IT IN", enabled: selection != nil) {
             guard let difficulty = selection else { return }
-            SystemHaptics.play(.confirm)
+            TelosHaptics.play(.commit)
             // CHOOSE, THEN GENERATE. The choice is recorded first so Today can name the day's gear the
             // moment it draws, and the quests are issued from it — replacing whatever an earlier pick
-            // for the same day left behind (`QuestIssuer.issuePlan`).
-            QuestModeStore.shared.set(difficulty, for: dayKey)
+            // for the same day left behind (`QuestIssuer.issuePlan`). The recorded gear is the EFFECTIVE
+            // one: a downward re-pick on an issued day keeps the higher gear (the issuer does the same).
+            QuestModeStore.shared.set(effectiveGear(difficulty), for: dayKey)
             // The issuing runs in a task of its OWN, not the view's: naming each quest is a round trip
             // to the coach, and this view is about to go away. The same shape `finishEntry` uses for the
             // dream it has just saved.
@@ -888,18 +1067,7 @@ struct DifficultyChoiceView: View {
                                             dayKey: day)
             }
             onDone()
-        } label: {
-            Text("LOCK IT IN")
-                .font(Diag.heavy(20))
-                .tracking(1.2)
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 64)
-                .background(Diag.blue.opacity(enabled ? 1 : 0.35), in: Capsule())
-                .shadow(color: Diag.blue.opacity(enabled ? 0.55 : 0), radius: 22, y: 6)
         }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
     }
 
     /// The level part in the words the level's own surfaces use.
@@ -934,41 +1102,34 @@ private struct DifficultyCard: View {
 
     var body: some View {
         Button(action: action) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 18) {
+            VStack(alignment: .leading, spacing: TelosSpace.m) {
+                HStack(spacing: TelosSpace.l) {
                     Image(systemName: symbol)
-                        .font(.system(size: 22, weight: .regular))
-                        .foregroundStyle(selected ? Diag.blue : Diag.icon)
+                        .font(TelosType.title2)
+                        .foregroundStyle(selected ? TelosColor.diagSignal : TelosColor.diagMuted)
                         .frame(width: 36)
-                    VStack(alignment: .leading, spacing: 4) {
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: TelosSpace.xs) {
                         Text(difficulty.title)
-                            .font(Diag.heavy(20))
-                            .foregroundStyle(selected ? .white : Color(white: 0.9))
+                            .font(TelosType.diagnosticS)
+                            .foregroundStyle(TelosColor.diagText)
                         Text(difficulty.blurb)
-                            .font(.system(size: 15))
-                            .foregroundStyle(Diag.grey)
+                            .font(TelosType.subhead)
+                            .foregroundStyle(TelosColor.diagMuted)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    Spacer(minLength: 8)
-                    ZStack {
-                        Circle()
-                            .strokeBorder(selected ? Diag.blue : Color(white: 0.35), lineWidth: 2)
-                            .frame(width: 32, height: 32)
-                        if selected { Circle().fill(Diag.blue).frame(width: 16, height: 16) }
-                    }
+                    Spacer(minLength: TelosSpace.s)
+                    DiagRadio(selected: selected)
                 }
                 if loaded { plan }
             }
-            .padding(.horizontal, 22)
-            .padding(.vertical, 20)
+            .padding(TelosSpace.l)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(selected ? Diag.selectedFill : Diag.card,
-                        in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
-                .strokeBorder(selected ? Diag.blue : Diag.cardBorder, lineWidth: selected ? 1.5 : 1))
+            .diagCard(stroke: selected ? TelosColor.diagSignal : TelosColor.diagLine,
+                      lineWidth: selected ? TelosStroke.data : TelosStroke.line)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(TelosPressButtonStyle())
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
@@ -979,23 +1140,23 @@ private struct DifficultyCard: View {
             // than being handed targets off a population average.
             Text("Nothing to scale a target from yet: a few more days of your own steps, sleep and "
                  + "training, and this fills in.")
-                .font(.system(size: 13))
-                .foregroundStyle(Diag.grey)
+                .font(TelosType.footnote)
+                .foregroundStyle(TelosColor.diagMuted)
                 .fixedSize(horizontal: false, vertical: true)
-                .padding(.leading, 54)
+                .padding(.leading, 36 + TelosSpace.l)
         } else {
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: TelosSpace.xs) {
                 ForEach(targets, id: \.id) { target in
-                    HStack(alignment: .top, spacing: 8) {
-                        Text("·").foregroundStyle(Diag.grey)
+                    HStack(alignment: .top, spacing: TelosSpace.s) {
+                        Text(verbatim: "·").foregroundStyle(TelosColor.diagMuted)
                         Text(target.target)
-                            .font(.system(size: 13))
-                            .foregroundStyle(Color(white: 0.8))
+                            .font(TelosType.footnote)
+                            .foregroundStyle(TelosColor.diagText)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
-            .padding(.leading, 54)
+            .padding(.leading, 36 + TelosSpace.l)
         }
     }
 }

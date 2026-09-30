@@ -69,7 +69,7 @@ private struct SleepAlarmSheetContent: View {
                 }
                 .padding(16)
             }
-            .background(StrandPalette.surfaceBase)
+            .background(TelosColor.canvas)
             .navigationTitle("Wake buzz")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -81,6 +81,10 @@ private struct SleepAlarmSheetContent: View {
             }
         }
         .tint(StrandPalette.accent)
+        #if os(iOS)
+        // §5.12: a solid canvas sheet (no material behind the wheel).
+        .presentationBackground(TelosColor.canvas)
+        #endif
         #if os(macOS)
         .frame(minWidth: NoopMetrics.editorSheetMinWidth, minHeight: NoopMetrics.editorSheetMinHeight)
         #endif
@@ -104,7 +108,7 @@ private struct SleepAlarmSheetContent: View {
     // MARK: - Time + on/off
 
     private var alarmCard: some View {
-        StrandCard(padding: 20, tint: alarmOn ? StrandPalette.restColor : nil) {
+        StrandCard(padding: TelosSpace.l, tint: alarmOn ? TelosColor.violet : nil) {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .center, spacing: 16) {
                     VStack(alignment: .leading, spacing: 2) {
@@ -126,7 +130,19 @@ private struct SleepAlarmSheetContent: View {
                     Divider().overlay(StrandPalette.hairline)
                     reachRow
                     Divider().overlay(StrandPalette.hairline)
-                    Text("Wake time").strandOverline()
+                    // The armed wake as the card's one big, light numeral (Telos 2.0), then the wheel.
+                    HStack(alignment: .firstTextBaseline, spacing: TelosSpace.s) {
+                        Text("Wake time")
+                            .telosScale()
+                            .textCase(.uppercase)
+                            .foregroundStyle(TelosColor.textTertiary)
+                        Spacer(minLength: TelosSpace.s)
+                        Text(verbatim: WakeBuzzAlarm.timeLabel(minutes))
+                            .telosNumeral(.numeralL)
+                            .foregroundStyle(TelosColor.violetInk)
+                            .lineLimit(1)
+                            .accessibilityHidden(true)
+                    }
                     timeWheel
                 }
             }
@@ -222,7 +238,7 @@ private struct SleepAlarmSheetContent: View {
     /// Fires the REAL ring, not a one-off buzz: same cadence, same auto-stop, same stop gestures. A
     /// test that behaved differently from the alarm would prove nothing about the alarm.
     private var testCard: some View {
-        StrandCard(padding: 20) {
+        StrandCard(padding: TelosSpace.l) {
             VStack(alignment: .leading, spacing: 12) {
                 Button {
                     if ringer.isRinging {
@@ -325,7 +341,7 @@ private struct SleepAlarmSheetContent: View {
     /// Said up front rather than discovered at 07:00. This buzz is sent by the phone over Bluetooth, so
     /// unlike the strap's own firmware alarm (Settings → Alarms) it cannot fire from a force-quit app.
     private var honestyCard: some View {
-        StrandCard(padding: 20) {
+        StrandCard(padding: TelosSpace.l) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "bell.slash")
                     .foregroundStyle(StrandPalette.statusWarning)

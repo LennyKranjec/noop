@@ -25,8 +25,15 @@ struct VitalTrioCardView: View {
 
     private static let parts: [LevelPart] = [.heart, .lungs, .sleep]
 
+    @Environment(\.dynamicTypeSize) private var typeSize
+
     var body: some View {
-        HStack(spacing: NoopMetrics.gap) {
+        // Three glass tiles side by side; from the accessibility sizes up they stack (§2.4) rather than
+        // squeeze the rings.
+        let layout = typeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(spacing: TelosSpace.tileGap))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: TelosSpace.tileGap))
+        layout {
             ForEach(Self.parts, id: \.rawValue) { part in
                 VitalTileView(
                     part: part,
@@ -57,46 +64,49 @@ private struct VitalTileView: View {
     }
 
     var body: some View {
-        let tile = VStack(alignment: .leading, spacing: 8) {
-            // Header: the glyph and the metric's name.
-            HStack(spacing: 6) {
+        let tint = levelPartTint(part)
+        let tile = VStack(alignment: .center, spacing: TelosSpace.s) {
+            // Header: the thin accent glyph and the metric's name, small caps.
+            HStack(spacing: TelosSpace.xs) {
                 Image(systemName: levelPartSymbol(part))
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textSecondary)
-                Text(levelPartLabel(part))
-                    .font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .font(TelosType.glyphDelta)
+                    .foregroundStyle(tint)
+                    .accessibilityHidden(true)
+                Text(verbatim: levelPartLabel(part))
+                    .telosScale()
+                    .foregroundStyle(TelosColor.textSecondary)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
 
-            // Body: the three-day mean, and the vertical bar beside it.
-            HStack(alignment: .center) {
-                Text(score.map { "\(Int($0.rounded()))" } ?? "–")
-                    .font(score != nil ? StrandFont.title2 : StrandFont.footnote)
-                    .foregroundStyle(score != nil ? StrandPalette.textPrimary : StrandPalette.textTertiary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                OptimumBar(fraction: (score ?? 0) / 100, tint: levelPartTint(part), lit: score != nil)
-            }
+            // Body: the three-day mean on a thin luminous ring. The part is UNBOUNDED (decision 9):
+            // 100 = the wearer's own optimum, and a score past it draws a second lap instead of a full,
+            // clipped bar. Nil draws the dashed bare track with "—" — never a zero fill.
+            TelosRing(value: score,
+                      scale: 100,
+                      color: tint,
+                      diameter: 64,
+                      accessibilityLabel: Text(verbatim: levelPartLabel(part).capitalized))
 
             // Footer: what it is worth, and which way it is going.
             Text(share.map { "\(Int($0.rounded()))% of level" } ?? " ")
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textTertiary)
+                .font(TelosType.caption)
+                .foregroundStyle(TelosColor.textTertiary)
                 .lineLimit(1)
-            HStack(spacing: 2) {
+                .minimumScaleFactor(0.8)
+            HStack(spacing: TelosSpace.xxs) {
                 // A MISSING PART IS NOT A ZERO. This read `?? 0`, so a part with no score rendered
                 // "lvl 0" — a measured floor — directly under the headline figure that correctly
-                // abstained with "–". Same dash, same meaning, in both places.
-                Text(score.map { "lvl \(Int($0.rounded()))" } ?? "lvl –")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(score != nil ? StrandPalette.textSecondary : StrandPalette.textTertiary)
+                // abstained with "—". Same dash, same meaning, in both places.
+                Text(score.map { "lvl \(Int($0.rounded()))" } ?? "lvl \u{2014}")
+                    .font(TelosType.caption)
+                    .foregroundStyle(score != nil ? TelosColor.textSecondary : TelosColor.textTertiary)
                 TrendArrow(now: score, then: previous)
             }
         }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(StrandPalette.surfaceRaised,
-                    in: RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
+        .padding(TelosSpace.tilePadding)
+        .frame(maxWidth: .infinity)
+        .frostedCardSurface(cornerRadius: TelosRadius.tile)
 
         if let onTap {
             Button {
@@ -106,7 +116,7 @@ private struct VitalTileView: View {
             // The sleep tile is the door to the sleep screen; `.plain` gave the finger nothing back
             // while it opened. Same press-down style as the rest of the card surfaces, at this tile's
             // own radius.
-            .buttonStyle(StrandPressableButtonStyle(cornerRadius: NoopMetrics.cardRadius))
+            .buttonStyle(StrandPressableButtonStyle(cornerRadius: TelosRadius.tile))
         } else {
             tile
         }
@@ -159,7 +169,7 @@ private struct TrendArrow: View {
                 let tint = up ? StrandPalette.statusPositive : StrandPalette.statusCritical
                 HStack(spacing: 1) {
                     Image(systemName: up ? "arrow.up" : "arrow.down")
-                        .font(.system(size: 9, weight: .bold))
+                        .font(TelosType.glyphDelta)
                         .foregroundStyle(tint)
                     // SIGNED, because an unsigned "4" beside a down arrow states the same thing twice
                     // and invites the reader to work out which of the two is the right way round.

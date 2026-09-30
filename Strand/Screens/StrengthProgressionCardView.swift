@@ -1,5 +1,6 @@
 import SwiftUI
 import StrandDesign
+import StrandAnalytics
 import StrandImport
 import WhoopStore
 
@@ -37,6 +38,12 @@ struct StrengthProgressionCardView: View {
     @State private var exercises: [StrengthProgression.Exercise]?
     /// Today's charge, when today has one. Nil means unknown, which is NOT the same as good.
     @State private var todayCharge: Double?
+    /// The week plan (HEALTH_V2 S3): on an easy week strength suggestions say "hold loads". Publishes only
+    /// when the plan is recomputed, so observing it here is cheap.
+    @ObservedObject private var weekPlan = WeekPlanSource.shared
+
+    /// An easy week holds loads: the double-progression step still shows, qualified — never auto-applied.
+    private var holdLoads: Bool { weekPlan.currentPlan?.strength.holdLoads == true }
 
     private var scored: [StrengthProgression.Exercise] { (exercises ?? []).filter { $0.abstained == nil } }
     private var abstaining: [StrengthProgression.Exercise] { (exercises ?? []).filter { $0.abstained != nil } }
@@ -53,7 +60,13 @@ struct StrengthProgressionCardView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text("Progression").strandOverline()
+            HStack(alignment: .firstTextBaseline) {
+                Text("Progression").strandOverline()
+                Spacer(minLength: TelosSpace.s)
+                if holdLoads {
+                    TelosTag(text: Text("Easy week — hold loads"), ink: TelosColor.warning)
+                }
+            }
             Text("Estimated one-rep max per exercise, from your logged sets")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
@@ -80,7 +93,7 @@ struct StrengthProgressionCardView: View {
                     NavigationLink {
                         StrengthProgressionDetailView(exercise: exercise, todayCharge: todayCharge)
                     } label: {
-                        ProgressionRow(exercise: exercise, lowCharge: isLowCharge)
+                        ProgressionRow(exercise: exercise, lowCharge: isLowCharge, holdLoads: holdLoads)
                     }
                     .buttonStyle(.plain)
                 }
@@ -136,6 +149,8 @@ private struct ProgressionRow: View {
     let exercise: StrengthProgression.Exercise
     /// Whether today's charge is low, which qualifies the suggestion rather than withholding it.
     let lowCharge: Bool
+    /// The week plan made this an easy week: the suggestion is qualified with "hold loads".
+    let holdLoads: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -166,11 +181,17 @@ private struct ProgressionRow: View {
             if let suggestion = exercise.suggestion {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Image(systemName: "arrow.forward.circle")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(TelosType.glyphDelta)
                         .foregroundStyle(StrandPalette.accent)
                     Text(StrengthProgressionCopy.suggestion(suggestion))
                         .font(StrandFont.caption)
                         .foregroundStyle(StrandPalette.textSecondary)
+                }
+                if holdLoads {
+                    Text("Easy week — hold loads")
+                        .font(StrandFont.caption)
+                        .foregroundStyle(TelosColor.warning)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if lowCharge {
                     Text("Charge is low today — this step can wait for a better day.")
@@ -199,11 +220,11 @@ private struct ProgressionRow: View {
         HStack(spacing: 4) {
             if let trend = exercise.headlineTrend {
                 Image(systemName: StrengthProgressionCopy.arrow(trend.direction))
-                    .font(.system(size: 9, weight: .bold))
+                    .font(TelosType.glyphDelta)
                     .foregroundStyle(tint(for: trend.direction))
                     .accessibilityLabel(Text(StrengthProgressionCopy.directionLabel(trend.direction)))
             }
-            Text(exercise.currentE1rmKg.map { StrengthProgressionCopy.kgUnit($0) } ?? "—")
+            Text(exercise.currentE1rmKg.map { StrengthProgressionCopy.kgUnit($0) } ?? TelosType.absent)
                 .font(StrandFont.captionNumber)
                 .foregroundStyle(StrandPalette.textPrimary)
         }

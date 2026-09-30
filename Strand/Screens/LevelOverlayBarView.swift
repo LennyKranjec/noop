@@ -44,7 +44,14 @@ let levelRadarDrop: CGFloat = -9
 var levelRadarOverhang: CGFloat { levelRadarDiameter / 3 + levelRadarDrop }
 
 /// How many levers fit. Two: a third glyph makes the row a toolbar and nobody acts on three.
-private let leverCount = 2
+let levelLeverCount = 2
+
+/// TELOS 2.0 (§6.1): the strip's text is the V2 type at 11 pt minimum — deltas `numeralXS` + the label voice,
+/// the step multiplier `scaleNumber`, levers the label voice in each part's identity colour. The strip is a
+/// FIXED 46 pt band of chrome, so its text is capped at the Large size (as the tab bar's is); from
+/// `.accessibility1` the strip shows only the radar and its number, and the trends and levers move into the
+/// level sheet's header (`LevelTimelineSheetView`), where there is room for them to grow.
+let levelStripTextCap: DynamicTypeSize = .large
 
 struct LevelOverlayBarView: View {
     let trend: LevelTrendSnapshot?
@@ -56,25 +63,40 @@ struct LevelOverlayBarView: View {
     /// Tapping the warning: somewhere to bring it down — the breathing exercise.
     var onStressAlert: () -> Void = {}
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     private var breakdown: LevelBreakdown? { trend?.now }
+
+    /// At the accessibility sizes the clusters leave the strip (they move into the level sheet's header).
+    private var compact: Bool { dynamicTypeSize >= .accessibility1 }
 
     var body: some View {
         ZStack(alignment: .top) {
             HStack(spacing: 0) {
-                trendCluster
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if !compact {
+                    trendCluster
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Spacer(minLength: 0)
+                }
                 // Only the radar's WIDTH is reserved here, so the two clusters never slide under it.
                 Color.clear.frame(width: levelRadarDiameter, height: 1)
-                leverCluster
-                    .frame(maxWidth: .infinity, alignment: .trailing)
+                if !compact {
+                    leverCluster
+                        .frame(maxWidth: .infinity, alignment: .trailing)
+                } else {
+                    Spacer(minLength: 0)
+                }
             }
-            .padding(.horizontal, 16)
+            .dynamicTypeSize(...levelStripTextCap)
+            .padding(.horizontal, TelosSpace.pageGutter)
             .frame(maxWidth: .infinity)
             .frame(height: levelBarHeight)
             // THE FILL BLEEDS UP BEHIND THE STATUS BAR, the content does not. That split is the whole
             // fix: the strip reads as part of the chrome with no seam above it, while the trend chips,
             // the levers and the pentagon all start below the clock, the battery and the notch.
-            .background(StrandPalette.surfaceBase.ignoresSafeArea(edges: .top))
+            // Opaque `canvas` (§6.1): chrome that content scrolls under is never see-through.
+            .background(TelosColor.canvas.ignoresSafeArea(edges: .top))
 
             LevelRadarView(
                 breakdown: breakdown,
@@ -87,7 +109,13 @@ struct LevelOverlayBarView: View {
             .contentShape(PentagonShape())
             .onTapGesture {
                 guard breakdown != nil else { return }
-                StrandHaptic.selection.play()
+                TelosHaptics.play(.select, action: "level.strip.open")
+                onOpenTimeline()
+            }
+            .accessibilityAddTraits(breakdown != nil ? .isButton : [])
+            .accessibilityHint(breakdown != nil ? Text("Opens the level over time") : Text(verbatim: ""))
+            .accessibilityAction {
+                guard breakdown != nil else { return }
                 onOpenTimeline()
             }
         }
@@ -96,7 +124,7 @@ struct LevelOverlayBarView: View {
         .overlay(alignment: .top) {
             if let stressAlert {
                 StressAlertPillView(level: stressAlert, action: onStressAlert)
-                    .offset(x: levelRadarDiameter / 2 + 46, y: levelBarHeight - 4)
+                    .offset(x: levelRadarDiameter / 2 + 50, y: levelBarHeight - 14)
                     .transition(.opacity)
             }
         }
@@ -110,13 +138,7 @@ struct LevelOverlayBarView: View {
     /// Both, because they answer different questions — three days is "did last night help", a month is
     /// "am I actually getting anywhere". A single figure would hide whichever one the wearer needed.
     private var trendCluster: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            DeltaChipView(delta: trend?.deltaThreeDays, span: "Ø3d")
-            DeltaChipView(delta: trend?.deltaMonth, span: "Ø1mo")
-            if let breakdown {
-                StepMultiplierChipView(multiplier: breakdown.stepPenalty)
-            }
-        }
+        LevelTrendCluster(trend: trend)
     }
 
     /// What would move the level most: the glyph, and the metric's own short name.
@@ -124,14 +146,45 @@ struct LevelOverlayBarView: View {
     /// Ranked by what they are WORTH, not by which score is lowest — a lungs score of 20 looks worse
     /// than a sleep score of 60 and is worth a third as much level.
     private var leverCluster: some View {
-        let levers = Array((breakdown?.levers() ?? []).prefix(leverCount))
+        LevelLeverCluster(trend: trend, alignment: .trailing)
+    }
+}
+
+/// The trend chips (three-day and month means) and the step multiplier — the strip's left cluster, reused in
+/// the level sheet's header at the accessibility sizes.
+struct LevelTrendCluster: View {
+    let trend: LevelTrendSnapshot?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            DeltaChipView(delta: trend?.deltaThreeDays, span: "Ø3d")
+            DeltaChipView(delta: trend?.deltaMonth, span: "Ø1mo")
+            if let breakdown = trend?.now {
+                StepMultiplierChipView(multiplier: breakdown.stepPenalty)
+            }
+        }
+    }
+}
+
+/// What would move the level most — the strip's right cluster, reused in the level sheet's header at the
+/// accessibility sizes.
+///
+/// MEDITATION IS NEVER A CONTRIBUTOR (coordinator decision 10): it only ever deducts, so a lever never names
+/// it; a focus lever whose driver is meditation names its part instead.
+struct LevelLeverCluster: View {
+    let trend: LevelTrendSnapshot?
+    var alignment: HorizontalAlignment = .trailing
+
+    var body: some View {
+        let levers = Array((trend?.now?.levers() ?? []).prefix(levelLeverCount))
         let top = levers.first?.headroom ?? 0
-        return VStack(alignment: .trailing, spacing: 1) {
+        return VStack(alignment: alignment, spacing: 1) {
             ForEach(Array(levers.enumerated()), id: \.offset) { _, lever in
                 let share = top > 0 ? lever.headroom / top : 0
+                let driver = trend?.drivers[lever.part]
                 LeverRowView(
                     part: lever.part,
-                    driver: trend?.drivers[lever.part],
+                    driver: driver == .meditation ? nil : driver,
                     share: share
                 )
             }
@@ -147,28 +200,34 @@ private struct DeltaChipView: View {
     var body: some View {
         // A change under half a point is noise on a 0–100 scale, and so is one that rounds away to
         // nothing; both are shown as flat rather than as a number the wearer would read meaning into.
+        // §5.5: "no delta computed" is an em dash, "unchanged" is ±0 — the two must stay distinguishable.
         let points = delta.map { Int($0.rounded()) } ?? 0
-        let flat = delta == nil || abs(delta!) < 0.5 || points == 0
+        let absent = delta == nil
+        let flat = absent || abs(delta ?? 0) < 0.5 || points == 0
+        let up = (delta ?? 0) > 0
         let tint: Color = flat
-            ? StrandPalette.textTertiary
-            : (delta! > 0 ? StrandPalette.statusPositive : StrandPalette.statusCritical)
+            ? TelosColor.textTertiary
+            : (up ? TelosColor.positive : TelosColor.critical)
+        let figure: String = absent ? TelosType.absent
+            : (flat ? "\u{00B1}0" : (points > 0 ? "+\(points)" : TelosType.minus + "\(abs(points))"))
 
-        return HStack(spacing: 2) {
-            // NO ARROW WHEN THERE IS NOTHING TO POINT AT. The flat glyph is a dash and the flat label is
-            // a dash, and the two side by side read as a rendering fault rather than as "unchanged".
+        return HStack(spacing: TelosSpace.xxs) {
+            // NO ARROW WHEN THERE IS NOTHING TO POINT AT.
             if !flat {
-                Image(systemName: delta! > 0 ? "arrow.up" : "arrow.down")
-                    .font(.system(size: 9, weight: .semibold))
+                Image(systemName: up ? "arrow.up" : "arrow.down")
+                    .font(TelosType.glyphDelta)
                     .foregroundStyle(tint)
+                    .accessibilityHidden(true)
             }
-            Text(flat ? "–" : (points > 0 ? "+\(points)" : "\(points)"))
-                .font(.system(size: 11, weight: .medium))
-                .monospacedDigit()
+            Text(verbatim: figure)
+                .font(TelosType.numeralXS)
                 .foregroundStyle(tint)
             Text(span)
-                .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(StrandPalette.textTertiary)
+                .telosScale()
+                .foregroundStyle(TelosColor.textTertiary)
         }
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
     }
 }
 
@@ -184,27 +243,32 @@ private struct StressAlertPillView: View {
     let action: () -> Void
 
     var body: some View {
-        Button {
-            SystemHaptics.play(.tap)
+        // §6.1: a WORD ("Stress high"), not a decimal — the band from the same cut-points as the stress
+        // screen. `critical` fill, white ink, the `raised` elevation (one shadow), a 44 pt hit area.
+        let word = LiveStressMonitor.bandWord(level).lowercased()
+        return Button {
+            TelosHaptics.play(.tap, action: "level.strip.stress")
             action()
         } label: {
-            HStack(spacing: 4) {
+            HStack(spacing: TelosSpace.xs) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 10, weight: .bold))
-                Text(String(format: "Stress %.1f", level))
                     .font(.system(size: 11, weight: .bold))
-                    .monospacedDigit()
+                Text("Stress \(word)")
+                    .font(.system(size: 12, weight: .bold))
+                    .lineLimit(1)
                 Image(systemName: "wind")
-                    .font(.system(size: 10, weight: .bold))
+                    .font(.system(size: 11, weight: .bold))
             }
-            .foregroundStyle(.white)
-            .padding(.horizontal, 9)
+            .foregroundStyle(TelosColor.onDarkPrimary)
+            .padding(.horizontal, 10)
             .padding(.vertical, 5)
-            .background(StrandPalette.statusCritical, in: Capsule())
-            .shadow(color: StrandPalette.statusCritical.opacity(0.5), radius: 8)
+            .background(TelosColor.critical, in: Capsule())
+            .telosElevation(.raised)
+            .frame(minHeight: TelosSpace.hitTarget)
+            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(Text(String(format: "Stress is high at rest, %.1f of 3. Opens a breathing exercise.", level)))
+        .buttonStyle(TelosPressButtonStyle())
+        .accessibilityLabel(Text("Stress is \(word) at rest. Opens a breathing exercise."))
     }
 }
 
@@ -213,16 +277,16 @@ private struct StepMultiplierChipView: View {
 
     var body: some View {
         let biting = multiplier < 0.995
-        let tint = biting ? StrandPalette.statusWarning : StrandPalette.textTertiary
-        return HStack(spacing: 2) {
+        let tint = biting ? TelosColor.warning : TelosColor.textTertiary
+        return HStack(spacing: TelosSpace.xxs) {
             Image(systemName: "shoeprints.fill")
-                .font(.system(size: 8, weight: .semibold))
+                .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(tint)
             Text(String(format: "×%.2f", multiplier))
-                .font(.system(size: 10, weight: .medium))
-                .monospacedDigit()
+                .font(TelosType.scaleNumber)
                 .foregroundStyle(tint)
         }
+        .lineLimit(1)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(biting
             ? "Steps multiply the level by \(String(format: "%.2f", multiplier))"
@@ -240,15 +304,19 @@ private struct LeverRowView: View {
         // layout shift when the ranking changes between renders.
         let alpha = 0.45 + 0.55 * min(max(share, 0), 1)
         let tint = levelPartTint(part).opacity(alpha)
-        return HStack(spacing: 3) {
+        return HStack(spacing: TelosSpace.xs) {
             Image(systemName: levelPartSymbol(part))
-                .font(.system(size: 9, weight: .semibold))
+                .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(tint)
+                .accessibilityHidden(true)
             // The glyph carries the part, so the word only has to carry the metric — which is what lets
-            // "consistency" stand next to a moon without also saying "sleep".
+            // "consistency" stand next to a moon without also saying "sleep". The label voice (§6.1).
             Text(driver.map { levelDriverLabel($0) } ?? LocalizedStringKey(part.rawValue))
-                .font(.system(size: 9, weight: .semibold))
+                .telosScale()
+                .textCase(.uppercase)
                 .foregroundStyle(tint)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
         }
     }
 }

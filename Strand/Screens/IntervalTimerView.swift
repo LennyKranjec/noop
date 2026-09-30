@@ -10,8 +10,13 @@ import StrandDesign
 /// long 5-loop buzz when the whole session finishes. With no strap bonded it still
 /// works as a big glanceable visual timer (just without haptics).
 struct IntervalTimerView: View {
-    @EnvironmentObject private var model: AppModel
-    @EnvironmentObject private var live: LiveState
+    /// NOT observed (DESIGN_V2 §2.1 rule 5). This screen needs ONE live field — whether the strap is bonded —
+    /// and calls the model only from actions. `@EnvironmentObject` on `AppModel` (1–3×/s while streaming) and
+    /// `LiveState` (per R-R packet) re-rendered the whole timer at stream rate; `bonded` now arrives through
+    /// one de-duplicated publisher into `@State`.
+    @Environment(\.appModelRef) private var modelRef
+    private var model: AppModel { requireAppModel(modelRef) }
+    @State private var bonded = false
 
     // MARK: Config (persisted only in-view)
 
@@ -37,18 +42,13 @@ struct IntervalTimerView: View {
     @State private var running: Bool = false
     @State private var elapsed: Int = 0             // total elapsed seconds across the session
 
-    // MARK: iPhone haptics (iOS only)
+    // MARK: Phone haptics
     //
-    // The strap buzz (`buzz`) only fires when a strap is bonded; on iPhone the device in
-    // the user's hand has a Taptic Engine, so we mirror every transition cue with native
-    // haptics that fire regardless of bond state. A monotonically-bumped Int token drives a
-    // single `.sensoryFeedback`, so even a repeated cue (the 3-2-1 tick three seconds running)
-    // re-fires because the trigger value always changes.
-    #if os(iOS)
+    // The strap buzz (`buzz`) only fires when a strap is bonded; the phone in the user's hand mirrors every
+    // transition cue through the ONE haptic vocabulary (`TelosHaptics`, coordinator decision 8), regardless
+    // of bond state: WORK → commit (rigid), REST → settle (soft), the 3-2-1 countdown → tick, DONE →
+    // success. It honours the app's haptics setting and reduces under Reduce Motion / Low Power.
     private enum HapticCue { case work, rest, tick, done }
-    @State private var lastHaptic: HapticCue = .work
-    @State private var hapticTick: Int = 0
-    #endif
 
     // 1Hz tick.
     private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
@@ -127,25 +127,18 @@ struct IntervalTimerView: View {
         // disabled app-wide.
         .onChangeCompat(of: running) { ScreenIdle.keepAwake($0) }
         .onDisappear { ScreenIdle.keepAwake(false) }
-        #if os(iOS)
-        // iPhone haptics: one modifier emits a different feel per cue, re-firing on every
-        // token bump. Fires regardless of strap bond so the timer is fully usable unstrapped.
-        .sensoryFeedback(trigger: hapticTick) { _, _ in
-            switch lastHaptic {
-            case .work: return .impact(weight: .heavy)      // strong cue into WORK
-            case .rest: return .impact(weight: .light)      // soft cue into REST
-            case .tick: return .selection                   // 3-2-1 countdown tick
-            case .done: return .success                     // session complete
-            }
+        // The ONE bond subscription. The `!=` guard: the publisher is rebuilt on every body pass and a fresh
+        // `removeDuplicates()` replays the current value — writing `@State` on each replay would loop.
+        .onReceive(model.live.$bonded.removeDuplicates()) { next in
+            if bonded != next { bonded = next }
         }
-        #endif
     }
 
     // MARK: Status row
 
     private var statusRow: some View {
         HStack(spacing: 10) {
-            if live.bonded {
+            if bonded {
                 StatePill("Buzz cues on", tone: .positive)
             } else {
                 StatePill("Connect strap for buzz cues", tone: .warning)
@@ -184,7 +177,7 @@ struct IntervalTimerView: View {
 
                 controls
 
-                if !live.bonded {
+                if !bonded {
                     Label("Bond your strap on the Live screen to feel the transitions hands-free.",
                           systemImage: "wave.3.right")
                         .font(StrandFont.footnote)
@@ -466,19 +459,23 @@ struct IntervalTimerView: View {
     /// Fire a strap buzz (no-op when not bonded — `buzz` already guards, but we
     /// also skip the call entirely so this stays a pure visual tool when unbonded).
     private func buzz(loops: UInt8) {
-        guard live.bonded else { return }
+        guard bonded else { return }
         model.buzz(loops: loops, gate: HapticPrefs.intervals)
     }
 
-    #if os(iOS)
-    /// Fire an iPhone haptic cue. Additive to `buzz` and unguarded by bond state, so the
-    /// timer gives tactile feedback even with no strap. Bumping the token re-triggers
-    /// `.sensoryFeedback` even when the same cue repeats.
+    /// Fire the phone's haptic cue for a transition. Additive to `buzz` and unguarded by bond state, so the
+    /// timer gives tactile feedback even with no strap. Keyed per second of the session so one transition
+    /// never plays two patterns.
     private func haptic(_ cue: HapticCue) {
-        lastHaptic = cue
-        hapticTick &+= 1
+        let pattern: TelosHaptic
+        switch cue {
+        case .work: pattern = .commit
+        case .rest: pattern = .settle
+        case .tick: pattern = .tick
+        case .done: pattern = .success
+        }
+        TelosHaptics.play(pattern, action: "intervals.\(elapsed).\(currentRound)")
     }
-    #endif
 
     // MARK: Formatting
 

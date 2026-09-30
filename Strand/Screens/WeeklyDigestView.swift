@@ -371,7 +371,7 @@ struct WeeklyDigestContent: View {
         let arrow = s.wowDelta > 0 ? "arrow.up" : (s.wowDelta < 0 ? "arrow.down" : "minus")
         return HStack(spacing: 3) {
             Image(systemName: arrow)
-                .font(.system(size: 9, weight: .bold))
+                .font(TelosType.glyphDelta)
                 .accessibilityHidden(true)
             Text(deltaText(s))
                 .font(StrandFont.captionNumber)

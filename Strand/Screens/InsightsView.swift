@@ -241,7 +241,7 @@ struct InsightsView: View {
                     // Self-contained (owns its own UserDefaults-backed store); sits in the same
                     // "log today" block. Opt-in: shows nothing until the user logs an intake.
                     CaffeineLogCard()
-                    experimentSection
+                    experimentRetiredSection
                     if behaviours.isEmpty {
                         // No journal yet, explain, without dead-ending on a paid export.
                         NoopCard {
@@ -295,28 +295,28 @@ struct InsightsView: View {
     /// The deep-link row into the v5 "What moves you" hub.
     private var whatMovesYouLink: some View {
         Button { router.openInsightsHub() } label: {
-            NoopCard(tint: StrandPalette.chargeColor) {
+            NoopCard(tint: TelosColor.teal) {
                 HStack(spacing: 12) {
                     Image(systemName: "wand.and.sparkles")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(StrandPalette.accent)
+                        .font(TelosType.glyphField)
+                        .foregroundStyle(TelosColor.teal)
                         .frame(width: 30, height: 30)
-                        .background(StrandPalette.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .background(TelosColor.teal.opacity(TelosOpacity.fill), in: RoundedRectangle(cornerRadius: TelosRadius.plate, style: .continuous))
                         .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 4) {
                         // WHOOP tappable-card title: UPPERCASE tracked white + trailing "›" chevron
                         // glyph (mirrors "HEALTH MONITOR ›"). The descriptive line stays beneath.
                         Text("WHAT MOVES YOU \u{203A}")
-                            .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                        Text("Ranked, lag-aware: which of your habits actually move your Charge, plus your personal alcohol/caffeine dose-response.")
-                            .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                            .telosScale()
+                            .foregroundStyle(TelosColor.textPrimary)
+                        Text("Which of your habits go with better or worse nights: associations with their intervals, and what a finished trial has shown.")
+                            .font(TelosType.footnote).foregroundStyle(TelosColor.textTertiary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 8)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(StrandPalette.accent)
+                        .font(TelosType.glyphChevron)
+                        .foregroundStyle(TelosColor.textTertiary)
                         .accessibilityHidden(true)
                 }
             }
@@ -324,7 +324,7 @@ struct InsightsView: View {
         // Liquid tap response: the same physical settle-inward every tappable liquid card gets.
         .buttonStyle(LiquidPressStyle())
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("What moves you. Ranked patterns in your own data, and your dose-response.")
+        .accessibilityLabel("What moves you. Habit patterns in your own data, and your trial results.")
     }
 
     // MARK: - Load
@@ -540,7 +540,60 @@ struct InsightsView: View {
         relationships = computeRelationships()
     }
 
-    // MARK: - Personal experiment section
+    // MARK: - Personal experiment → Habit Trials (HEALTH_V2 H13)
+    //
+    // RETIRED IN 2.0. The before/after protocol below counted unlogged days as the baseline, paired a
+    // behaviour with the morning BEFORE it and ran no test. No new experiment can be started: the section
+    // now points at Habit Trials (randomised ON/OFF days, a pre-registered meaningful change, a verdict with
+    // its interval). The `noop.experiment.*` AppStorage keys stay readable for one release, so an experiment
+    // already in progress still shows its start as history. The old protocol code below is unreachable
+    // from the UI and kept only so those keys keep one reader.
+
+    private var experimentRetiredSection: some View {
+        VStack(alignment: .leading, spacing: TelosSpace.sectionHeaderGap) {
+            SectionHeader("Habit trials", overline: "Replaces Personal Experiment")
+            StrandCard(tint: TelosColor.teal) {
+                VStack(alignment: .leading, spacing: TelosSpace.s) {
+                    Text("Personal experiments are now Habit Trials: the app picks ON and OFF days at random, fixes the change that would matter before you start, and gives a verdict with its interval at the end.")
+                        .font(TelosType.subhead)
+                        .foregroundStyle(TelosColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !experimentStartedDay.isEmpty {
+                        HStack(alignment: .firstTextBaseline, spacing: TelosSpace.s) {
+                            PGOverline("History")
+                            Text(verbatim: experimentBehaviour.isEmpty
+                                 ? experimentStartedDay
+                                 : "\(experimentBehaviour) · \(experimentStartedDay)")
+                                .font(TelosType.scaleNumber)
+                                .foregroundStyle(TelosColor.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Text("Your earlier experiment's start is kept as history. It is not analysed.")
+                            .font(TelosType.caption)
+                            .foregroundStyle(TelosColor.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    #if os(iOS)
+                    NavigationLink {
+                        HabitsHubView()
+                    } label: {
+                        HStack(spacing: TelosSpace.xs) {
+                            Text("Open Habit Trials")
+                            Image(systemName: "chevron.right").font(TelosType.glyphChevron)
+                        }
+                        .font(TelosType.subhead.weight(.semibold))
+                        .foregroundStyle(TelosColor.teal)
+                        .frame(minHeight: TelosSpace.hitTarget)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(TelosPressButtonStyle())
+                    #endif
+                }
+            }
+        }
+    }
+
+    // MARK: - Personal experiment section (retired — unreachable, see above)
     //
     // A LOCAL-ONLY n-of-1 protocol: pick ONE behaviour you actually log, one outcome,
     // and a short window, then compare the outcome on days you logged the behaviour
@@ -1183,7 +1236,7 @@ struct InsightsView: View {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                 HStack(alignment: .center, spacing: 8) {
                     Image(systemName: sportSymbol(cost.sport))
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(TelosType.glyphRow)
                         .foregroundStyle(accent)
                         .frame(width: 20)
                     Text(cost.sport)

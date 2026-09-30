@@ -24,50 +24,12 @@ struct ConsistencyCard: View {
         // read here — the same memoized result the Night-detail grid reads for its tile.
         let cons = model.consistency
 
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+        VStack(alignment: .leading, spacing: TelosSpace.sectionHeaderGap) {
             SectionHeader("Consistency", overline: "Sleep")
-            // Verbatim of the NightDetailCard "Consistency" tile so the hosted value matches the Sleep-tab
-            // tile exactly; stretched to the card's full width as a single-metric summary.
-            StatTile(
-                label: "Consistency",
-                value: pctValue(cons.latest),
-                caption: tileCaption(latestDay: cons.latestDay, latest: cons.latest,
-                                     typical: cons.typical, suffix: "%"),
-                accent: cons.latest.map { StrandPalette.recoveryColor($0) } ?? StrandPalette.textPrimary,
-                sparkline: spark(cons.series),
-                sparkColor: StrandPalette.metricCyan)
-                .frame(maxWidth: .infinity)
+            // Telos 2.0: the SAME compact tile the Night-detail grid builds for this metric
+            // (`SleepMetricTile`), so the hosted value, delta and states match it exactly.
+            SleepMetricTile.make("Consistency", metric: cons, unit: "%",
+                                 direction: .higherIsBetter, spark: TelosColor.lungs, icon: "clock")
         }
-    }
-
-    // MARK: - Tile formatting (verbatim lift of the NightDetailCard "Consistency" tile helpers)
-
-    private func pctValue(_ v: Double?) -> String {
-        v.map { "\(Int($0.rounded()))%" } ?? "—"
-    }
-
-    /// #1946: a carried prior-day value is stamped "Carried · <date>" instead of "vs typical".
-    private func tileCaption(latestDay: String?, latest: Double?, typical: Double?,
-                             suffix: String, decimals: Int = 0) -> String {
-        if let carried = SleepModel.carriedMetricCaption(latestDay: latestDay, latest: latest) {
-            return carried
-        }
-        return vsTypical(latest, typical, suffix: suffix, decimals: decimals)
-    }
-
-    /// "+12% vs typical" — the latest-vs-mean caption the metric tile carries.
-    private func vsTypical(_ latest: Double?, _ typical: Double?, suffix: String, decimals: Int = 0) -> String {
-        guard let latest, let typical, typical != 0 else { return String(localized: "vs typical - ") }
-        let diff = latest - typical
-        let sign = diff >= 0 ? "+" : "−"
-        let mag = abs(diff)
-        let num = decimals == 0 ? "\(Int(mag.rounded()))" : String(format: "%.\(decimals)f", mag)
-        return String(localized: "\(sign)\(num)\(suffix) vs typical")
-    }
-
-    /// A sparkline needs at least two points; otherwise return nil so the tile stays clean.
-    private func spark(_ series: [Double]) -> [Double]? {
-        let tail = Array(series.suffix(30))
-        return tail.count > 1 ? tail : nil
     }
 }

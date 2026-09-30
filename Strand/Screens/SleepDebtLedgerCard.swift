@@ -23,7 +23,7 @@ struct SleepDebtLedgerCard: View {
         let ledger = model.sleepDebtLedger
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             SectionHeader("Sleep-debt ledger", overline: "Last 14 nights")
-            NoopCard(tint: StrandPalette.restColor) {
+            NoopCard(tint: TelosColor.violet) {
                 if ledger.nightCount == 0 {
                     Text("No nights with sleep data yet. Your ledger fills in as you wear the strap to bed.")
                         .font(StrandFont.subhead)
@@ -37,7 +37,7 @@ struct SleepDebtLedgerCard: View {
                             CountUpText(
                                 value: ledger.magnitudeMin,
                                 format: { debtHeadline(forMagnitudeMin: $0, ledger: ledger) },
-                                font: StrandFont.number(26),
+                                font: TelosType.numeralFont(size: 30, weight: .light),
                                 color: debtBalanceColor(ledger)
                             )
                             .lineLimit(1)

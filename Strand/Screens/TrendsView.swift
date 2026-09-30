@@ -253,7 +253,8 @@ struct TrendsView: View {
     }
 
     private var scaffold: some View {
-        ScreenScaffold(title: "Trends", subtitle: "The thread of you over time.",
+        // DESIGN_V2 §6.4: the screen is titled like its tab.
+        ScreenScaffold(title: "Health", subtitle: "The thread of you over time.",
                        // PERF (scroll): lazy column — byte-identical layout (LazyVStack == eager VStack
                        // alignment/spacing/header). The content is one inner eager VStack, so the staggered
                        // section reveal is unchanged; this only defers building that stack until it scrolls in.
@@ -279,6 +280,12 @@ struct TrendsView: View {
                 VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                     // The main card list ripples in once on appear (Reduce-Motion safe).
                     Group {
+                        // THIS WEEK, above the muscle model (DESIGN_V2 §6.14 / HEALTH_V2 S3): the week's
+                        // movement plan — aerobic minutes vs range, strength sessions, steps, the day's
+                        // guidance — and on review day the Monday review. Static; re-renders only when
+                        // `WeekPlanSource` publishes.
+                        WeekPlanCardView(source: WeekPlanSource.shared)
+                            .staggeredAppear(index: 0)
                         // MUSCLE LOAD FIRST. It is the card this tab is opened for on a lifting week,
                         // and it was sitting below four charts and a training-load panel — far enough
                         // down that the wearer had to go looking for the thing they came to see.
@@ -296,6 +303,10 @@ struct TrendsView: View {
                         // own: the figure above already says what this part of the screen is, and a
                         // title here would label a label. The third tile IS the Sleep door.
                         VitalTrioCardView(trend: levelTrend, onOpenSleep: { openSleep = true })
+                            .staggeredAppear(index: 2)
+                        // The Biometrics strip: the latest vitals as compact glass tiles (decision 11),
+                        // each with its 14-day micro-line. A value from an earlier day says so.
+                        BiometricsVitalsStrip(days: repo.days)
                             .staggeredAppear(index: 2)
                         // Week-in-review digest (#208) with prev/next week browsing (#710) — self-hides
                         // only when NO week in history has data. Past weeks render in the same format.
@@ -318,6 +329,9 @@ struct TrendsView: View {
                         yearStrip
                             .staggeredAppear(index: 9)
                         exportReportRow
+                            .staggeredAppear(index: 10)
+                        // GO DEEPER (§6.4): the deeper screens as one grouped list. They stay in More too.
+                        HealthGoDeeperList()
                             .staggeredAppear(index: 10)
                     }
                 }
@@ -853,6 +867,151 @@ struct TrendsView: View {
             .foregroundStyle(StrandPalette.textTertiary)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
             .background(NoopPanelSurface(cornerRadius: 12))
+    }
+}
+
+// MARK: - Biometrics vitals strip
+
+/// The latest vitals as compact tiles: resting HR, HRV, respiratory rate, SpO₂ and the skin-temperature
+/// deviation. Each reads today's row; when today has none it shows the most recent of the last seven days
+/// as CARRIED (secondary numeral + "Carried · d MMM"), and older than that it abstains with "—". The
+/// micro-line is the last 14 days, a missing day breaking the line (NaN), never bridged.
+///
+/// COST: static; a pass over the last 14 rows per `repo.days` change.
+struct BiometricsVitalsStrip: View {
+    let days: [DailyMetric]
+
+    private struct Reading {
+        let value: Double?
+        let carriedFrom: Date?
+        let spark: [Double]
+    }
+
+    private func reading(_ value: (DailyMetric) -> Double?) -> Reading {
+        let today = Repository.localDayKey(Date())
+        let recent = Array(days.suffix(14))
+        let spark = recent.map { value($0) ?? .nan }
+        let floor = WeeklyDigestEngine.addDays(today, -6)
+        guard let latest = days.last(where: { $0.day >= floor && $0.day <= today && value($0) != nil }),
+              let v = value(latest) else {
+            return Reading(value: nil, carriedFrom: nil, spark: spark)
+        }
+        return Reading(value: v,
+                       carriedFrom: latest.day == today ? nil : Self.date(latest.day),
+                       spark: spark)
+    }
+
+    var body: some View {
+        let rhr = reading { $0.restingHr.map(Double.init) }
+        let hrv = reading { $0.avgHrv }
+        let resp = reading { $0.respRateBpm }
+        let spo2 = reading { $0.spo2Pct }
+        // Deviation only: imports write an ABSOLUTE wrist °C into the same column, which is not a
+        // deviation and is dropped here rather than shown as "+33 °C" (HEALTH_V2 H7a).
+        let skin = reading { m in m.skinTempDevC.flatMap { VitalBands.isAbsoluteSkinTemp($0) ? nil : $0 } }
+        TelosTileGrid(maxColumns: 3) {
+            TelosMetricTile("Resting HR", value: rhr.value, unit: "bpm",
+                            absentReason: Text("No night recorded"), carriedFrom: rhr.carriedFrom,
+                            sparkline: rhr.spark, ink: TelosColor.heartInk, sparkColor: TelosColor.heart,
+                            icon: "heart", iconTint: TelosColor.heart)
+            TelosMetricTile("HRV", value: hrv.value, unit: "ms",
+                            absentReason: Text("No night recorded"), carriedFrom: hrv.carriedFrom,
+                            sparkline: hrv.spark, ink: TelosColor.focusInk, sparkColor: TelosColor.focus,
+                            icon: "waveform.path.ecg", iconTint: TelosColor.focus)
+            TelosMetricTile("Resp", value: resp.value, unit: "br/min", format: TelosFormat.decimal(1),
+                            absentReason: Text("No night recorded"), carriedFrom: resp.carriedFrom,
+                            sparkline: resp.spark, ink: TelosColor.lungsInk, sparkColor: TelosColor.lungs,
+                            icon: "lungs", iconTint: TelosColor.lungs)
+            TelosMetricTile("SpO₂", value: spo2.value, unit: "%",
+                            absentReason: Text("No night recorded"), carriedFrom: spo2.carriedFrom,
+                            sparkline: spo2.spark, ink: TelosColor.lungsInk, sparkColor: TelosColor.teal,
+                            icon: "drop", iconTint: TelosColor.teal)
+            TelosMetricTile("Skin temp", value: skin.value, unit: "°C",
+                            format: { TelosFormat.signedDelta($0, digits: 1) },
+                            absentReason: Text("No night recorded"), carriedFrom: skin.carriedFrom,
+                            sparkline: skin.spark, ink: TelosColor.textPrimary, sparkColor: TelosColor.amber,
+                            icon: "thermometer.medium", iconTint: TelosColor.amber)
+        }
+    }
+
+    static func date(_ ymd: String) -> Date? {
+        guard let (y, m, d) = WeeklyDigestEngine.parseYMD(ymd) else { return nil }
+        return Calendar.current.date(from: DateComponents(year: y, month: m, day: d, hour: 12))
+    }
+}
+
+// MARK: - Go deeper (§6.4)
+
+/// Health Monitor, Explore, Sleep, Stress, Compare and Look ahead as one grouped list (§5.8 rows). The
+/// routes are the existing ones — `TabRoute` values where the stack registers them, the Compare and Look
+/// ahead screens by closure (they have no route value).
+struct HealthGoDeeperList: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: TelosSpace.sectionHeaderGap) {
+            Text("Go deeper")
+                .telosScale()
+                .textCase(.uppercase)
+                .foregroundStyle(TelosColor.textTertiary)
+                .accessibilityAddTraits(.isHeader)
+            VStack(spacing: 0) {
+                NavigationLink(value: TabRoute.health) {
+                    TelosListRow("Health Monitor", systemImage: "heart.text.square", iconTint: TelosColor.heart,
+                                 showsChevron: true)
+                }
+                .buttonStyle(TelosRowButtonStyle())
+                TelosListDivider()
+                NavigationLink(value: TabRoute.metricExplorer) {
+                    TelosListRow("Explore", systemImage: "square.grid.2x2", iconTint: TelosColor.mint,
+                                 showsChevron: true)
+                }
+                .buttonStyle(TelosRowButtonStyle())
+                TelosListDivider()
+                NavigationLink(value: TabRoute.sleep) {
+                    TelosListRow("Sleep", systemImage: "moon.stars", iconTint: TelosColor.rest,
+                                 showsChevron: true)
+                }
+                .buttonStyle(TelosRowButtonStyle())
+                TelosListDivider()
+                NavigationLink(value: TabRoute.stress) {
+                    TelosListRow("Stress", systemImage: "waveform.path", iconTint: TelosColor.stress,
+                                 showsChevron: true)
+                }
+                .buttonStyle(TelosRowButtonStyle())
+                TelosListDivider()
+                NavigationLink {
+                    CompareView()
+                } label: {
+                    TelosListRow("Compare", systemImage: "chart.xyaxis.line", iconTint: TelosColor.teal,
+                                 showsChevron: true)
+                }
+                .buttonStyle(TelosRowButtonStyle())
+                TelosListDivider()
+                // Look ahead (decision 13): projections on the current trend vs the plan.
+                NavigationLink {
+                    LookAheadDestination()
+                } label: {
+                    TelosListRow("Look ahead", systemImage: "chart.line.uptrend.xyaxis",
+                                 iconTint: TelosColor.mint, showsChevron: true)
+                }
+                .buttonStyle(TelosRowButtonStyle())
+            }
+            .frostedCardSurface()
+        }
+    }
+}
+
+/// `LookAheadView` reads the `AppModel` as an environment object. This host hands it the live model
+/// WITHOUT observing it (`appModelRef`), so a screen that only links there never subscribes to the model.
+/// Used by the Health tab and the week review.
+struct LookAheadDestination: View {
+    @Environment(\.appModelRef) private var appModelRef
+
+    var body: some View {
+        if let model = resolvedAppModel(appModelRef) {
+            LookAheadView().environmentObject(model)
+        } else {
+            ProgressView()
+        }
     }
 }
 

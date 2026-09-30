@@ -82,6 +82,7 @@ struct LiftProgramEditorView: View {
                 }
             }
             .navigationTitle(Text("Training plan"))
+            .liftFormChrome()
             .navigationBarTitleDisplayMode(.inline)
             .navigationDestination(for: TemplateRoute.self) { route in
                 LiftTemplateEditorView(programs: programs, templateId: route.id)
@@ -148,6 +149,7 @@ struct LiftTemplateEditorView: View {
             }
         }
         .navigationTitle(Text(verbatim: template?.name ?? ""))
+        .liftFormChrome()
         .toolbar { EditButton() }
         .onAppear { name = template?.name ?? "" }
         .onDisappear(perform: commitName)
@@ -263,6 +265,7 @@ struct LiftExerciseEditorView: View {
             }
         }
         .navigationTitle(Text(verbatim: exercise?.name ?? ""))
+        .liftFormChrome()
         .navigationBarTitleDisplayMode(.inline)
         .onAppear {
             name = exercise?.name ?? ""

@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import Charts
 import StrandDesign
 import StrandAnalytics
@@ -14,40 +15,44 @@ import WhoopProtocol
 /// `HRZones` model; elapsed time ticks from the workout's start (a TimelineView, no manual Timer);
 /// effort is the running `ActiveWorkout.liveStrain` (StrainScorer over the captured window).
 ///
-/// ZONE LOCK: the HR ZONE block carries a zone slider (the whole zone 1 … HRmax range as one bar with a
-/// live marker) and five lock chips. A locked zone is stored on `ActiveWorkout.lockedZone`; the strap
-/// cueing itself lives in `AppModel.evaluateZoneGuidance`, so it keeps running with this screen closed.
-/// The session card sets the session against the day's Effort and its recommended ceiling.
+/// TELOS 2.0 (DESIGN_V2 §6.7, the "Training Coach" reference). Top to bottom:
+///   - the Telos Lift logger (strength sports only — decision 16), unchanged in behaviour;
+///   - the hero glass panel: a luminous ZONE DIAL (the five zone arcs in the HR-zone ramp, the current
+///     zone lit, a caret at the live bpm) with the heart rate as the big numeral in the zone's colour,
+///     and the session's Effort as a thin `TelosRing` beside it; the LIVE status pill above;
+///   - compact glass tiles: AVG · PEAK · DAY / TARGET, "—" until the session has a reading (the old
+///     `?? 0` into this card is gone), with the day-vs-ceiling bar under them;
+///   - HR ZONE: the zone scale (5-band bar, caret at the live bpm) and the five 44 pt lock chips;
+///   - the HR-since-start trace (collapsed by default), GPS distance / pace, sensor read-outs (leaves);
+///   - an OPAQUE `surface` band pinned to the bottom safe area holding the controls (delete · pause ·
+///     elapsed · end) — glass role 3 on iOS 26, the solid fallback everywhere else. No `Material`.
 ///
-/// COMPACT LAYOUT (the in-exercise screen must be glanceable mid-set, not a scroll). The screen used to
-/// be nine separately-spaced blocks — a status pill, a hero TIME, a hero HR, a hero EFFORT, a day-effort
-/// card, an HR-trace card, a zone block, an AVG/PEAK/EFFORT card and two sensor cards — roughly 1200pt
-/// on a 390×844 phone against about 680pt of visible room. Everything is still here; it is packed
-/// differently:
-///   - TIME lives ONLY in the always-visible bottom bar now. It was shown twice (56pt hero + 40pt bar),
-///     which is the "two timers" report #1068 already chased once.
-///   - HR and EFFORT share one hero row.
-///   - AVG / PEAK / day-vs-target are one card (EFFORT was duplicated between the hero and the stat row).
-///   - The HR-since-start chart is collapsed behind a disclosure header, remembered in `@AppStorage`.
-///   - The GPS and sensor read-outs are single thin lines instead of stat cards.
-/// Nothing was removed from the screen except the two values that appeared twice.
+/// ZONE LOCK: the HR ZONE block carries a zone slider and five lock chips. A locked zone is stored on
+/// `ActiveWorkout.lockedZone`; the strap cueing itself lives in `AppModel.evaluateZoneGuidance`, so it
+/// keeps running with this screen closed.
+///
+/// PERFORMANCE (§2.1 rule 5 — the owner reports lag on an iPhone 12 Pro). `AppModel` publishes at 1 Hz
+/// while a strap streams AND rewrites `activeWorkout` every second of a workout. This parent does NOT
+/// observe it: it holds the model through the non-observing `\.appModelRef` and takes its ONE
+/// invalidation from `LiveWorkoutCoarse` — the few coarse workout fields the layout gates on
+/// (active, start, sport, paused), de-duplicated into `@State`. The per-second values are read ONLY in
+/// small leaves (`LiveWorkoutHero`, `LiveZoneSection`, `SessionSummaryCard`, `LiveHRTraceLeaf`), so a
+/// heartbeat re-renders those leaves and never the Lift logger, the bottom band or the scroll column.
+/// The trace chart is additionally throttled to one redraw per 5 samples while expanded.
+///
+/// MOTION: the zone caret and the Effort arc settle on a new reading (`TelosMotion.settle`, ≈0.45 s,
+/// then rest); the LIVE dot is the one loop, gated by `TelosMotion.liveLoop` (Reduce Motion / Low Power /
+/// "Reduce motion in NOOP" → a still dot). Nothing else loops; the backdrop is the plain canvas.
 struct LiveWorkoutView: View {
-    @EnvironmentObject private var model: AppModel
-    // PERF (scroll/recompose): this screen deliberately does NOT observe `LiveState` directly. A connected
-    // strap publishes `LiveState` ~1 Hz (HR + each R-R packet, plus sensor frames), and an
-    // `@EnvironmentObject live` here would invalidate the WHOLE body on every tick — the HR hero, effort
-    // gauge, zone rail and stats grid all re-evaluate even though they read from `model` (smoothed bpm +
-    // scorers), not `live`. The only region that genuinely needs `live` is the additive sensor readout
-    // (speed / cadence / power), so it's extracted into the small `SensorRowIfPresent` leaf below that
-    // owns its OWN `@EnvironmentObject live`. A sensor/R-R packet now re-renders just that row, not the
-    // hero. (`model.live` is its own ObservableObject, so the leaf's `live` is the one that sees the
-    // @Published changes — exactly as the parent's direct observation did before.)
-    let onClose: () -> Void
+    /// NOT observed (see PERFORMANCE above). Actions and one-shot reads go through `model`.
+    @Environment(\.appModelRef) private var modelRef
+    private var model: AppModel { requireAppModel(modelRef) }
+    /// The parent's sole invalidation driver from the model — fed by the de-duplicated `.onReceive` below.
+    @State private var coarseState: LiveWorkoutCoarse?
+    /// The published snapshot once it landed, otherwise read straight off the model (first body pass).
+    private var coarse: LiveWorkoutCoarse { coarseState ?? LiveWorkoutCoarse(model.activeWorkout) }
 
-    /// Effort display scale (#268) — routes the live Effort read-out through the shared helper so it
-    /// matches every other surface. Display-only; the captured value stays stored 0–100.
-    @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
-    private var effortScale: EffortScale { UnitPrefs.resolveEffortScale(effortScaleRaw) }
+    let onClose: () -> Void
 
     /// Keep the screen awake while recording (#703). Opt-in, default off; the toggle lives in Settings.
     /// Read here so we can hold the idle timer off only while this in-exercise screen is up and release it
@@ -59,9 +64,6 @@ struct LiveWorkoutView: View {
     @State private var showEndConfirm = false
     @State private var showDeleteConfirm = false
 
-    private var zoneSet: HRZoneSet { model.profile.hrZoneSet }
-    private var zone: Int { model.bpm.map { zoneSet.zoneNumber(forBPM: Double($0)) } ?? 0 }
-
     // TELOS LIFT (DESIGN_V2 decision 16). A strength sport opens the in-app logger INSIDE this screen, above the
     // live HR / zone / Effort blocks, which keep running underneath. The finish screen then replaces the whole
     // screen in place (decision 7: no cover of its own). Everything lift-specific lives in `Screens/Lift/*` and
@@ -72,7 +74,7 @@ struct LiveWorkoutView: View {
 
     private var isLift: Bool {
         #if os(iOS)
-        return LiftSessionRecorder.isStrengthSport(model.activeWorkout?.sport)
+        return LiftSessionRecorder.isStrengthSport(coarse.sport)
         #else
         return false
         #endif
@@ -105,7 +107,7 @@ struct LiveWorkoutView: View {
 
     private var workoutBody: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+            VStack(alignment: .leading, spacing: TelosSpace.cardGap) {
                 #if os(iOS)
                 if isLift {
                     LiftLoggerView(recorder: lift, programs: liftPrograms, onFinish: finishLift)
@@ -113,21 +115,17 @@ struct LiveWorkoutView: View {
                 #endif
                 // Listed directly (not an [AnyView] walked by a ForEach): SwiftUI keeps each card's static
                 // type, so it can diff them instead of rebuilding type-erased boxes on every live tick.
-                heroRow.staggeredAppear(index: 0)
+                LiveWorkoutHero(isPaused: coarse.isPaused).staggeredAppear(index: 0)
                 // AVG / PEAK plus today's Effort against the day's recommended ceiling — the SAME two
                 // shared resolutions Today's hero ring and the lock-screen strip read (`todayEffortNow` /
                 // `todayEffortTarget`), so a session can be paced against the whole day without this
                 // screen ever printing a day figure the other surfaces disagree with.
-                SessionSummaryCard(avgHr: model.activeWorkout?.avgHr ?? 0,
-                                   peakHr: model.activeWorkout?.peakHr ?? 0,
-                                   sessionEffort: model.activeWorkout?.liveStrain ?? 0,
-                                   effortScale: effortScale)
-                    .staggeredAppear(index: 1)
-                zoneSection.staggeredAppear(index: 2)
+                SessionSummaryCard().staggeredAppear(index: 1)
+                LiveZoneSection().staggeredAppear(index: 2)
                 // The whole session's HR since start against the zone lines (dashed), with a locked
                 // zone's band raised — the history the zone slider above shows only the latest point of.
                 // Collapsed by default; the disclosure state is remembered across sessions.
-                hrTraceCard.staggeredAppear(index: 3)
+                LiveHRTraceLeaf().staggeredAppear(index: 3)
                 // Live GPS distance + pace (#1195) — a self-gating leaf owning its own recorder
                 // observation, so a GPS fix re-renders only this line. Renders nothing until the first
                 // accepted fix, so non-GPS / denied sessions leave the stack unchanged.
@@ -137,13 +135,12 @@ struct LiveWorkoutView: View {
                 // re-rendering the HR hero / zone rail above (scroll-stutter isolation).
                 SensorRowIfPresent()
             }
-            .screenPadding()
-            .padding(.top, NoopMetrics.space3)
-            // The bottom bar is a `.safeAreaInset`, so the scroll view ALREADY reserves the bar's full
+            .padding(.horizontal, TelosSpace.pageGutter)
+            .padding(.top, TelosSpace.m)
+            // The bottom band is a `.safeAreaInset`, so the scroll view ALREADY reserves the band's full
             // height (plus the home-indicator inset) below the content — this is only optical breathing
-            // room above it, not the clearance itself. Adding the bar height again here is what used to
-            // push the last card needlessly far down.
-            .padding(.bottom, NoopMetrics.space3)
+            // room above it, not the clearance itself.
+            .padding(.bottom, TelosSpace.m)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         #if os(iOS)
@@ -151,33 +148,45 @@ struct LiveWorkoutView: View {
         // tracker, up for the whole workout, so worth the same defensive fix.
         .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
         #endif
-        // Floating discard / pause / elapsed / end controls sit in the bottom safe area so the scroll
-        // content never owns the chrome and the controls can never scroll out of reach.
+        // The controls sit in the bottom safe area so the scroll content never owns the chrome and the
+        // controls can never scroll out of reach (one-handed: everything tappable mid-set is at the
+        // bottom). `safeAreaInset(edge: .bottom)` lays the band out INSIDE the bottom safe area and
+        // shrinks the ScrollView's safe area by its height, so content never hides behind it.
         //
-        // `safeAreaInset(edge: .bottom)` is what makes this safe on a home-indicator phone: SwiftUI lays
-        // the bar out INSIDE the container's bottom safe area (above the indicator) and then shrinks the
-        // ScrollView's own safe area by the bar's height, so scroll content can never hide behind it and
-        // the bar can never sit under the indicator. That is why the controls must NOT be in the scrolling
-        // column, and why the column's own bottom padding stays small (see above).
+        // §4.9 role 3: the glass controls sit on an OPAQUE `surface` band, never over the scrolling cards,
+        // so iOS 26's glass never re-samples moving content every frame.
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            VStack(spacing: NoopMetrics.space2) {
+            VStack(spacing: TelosSpace.s) {
                 #if os(iOS)
                 if isLift { LiftRestTimerPill(recorder: lift) }
                 #endif
                 bottomControlRow
             }
+            .padding(.top, TelosSpace.s)
+            .frame(maxWidth: .infinity)
+            .background(alignment: .top) {
+                TelosColor.surface
+                    .overlay(alignment: .top) {
+                        Rectangle().fill(TelosColor.line).frame(height: TelosStroke.line)
+                    }
+                    .ignoresSafeArea(edges: .bottom)
+            }
         }
-        // A scenic Effort-tinted backdrop behind the whole in-exercise screen, fading to the base — the
-        // live workout reads as an Effort-world hero, not a flat panel.
+        // Plain canvas behind the whole in-exercise screen (§6.7: `ScenicHeroBackground` goes). Static.
         .background {
-            ScenicHeroBackground(domain: .effort)
-                .ignoresSafeArea()
+            TelosColor.canvas.ignoresSafeArea()
+        }
+        // THE PARENT'S ONE SUBSCRIPTION to the model. The `!=` guard is load-bearing: the publisher is
+        // rebuilt on every body pass, SwiftUI re-subscribes and a fresh `removeDuplicates()` replays the
+        // current value — writing `@State` on each replay would be a render loop (the LiveView pattern).
+        .onReceive(LiveWorkoutCoarse.publisher(model)) { next in
+            if coarseState != next { coarseState = next }
         }
         // If the workout ended elsewhere (process restart cleared it), close the screen.
-        .onChangeCompat(of: model.activeWorkout == nil) { gone in if gone && lift.phase != .finished { onClose() } }
+        .onChangeCompat(of: coarse.active) { active in if !active && lift.phase != .finished { onClose() } }
         // Attach the lift logger to this workout (idempotent), with today's Charge and the week plan's easy-week
         // flag for the progression proposal.
-        .task(id: model.activeWorkout?.start) {
+        .task(id: coarse.start) {
             guard isLift, let start = model.activeWorkout?.start else { return }
             let repo = model.repo
             let todayKey = Repository.localDayKey(Date())
@@ -198,6 +207,8 @@ struct LiveWorkoutView: View {
         // two balance and neither disarms the other (mirrors Android LiveWorkoutScreen's DisposableEffect
         // requestRealtimeHr/releaseRealtimeHr). Balanced: one start on appear, one stop on disappear.
         .onAppear {
+            let seeded = LiveWorkoutCoarse(model.activeWorkout)
+            if coarseState != seeded { coarseState = seeded }
             model.startRealtimeHR()
             // Hold the display awake for the session only if the user opted in (#703).
             if keepScreenOn { ScreenIdle.keepAwake(true) }
@@ -237,350 +248,69 @@ struct LiveWorkoutView: View {
         }
     }
 
-    // MARK: - Hero
+    // MARK: - Bottom controls (on the opaque band)
 
-    /// Status pill + the two live hero numbers (heart rate, effort) on ONE row.
+    /// Diameter of the ICON FRAME inside each control circle.
     ///
-    /// TIME is deliberately not here: the bottom bar shows it at 32pt and never scrolls, so a second
-    /// 56pt copy above cost ~110pt of the fold to say the same thing twice.
-    private var heroRow: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-            statusPill
-            HStack(alignment: .top, spacing: NoopMetrics.space3) {
-                // HR wins the room at accessibility text sizes — it is the number a wearer glances at
-                // mid-set, and "EFFORT BUILDING" is the widest label on the row.
-                heartRateBlock.layoutPriority(1)
-                Spacer(minLength: NoopMetrics.space2)
-                effortBlock
-            }
-        }
-    }
-
-    private var statusPill: some View {
-        HStack(spacing: NoopMetrics.space1) {
-            Circle()
-                .fill(StrandPalette.metricRose)
-                .frame(width: 7, height: 7)
-            Group {
-                if model.activeWorkout?.isPaused == true { Text("Paused") }
-                else { Text("Recording workout") }
-            }
-            .textCase(.uppercase)
-            .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
-            .foregroundStyle(StrandPalette.metricRose)
-        }
-        .padding(.horizontal, NoopMetrics.space2)
-        .padding(.vertical, NoopMetrics.spaceHalf)
-        .background(NoopPanelSurface(tint: StrandPalette.metricRose, cornerRadius: 14))
-        .clipShape(Capsule())
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(Text("Recording workout"))
-    }
-
-    /// Live HR — the screen's biggest number, still the smoothed `AppModel.bpm` and still zone-tinted.
-    /// The "bpm" unit moved onto the value's baseline so the stack is two lines instead of three.
-    private var heartRateBlock: some View {
-        let tint = zone >= 1 ? StrandPalette.hrZoneColor(zone) : StrandPalette.effortColor
-        return VStack(alignment: .leading, spacing: 0) {
-            Text("HEART RATE")
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .lineLimit(1).minimumScaleFactor(0.7)
-            HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space1) {
-                if let bpm = model.bpm {
-                    CountUpText(value: Double(bpm),
-                                format: { "\(Int($0.rounded()))" },
-                                font: StrandFont.rounded(48, weight: .semibold),
-                                color: tint)
-                } else {
-                    Text("—")
-                        .font(StrandFont.rounded(48, weight: .semibold))
-                        .foregroundStyle(tint)
-                }
-                Text("bpm")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textSecondary)
-            }
-            // Keep the hero legible at accessibility text sizes rather than letting it clip.
-            .lineLimit(1)
-            .minimumScaleFactor(0.5)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(Text("Heart rate"))
-        .accessibilityValue(Text(heartRateAccessibilityValue))
-    }
-
-    /// Spoken HR. Absent input abstains — "No heart rate", never a stand-in number.
-    private var heartRateAccessibilityValue: String {
-        guard let bpm = model.bpm else { return String(localized: "No heart rate") }
-        return String(localized: "\(bpm) bpm")
-    }
-
-    /// Live Effort — same `liveStrain` / Effort-scale conversion and `StrainGauge` intensity label as
-    /// before, just sized as the hero's second number rather than a block of its own. Display-only;
-    /// the captured value stays 0–100.
-    private var effortBlock: some View {
-        let strain = model.activeWorkout?.liveStrain ?? 0
-        let displayEffort = UnitFormatter.effortValue(strain, scale: effortScale)
-        let maxValue = effortScale == .whoop ? 21.0 : 100.0
-        let fraction = min(max(displayEffort / maxValue, 0), 1)
-        // VoiceOver needs the selected scale maximum (0–21 / 0–100) even though the visible denominator
-        // was removed from the glanceable layout. Reuse the same localized "of %@" caption as Today /
-        // Week-in-review, and format the spoken value like the on-screen CountUpText.
-        let valueText = effortScale == .whoop
-            ? String(format: "%.1f", displayEffort)
-            : "\(Int(displayEffort.rounded()))"
-        let scaleCaption = String(localized: "of \(UnitFormatter.effortScaleMax(effortScale))")
-        let effortAccessibilityLabel = "\(String(localized: "Effort")) \(valueText) \(scaleCaption)"
-        return VStack(alignment: .trailing, spacing: 0) {
-            Text("EFFORT BUILDING")
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
-                .foregroundStyle(StrandPalette.effortColor)
-                .lineLimit(1).minimumScaleFactor(0.6)
-            CountUpText(value: displayEffort,
-                        format: { value in
-                            effortScale == .whoop
-                                ? String(format: "%.1f", value)
-                                : "\(Int(value.rounded()))"
-                        },
-                        font: StrandFont.rounded(36, weight: .semibold),
-                        color: StrandPalette.textPrimary)
-            .lineLimit(1)
-            .minimumScaleFactor(0.5)
-            Text(StrainGauge.stateLabel(forFraction: fraction))
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(Text(effortAccessibilityLabel))
-        .accessibilityValue(Text(StrainGauge.stateLabel(forFraction: fraction)))
-    }
-
-    /// The full HR trace since the workout started. Reads the same `activeWorkout.samples` that
-    /// `captureWorkoutSample` appends (and `ActiveWorkoutPersistence` restores after a relaunch), and the
-    /// same `zoneSet` / `lockedZone` the slider and lock row above use, so it updates on every sample.
-    @ViewBuilder private var hrTraceCard: some View {
-        if let w = model.activeWorkout {
-            WorkoutHRTraceCard(samples: w.samples,
-                               startSec: Int(w.start.timeIntervalSince1970),
-                               zoneSet: zoneSet,
-                               lockedZone: w.lockedZone)
-        }
-    }
-
-    // MARK: - HR zone
-
-    /// HR ZONE — the header capsule, the ZONE SLIDER (one continuous bar from zone 1's floor to HRmax with
-    /// a live marker), where-in-the-zone caption, and the ZONE LOCK chips. Same zone derivation as before
-    /// (`HRZoneSet.zoneNumber(forBPM:)` on the smoothed bpm); the slider still replaces the five-chip rail.
-    /// Deliberately NOT wrapped in a card: the card's own 16pt inset would cost more than the grouping buys.
-    private var zoneSection: some View {
-        let tint = zone >= 1 ? StrandPalette.hrZoneColor(zone) : StrandPalette.effortColor
-        let locked = model.activeWorkout?.lockedZone
-        return VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-            HStack {
-                Text("HR ZONE")
-                    .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                Spacer()
-                Text(zone >= 1 ? "Zone \(zone) · \(Self.zoneName(zone))" : "Below Zone 1")
-                    .font(StrandFont.captionNumber)
-                    .foregroundStyle(tint)
-                    .multilineTextAlignment(.trailing)
-                    .padding(.horizontal, NoopMetrics.space2)
-                    .padding(.vertical, NoopMetrics.spaceHalf)
-                    .background(tint.opacity(0.12), in: Capsule())
-            }
-            ZoneSlider(zoneSet: zoneSet, bpm: model.bpm, lockedZone: locked)
-            zoneLockRow(locked: locked)
-            // Both captions in one stack at label spacing — they read as one explanatory footer, and the
-            // 8pt section gap between them was pure height.
-            VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
-                Text(zonePlacementCaption)
-                    .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-                Text(zoneLockCaption(locked: locked))
-                    .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    /// "Z3 · 142 bpm · high end" — the zone, the bpm and WHERE in the zone the marker sits, so the
-    /// slider reads in words too (and for VoiceOver). Warming-up copy below zone 1, as before.
-    private var zonePlacementCaption: String {
-        guard let bpm = model.bpm else { return String(localized: "Waiting for heart rate.") }
-        guard zone >= 1, let within = ZoneSliderGeometry.withinZone(bpm: Double(bpm), set: zoneSet) else {
-            return String(localized: "Warming up. Keep moving to climb into Zone 1.")
-        }
-        let place: String
-        switch within {
-        case ..<(1.0 / 3.0): place = String(localized: "low end")
-        case ..<(2.0 / 3.0): place = String(localized: "middle")
-        default:             place = String(localized: "high end")
-        }
-        return "Z\(zone) · \(bpm) bpm · \(place)"
-    }
-
-    /// ZONE LOCK row: five chips, at most one on. Tapping the locked zone unlocks it; tapping another
-    /// moves the lock. The phone gives a light tap on every toggle; the STRAP carries the in-session cues
-    /// (`AppModel.evaluateZoneGuidance`), so the wearer never has to look.
-    ///
-    /// The chips are the old toggles trimmed to `zoneChipHeight` and given a 4pt gutter instead of 6.
-    /// They stay a full-width fifth each, so the touch target is about 70×36pt — deliberately NOT cut
-    /// below the mid-30s, because the height here is worth only a few points and these are the screen's
-    /// only in-column controls.
-    private func zoneLockRow(locked: Int?) -> some View {
-        HStack(spacing: NoopMetrics.space1) {
-            ForEach(1...5, id: \.self) { z in
-                let isLocked = locked == z
-                let color = StrandPalette.hrZoneColor(z)
-                Button {
-                    StrandHaptic.light.play()
-                    model.toggleWorkoutZoneLock(z)
-                } label: {
-                    HStack(spacing: 3) {
-                        if isLocked {
-                            Image(systemName: "lock.fill").font(.system(size: 9, weight: .bold))
-                        }
-                        Text("Z\(z)")
-                    }
-                    .font(StrandFont.captionNumber)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                    .foregroundStyle(isLocked ? StrandPalette.surfaceBase : color)
-                    .frame(maxWidth: .infinity, minHeight: Self.zoneChipHeight)
-                    .background(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .fill(isLocked ? color : color.opacity(0.14))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
-                            .strokeBorder(isLocked ? color : StrandPalette.hairline, lineWidth: 1)
-                    )
-                    .contentShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel(Text(isLocked ? String(localized: "Unlock Zone \(z)")
-                                                    : String(localized: "Lock Zone \(z)")))
-                .accessibilityAddTraits(isLocked ? .isSelected : [])
-            }
-        }
-    }
-
-    private static let zoneChipHeight: CGFloat = 36
-
-    private func zoneLockCaption(locked: Int?) -> String {
-        guard let locked, let band = zoneSet.zones.first(where: { $0.number == locked }) else {
-            return String(localized: "Tap a zone to lock it as your target. The strap buzzes twice when you're below it and once when you're above it.")
-        }
-        return String(localized: "Zone \(locked) locked · \(Int(band.lower))-\(Int(band.upper)) bpm. Two buzzes: speed up. One buzz: ease off.")
-    }
-
-    // MARK: - Bottom floating controls
-
-    /// Diameter of the ICON FRAME inside each Liquid Glass circle in the bottom capsule.
-    ///
-    /// This was 56 with `.controlSize(.large)`, and that combination is what pushed the row past the
-    /// screen: on iOS 26 `nativeLiquidGlassWorkoutControl` resolves to `.buttonStyle(.glass)`, which adds
-    /// its OWN metrics-driven padding AROUND the label — so a 56pt label at `.large` occupies roughly
-    /// 90pt. Three of those plus their gaps and the capsule insets left the elapsed clock with almost no
-    /// room on a 390pt screen; the HStack then overflowed the capsule and the outer controls were clipped
-    /// off the edge. 46 at `.regular` lands each control near 64pt, which fits with the clock intact.
-    ///
-    /// 46 (not 44) because the tap shape is a CIRCLE inscribed in this square — a 44pt frame would put
-    /// the circle's usable width under the 44pt minimum at the top and bottom of the glyph.
+    /// On iOS 26 `nativeLiquidGlassWorkoutControl` resolves to `.buttonStyle(.glass)`, which adds its OWN
+    /// metrics-driven padding AROUND the label — at `.large` a 56 pt label occupied roughly 90 pt and the
+    /// row overflowed. 46 at `.regular` lands each control near 64 pt, which fits with the clock intact.
+    /// 46 (not 44) because the tap shape is a CIRCLE inscribed in this square — a 44 pt frame would put
+    /// the circle's usable width under the 44 pt minimum at the top and bottom of the glyph.
     private static let bottomControlDiameter: CGFloat = 46
-    /// Tight inset so the glass circles nest into the capsule ends (stopwatch-bar proportions).
-    private static let bottomBarInset: CGFloat = 6
 
-    /// One shared dark floating capsule: discard · pause · elapsed · end. Every destructive control on
-    /// this screen lives here, outside the scroll, so none of them can be scrolled away from.
-    ///
-    /// Laid out in ONE HStack, so the timer and the controls cannot overlap. #1068 built this as a
-    /// ZStack with the timer centred independently — deliberately, "so uneven label widths cannot pull
-    /// the time off-center" — and that held while the bar carried one circle per side. #1533 added the
-    /// discard and pause controls to the left group, and a centred 40pt timer then began where two
-    /// 56pt circles plus their spacing end: `0:02` merely touched the pause button, and anything wider
-    /// went under it. A field report of "two timers" was this one half-occluded, read as a duplicate of
-    /// the big TIME readout above. `.allowsHitTesting(false)` on the timer was already a tell that it
-    /// sat beneath something tappable. (The big TIME readout is gone now, so this is the only clock.)
-    ///
-    /// The trade is deliberate: the timer sits centred in the space the buttons leave rather than in the
-    /// bar, so it reads slightly right of true centre because the left chrome is heavier. That is the
-    /// cost of the layout being unable to collide at all. The buttons keep the positions they have
-    /// shipped with — moving pause to the right would centre the timer better and would also move a
-    /// control under the thumb of everyone already using this screen.
-    ///
-    /// ROOM (redone for the 46pt/`.regular` control, see `bottomControlDiameter`): three controls at
-    /// ~64pt rendered = 192, three 8pt gaps = 24, the capsule's own 6pt inset each side = 12, and the
-    /// 16pt page gutter each side = 32. On a 390pt screen that leaves the clock about 122pt against
-    /// roughly 115pt for `1:30:00` at 32pt monospaced — it fits, and `minimumScaleFactor` covers a 375pt
-    /// device and larger Dynamic Type by scaling the clock rather than overflowing the capsule.
+    /// discard · pause · elapsed · end, laid out in ONE HStack so the timer and the controls cannot
+    /// overlap (#1068 / #1533: a ZStack-centred clock once slid under the pause button and read as a
+    /// second timer). The clock sits centred in the space the buttons leave; its layout priority is -1 so
+    /// the buttons are sized first unconditionally and the clock scales into whatever is left.
     private var bottomControlRow: some View {
-        HStack(spacing: NoopMetrics.space2) {
+        HStack(spacing: TelosSpace.s) {
             deleteWorkoutGlassButton
             pauseWorkoutGlassButton
             bottomElapsedTimer
                 .allowsHitTesting(false)
                 // Scaling down is the honest failure when the room runs out: truncating a clock to
-                // "1:30:0" would be worse than a smaller one. Same idiom the rest of this file uses.
+                // "1:30:0" would be worse than a smaller one.
                 .lineLimit(1)
                 .minimumScaleFactor(0.5)
-                // NEVER raise the timer's priority. Sizing it BEFORE the three circles inverts which
-                // element gives way: a half-drawn pause button is worse than a smaller clock, and a
-                // clipped control is the failure this whole layout exists to remove.
-                //
-                // LOWERING it is the belt to that brace, and it is why the bar cannot repeat the #1533
-                // overflow. The circles' footprint is NOT a number this file controls — on iOS 26 the
-                // glass button style adds its own metrics-driven padding around the 46pt label — so
-                // "equal priority is enough because fixed frames are inflexible" is an assumption about
-                // a system control. At -1 the buttons are sized first unconditionally and the clock
-                // scales into whatever is left, down to nothing, instead of pushing a control off the
-                // capsule's edge.
+                // NEVER raise the timer's priority — a clipped control is the failure this layout exists
+                // to remove (see the type comment).
                 .layoutPriority(-1)
             endWorkoutGlassButton
         }
-        .padding(Self.bottomBarInset)
-        .background {
-            NoopPanelSurface(cornerRadius: NoopVisualStyle.pillRadius, elevated: true)
-        }
-        .padding(.horizontal, NoopMetrics.space4)
-        .padding(.top, NoopMetrics.space2)
-        // Clearance ABOVE the home indicator, on top of the safe-area inset `safeAreaInset(edge: .bottom)`
-        // already applies — the bar is laid out inside the safe area, so this is breathing room, not the
-        // indicator clearance itself. Kept at 12 (not trimmed with the rest of the layout) because on a
-        // device with NO home indicator it is the ONLY gap between the capsule and the screen edge.
-        .padding(.bottom, NoopMetrics.space3)
+        .padding(.horizontal, TelosSpace.pageGutter)
+        // Clearance ABOVE the home indicator on top of the safe-area inset; on a device with NO home
+        // indicator it is the ONLY gap between the controls and the screen edge.
+        .padding(.bottom, TelosSpace.m)
     }
 
-    /// The screen's ONLY elapsed clock now (the hero TIME block it used to duplicate is gone), from the
-    /// same pause-aware `activeWorkout.elapsed()` + `TimelineView` source — plain primary text, no card /
-    /// glass / capsule behind it (the shared bar owns the surface).
+    /// The screen's ONLY elapsed clock, from the pause-aware `activeWorkout.elapsed()` read at each 1 s
+    /// tick (a periodic clock, not a frame loop). Read through the non-observing model reference, so the
+    /// tick re-renders this `Text` alone.
     private var bottomElapsedTimer: some View {
         Group {
-            if let workout = model.activeWorkout {
+            if coarse.active {
                 TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    Text(Self.elapsed(seconds: workout.elapsed()))
-                        .font(StrandFont.number(32)).monospacedDigit()
-                        .foregroundStyle(StrandPalette.textPrimary)
+                    let seconds: TimeInterval = model.activeWorkout?.elapsed() ?? 0
+                    Text(Self.elapsed(seconds: seconds))
+                        .telosNumeral(.numeralM)
+                        .foregroundStyle(coarse.isPaused ? TelosColor.textSecondary : TelosColor.textPrimary)
                         .contentTransition(.numericText())
+                        .accessibilityLabel(Text("Elapsed time"))
+                        .accessibilityValue(Text(Self.elapsed(seconds: seconds)))
                 }
-                .accessibilityLabel(Text("Elapsed time"))
-                .accessibilityValue(Text(Self.elapsed(seconds: workout.elapsed())))
             }
         }
         // minWidth 0 so the clock is allowed to give up ALL of its width to the controls rather than
-        // insisting on an ideal size the capsule cannot pay for.
+        // insisting on an ideal size the row cannot pay for.
         .frame(minWidth: 0, maxWidth: .infinity)
     }
 
     private var endWorkoutGlassButton: some View {
         Button { showEndConfirm = true } label: {
             Image(systemName: "xmark")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(StrandPalette.textPrimary)
+                .font(TelosType.glyphControl)
+                .foregroundStyle(TelosColor.textPrimary)
                 .frame(width: Self.bottomControlDiameter, height: Self.bottomControlDiameter)
                 .contentShape(Circle())
         }
@@ -590,11 +320,14 @@ struct LiveWorkoutView: View {
     }
 
     private var pauseWorkoutGlassButton: some View {
-        let paused = model.activeWorkout?.isPaused == true
-        return Button { model.toggleWorkoutPause() } label: {
+        let paused = coarse.isPaused
+        return Button {
+            TelosHaptics.play(.select)
+            model.toggleWorkoutPause()
+        } label: {
             Image(systemName: paused ? "play.fill" : "pause.fill")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(StrandPalette.textPrimary)
+                .font(TelosType.glyphControl)
+                .foregroundStyle(paused ? TelosColor.mint : TelosColor.textPrimary)
                 .frame(width: Self.bottomControlDiameter, height: Self.bottomControlDiameter)
                 .contentShape(Circle())
         }
@@ -605,8 +338,8 @@ struct LiveWorkoutView: View {
     private var deleteWorkoutGlassButton: some View {
         Button { showDeleteConfirm = true } label: {
             Image(systemName: "trash")
-                .font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(StrandPalette.statusCritical)
+                .font(TelosType.glyphControl)
+                .foregroundStyle(TelosColor.critical)
                 .frame(width: Self.bottomControlDiameter, height: Self.bottomControlDiameter)
                 .contentShape(Circle())
         }
@@ -615,7 +348,7 @@ struct LiveWorkoutView: View {
     }
 
     private var activeSportName: String {
-        model.activeWorkout?.sport ?? WorkoutCatalog.defaultSportName
+        coarse.sport ?? WorkoutCatalog.defaultSportName
     }
 
     private var workoutTypeGlassButton: some View {
@@ -632,15 +365,12 @@ struct LiveWorkoutView: View {
 
     // MARK: - Helpers
 
-    /// Delegates to the shared clock. This carried its own `%d:%02d` with NO hour roll-over, so a
-    /// 90-minute session read "90:00" here while Android's live workout screen read "1:30:00" — and,
-    /// after the card fix, while the iOS card that opens THIS screen read "1:30:00" too. The math was
-    /// already pause-aware (`workout.elapsed()`); only the formatting was the odd one out.
-    private static func elapsed(seconds: TimeInterval) -> String {
+    /// Delegates to the shared clock (hour roll-over "1:30:00", matching Android and the Today card).
+    fileprivate static func elapsed(seconds: TimeInterval) -> String {
         ActiveWorkoutClock.clock(Int(seconds))
     }
 
-    private static func zoneName(_ zone: Int) -> String {
+    fileprivate static func zoneName(_ zone: Int) -> String {
         switch zone {
         case 1: return String(localized: "Recovery")
         case 2: return String(localized: "Fat burn")
@@ -650,44 +380,506 @@ struct LiveWorkoutView: View {
         default: return ""
         }
     }
+
+    /// The zone's ramp colour, or the Effort hue below zone 1 / without a reading.
+    fileprivate static func zoneTint(_ zone: Int) -> Color {
+        zone >= 1 ? StrandPalette.hrZoneColor(zone) : TelosColor.effort
+    }
 }
 
-// MARK: - Native Liquid Glass workout controls
+// MARK: - Coarse snapshot (the parent's only model-driven invalidation)
+
+/// The workout fields the parent's LAYOUT gates on. `activeWorkout` is rewritten every second of a
+/// workout (new sample, new live Effort); none of that reaches the parent because these four fields do
+/// not change per sample, and `removeDuplicates()` drops the 1 Hz rewrites before they reach `@State`.
+struct LiveWorkoutCoarse: Equatable {
+    var active: Bool
+    var start: Date?
+    var sport: String?
+    var isPaused: Bool
+
+    init(_ w: AppModel.ActiveWorkout?) {
+        active = w != nil
+        start = w?.start
+        sport = w?.sport
+        isPaused = w?.isPaused ?? false
+    }
+
+    @MainActor
+    static func publisher(_ model: AppModel) -> AnyPublisher<LiveWorkoutCoarse, Never> {
+        model.$activeWorkout
+            .map { LiveWorkoutCoarse($0) }
+            .removeDuplicates()
+            .eraseToAnyPublisher()
+    }
+}
+
+// MARK: - Controls chrome (glass role 3)
 
 private extension View {
-    /// Platform-owned circular chrome for the live-workout bottom controls. iOS 26 uses the interactive
-    /// Liquid Glass button material; macOS and older iOS keep the same circular geometry with the
-    /// same native-system material fallback the Home header buttons already use.
+    /// Platform-owned circular chrome for the live-workout controls. iOS 26 uses the interactive Liquid
+    /// Glass button (through the `nativeLiquidGlass*` family); everywhere else the ONE solid fallback
+    /// (`nativeLiquidGlassFallbackSurface`: `surfaceRaised` + 1 pt `line`) — no material, no blur.
     ///
     /// `.regular`, not `.large`: the glass style's padding is driven by the control size and is added
-    /// AROUND the 46pt label, so `.large` inflated each control to ~90pt and overflowed the bar.
+    /// AROUND the 46 pt label, so `.large` inflated each control to ~90 pt and overflowed the bar.
     @ViewBuilder
     func nativeLiquidGlassWorkoutControl() -> some View {
         self.nativeLiquidGlassButtonChrome(controlSize: .regular) {
             self
-                .buttonStyle(LiquidPressStyle())
-                .background(.ultraThinMaterial, in: Circle())
-                .overlay(Circle().strokeBorder(.white.opacity(0.16), lineWidth: 0.8))
+                .buttonStyle(TelosPressButtonStyle())
+                .nativeLiquidGlassFallbackSurface(Circle())
         }
+    }
+}
+
+// MARK: - LIVE dot
+
+/// The heart-coloured LIVE dot. Its breathing is the ONE loop on this screen, and only while the session
+/// is actually recording with a reading: `TelosMotion.liveLoop(poseStill:)` returns nil (a still dot)
+/// under Reduce Motion / Low Power / "Reduce motion in NOOP", and when paused or waiting for the strap.
+/// Cost: one 7 pt circle's opacity, 2 s half-cycle.
+private struct LiveWorkoutDot: View {
+    let live: Bool
+    @State private var dimmed = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var motion = NoopMotionState.shared
+    private var looping: Bool { live && !motion.poseStill(reduceMotion) }
+
+    var body: some View {
+        Circle()
+            .fill(live ? TelosColor.heart : TelosColor.textTertiary)
+            .frame(width: 7, height: 7)
+            .opacity(dimmed ? 0.35 : 1)
+            .animation(TelosMotion.liveLoop(poseStill: !looping), value: dimmed)
+            .onAppear { dimmed = looping }
+            .onChangeCompat(of: looping) { active in dimmed = active }
+            .accessibilityHidden(true)
+    }
+}
+
+// MARK: - Hero (leaf: observes the model)
+
+/// The status pill + the luminous zone dial holding the live heart rate + the session's Effort ring.
+/// A LEAF: it owns the 1 Hz `AppModel` observation, so a heartbeat re-renders this panel and nothing
+/// above or below it.
+private struct LiveWorkoutHero: View {
+    @EnvironmentObject private var model: AppModel
+    let isPaused: Bool
+
+    /// Effort display scale (#268) — routes the live Effort read-out through the shared helper so it
+    /// matches every other surface. Display-only; the captured value stays stored 0–100.
+    @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
+    private var effortScale: EffortScale { UnitPrefs.resolveEffortScale(effortScaleRaw) }
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
+    private static let dialDiameter: CGFloat = 184
+    private static let effortDiameter: CGFloat = 96
+
+    var body: some View {
+        let zoneSet = model.profile.hrZoneSet
+        let bpm = model.bpm
+        let zone = bpm.map { zoneSet.zoneNumber(forBPM: Double($0)) } ?? 0
+        let tint = LiveWorkoutView.zoneTint(zone)
+        return VStack(alignment: .leading, spacing: TelosSpace.m) {
+            statusPill(hasReading: bpm != nil)
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    // AX sizes: stack, so neither the heart rate nor Effort has to shrink.
+                    VStack(spacing: TelosSpace.l) {
+                        dial(zoneSet: zoneSet, bpm: bpm, zone: zone, tint: tint)
+                        effortColumn
+                    }
+                    .frame(maxWidth: .infinity)
+                } else {
+                    HStack(alignment: .center, spacing: TelosSpace.m) {
+                        dial(zoneSet: zoneSet, bpm: bpm, zone: zone, tint: tint)
+                        Spacer(minLength: 0)
+                        effortColumn
+                    }
+                }
+            }
+        }
+        .padding(TelosSpace.cardPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background {
+            ZStack(alignment: .topLeading) {
+                FrostedCardSurface(tint: nil, cornerRadius: TelosRadius.card)
+                // The zone's bioluminescence behind the dial: ONE static radial gradient (no blur, no
+                // shadow); it only changes colour when the zone changes.
+                TelosRadialGlow(color: tint, intensity: 0.20, radius: Self.dialDiameter * 0.7)
+                    .frame(width: Self.dialDiameter * 1.4, height: Self.dialDiameter * 1.4)
+                    .offset(x: -Self.dialDiameter * 0.1, y: TelosSpace.l)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: TelosRadius.card, style: .continuous))
+    }
+
+    private func statusPill(hasReading: Bool) -> some View {
+        let ink = isPaused ? TelosColor.textSecondary : TelosColor.heartInk
+        let title: Text = isPaused ? Text("Paused") : Text("Recording workout")
+        return HStack(spacing: TelosSpace.xs) {
+            LiveWorkoutDot(live: !isPaused && hasReading)
+            title
+                .telosScale()
+                .textCase(.uppercase)
+                .foregroundStyle(ink)
+                .lineLimit(1)
+        }
+        .padding(.horizontal, TelosSpace.s)
+        .padding(.vertical, TelosSpace.xxs)
+        .frame(minHeight: 22)
+        .background(Capsule(style: .continuous).fill(ink.opacity(TelosOpacity.wash)))
+        .overlay(Capsule(style: .continuous).strokeBorder(ink.opacity(TelosOpacity.border), lineWidth: TelosStroke.line))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(title)
+    }
+
+    private func dial(zoneSet: HRZoneSet, bpm: Int?, zone: Int, tint: Color) -> some View {
+        ZStack {
+            LiveZoneDial(zoneSet: zoneSet, bpm: bpm, currentZone: zone)
+            VStack(spacing: TelosSpace.xxs) {
+                Text("HEART RATE")
+                    .telosScale()
+                    .foregroundStyle(TelosColor.textTertiary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                if let bpm {
+                    HStack(alignment: .firstTextBaseline, spacing: TelosSpace.xxs) {
+                        Text(verbatim: "\(bpm)")
+                            .telosNumeral(.geometryBound(size: 54, cap: 1.2))
+                            .foregroundStyle(tint)
+                            .contentTransition(.numericText())
+                        Text("bpm")
+                            .font(TelosType.scale)
+                            .foregroundStyle(TelosColor.textSecondary)
+                    }
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.5)
+                    Text(zone >= 1 ? "Zone \(zone) · \(LiveWorkoutView.zoneName(zone))" : "Below Zone 1")
+                        .telosScale()
+                        .textCase(.uppercase)
+                        .foregroundStyle(zone >= 1 ? tint : TelosColor.textSecondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.6)
+                } else {
+                    // Absent input abstains — the dash and the existing reason, never a stand-in number.
+                    Text(verbatim: TelosType.absent)
+                        .telosNumeral(.geometryBound(size: 54, cap: 1.2))
+                        .foregroundStyle(TelosColor.textTertiary)
+                    Text("Waiting for the strap")
+                        .font(TelosType.footnote)
+                        .foregroundStyle(TelosColor.textTertiary)
+                        .multilineTextAlignment(.center)
+                        .lineLimit(2)
+                        .minimumScaleFactor(0.8)
+                }
+            }
+            .frame(maxWidth: Self.dialDiameter * 0.66)
+        }
+        .frame(width: Self.dialDiameter, height: Self.dialDiameter)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("Heart rate"))
+        .accessibilityValue(Text(heartRateAccessibilityValue(bpm: bpm, zone: zone)))
+    }
+
+    /// Spoken HR. Absent input abstains — "No heart rate", never a stand-in number.
+    private func heartRateAccessibilityValue(bpm: Int?, zone: Int) -> String {
+        guard let bpm else { return String(localized: "No heart rate") }
+        return zone >= 1 ? String(localized: "Zone \(zone), \(bpm) bpm")
+                         : String(localized: "Below Zone 1, \(bpm) bpm")
+    }
+
+    /// Live Effort — the same `liveStrain` / Effort-scale conversion and `StrainGauge` intensity word as
+    /// every other surface, as a thin luminous ring (one lap = the scale's top, so a value past it wraps
+    /// instead of clipping). "—" until the session has its first sample: a zero arc would claim a
+    /// measured zero.
+    ///
+    /// No target caret on this ring on purpose: the day's recommended ceiling is on the DAY axis and this
+    /// ring is the SESSION's own Effort; the ceiling is drawn where both share an axis (the DAY / TARGET
+    /// tile and its bar below).
+    private var effortColumn: some View {
+        let w = model.activeWorkout
+        let hasSamples: Bool = !(w?.samples.isEmpty ?? true)
+        let strain: Double? = hasSamples ? w?.liveStrain : nil
+        let displayEffort: Double? = strain.map { UnitFormatter.effortValue($0, scale: effortScale) }
+        let maxValue: Double = effortScale == .whoop ? 21.0 : 100.0
+        // The intensity word exists only for a real reading (no word is ever derived from a stand-in 0).
+        let state: String? = displayEffort.map { StrainGauge.stateLabel(forFraction: min(max($0 / maxValue, 0), 1)) }
+        let format: (Double) -> String = effortScale == .whoop ? TelosFormat.decimal(1) : TelosFormat.integer
+        let scaleCaption = String(localized: "of \(UnitFormatter.effortScaleMax(effortScale))")
+        let axLabel = "\(String(localized: "Effort")) \(scaleCaption)"
+        return VStack(spacing: TelosSpace.xs) {
+            TelosRing(value: displayEffort,
+                      scale: maxValue,
+                      color: TelosColor.effort,
+                      diameter: Self.effortDiameter,
+                      format: format,
+                      caption: state.map { Text($0) },
+                      captionColor: TelosColor.effortInk,
+                      accessibilityLabel: Text(verbatim: axLabel))
+            Text("EFFORT BUILDING")
+                .telosScale()
+                .foregroundStyle(TelosColor.effortInk)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+        }
+        .frame(minWidth: Self.effortDiameter)
+    }
+}
+
+// MARK: - Zone dial
+
+/// The luminous zone dial (the Training Coach reference's ring): an open 270° gauge from zone 1's floor
+/// to HRmax, each zone an arc of its TRUE bpm span in the HR-zone ramp (data ramp, unchanged) — the
+/// current zone lit at full strength with one faint halo stroke, the rest at 0.35 — and a caret dot at
+/// the live bpm. No reading: the arcs stay dim and no caret is drawn.
+///
+/// Cost (§2.1 rule 8): shapes only — no Canvas, no clock, no blur. The caret SETTLES to a new reading
+/// (`TelosMotion.settle`, ≈0.45 s, then rest); under Reduce Motion / quiet motion it jumps.
+private struct LiveZoneDial: View {
+    let zoneSet: HRZoneSet
+    let bpm: Int?
+    let currentZone: Int
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var motion = NoopMotionState.shared
+
+    private static let lineWidth: CGFloat = 7
+    private static let gapFraction: Double = 0.006
+
+    var body: some View {
+        if let span = ZoneSliderGeometry.span(zoneSet) {
+            let width: Double = span.upperBound - span.lowerBound
+            let fraction: Double? = bpm.map { ZoneSliderGeometry.fraction(bpm: Double($0), in: span) }
+            ZStack {
+                // The dim track under the arcs, so gaps between zones read as a scale, not holes.
+                DialArc(from: 0, to: 1, inset: Self.lineWidth)
+                    .stroke(TelosColor.lineSoft, style: StrokeStyle(lineWidth: Self.lineWidth * 0.4, lineCap: .round))
+                ForEach(zoneSet.zones, id: \.number) { z in
+                    zoneArc(z, span: span, width: width)
+                }
+                if let fraction {
+                    DialCaret(fraction: fraction, inset: Self.lineWidth, diameter: Self.lineWidth + 5)
+                        .fill(TelosColor.textPrimary)
+                        .overlay(
+                            DialCaret(fraction: fraction, inset: Self.lineWidth, diameter: Self.lineWidth + 5)
+                                .stroke(TelosColor.canvas, lineWidth: TelosStroke.strong)
+                        )
+                        .animation(motion.poseStill(reduceMotion) ? nil : TelosMotion.settle, value: fraction)
+                }
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+        } else {
+            // No usable zone set: the bare dashed track (nothing to place a caret on).
+            DialArc(from: 0, to: 1, inset: Self.lineWidth)
+                .stroke(TelosColor.lineStrong, style: StrokeStyle(lineWidth: TelosStroke.line, dash: [2, 3]))
+                .accessibilityHidden(true)
+        }
+    }
+
+    @ViewBuilder
+    private func zoneArc(_ z: HRZone, span: ClosedRange<Double>, width: Double) -> some View {
+        let lo: Double = (z.lower - span.lowerBound) / width
+        let hi: Double = (z.upper - span.lowerBound) / width
+        let color = StrandPalette.hrZoneColor(z.number)
+        let arc = DialArc(from: lo + Self.gapFraction, to: hi - Self.gapFraction, inset: Self.lineWidth)
+        if bpm != nil && z.number == currentZone {
+            arc.telosLuminousStroke(color, lineWidth: Self.lineWidth, haloOpacity: 0.25)
+        } else {
+            arc.stroke(color.opacity(bpm == nil ? 0.18 : 0.35),
+                       style: StrokeStyle(lineWidth: Self.lineWidth, lineCap: .round))
+        }
+    }
+}
+
+/// The dial's geometry: an open gauge from 135° (bottom-left) clockwise through the top to 405°.
+private enum DialGeometry {
+    static let startDegrees: Double = 135
+    static let spanDegrees: Double = 270
+
+    static func radius(in rect: CGRect, inset: CGFloat) -> CGFloat {
+        max(0, min(rect.width, rect.height) / 2 - inset)
+    }
+
+    static func point(fraction: Double, in rect: CGRect, inset: CGFloat) -> CGPoint {
+        let clamped: Double = min(max(fraction, 0), 1)
+        let a: Double = (startDegrees + spanDegrees * clamped) * Double.pi / 180
+        let r: CGFloat = radius(in: rect, inset: inset)
+        return CGPoint(x: rect.midX + r * CGFloat(cos(a)), y: rect.midY + r * CGFloat(sin(a)))
+    }
+}
+
+private struct DialArc: Shape {
+    var from: Double
+    var to: Double
+    var inset: CGFloat
+
+    func path(in rect: CGRect) -> Path {
+        var p = Path()
+        let lo: Double = min(max(from, 0), 1)
+        let hi: Double = min(max(to, 0), 1)
+        guard hi > lo else { return p }
+        p.addArc(center: CGPoint(x: rect.midX, y: rect.midY),
+                 radius: DialGeometry.radius(in: rect, inset: inset),
+                 startAngle: .degrees(DialGeometry.startDegrees + DialGeometry.spanDegrees * lo),
+                 endAngle: .degrees(DialGeometry.startDegrees + DialGeometry.spanDegrees * hi),
+                 clockwise: false)
+        return p
+    }
+}
+
+/// The caret dot, animatable along the arc (its fraction interpolates, so it travels the ring rather
+/// than cutting across it).
+private struct DialCaret: Shape {
+    var fraction: Double
+    var inset: CGFloat
+    var diameter: CGFloat
+
+    var animatableData: Double {
+        get { fraction }
+        set { fraction = newValue }
+    }
+
+    func path(in rect: CGRect) -> Path {
+        let c = DialGeometry.point(fraction: fraction, in: rect, inset: inset)
+        let r = diameter / 2
+        return Path(ellipseIn: CGRect(x: c.x - r, y: c.y - r, width: diameter, height: diameter))
+    }
+}
+
+// MARK: - HR zone section (leaf: observes the model)
+
+/// HR ZONE — the zone scale (one continuous bar from zone 1's floor to HRmax with a caret at the live
+/// bpm), the where-in-the-zone caption, and the ZONE LOCK chips. Same zone derivation as before
+/// (`HRZoneSet.zoneNumber(forBPM:)` on the smoothed bpm). A leaf, so the lock row re-renders with the
+/// reading rather than dragging the whole screen with it.
+private struct LiveZoneSection: View {
+    @EnvironmentObject private var model: AppModel
+
+    private static let chipVisualHeight: CGFloat = 36
+
+    var body: some View {
+        let zoneSet = model.profile.hrZoneSet
+        let bpm = model.bpm
+        let zone = bpm.map { zoneSet.zoneNumber(forBPM: Double($0)) } ?? 0
+        let locked = model.activeWorkout?.lockedZone
+        return VStack(alignment: .leading, spacing: TelosSpace.s) {
+            HStack {
+                Text("HR ZONE")
+                    .telosScale()
+                    .foregroundStyle(TelosColor.textTertiary)
+                Spacer()
+                if let locked {
+                    HStack(spacing: TelosSpace.xxs) {
+                        Image(systemName: "lock.fill").font(TelosType.glyphDelta)
+                        Text("Z\(locked)")
+                    }
+                    .font(TelosType.numeralXS)
+                    .foregroundStyle(StrandPalette.hrZoneColor(locked))
+                    .accessibilityHidden(true)
+                }
+            }
+            ZoneSlider(zoneSet: zoneSet, bpm: bpm, lockedZone: locked)
+            zoneLockRow(locked: locked)
+            // Both captions in one stack at label spacing — they read as one explanatory footer.
+            VStack(alignment: .leading, spacing: TelosSpace.xxs) {
+                Text(zonePlacementCaption(zoneSet: zoneSet, bpm: bpm, zone: zone))
+                    .font(TelosType.footnote).foregroundStyle(TelosColor.textSecondary)
+                Text(zoneLockCaption(zoneSet: zoneSet, locked: locked))
+                    .font(TelosType.footnote).foregroundStyle(TelosColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(TelosSpace.cardPadding)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(FrostedCardSurface(tint: nil, cornerRadius: TelosRadius.card))
+    }
+
+    /// "Z3 · 142 bpm · high end" — the zone, the bpm and WHERE in the zone the marker sits, so the
+    /// slider reads in words too (and for VoiceOver). Warming-up copy below zone 1, as before.
+    private func zonePlacementCaption(zoneSet: HRZoneSet, bpm: Int?, zone: Int) -> String {
+        guard let bpm else { return String(localized: "Waiting for heart rate.") }
+        guard zone >= 1, let within = ZoneSliderGeometry.withinZone(bpm: Double(bpm), set: zoneSet) else {
+            return String(localized: "Warming up. Keep moving to climb into Zone 1.")
+        }
+        let place: String
+        switch within {
+        case ..<(1.0 / 3.0): place = String(localized: "low end")
+        case ..<(2.0 / 3.0): place = String(localized: "middle")
+        default:             place = String(localized: "high end")
+        }
+        return "Z\(zone) · \(bpm) bpm · \(place)"
+    }
+
+    /// ZONE LOCK row: five chips, at most one on. Tapping the locked zone unlocks it; tapping another
+    /// moves the lock. The phone gives a light selection tick on every toggle; the STRAP carries the
+    /// in-session cues (`AppModel.evaluateZoneGuidance`), so the wearer never has to look.
+    ///
+    /// Each chip is a full-width fifth by a 44 pt hit target (the visual chip is 36 pt, centred), so
+    /// one-handed taps mid-set land.
+    private func zoneLockRow(locked: Int?) -> some View {
+        HStack(spacing: TelosSpace.xs) {
+            ForEach(1...5, id: \.self) { z in
+                zoneLockChip(z, isLocked: locked == z)
+            }
+        }
+    }
+
+    private func zoneLockChip(_ z: Int, isLocked: Bool) -> some View {
+        let color = StrandPalette.hrZoneColor(z)
+        let shape = RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
+        return Button {
+            TelosHaptics.play(.select)
+            model.toggleWorkoutZoneLock(z)
+        } label: {
+            HStack(spacing: 3) {
+                if isLocked {
+                    Image(systemName: "lock.fill").font(TelosType.glyphDelta)
+                }
+                Text("Z\(z)")
+            }
+            .font(TelosType.numeralXS)
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .foregroundStyle(isLocked ? TelosColor.canvas : color)
+            .frame(maxWidth: .infinity, minHeight: Self.chipVisualHeight)
+            .background(shape.fill(isLocked ? color : color.opacity(TelosOpacity.wash)))
+            .overlay(shape.strokeBorder(isLocked ? color : color.opacity(TelosOpacity.border),
+                                        lineWidth: TelosStroke.line))
+            .frame(minHeight: TelosSpace.hitTarget)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(TelosPressButtonStyle())
+        .accessibilityLabel(Text(isLocked ? String(localized: "Unlock Zone \(z)")
+                                            : String(localized: "Lock Zone \(z)")))
+        .accessibilityAddTraits(isLocked ? .isSelected : [])
+    }
+
+    private func zoneLockCaption(zoneSet: HRZoneSet, locked: Int?) -> String {
+        guard let locked, let band = zoneSet.zones.first(where: { $0.number == locked }) else {
+            return String(localized: "Tap a zone to lock it as your target. The strap buzzes twice when you're below it and once when you're above it.")
+        }
+        return String(localized: "Zone \(locked) locked · \(Int(band.lower))-\(Int(band.upper)) bpm. Two buzzes: speed up. One buzz: ease off.")
     }
 }
 
 // MARK: - Compact inline read-out
 
 /// One "LABEL value" pair for the thin single-line read-outs (GPS, sensor) at the bottom of the stack.
-/// These used to be full stat cards (~90pt each); as a line they cost about 36pt and say the same thing.
 private struct InlineReadout: View {
     let label: String
     let value: String
-    var tint: Color = StrandPalette.effortColor
+    var tint: Color = TelosColor.effortInk
 
     var body: some View {
-        HStack(spacing: NoopMetrics.space1) {
+        HStack(spacing: TelosSpace.xs) {
             Text(label)
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
-                .foregroundStyle(StrandPalette.textSecondary)
+                .telosScale()
+                .foregroundStyle(TelosColor.textTertiary)
             Text(value)
-                .font(StrandFont.bodyNumber)
+                .font(TelosType.numeralS)
                 .foregroundStyle(tint)
         }
         .lineLimit(1)
@@ -696,16 +888,16 @@ private struct InlineReadout: View {
     }
 }
 
-/// The shared thin pill the inline read-out lines sit in.
+/// The shared thin glass pill the inline read-out lines sit in.
 private extension View {
     func inlineReadoutRow() -> some View {
         self
             .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, NoopMetrics.space3)
-            .padding(.vertical, NoopMetrics.space2)
-            .background(NoopPanelSurface(tint: StrandPalette.effortColor,
-                                         cornerRadius: NoopVisualStyle.pillRadius))
-            .clipShape(Capsule())
+            .padding(.horizontal, TelosSpace.m)
+            .padding(.vertical, TelosSpace.s)
+            .frame(minHeight: TelosSpace.hitTarget)
+            .background(FrostedCardSurface(tint: nil, cornerRadius: TelosRadius.pill))
+            .clipShape(Capsule(style: .continuous))
     }
 }
 
@@ -716,13 +908,9 @@ private extension View {
 /// render — each metric is dropped when its value is absent, and the WHOLE line (pill + entrance stagger)
 /// is hidden when nothing is present (`live.hasSensorMetrics`), so a plain HR-only workout looks exactly
 /// as before. Speed follows the exercise-distance preference; cadence stays per-minute and power in watts.
-/// Tinted with the Effort world so it reads as part of the hero, not a competing accent. Nothing
-/// here touches HR / zone / effort.
 ///
-/// This is a standalone leaf that owns its OWN `@EnvironmentObject live` (the parent `LiveWorkoutView`
-/// no longer observes `LiveState`), so an incoming sensor / R-R packet re-renders only this row, not the
-/// HR hero / zone rail above. The gate and its absent-value semantics are preserved verbatim; only the
-/// chrome changed (stat card → one thin line) and the stagger slot moved with the shortened stack.
+/// A standalone leaf that owns its OWN `@EnvironmentObject live` (the parent does not observe
+/// `LiveState`), so an incoming sensor / R-R packet re-renders only this row.
 private struct SensorRowIfPresent: View {
     @EnvironmentObject private var live: LiveState
     @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
@@ -739,7 +927,7 @@ private struct SensorRowIfPresent: View {
                 live.sensorSpeedKmh, system: distanceUnitSystem)
             let cadence = LiveState.formatCadence(live.sensorCadence)
             let power = LiveState.formatPowerWatts(live.sensorPowerWatts)
-            HStack(spacing: NoopMetrics.space3) {
+            HStack(spacing: TelosSpace.m) {
                 if let speed { InlineReadout(label: String(localized: "SPEED"), value: speed) }
                 if let cadence { InlineReadout(label: String(localized: "CADENCE"), value: "\(cadence)/min") }
                 if let power { InlineReadout(label: String(localized: "POWER"), value: "\(power) W") }
@@ -751,14 +939,11 @@ private struct SensorRowIfPresent: View {
     }
 }
 
-/// Live GPS distance + average pace on the active-workout screen, for distance sports (#1195). The main
-/// gap this closes: the recorder already computes and publishes `distanceM` / `paceSecPerKm` on every
-/// accepted fix, but they were only ever shown in the post-workout detail view — never live.
+/// Live GPS distance + average pace on the active-workout screen, for distance sports (#1195).
 ///
-/// A standalone leaf that owns its OWN `@ObservedObject` on the recorder (the parent `LiveWorkoutView`
-/// does not observe it), so a GPS fix re-renders only this line — not the HR hero above, the same
-/// scroll-stutter isolation as `SensorRowIfPresent`. Self-gates to nothing until the first accepted fix,
-/// so a denied-permission or GPS-less (Mac) session shows no empty row. Mirrors Android's gated
+/// A standalone leaf that owns its OWN `@ObservedObject` on the recorder (the parent does not observe
+/// it), so a GPS fix re-renders only this line. Self-gates to nothing until the first accepted fix, so a
+/// denied-permission or GPS-less (Mac) session shows no empty row. Mirrors Android's gated
 /// distance/pace row in `LiveWorkoutScreen`.
 private struct DistancePaceRowIfPresent: View {
     @ObservedObject var recorder: GpsWorkoutRecorder
@@ -774,10 +959,9 @@ private struct DistancePaceRowIfPresent: View {
         // `isRecording` is essential, not just `pointCount > 0`: the recorder is a single long-lived
         // object and `stop()` leaves `pointCount`/`distanceM` intact (only `start()` resets them, and it
         // runs solely for distance sports). Without the `isRecording` guard a non-GPS workout started
-        // after a GPS one would show the previous session's stale distance. Together they mean "a GPS
-        // recording is live AND has at least one accepted fix" — the Android `gpsEnabled && track` twin.
+        // after a GPS one would show the previous session's stale distance.
         if recorder.isRecording, recorder.pointCount > 0 {
-            HStack(spacing: NoopMetrics.space4) {
+            HStack(spacing: TelosSpace.l) {
                 // "Distance"/"Pace" are already localized (reused from the detail view); uppercased for
                 // the caps label, exactly as the detail route stats do.
                 InlineReadout(label: String(localized: "Distance").uppercased(),
@@ -795,35 +979,55 @@ private struct DistancePaceRowIfPresent: View {
 
 // MARK: - HR trace
 
+/// The leaf that reads the session's samples (1 Hz) and hands them to the trace card, which is
+/// `Equatable` on a 5-sample bucket: while expanded the Swift Chart redraws at most once per 5 samples
+/// (≈5 s) instead of every heartbeat; collapsed, it costs one small header.
+private struct LiveHRTraceLeaf: View {
+    @EnvironmentObject private var model: AppModel
+
+    var body: some View {
+        if let w = model.activeWorkout {
+            WorkoutHRTraceCard(samples: w.samples,
+                               startSec: Int(w.start.timeIntervalSince1970),
+                               zoneSet: model.profile.hrZoneSet,
+                               lockedZone: w.lockedZone)
+                .equatable()
+        }
+    }
+}
+
 /// The whole session's heart rate since the workout started (x = time since start, y = bpm), read
 /// against the wearer's dynamic Karvonen zones: each zone boundary is a dashed line in its zone colour,
 /// labelled Z1…Z5 on the leading axis, every zone band carries a faint wash of its colour, and a LOCKED
 /// zone's band is raised so the target reads at a glance.
 ///
-/// COLLAPSIBLE (compact layout). The chart is the tallest thing on the screen (~200pt with its card) and
-/// the least glanceable mid-set, so it now sits behind a disclosure header: a tap on the whole title row
-/// expands it, and the state is remembered in `@AppStorage` so a wearer who wants it open keeps it open
-/// across sessions. Collapsed it costs about 42pt.
+/// COLLAPSIBLE: a tap on the whole title row expands it, and the state is remembered in `@AppStorage`.
 ///
 /// All the shaping is `WorkoutHRTrace` (StrandAnalytics, unit-tested): the samples are bucketed to at
-/// most ~600 points so a two-hour session costs the same per render as a ten-minute one, the line breaks
-/// across capture gaps (a pause records no samples), and the y-range frames the data between its
-/// neighbouring zone lines plus the locked band, never 0…220.
+/// most ~600 points, the line breaks across capture gaps (a pause records no samples), and the y-range
+/// frames the data between its neighbouring zone lines plus the locked band, never 0…220. Interpolation
+/// `.monotone` (never overshoots the data).
 ///
-/// The downsample memo (`TraceCache`) is untouched and still keyed the same way. Collapsing simply does
-/// not ask it for a shape at all — the cache is `@State`, so re-expanding hits the memo rather than
-/// re-bucketing, exactly as a live tick does.
-///
-/// The x-axis is WALL time since start, so a pause shows as a gap; the elapsed clock in the bottom bar is
+/// The x-axis is WALL time since start, so a pause shows as a gap; the elapsed clock in the bottom band is
 /// pause-aware active time, so the two differ by the paused duration.
-private struct WorkoutHRTraceCard: View {
+private struct WorkoutHRTraceCard: View, Equatable {
     let samples: [HRSample]
     let startSec: Int
     let zoneSet: HRZoneSet
     let lockedZone: Int?
 
+    /// Redraw bucket: every sample for the first 10 (so the first readings appear at once), then one
+    /// step per 5 samples.
+    private var sampleBucket: Int { samples.count < 10 ? samples.count : 10 + samples.count / 5 }
+
+    static func == (lhs: WorkoutHRTraceCard, rhs: WorkoutHRTraceCard) -> Bool {
+        lhs.sampleBucket == rhs.sampleBucket && lhs.startSec == rhs.startSec
+            && lhs.zoneSet == rhs.zoneSet && lhs.lockedZone == rhs.lockedZone
+    }
+
     /// Remembered across sessions, per the compact layout. Default collapsed.
     @AppStorage("liveWorkoutTraceExpanded") private var expanded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private struct Band: Identifiable {
         let zone: Int
@@ -843,37 +1047,37 @@ private struct WorkoutHRTraceCard: View {
 
     private static let chartHeight: CGFloat = 150
 
-    /// Memo of the shaped trace. The card re-renders on every live tick of the screen (bpm, the clock),
-    /// but its points only change when a sample lands; re-bucketing the whole session each render was
-    /// the cost. A reference held in @State, so filling it never invalidates the view.
+    /// Memo of the shaped trace — its points only change when a sample lands. A reference held in
+    /// @State, so filling it never invalidates the view.
     @State private var cache = TraceCache()
 
     var body: some View {
-        NoopCard(padding: NoopMetrics.space3) {
-            VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                disclosureHeader
-                if expanded { expandedBody }
-            }
+        VStack(alignment: .leading, spacing: TelosSpace.s) {
+            disclosureHeader
+            if expanded { expandedBody }
         }
+        .padding(.horizontal, TelosSpace.cardPadding)
+        .padding(.vertical, TelosSpace.xs)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(FrostedCardSurface(tint: nil, cornerRadius: TelosRadius.card))
     }
 
     private var disclosureHeader: some View {
         Button {
-            withAnimation(.easeInOut(duration: 0.2)) { expanded.toggle() }
+            withAnimation(TelosMotion.animation(.screen, reduced: reduceMotion)) { expanded.toggle() }
         } label: {
-            HStack(spacing: NoopMetrics.space2) {
+            HStack(spacing: TelosSpace.s) {
                 Text("HEART RATE SINCE START")
-                    .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .telosScale()
+                    .foregroundStyle(TelosColor.textTertiary)
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.down")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .font(TelosType.glyphChevron)
+                    .foregroundStyle(TelosColor.textTertiary)
                     .rotationEffect(.degrees(expanded ? 0 : -90))
             }
-            // The whole row is the target: the card's full width by a 44pt-tall strip, so the
-            // disclosure meets the touch-target rule even though its label is an 11pt overline.
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+            // The whole row is the target: the card's full width by a 44 pt-tall strip.
+            .frame(maxWidth: .infinity, minHeight: TelosSpace.hitTarget, alignment: .leading)
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
@@ -893,16 +1097,17 @@ private struct WorkoutHRTraceCard: View {
         let shaped = cache.shaped(samples: samples, startSec: startSec, zoneSet: zoneSet, lockedZone: lockedZone)
         let points = shaped.points
         let yDomain = shaped.yDomain
-        let xMax = max(60, points.last?.offset ?? 0)
+        let lastOffset: Double = points.last?.offset ?? 0
+        let xMax: Double = max(60, lastOffset)
         return Group {
             if points.isEmpty {
-                Text(String(localized: "Waiting for heart rate."))
-                    .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                AbsentValue(reason: "Waiting for heart rate.")
                     .frame(maxWidth: .infinity, minHeight: Self.chartHeight)
             } else {
                 chart(points: points, yDomain: yDomain, xMax: xMax)
             }
         }
+        .padding(.bottom, TelosSpace.s)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("Heart rate since start"))
         .accessibilityValue(Text(accessibilityValue(points)))
@@ -920,7 +1125,7 @@ private struct WorkoutHRTraceCard: View {
             }
             ForEach(edges) { edge in
                 RuleMark(y: .value("Zone boundary", edge.bpm))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                    .lineStyle(StrokeStyle(lineWidth: TelosStroke.line, dash: [4, 4]))
                     .foregroundStyle(edge.color.opacity(isLockedEdge(edge) ? 0.9 : 0.5))
             }
             ForEach(points, id: \.offset) { p in
@@ -928,8 +1133,8 @@ private struct WorkoutHRTraceCard: View {
                          y: .value("BPM", p.bpm),
                          series: .value("Segment", p.segment))
                     .interpolationMethod(.monotone)
-                    .lineStyle(StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round))
-                    .foregroundStyle(StrandPalette.metricRose)
+                    .lineStyle(StrokeStyle(lineWidth: TelosStroke.data, lineCap: .round, lineJoin: .round))
+                    .foregroundStyle(TelosColor.heart)
             }
         }
         .chartXScale(domain: 0...xMax)
@@ -937,11 +1142,11 @@ private struct WorkoutHRTraceCard: View {
         .chartPlotStyle { plotArea in plotArea.clipped() }
         .chartXAxis {
             AxisMarks(values: WorkoutHRTrace.xTicks(maxOffset: xMax)) { value in
-                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.4))
+                AxisGridLine().foregroundStyle(TelosColor.lineSoft)
                 AxisValueLabel {
                     if let s = value.as(Double.self) {
                         Text(ActiveWorkoutClock.clock(Int(s)))
-                            .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                            .font(TelosType.scaleNumber).foregroundStyle(TelosColor.textTertiary)
                     }
                 }
             }
@@ -952,14 +1157,14 @@ private struct WorkoutHRTraceCard: View {
                 AxisValueLabel {
                     if let v = value.as(Double.self), let edge = edges.first(where: { abs($0.bpm - v) < 0.01 }) {
                         Text(edge.label)
-                            .font(StrandFont.footnote)
+                            .font(TelosType.scaleNumber)
                             .foregroundStyle(edge.color)
                     }
                 }
             }
             AxisMarks(position: .trailing, values: .automatic(desiredCount: 3)) { _ in
-                AxisValueLabel().foregroundStyle(StrandPalette.textTertiary)
-                    .font(StrandFont.footnote)
+                AxisValueLabel().foregroundStyle(TelosColor.textTertiary)
+                    .font(TelosType.scaleNumber)
             }
         }
         .frame(height: Self.chartHeight)
@@ -1029,13 +1234,13 @@ private struct WorkoutHRTraceCard: View {
 
 /// One continuous horizontal bar from zone 1's lower bound to HRmax, divided into the five zone segments
 /// in their zone colours (each segment's width is its real bpm span, so personalised zones of unequal
-/// width draw true to scale). A marker rides the bar at the current smoothed bpm, showing WHERE in the
-/// zone the wearer is, not just which one. A locked zone's segment is raised and outlined; the rest dim.
+/// width draw true to scale; ramp at 0.35, the current — or locked — band at full strength). A caret
+/// rides the bar at the current smoothed bpm, showing WHERE in the zone the wearer is, not just which
+/// one. A locked zone's segment is raised and outlined.
 ///
-/// The marker glides between readings; under Reduce Motion / quiet motion / Low Power (`NoopMotionState`)
-/// it jumps instead. The animation always settles, so it costs nothing between HR updates.
-///
-/// Heights are trimmed for the compact layout (36 → 30pt overall); the geometry is otherwise unchanged.
+/// The caret settles between readings (`TelosMotion.settle`); under Reduce Motion / quiet motion / Low
+/// Power (`NoopMotionState`) it jumps instead. The animation always settles, so it costs nothing between
+/// HR updates.
 private struct ZoneSlider: View {
     let zoneSet: HRZoneSet
     let bpm: Int?
@@ -1044,8 +1249,8 @@ private struct ZoneSlider: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject private var motion = NoopMotionState.shared
 
-    private static let barHeight: CGFloat = 14
-    private static let lockedHeight: CGFloat = 22
+    private static let barHeight: CGFloat = 12
+    private static let lockedHeight: CGFloat = 20
     private static let segmentGap: CGFloat = 2
 
     var body: some View {
@@ -1062,14 +1267,13 @@ private struct ZoneSlider: View {
                     if let fraction {
                         marker
                             .offset(x: CGFloat(fraction) * w - 3)
-                            .animation(motion.poseStill(reduceMotion) ? nil
-                                       : .spring(response: 0.55, dampingFraction: 0.85),
+                            .animation(motion.poseStill(reduceMotion) ? nil : TelosMotion.settle,
                                        value: fraction)
                     }
                 }
                 .frame(width: w, height: geo.size.height, alignment: .leading)
             }
-            .frame(height: 30)
+            .frame(height: 28)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Text("Heart rate zone slider"))
             .accessibilityValue(Text(accessibilityValue(current: current)))
@@ -1085,12 +1289,10 @@ private struct ZoneSlider: View {
         let isLocked = lockedZone == z.number
         let emphasised = lockedZone.map { $0 == z.number } ?? (z.number == current)
         let color = StrandPalette.hrZoneColor(z.number)
-        return RoundedRectangle(cornerRadius: 5, style: .continuous)
+        let shape = Capsule(style: .continuous)
+        return shape
             .fill(color.opacity(emphasised ? 1 : 0.35))
-            .overlay(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .strokeBorder(isLocked ? StrandPalette.textPrimary : Color.clear, lineWidth: 1.5)
-            )
+            .overlay(shape.strokeBorder(isLocked ? TelosColor.textPrimary : Color.clear, lineWidth: TelosStroke.strong))
             .frame(width: segW, height: isLocked ? Self.lockedHeight : Self.barHeight)
             .offset(x: x)
     }
@@ -1101,52 +1303,39 @@ private struct ZoneSlider: View {
                             : String(localized: "Below Zone 1, \(bpm) bpm")
     }
 
-    /// The live-bpm marker: a slim pill that stands clear of the tallest (locked) segment.
+    /// The live-bpm caret: a slim pill that stands clear of the tallest (locked) segment. No shadow.
     private var marker: some View {
         Capsule()
-            .fill(StrandPalette.textPrimary)
-            .frame(width: 6, height: 28)
-            .overlay(Capsule().strokeBorder(StrandPalette.surfaceBase, lineWidth: 1.5))
-            .shadow(color: .black.opacity(0.35), radius: 3, y: 1)
+            .fill(TelosColor.textPrimary)
+            .frame(width: 6, height: 26)
+            .overlay(Capsule().strokeBorder(TelosColor.canvas, lineWidth: TelosStroke.strong))
     }
 }
 
 // MARK: - Session stats + Today's Effort vs target
 
-/// The session's AVG / PEAK heart rate AND today's Effort against the day's recommended ceiling, in one
-/// card. They were two cards with a 26pt gap between them, and the stat row's third column repeated the
-/// Effort already shown in the hero above — so the merge costs no information.
+/// The session's AVG / PEAK heart rate AND today's Effort against the day's recommended ceiling, as three
+/// compact glass tiles (decision 11) with the day bar under them.
 ///
-/// Today's Effort against the day's recommended ceiling, on the wearer's Effort scale: "9.8 / 14". A bar
-/// fills to the day's figure with a notch at the target.
+/// HONEST ABSENCE (§2.3 rule 2 — the `?? 0` this card used to be fed is gone): AVG and PEAK are nil until
+/// the session holds a sample, and render "—" + "Waiting for the strap"; the day figure and the target
+/// each show a dash on their own until they resolve, and the bar does not draw until the day figure
+/// does. Nothing is substituted for a missing value.
 ///
-/// THE SAME NUMBER TODAY AND THE WIDGET SHOW, AT THE SAME MOMENT — because it is literally the same
-/// resolution: `Repository.todayEffortNow()` printed through its own `display(scale:)`, and
-/// `Repository.todayEffortTarget()` for the ceiling. This card used to resolve both itself — a
-/// calendar-day key instead of Today's logical day, its own (computed ?? merged) read of the day, its own
-/// recovery precedence for the band, and its own `StrainCombine` sum of the live session on top — so it
-/// printed a different day figure from Today and the lock-screen strip for the whole session.
+/// THE SAME NUMBER TODAY AND THE WIDGET SHOW, AT THE SAME MOMENT — `Repository.todayEffortNow()` printed
+/// through its own `display(scale:)`, and `Repository.todayEffortTarget()` for the ceiling.
 ///
 /// THE SESSION IS NOT ADDED INTO THE DAY FIGURE. The day's Effort is measured from the day's heart rate,
 /// and this session's beats reach it through the strap's history; adding the session's own running Effort
-/// on top would count the overlap twice the moment a drain lands, and it would have to be added on Today,
-/// the Key Metrics tile, the Effort detail and the widget too or the four would disagree again. The
-/// session's own live Effort is the hero number at the top of this screen, and the line under the bar
-/// states it as its own figure — see `TodayEffortNow`.
+/// on top would count the overlap twice the moment a drain lands. The session's own live Effort is the
+/// ring in the hero, and the line under the bar states it as its own figure — see `TodayEffortNow`.
 ///
-/// CHEAP ON PURPOSE. Nothing here rescans the day's heart rate: the two shared resolutions are day-scoped
-/// reads on a 30 s task of their own, never on the live-HR path (`captureWorkoutSample`, its accumulator
-/// and the trace's downsample cache are untouched by this card).
-///
-/// ABSENT INPUT ABSTAINS: AVG/PEAK show "—" until the session has a reading; the day figure and the
-/// target each show a dash on their own until they resolve, and the bar does not draw until the day
-/// figure does. Nothing is substituted for a missing value.
+/// CHEAP ON PURPOSE: the two shared resolutions are day-scoped reads on a 30 s task of their own, never on
+/// the live-HR path. A leaf: its 1 Hz observation re-renders three small tiles, nothing else.
 private struct SessionSummaryCard: View {
     @EnvironmentObject private var model: AppModel
-    let avgHr: Int
-    let peakHr: Int
-    let sessionEffort: Double
-    let effortScale: EffortScale
+    @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
+    private var effortScale: EffortScale { UnitPrefs.resolveEffortScale(effortScaleRaw) }
 
     /// How often the shared day figure + target are re-read while the session runs. Slow on purpose: both
     /// move on a sync or a Today reload, not per heartbeat.
@@ -1156,114 +1345,95 @@ private struct SessionSummaryCard: View {
     @State private var target: TodayEffortTarget?
 
     var body: some View {
-        // The stat row renders immediately (it needs no load), and the day-vs-target strip appears under
-        // it when the first read lands. The card is never zero-height, so `.task` is always attached to
-        // a view that actually renders — the reason the old card carried a 1pt stand-in.
-        NoopCard(padding: NoopMetrics.space3, tint: StrandPalette.effortColor) {
-            VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                statRow
-                if let day100 = effortNow?.effort100 { dayStrip(day100: day100) }
+        let w = model.activeWorkout
+        let hasSamples: Bool = !(w?.samples.isEmpty ?? true)
+        // No sample yet ⇒ no average and no peak (never the stored 0 the struct starts with).
+        let avg: Int? = hasSamples ? w.flatMap { $0.avgHr > 0 ? $0.avgHr : nil } : nil
+        let peak: Int? = hasSamples ? w.flatMap { $0.peakHr > 0 ? $0.peakHr : nil } : nil
+        let sessionEffort: Double? = hasSamples ? w?.liveStrain : nil
+        let dayInk: Color = effortNow == nil ? TelosColor.textTertiary
+            : (pastTarget ? TelosColor.heartInk : TelosColor.effortInk)
+        // The stat row renders immediately (it needs no load), and the day bar appears under it when the
+        // first read lands. The card is never zero-height, so `.task` is always attached to a view that
+        // actually renders.
+        return VStack(alignment: .leading, spacing: TelosSpace.s) {
+            TelosTileGrid(minTileWidth: 96, maxColumns: 3) {
+                LiveStatTile(label: String(localized: "AVG"), value: avg.map { "\($0)" }, unit: "bpm",
+                             ink: TelosColor.heartInk)
+                LiveStatTile(label: String(localized: "PEAK"), value: peak.map { "\($0)" }, unit: "bpm",
+                             ink: TelosColor.heartInk)
+                // Day Effort / today's recommended ceiling, on the wearer's scale, both from the shared
+                // resolutions. The label reuses the already-translated "Day" and "target" keys.
+                LiveStatTile(label: Self.dayTargetLabel,
+                             value: TodayEffortNow.dayTargetText(effort: effortNow, target: target, scale: effortScale),
+                             unit: nil,
+                             ink: dayInk)
+            }
+            if let day100 = effortNow?.effort100 {
+                dayStrip(day100: day100, sessionEffort: sessionEffort)
+                    .padding(.horizontal, TelosSpace.xs)
             }
         }
-        .accessibilityElement(children: .combine)
         .task { await trackDayEffort() }
-    }
-
-    private var statRow: some View {
-        HStack(spacing: 0) {
-            stat(String(localized: "AVG"), avgHr > 0 ? "\(avgHr)" : "—",
-                 tint: avgHr > 0 ? StrandPalette.metricRose : StrandPalette.textPrimary)
-            statDivider
-            stat(String(localized: "PEAK"), peakHr > 0 ? "\(peakHr)" : "—",
-                 tint: peakHr > 0 ? StrandPalette.metricRose : StrandPalette.textPrimary)
-            statDivider
-            // Day Effort / today's recommended ceiling, on the wearer's scale, both from the shared
-            // resolutions. The label reuses the already-translated "Day" and "target" keys rather than
-            // introducing a new string.
-            stat(Self.dayTargetLabel,
-                 TodayEffortNow.dayTargetText(effort: effortNow, target: target, scale: effortScale),
-                 tint: pastTarget ? StrandPalette.metricRose : StrandPalette.textPrimary)
-        }
     }
 
     /// The bar: the day so far on the 0–100 axis with a notch at the target — the same axis and the same
     /// inverse-calibrated mark Today's hero ring uses.
-    private func dayStrip(day100: Double) -> some View {
+    private func dayStrip(day100: Double, sessionEffort: Double?) -> some View {
         let target100 = target?.upper100
-        let domain = min(StrainScorer.maxStrain, max((target100 ?? 0) * 1.2, day100 * 1.1, 10))
-        let dayFrac = min(max(day100 / domain, 0), 1)
-        let targetFrac = target100.map { min(max($0 / domain, 0), 1) }
-        // The session's OWN Effort, stated as its own figure. Not a delta of the day number: the day
-        // number does not contain it (see the type comment), so `effortDisplay` — the stored-value
-        // formatter every other session read-out uses — is the right one here.
-        let sessionText = UnitFormatter.effortDisplay(sessionEffort, scale: effortScale)
-        return VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
+        // Axis only (never a displayed figure): room for the target and the day, at least 10.
+        let targetRoom: Double = target100.map { $0 * 1.2 } ?? 10
+        let domain: Double = min(StrainScorer.maxStrain, max(targetRoom, day100 * 1.1, 10))
+        let dayFrac: Double = min(max(day100 / domain, 0), 1)
+        let targetFrac: Double? = target100.map { min(max($0 / domain, 0), 1) }
+        return VStack(alignment: .leading, spacing: TelosSpace.xxs) {
             GeometryReader { geo in
                 let w = geo.size.width
                 ZStack(alignment: .leading) {
-                    Capsule().fill(StrandPalette.hairline)
-                    Capsule().fill(StrandPalette.effortColor)
+                    Capsule().fill(TelosColor.effort.opacity(TelosOpacity.fill))
+                    Capsule().fill(TelosColor.effort)
                         .frame(width: max(0, CGFloat(dayFrac) * w))
                     if let targetFrac {
-                        Rectangle()
-                            .fill(StrandPalette.textPrimary)
-                            .frame(width: 2, height: 16)
+                        Capsule()
+                            .fill(TelosColor.textPrimary)
+                            .frame(width: 2, height: 14)
                             .offset(x: CGFloat(targetFrac) * w - 1)
                     }
                 }
-                .frame(width: w, height: NoopMetrics.indicatorTrackHeight, alignment: .leading)
+                .frame(width: w, height: 6, alignment: .leading)
                 .frame(height: geo.size.height)
             }
-            .frame(height: 16)
-            Text(pastTarget ? String(localized: "Past today's recommended ceiling.")
-                            : String(localized: "This workout \(sessionText) so far"))
-                .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-                .lineLimit(1).minimumScaleFactor(0.8)
+            .frame(height: 14)
+            Group {
+                if pastTarget {
+                    Text("Past today's recommended ceiling.")
+                } else if let sessionEffort {
+                    // The session's OWN Effort, stated as its own figure (see the type comment).
+                    Text("This workout \(UnitFormatter.effortDisplay(sessionEffort, scale: effortScale)) so far")
+                } else {
+                    Text("Waiting for heart rate.")
+                }
+            }
+            .font(TelosType.footnote).foregroundStyle(TelosColor.textTertiary)
+            .lineLimit(1).minimumScaleFactor(0.8)
         }
+        .accessibilityElement(children: .combine)
     }
 
-    private func stat(_ title: String, _ value: String, tint: Color) -> some View {
-        VStack(spacing: NoopMetrics.spaceHalf) {
-            Text(title)
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .lineLimit(1).minimumScaleFactor(0.7)
-            Text(value)
-                .font(StrandFont.number(24))
-                .foregroundStyle(tint)
-                .lineLimit(1).minimumScaleFactor(0.5)
-        }
-        .frame(maxWidth: .infinity)
-    }
-
-    private var statDivider: some View {
-        Rectangle()
-            .fill(StrandPalette.hairline)
-            .frame(width: 1, height: 32)
-    }
-
-    /// "DAY / TARGET" built from the two existing localized words, so the merged card adds no new
-    /// translation key. `localizedUppercase` keeps the caps-label convention in every language that
-    /// has a case distinction and is a no-op in the ones that don't.
+    /// "DAY / TARGET" built from the two existing localized words, so the card adds no new translation key.
     private static var dayTargetLabel: String {
         "\(String(localized: "Day").localizedUppercase) / \(String(localized: "target").localizedUppercase)"
     }
 
     /// Past the ceiling, compared on the one axis both figures are already on (0–100, the target through
-    /// the inverse calibration) — the monotone image of Today's own strain21-vs-band-top comparison.
+    /// the inverse calibration).
     private var pastTarget: Bool {
         guard let day100 = effortNow?.effort100, let target100 = target?.upper100 else { return false }
         return day100 >= target100
     }
 
-    /// Keep the day figure + target current while the session runs.
-    ///
-    /// They must be the numbers Today and the widget show AT THE SAME MOMENT, and both of those move
-    /// without notifying this screen: the live in-progress value is a static Today publishes when it
-    /// reloads, and the day's own rows land on a history drain. The card used to read its figures exactly
-    /// ONCE, latched behind a `loaded` flag, so a session that outlived a sync kept showing the day as it
-    /// stood when the screen opened. A slow poll of the two shared resolutions is what keeps them level;
-    /// it is its own task, cancelled with the screen, and never touches the live-HR path.
+    /// Keep the day figure + target current while the session runs — a slow poll of the two shared
+    /// resolutions, its own task, cancelled with the screen, never on the live-HR path.
     private func trackDayEffort() async {
         let repo = model.repo
         while !Task.isCancelled {
@@ -1273,5 +1443,56 @@ private struct SessionSummaryCard: View {
             target = resolvedTarget
             try? await Task.sleep(nanoseconds: Self.dayRefreshNanos)
         }
+    }
+}
+
+/// One compact glass stat tile: label (small caps) → value + unit, or "—" + the existing reason. No
+/// count-up on purpose — these move every second while streaming, and a per-second count would be a
+/// near-continuous animation.
+private struct LiveStatTile: View {
+    let label: String
+    let value: String?
+    let unit: String?
+    let ink: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: TelosSpace.xxs) {
+            Text(label)
+                .telosScale()
+                .textCase(.uppercase)
+                .foregroundStyle(TelosColor.textTertiary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            HStack(alignment: .firstTextBaseline, spacing: TelosSpace.xxs) {
+                Text(verbatim: value ?? TelosType.absent)
+                    .telosNumeral(.numeralM)
+                    .foregroundStyle(value == nil ? TelosColor.textTertiary : ink)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                if value != nil, let unit {
+                    Text(verbatim: unit)
+                        .font(TelosType.scale)
+                        .foregroundStyle(TelosColor.textSecondary)
+                        .lineLimit(1)
+                }
+            }
+            if value == nil {
+                Text("Waiting for the strap")
+                    .font(TelosType.caption)
+                    .foregroundStyle(TelosColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(TelosSpace.tilePadding)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(FrostedCardSurface(tint: nil, cornerRadius: TelosRadius.tile))
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(label))
+        .accessibilityValue(accessibilityValueText)
+    }
+
+    private var accessibilityValueText: Text {
+        guard let value else { return Text("No data") }
+        return Text(verbatim: value + (unit.map { " " + $0 } ?? ""))
     }
 }

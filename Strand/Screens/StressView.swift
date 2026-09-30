@@ -281,9 +281,15 @@ struct StressView: View {
     private func content(_ model: StressModel) -> some View {
         VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
 
-            // 1. HERO — the liquid stress-level vessel + band + one plain-English line, all in one card.
+            // 1. HERO — the 0–3 dial reading a WORD (H1d), one plain-English line, the number only in the
+            //    provenance row, and the live ten-minute read beneath.
             heroCard(model)
                 .staggeredAppear(index: 0)
+
+            // 1a. Breathing entry (§6.10) + the pre-session RMSSD trend (S4; self-hides with no sessions).
+            breatheEntry
+                .staggeredAppear(index: 1)
+            BreathPreRmssdTrendCard()
 
             // 1b. ADVANCED HRV readouts (additive, on-demand). A separate, clearly-labelled card
             //     that appears only when at least one engine returned a value. It sits BELOW the
@@ -349,9 +355,11 @@ struct StressView: View {
                         // can exceed both hourly neighbours when the busy stretch straddles a boundary,
                         // so `day.peak` would caption the line with a number below its visible maximum.
                         // Everything that COUNTS hours still reads `hours`; a maximum is not a count.
-                        let drawnPeak = day.timeline.filter { $0.level != nil }
-                            .max { ($0.level ?? 0) < ($1.level ?? 0) }
-                        if let peak = drawnPeak, let lvl = peak.level {
+                        let drawnPeak = day.timeline
+                            .compactMap { p in p.level.map { (hour: p.hour, level: $0) } }
+                            .max { $0.level < $1.level }
+                        if let peak = drawnPeak {
+                            let lvl = peak.level
                             Text("peak \(String(format: "%.1f", lvl)) · \(hourLabel(peak.hour))")
                                 .font(StrandFont.captionNumber)
                                 .foregroundStyle(StressRamp.color(lvl))
@@ -447,42 +455,70 @@ struct StressView: View {
         return date.formatted(.dateTime.hour())
     }
 
-    // MARK: 1 · Hero — the liquid stress-level vessel.
+    // MARK: 1 · Hero — the 0–3 dial that reads a word (DESIGN_V2 §6.10, HEALTH_V2 H1d).
     //
-    // The 0–3 stress score reads as the signature liquid gauge: a LiquidVessel that fills to score/3
-    // and is tinted by the live band (calm blue → steady green → tense amber), with the count-up value +
-    // "of 3" over it (the Today HeroScoreCell / Live BPM-gauge idiom). The band pill sits top-trailing and
-    // one plain-English line explains the number below. Frosted card, liquid finish.
+    // The daily 0–3 proxy on a `TelosBezel` with its three band arcs (calm blue → steady green → tense
+    // amber). The centre reads the band as a WORD — low / moderate / high — because a decimal on an
+    // autonomic proxy claims more precision than it has; the number stays available in the provenance row.
+    // Below it the live ten-minute read (`LiveStressMonitor`), which abstains honestly when the window had
+    // no motion evidence. Static: the bezel only redraws when the score changes.
 
     private func heroCard(_ model: StressModel) -> some View {
         NoopCard(tint: StressRamp.calm) {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-                HStack {
-                    Text("Stress monitor").strandOverline()
-                    Spacer()
-                    StatePill("\(model.band.title)", tone: model.band.tone, showsDot: true)
-                }
+                Text("Stress monitor").strandOverline()
 
-                HStack(alignment: .center, spacing: NoopMetrics.space5) {
-                    // The stress-level vessel: fills to score/3, tinted to the live band, the value
-                    // counting up over it. Taps splash the gauge (the numeral is hit-transparent).
-                    StressHeroGauge(score: model.score, tint: StressRamp.color(model.score))
-
-                    VStack(alignment: .leading, spacing: NoopMetrics.space1) {
-                        Text(model.band.title)
-                            .font(StrandFont.overline)
-                            .tracking(StrandFont.overlineTracking)
-                            .foregroundStyle(StressRamp.color(model.score))
-                        // One plain-English line beside the gauge.
-                        Text(model.explanation)
-                            .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .center, spacing: TelosSpace.l) {
+                        StressDial(score: model.score, word: model.band.word)
+                        heroExplanation(model)
                     }
-                    Spacer(minLength: 0)
+                    VStack(alignment: .leading, spacing: TelosSpace.m) {
+                        StressDial(score: model.score, word: model.band.word)
+                            .frame(maxWidth: .infinity)
+                        heroExplanation(model)
+                    }
                 }
+
+                ProvenanceRow(TelosProvenance(
+                    sourceText: Text(verbatim: "HRV · RHR"),
+                    window: Text(verbatim: String(format: "%.1f / 3", model.score))))
+
+                Divider().overlay(StrandPalette.hairline)
+                LiveStressNowRow()
             }
         }
+    }
+
+    private func heroExplanation(_ model: StressModel) -> some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+            Text(model.band.word)
+                .telosScale()
+                .textCase(.uppercase)
+                .foregroundStyle(StressRamp.color(model.score))
+            // One plain-English line beside the dial.
+            Text(model.explanation)
+                .font(TelosType.subhead)
+                .foregroundStyle(TelosColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // MARK: 1a · Breathing entry
+
+    /// Opens the existing Breathe trainer in the same sheet the sustained-stress card uses.
+    private var breatheEntry: some View {
+        Button { showBreathe = true } label: {
+            TelosListRow("Breathe",
+                         subtitle: "Haptic-paced breathing · find your pace · calm down",
+                         systemImage: "wind",
+                         iconTint: TelosColor.rest,
+                         showsChevron: true)
+        }
+        .buttonStyle(TelosRowButtonStyle())
+        .frostedCardSurface()
+        .accessibilityHint(Text("Opens the breathing trainer"))
     }
 
     // MARK: 1b · Advanced HRV readouts (additive, on-demand)
@@ -564,11 +600,11 @@ struct StressView: View {
             alignment: .leading,
             spacing: NoopMetrics.gap
         ) {
-            // Today's stress value, with its band as the caption.
+            // Today's stress in WORDS (H1d); the 0–3 figure is the caption, not the headline.
             StatTile(
                 label: "Stress",
-                value: String(format: "%.1f", model.score),
-                caption: String(localized: "of 3 · \(model.band.title)"),
+                value: model.band.word,
+                caption: String(format: "%.1f / 3", model.score),
                 accent: StressRamp.color(model.score),
                 sparkline: model.sparkValues.count > 1 ? model.sparkValues : nil,
                 sparkColor: StressRamp.color(model.score)
@@ -733,6 +769,8 @@ struct StressView: View {
     }
 
     // MARK: Empty state
+    //
+    // (The hero's live row — `LiveStressNowRow` — and the dial live below the screen struct.)
 
     private var emptyState: some View {
         // Two different "no score" states, and saying the wrong one is its own small dishonesty: a user
@@ -747,7 +785,87 @@ struct StressView: View {
     }
 }
 
-// MARK: - Stress hero gauge (liquid vessel + count-up score)
+// MARK: - Stress dial (TelosBezel 0–3, word in the centre)
+
+/// The daily stress on a 0–3 open dial: three band arcs, a value caret, the band WORD in the centre.
+/// One VoiceOver element: "Stress, Moderate". Static (the bezel draws once per score).
+private struct StressDial: View {
+    let score: Double
+    let word: String
+
+    var body: some View {
+        let ink = StressRamp.color(score)
+        ZStack {
+            // One pre-composited radial fill behind the dial — no blur, no clock.
+            TelosRadialGlow(color: ink, intensity: 0.16, radius: 70)
+            TelosBezel(value: score,
+                       range: 0...3,
+                       color: ink,
+                       majorCount: 3,
+                       minorPerMajor: 5,
+                       startDegrees: 150,
+                       spanDegrees: 240,
+                       bands: [
+                           TelosBezel.Band(range: 0...1, color: StressRamp.calm),
+                           TelosBezel.Band(range: 1...2, color: StressRamp.steady),
+                           TelosBezel.Band(range: 2...3, color: StressRamp.tense),
+                       ])
+            VStack(spacing: TelosSpace.xxs) {
+                Text(verbatim: word)
+                    .font(TelosType.title2)
+                    .foregroundStyle(ink)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.7)
+                Text("Stress")
+                    .telosScale()
+                    .textCase(.uppercase)
+                    .foregroundStyle(TelosColor.textTertiary)
+            }
+            .padding(.horizontal, TelosSpace.m)
+        }
+        .frame(width: 124, height: 124)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text("Stress"))
+        .accessibilityValue(Text(verbatim: word))
+    }
+}
+
+/// The last ten minutes (`LiveStressMonitor`), in words, or "—" with why there is no reading — a window
+/// without motion evidence abstains (`noMotionEvidence`, HEALTH_V2 H1a) rather than claiming rest.
+///
+/// LEAF: the only view on this screen that observes the monitor (it publishes about every five minutes
+/// while the app is in front), so the rest of the screen never re-renders for it.
+private struct LiveStressNowRow: View {
+    @ObservedObject private var monitor = LiveStressMonitor.shared
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: TelosSpace.s) {
+            Text("Right now")
+                .telosScale()
+                .textCase(.uppercase)
+                .foregroundStyle(TelosColor.textTertiary)
+            Spacer(minLength: TelosSpace.s)
+            if let level = monitor.level, level.isFinite {
+                Text(verbatim: StressBand(score: level).word)
+                    .font(TelosType.headline)
+                    .foregroundStyle(StressRamp.color(level))
+                if let at = monitor.at {
+                    Text(verbatim: TelosFormat.time(at))
+                        .font(TelosType.scaleNumber)
+                        .foregroundStyle(TelosColor.textTertiary)
+                }
+            } else {
+                AbsentValue(reasonText: monitor.abstention == .noMotionEvidence
+                                ? Text("No motion data for these ten minutes, so rest could not be confirmed")
+                                : Text("No reading in the last ten minutes"),
+                            arrangement: .inline)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+// MARK: - Stress hero gauge (liquid vessel + count-up score) — retired from the hero (kept for parity)
 
 /// The stress-level vessel: a LiquidVessel filled to `score`/3 and tinted to the live band, with the
 /// 0–3 value counting up over it and "of 3" beneath (the Today HeroScoreCell / Live BPM-gauge idiom).
@@ -810,6 +928,16 @@ enum StressBand {
         case .low:    return .positive
         case .medium: return .warning
         case .high:   return .critical
+        }
+    }
+
+    /// The band in words, the way the dial and tiles say it (H1d): low / moderate / high — the same
+    /// words the live monitor uses (`LiveStressMonitor.bandWord`).
+    var word: String {
+        switch self {
+        case .low:    return String(localized: "Low")
+        case .medium: return String(localized: "Moderate")
+        case .high:   return String(localized: "High")
         }
     }
 }
@@ -1053,10 +1181,11 @@ enum StressMath {
     }
 
     static func explanation(band: StressBand, rhrDelta: Double?, hrvDelta: Double?, usingStored: Bool) -> String {
-        let rhrUp = (rhrDelta ?? 0) > 1.0
-        let rhrDn = (rhrDelta ?? 0) < -1.0
-        let hrvUp = (hrvDelta ?? 0) > 1.0
-        let hrvDn = (hrvDelta ?? 0) < -1.0
+        // A missing delta is neither up nor down (no substituted zero).
+        let rhrUp = rhrDelta.map { $0 > 1.0 } ?? false
+        let rhrDn = rhrDelta.map { $0 < -1.0 } ?? false
+        let hrvUp = hrvDelta.map { $0 > 1.0 } ?? false
+        let hrvDn = hrvDelta.map { $0 < -1.0 } ?? false
 
         switch band {
         case .high:

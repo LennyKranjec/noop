@@ -306,7 +306,7 @@ struct FullDayChartView: View {
     private var emptyState: some View {
         VStack(spacing: NoopMetrics.space2) {
             Image(systemName: "waveform.slash")
-                .font(.system(size: 26, weight: .light))
+                .font(TelosType.numeralFont(size: 26, weight: .light))
                 .foregroundStyle(StrandPalette.textTertiary)
             Text("No \(metric.title.lowercased()) here")
                 .font(StrandFont.body)
@@ -363,10 +363,11 @@ struct FullDayChartView: View {
 
     private var statsFooter: some View {
         let v = displayPoints.map(\.value)
+        // An empty window has no min / mean / max — "—", never a formatted zero (§2.3).
         return ChartFooter([
-            ("Min", format(v.min() ?? 0)),
-            ("Avg", format(v.reduce(0, +) / Double(max(1, v.count)))),
-            ("Max", format(v.max() ?? 0)),
+            ("Min", v.min().map { format($0) } ?? TelosType.absent),
+            ("Avg", v.isEmpty ? TelosType.absent : format(v.reduce(0, +) / Double(v.count))),
+            ("Max", v.max().map { format($0) } ?? TelosType.absent),
         ])
     }
 

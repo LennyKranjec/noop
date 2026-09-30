@@ -152,7 +152,7 @@ struct JournalLogCard: View {
                             .foregroundStyle(StrandPalette.textTertiary)
                         Spacer()
                         Image(systemName: collapsed ? "chevron.right" : "chevron.down")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(TelosType.glyphChevron)
                             .foregroundStyle(StrandPalette.textTertiary)
                     }
                 }

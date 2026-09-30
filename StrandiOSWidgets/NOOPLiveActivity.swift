@@ -9,6 +9,11 @@ import StrandDesign
 /// effort it has cost so far or — for a recovery session such as a meditation — how stress has moved
 /// from its opening minutes to now. The clock is `Text(timerInterval:)`, which the system ticks by
 /// itself, so the time is live to the second without the app sending a single update for it.
+///
+/// TELOS 2.0 (DESIGN_V2 §6.13): the Telos ground as the banner tint, HR as the big light figure in the
+/// `heart` hue, Effort in the mono `scaleNumber` voice, labels in the tracked small-caps voice, the
+/// workout's effort as a static `TelosRing`. Every API here is iOS 16.1+ (ActivityKit / Dynamic Island),
+/// inside the extension's iOS 17 floor — nothing needs an availability guard.
 struct NOOPLiveActivity: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: NOOPActivityAttributes.self) { context in
@@ -21,8 +26,9 @@ struct NOOPLiveActivity: Widget {
                 }
             }
             .padding()
-            .activityBackgroundTint(StrandPalette.surfaceBase)
-            .activitySystemActionForegroundColor(StrandPalette.textPrimary)
+            // The Telos ground. A tint, not a gradient: the banner API takes one colour. Cost: none.
+            .activityBackgroundTint(TelosColor.canvas)
+            .activitySystemActionForegroundColor(TelosColor.textPrimary)
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
@@ -31,11 +37,20 @@ struct NOOPLiveActivity: Widget {
                             workoutClock(context.state)
                         } icon: {
                             Image(systemName: workoutSymbol(context.state))
+                                .foregroundStyle(workoutTint(context.state))
                         }
-                        .foregroundStyle(StrandPalette.textPrimary)
+                        .font(TelosType.numeralFont(size: 17, weight: .regular))
+                        .foregroundStyle(TelosColor.textPrimary)
                     } else {
-                        Label("\(context.state.bpm.map(String.init) ?? "–")", systemImage: "heart.fill")
-                            .foregroundStyle(StrandPalette.statusCritical)
+                        Label {
+                            Text(context.state.bpm.map(String.init) ?? TelosType.absent)
+                                .font(TelosType.numeralFont(size: 22, weight: .light))
+                                .foregroundStyle(context.state.bpm == nil
+                                                 ? TelosColor.textTertiary : TelosColor.heartInk)
+                        } icon: {
+                            Image(systemName: "heart.fill")
+                                .foregroundStyle(TelosColor.heart)
+                        }
                     }
                 }
                 DynamicIslandExpandedRegion(.trailing) {
@@ -55,28 +70,34 @@ struct NOOPLiveActivity: Widget {
                 }
                 DynamicIslandExpandedRegion(.bottom) {
                     Text(context.state.workoutName ?? context.attributes.title)
-                        .font(.caption).foregroundStyle(.secondary)
+                        .font(TelosType.caption)
+                        .foregroundStyle(TelosColor.textSecondary)
                 }
             } compactLeading: {
                 if context.state.inWorkout {
                     Image(systemName: workoutSymbol(context.state))
-                        .foregroundStyle(StrandPalette.effortColor)
+                        .foregroundStyle(workoutTint(context.state))
                 } else {
-                    Image(systemName: "heart.fill").foregroundStyle(StrandPalette.statusCritical)
+                    Image(systemName: "heart.fill").foregroundStyle(TelosColor.heart)
                 }
             } compactTrailing: {
                 if context.state.inWorkout {
                     workoutClock(context.state)
+                        .font(TelosType.numeralFont(size: 14, weight: .regular))
                         .frame(maxWidth: 52)
                 } else {
-                    Text("\(context.state.bpm.map(String.init) ?? "–")")
+                    // The live bpm, in the heart ink. "—" until the first reading.
+                    Text(context.state.bpm.map(String.init) ?? TelosType.absent)
+                        .font(TelosType.numeralFont(size: 15, weight: .medium))
+                        .foregroundStyle(context.state.bpm == nil
+                                         ? TelosColor.textTertiary : TelosColor.heartInk)
                 }
             } minimal: {
                 if context.state.inWorkout {
                     Image(systemName: workoutSymbol(context.state))
-                        .foregroundStyle(StrandPalette.effortColor)
+                        .foregroundStyle(workoutTint(context.state))
                 } else {
-                    Image(systemName: "heart.fill").foregroundStyle(StrandPalette.statusCritical)
+                    Image(systemName: "heart.fill").foregroundStyle(TelosColor.heart)
                 }
             }
         }
@@ -90,13 +111,23 @@ private func liveHRBanner(title: String, state: NOOPActivityAttributes.ContentSt
     HStack(spacing: 14) {
         Image(systemName: "waveform.path.ecg")
             .font(.title2)
-            .foregroundStyle(StrandPalette.statusCritical)
+            .foregroundStyle(TelosColor.heart)
         VStack(alignment: .leading, spacing: 2) {
             Text(title)
-                .font(.caption).foregroundStyle(StrandPalette.textSecondary)
-            Text("\(state.bpm.map(String.init) ?? "–") bpm")
-                .font(.system(size: 26, weight: .bold, design: .rounded))
-                .foregroundStyle(StrandPalette.textPrimary)
+                .font(TelosType.scale)
+                .tracking(TelosType.Tracking.scale)
+                .textCase(.uppercase)
+                .foregroundStyle(TelosColor.textSecondary)
+            HStack(alignment: .firstTextBaseline, spacing: 4) {
+                // numeralL (34 pt) in the heart hue — the banner's one big figure.
+                Text(state.bpm.map(String.init) ?? TelosType.absent)
+                    .font(TelosType.numeralFont(size: 34, weight: .light))
+                    .tracking(TelosType.Tracking.numeralL)
+                    .foregroundStyle(state.bpm == nil ? TelosColor.textTertiary : TelosColor.heartInk)
+                Text("bpm")
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(TelosColor.textSecondary)
+            }
         }
         Spacer()
         // Charge + Effort (#446) on the banner, mirroring the Dynamic Island expanded stats.
@@ -118,25 +149,32 @@ private func workoutBanner(_ state: NOOPActivityAttributes.ContentState) -> some
     HStack(alignment: .center, spacing: 14) {
         Image(systemName: workoutSymbol(state))
             .font(.title2)
-            .foregroundStyle(state.workoutRecovery == true ? StrandPalette.restColor : StrandPalette.effortColor)
+            .foregroundStyle(workoutTint(state))
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 6) {
                 Text(state.workoutName ?? "Workout")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .font(TelosType.scale)
+                    .tracking(TelosType.Tracking.scale)
+                    .textCase(.uppercase)
+                    .foregroundStyle(TelosColor.textSecondary)
                 if let bpm = state.bpm {
                     Text("· \(bpm) bpm")
-                        .font(.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
+                        .font(TelosType.scaleNumber)
+                        .foregroundStyle(TelosColor.heartInk)
                 }
             }
             workoutClock(state)
-                .font(.system(size: 30, weight: .bold, design: .rounded))
-                .foregroundStyle(StrandPalette.textPrimary)
+                .font(TelosType.numeralFont(size: 30, weight: .light))
+                .foregroundStyle(TelosColor.textPrimary)
         }
         Spacer(minLength: 8)
         workoutMetric(state, compact: false)
     }
+}
+
+/// The session's hue: `rest` for a recovery session, `effort` for a load session.
+private func workoutTint(_ state: NOOPActivityAttributes.ContentState) -> Color {
+    state.workoutRecovery == true ? TelosColor.rest : TelosColor.effort
 }
 
 /// The session's active time: ticking by itself while running, frozen while paused.
@@ -149,7 +187,7 @@ private func workoutClock(_ state: NOOPActivityAttributes.ContentState) -> some 
             .monospacedDigit()
             .multilineTextAlignment(.trailing)
     } else {
-        Text("–")
+        Text(verbatim: TelosType.absent)
     }
 }
 
@@ -159,48 +197,53 @@ private func workoutMetric(_ state: NOOPActivityAttributes.ContentState, compact
     if state.workoutRecovery == true {
         VStack(alignment: .trailing, spacing: 2) {
             Text("STRESS")
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(StrandPalette.textSecondary)
+                .font(TelosType.scaleFixed)
+                .tracking(TelosType.Tracking.scale)
+                .foregroundStyle(TelosColor.textSecondary)
             Text(stressLine(state))
-                .font(.headline)
-                .monospacedDigit()
-                .foregroundStyle(StrandPalette.textPrimary)
+                .font(TelosType.numeralFont(size: 17, weight: .regular))
+                .foregroundStyle(TelosColor.stressInk)
             if let start = state.stressStart, let now = state.stressNow {
                 let change = now - start
+                // The sign carries the direction as well as the hue.
                 Text(String(format: "%+.1f", change))
-                    .font(.caption.weight(.bold))
-                    .monospacedDigit()
-                    .foregroundStyle(change <= 0 ? StrandPalette.statusPositive : StrandPalette.statusWarning)
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(change <= 0 ? TelosColor.positive : TelosColor.warning)
             } else {
                 Text(state.stressStart == nil ? "reading in 5 min" : "change from 10 min")
-                    .font(.caption2)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(TelosColor.textTertiary)
             }
         }
     } else {
-        ZStack {
-            Circle()
-                .stroke(StrandPalette.effortColor.opacity(0.25), lineWidth: 5)
-            Circle()
-                .trim(from: 0, to: min(1, max(0, state.workoutEffortFraction ?? 0)))
-                .stroke(StrandPalette.effortColor, style: StrokeStyle(lineWidth: 5, lineCap: .round))
-                .rotationEffect(.degrees(-90))
-            VStack(spacing: 0) {
-                Text(state.workoutEffort ?? "–")
-                    .font(.system(size: 15, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Text("effort")
-                    .font(.system(size: 8, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textSecondary)
+        VStack(spacing: 2) {
+            ZStack {
+                // The effort so far as a static Telos ring: `scale: 1` because the fraction is 0–1; a
+                // fraction past 1 draws a second lap rather than being clipped, and a missing fraction is
+                // the dashed bare track rather than an empty arc that reads as zero.
+                // Cost: TelosRing's shapes only; `animatesChanges: false` (each update is a new render).
+                TelosRing(value: state.workoutEffortFraction, scale: 1, color: TelosColor.effort,
+                          diameter: 48, showsValue: false, animatesChanges: false)
+                Text(state.workoutEffort ?? TelosType.absent)
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(state.workoutEffort == nil ? TelosColor.textTertiary : TelosColor.textPrimary)
+                    .lineLimit(1)
+                    .padding(.horizontal, 6)
             }
+            .frame(width: 48, height: 48)
+            Text("effort")
+                .font(TelosType.scaleFixed)
+                .tracking(TelosType.Tracking.scale)
+                .textCase(.uppercase)
+                .foregroundStyle(TelosColor.textSecondary)
+                .lineLimit(1)
+                .fixedSize()
         }
-        .frame(width: 52, height: 52)
     }
 }
 
 private func stressLine(_ state: NOOPActivityAttributes.ContentState) -> String {
-    func f(_ v: Double?) -> String { v.map { String(format: "%.1f", $0) } ?? "–" }
+    func f(_ v: Double?) -> String { v.map { String(format: "%.1f", $0) } ?? TelosType.absent }
     return state.stressNow == nil ? f(state.stressStart) : "\(f(state.stressStart)) → \(f(state.stressNow))"
 }
 
@@ -230,11 +273,20 @@ private func clockText(_ seconds: Int) -> String {
 /// the label (e.g. "12" under "Effort") it drifted to the label's right edge instead of under it, which
 /// read as "the number doesn't line up with its label". `fixedSize` stops either line truncating so the
 /// pairing is never clipped at narrow widths.
+///
+/// Telos: label in the tracked small-caps voice, value in the mono `scaleNumber` voice (§6.13: "effort
+/// `scaleNumber`") — the banner's one big figure is the heart rate.
 @ViewBuilder
 private func bannerStat(label: String, value: String) -> some View {
     VStack(alignment: .center, spacing: 2) {
-        Text(label).font(.caption2).foregroundStyle(StrandPalette.textSecondary)
-        Text(value).font(.headline).foregroundStyle(StrandPalette.textPrimary)
+        Text(label)
+            .font(TelosType.scaleFixed)
+            .tracking(TelosType.Tracking.scale)
+            .textCase(.uppercase)
+            .foregroundStyle(TelosColor.textSecondary)
+        Text(value)
+            .font(TelosType.scaleNumber)
+            .foregroundStyle(TelosColor.textPrimary)
     }
     .multilineTextAlignment(.center)
     .fixedSize()
@@ -245,8 +297,14 @@ private func bannerStat(label: String, value: String) -> some View {
 @ViewBuilder
 private func statColumn(label: String, value: String) -> some View {
     VStack(alignment: .center, spacing: 1) {
-        Text(label).font(.caption2).foregroundStyle(.secondary)
-        Text(value).font(.headline)
+        Text(label)
+            .font(TelosType.scaleFixed)
+            .tracking(TelosType.Tracking.scale)
+            .textCase(.uppercase)
+            .foregroundStyle(TelosColor.textSecondary)
+        Text(value)
+            .font(TelosType.scaleNumber)
+            .foregroundStyle(TelosColor.textPrimary)
     }
     .multilineTextAlignment(.center)
     .fixedSize()

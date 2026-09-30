@@ -153,7 +153,7 @@ struct HydrationView: View {
                 .accessibilityLabel("Log custom \(customSizeML) millilitres")
                 Button { showCustomSizeSheet = true } label: {
                     Image(systemName: "pencil")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(TelosType.glyphRow)
                         .foregroundStyle(StrandPalette.accent)
                         .frame(width: 44, height: 44)
                         .background(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous)
@@ -218,7 +218,7 @@ struct HydrationView: View {
     @ViewBuilder private var importedRow: some View {
         HStack(spacing: 10) {
             Image(systemName: "heart.text.square")
-                .font(.system(size: 13, weight: .semibold))
+                .font(TelosType.glyphChevron)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .accessibilityHidden(true)
             Text("From Apple Health")
@@ -242,7 +242,7 @@ struct HydrationView: View {
             Button { editingEntry = entry } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "drop.fill")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(TelosType.glyphChevron)
                         .foregroundStyle(StrandPalette.accent)
                         .accessibilityHidden(true)
                     Text(Self.entryTimeFmt.string(from: entry.loggedAt))
@@ -264,7 +264,7 @@ struct HydrationView: View {
                 Task { await deleteEntry(entry) }
             } label: {
                 Image(systemName: "trash")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(TelosType.glyphChevron)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .frame(width: 36, height: 36)
                     .contentShape(Rectangle())
@@ -339,7 +339,7 @@ struct HydrationView: View {
                 } else {
                     HStack(spacing: 10) {
                         Image(systemName: "drop.fill")
-                            .font(.system(size: 15, weight: .semibold))
+                            .font(TelosType.glyphRow)
                             .foregroundStyle(StrandPalette.accent)
                             .accessibilityHidden(true)
                         Text("Logged today")

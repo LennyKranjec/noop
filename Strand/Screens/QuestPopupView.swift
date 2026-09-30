@@ -4,44 +4,70 @@ import StrandDesign
 
 // QuestPopupView.swift — the system interrupting.
 //
-// SwiftUI twin of the Android `QuestPopup`. A full-screen overlay with a hard border, the directive,
-// what it is worth, and one button — the wearer has to answer it, which is the entire mechanism: a
-// nudge that can be scrolled past is a nudge that is scrolled past.
+// SwiftUI twin of the Android `QuestPopup`. A card over the app with the directive, what it is worth, and
+// one button — the wearer has to answer it, which is the entire mechanism: a nudge that can be scrolled
+// past is a nudge that is scrolled past.
 //
-// THE TAUNT TYPES ITSELF, one letter at a time, with a tick of haptic per letter. That is the moment
-// the wearer asked for — the bond between them and the machine made physical — and it is also why the
-// tick is the weakest cue in `SystemHaptics`: at 25 letters a second, anything stronger is a drill.
+// THE TAUNT TYPES ITSELF on the OFFER, one letter at a time, with a tick of haptic per letter — the moment
+// the wearer asked for. SKIPPABLE: tapping anywhere while it types finishes the line at once; under Reduce
+// Motion the line is simply there.
 //
-// SKIPPABLE. Tapping anywhere while it types finishes the line at once. A wearer who has read it
-// already must never be made to sit through the animation, and an unskippable cutscene is the fastest
-// way to make a feature hated.
+// IT DOES NOT FILL THE SCREEN. The card sits over a scrim so the app underneath stays visible around it.
 //
-// IT DOES NOT FILL THE SCREEN. The first Android cut covered the display edge to edge over a 97 %
-// scrim, which made the quest read as a separate app rather than as the system speaking over this one.
-// It still cannot be scrolled past — the decision is the mechanism — but the app underneath stays
-// visible around it.
-
-/// How long between letters. ~25/s: fast enough not to be a wait, slow enough to read as typing.
-private let typeInterval: TimeInterval = 0.038
+// TELOS 2.0 (PROGRESS part B): restyled WITHOUT restructuring — the one host (`QuestHostModifier`) still
+// decides what is on screen, in the same order (completion, failure, offer). Cards are the overlay-elevation
+// glass card (radius 24, one shadow, a pre-composited radial glow behind — no blur); the quest world's hue is
+// the effort blue.
+//
+// THE FAILURE CARD (HEALTH_V2 H3b/d, DESIGN_V2 §5.14 + coordinator decision 1): one card per day, red and
+// consequential through its rail, its critical cost ink and its exact numbers — NOT through alarm: no
+// per-letter ticks, no countdown, no 00:00:00, no strike-through, no warning triangle. The summary is shown
+// whole, on as many lines as it needs, with the reading behind the miss and exactly what it cost.
 
 /// Margins. Wide enough that the screen behind stays legible around the card.
-private let questScreenMargin: CGFloat = 30
+private let questScreenMargin: CGFloat = 24
 
-/// How much of the screen behind shows through.
-///
-/// Enough to place yourself, not enough to read by: the card is still the only thing with contrast, so
-/// attention lands where it should while the app underneath stays visible.
-private let questScrimAlpha: Double = 0.62
+/// The modal cards' maximum width (§5.14: 360).
+private let questCardMaxWidth: CGFloat = 360
 
-/// The glow's reach. A soft blue bloom off every corner, which is what makes it read as summoned.
-private let questGlowRadius: CGFloat = 28
+/// How long between letters on the OFFER. ~25/s: fast enough not to be a wait, slow enough to read.
+private let typeInterval: TimeInterval = 0.038
 
-/// The quest world's blue.
-///
-/// `metricPurple` is this palette's WHOOP-Effort BLUE (#4A90E2 dark, #3A80D6 light) — the token's name
-/// is a leftover and its value is not purple in either theme. Aliased here so this file reads as what
-/// it draws, and so a future rename has one place to land.
-private var questBlue: Color { StrandPalette.metricPurple }
+/// The quest world's hue: the effort blue.
+private var questBlue: Color { TelosColor.effort }
+
+/// The scrim behind every quest card: black @ 0.5, no blur.
+private var questScrim: some View {
+    TelosColor.diagField.opacity(0.5).ignoresSafeArea()
+}
+
+/// The overlay-elevation glass card every quest pop-up shares: opaque `surface` (the app shows around it,
+/// not through it), a luminous edge in the card's hue, a faint top glow, one shadow (§4.6 overlay).
+private struct QuestCardSurface: ViewModifier {
+    let hue: Color
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: TelosRadius.card, style: .continuous)
+        return content
+            .padding(TelosSpace.l)
+            .frame(maxWidth: questCardMaxWidth)
+            .background(
+                shape.fill(TelosColor.surface)
+                    .overlay(shape.fill(LinearGradient(colors: [hue.opacity(0.14), Color.clear],
+                                                       startPoint: .top, endPoint: UnitPoint(x: 0.5, y: 0.4))))
+            )
+            .overlay(shape.strokeBorder(LinearGradient(colors: [hue.opacity(0.75), hue.opacity(0.15)],
+                                                       startPoint: .topLeading, endPoint: .bottomTrailing),
+                                        lineWidth: TelosStroke.line))
+            // The glow is a pre-composited radial fill behind the card — no blur, no coloured shadow.
+            .background(TelosRadialGlow(color: hue, intensity: 0.22, radius: 260))
+            .telosElevation(.overlay)
+    }
+}
+
+private extension View {
+    func questCard(_ hue: Color) -> some View { modifier(QuestCardSurface(hue: hue)) }
+}
 
 struct QuestPopupView: View {
     let quest: Quest
@@ -54,6 +80,7 @@ struct QuestPopupView: View {
     @State private var typed = 0
     /// Read ONCE, held for the whole animation: a preference lookup per letter would stutter the type.
     @State private var hapticsOn = SystemHaptics.enabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @EnvironmentObject private var coach: AICoachEngine
     @EnvironmentObject private var router: NavRouter
@@ -63,8 +90,7 @@ struct QuestPopupView: View {
 
     var body: some View {
         ZStack {
-            StrandPalette.surfaceBase.opacity(questScrimAlpha)
-                .ignoresSafeArea()
+            questScrim
                 // Tap anywhere to finish the typing early; once finished, taps do nothing (the button is
                 // the only way out, because this is a decision and not a toast).
                 .contentShape(Rectangle())
@@ -80,6 +106,10 @@ struct QuestPopupView: View {
     private func run() async {
         SystemHaptics.play(.summon)
         onSummonStrap()
+        if reduceMotion {
+            typed = full.count
+            return
+        }
         typed = 0
         let letters = Array(full)
         // See `TypewriterText.run` — the engine is held open for the length of the line, or it idles
@@ -101,7 +131,7 @@ struct QuestPopupView: View {
     private var card: some View {
         // WRAPS ITS CONTENT rather than filling the screen, so the card is only as tall as the quest
         // actually is and the app stays visible above and below it.
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: TelosSpace.m) {
             header
             body_
             rewardRow
@@ -112,114 +142,89 @@ struct QuestPopupView: View {
             // opening line so a follow-up has something to be a follow-up to — and the quest stays
             // OFFERED, because asking a question about a commitment is not the same as making it.
             Button {
-                SystemHaptics.play(.tap)
+                TelosHaptics.play(.select)
                 coach.surfaceQuest(title: quest.title, target: quest.target, taunt: quest.taunt)
                 router.openCoach()
             } label: {
                 Label("Ask about this", systemImage: "sparkles")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.accent)
                     .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.noopGhost)
             .disabled(!done)
 
             Button {
-                SystemHaptics.play(.tap)
+                TelosHaptics.play(.select)
                 onDismiss()
             } label: {
                 Text("Not today")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .frame(maxWidth: .infinity)
+                    .font(TelosType.footnote)
+                    .foregroundStyle(TelosColor.textTertiary)
+                    .frame(maxWidth: .infinity, minHeight: TelosSpace.hitTarget)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(TelosPressButtonStyle())
             .disabled(!done)
         }
-        .padding(16)
-        .background(
-            // A blue-lifted top so the card itself carries the colour, not just its edge.
-            LinearGradient(
-                colors: [questBlue.opacity(0.16), StrandPalette.surfaceBase],
-                startPoint: .top, endPoint: .bottom)
-                .background(StrandPalette.surfaceRaised)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .strokeBorder(questBlue.opacity(0.70), lineWidth: 1)
-        )
-        // THE GLOW IS A COLOURED SHADOW, cast in the quest's own blue — so it blooms off all four
-        // corners rather than being a border that happens to be thick.
-        .shadow(color: questBlue.opacity(0.55), radius: questGlowRadius)
+        .questCard(questBlue)
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 13, weight: .semibold))
+        HStack(spacing: TelosSpace.s) {
+            Image(systemName: "dot.radiowaves.left.and.right")
+                .font(TelosType.glyphRow)
                 .foregroundStyle(questBlue)
+                .accessibilityHidden(true)
             Text("SYSTEM DIRECTIVE")
-                .font(StrandFont.headline.weight(.bold))
-                .tracking(3)
-                .foregroundStyle(StrandPalette.textPrimary)
+                .font(TelosType.labelLarge)
+                .tracking(TelosType.Tracking.labelLarge)
+                .foregroundStyle(TelosColor.textPrimary)
         }
+        .accessibilityAddTraits(.isHeader)
     }
 
     /// The body panel: name, the typed taunt, and the directive.
     private var body_: some View {
-        VStack(spacing: 0) {
-            Text(quest.title.uppercased())
-                .font(StrandFont.title2)
-                .tracking(2)
-                .foregroundStyle(StrandPalette.textPrimary)
+        VStack(spacing: TelosSpace.m) {
+            Text(quest.title)
+                .font(TelosType.title2)
+                .foregroundStyle(TelosColor.textPrimary)
                 .multilineTextAlignment(.center)
-            Spacer().frame(height: 12)
+                .fixedSize(horizontal: false, vertical: true)
             TypedLine(text: full, shown: typed)
-            Spacer().frame(height: 14)
             Text(quest.target)
-                .font(StrandFont.headline)
-                .foregroundStyle(StrandPalette.accent)
+                .font(TelosType.headline)
+                .foregroundStyle(TelosColor.mint)
                 .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity)
-        .padding(14)
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(questBlue.opacity(0.35), lineWidth: 1)
-        )
+        .padding(TelosSpace.m)
+        .pgInsetBand(tint: questBlue)
     }
 
     /// What finishing it is worth: the systems it touches. The icons are a claim about WHICH systems,
     /// never about how much.
     private var rewardRow: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("WHAT IT TOUCHES")
-                .font(StrandFont.overline)
-                .tracking(1.4)
-                .foregroundStyle(StrandPalette.textTertiary)
-            HStack(spacing: 12) {
+        VStack(alignment: .leading, spacing: TelosSpace.s) {
+            PGOverline("WHAT IT TOUCHES")
+            HStack(spacing: TelosSpace.m) {
                 ForEach(quest.rewards, id: \.rawValue) { reward in
-                    Image(systemName: questRewardIcon(reward))
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(questRewardTint(reward))
-                        .frame(width: 34, height: 34)
-                        .background(StrandPalette.surfaceInset, in: Capsule())
-                        .accessibilityLabel(Text(questRewardLabel(reward)))
+                    QuestRewardGlyph(reward: reward)
                 }
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// THE CLOCK, and what runs out with it. Plain, and now true: an accepted quest that runs out unmet
-    /// is judged on its data and costs XP (`QuestPenaltyRules`) — a stated price, not an implied threat.
+    /// THE CLOCK, and what runs out with it. Plain, and true: an accepted quest that runs out unmet is
+    /// judged on its data and costs XP (`QuestPenaltyRules`) — a stated price, not an implied threat.
     private var deadline: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: TelosSpace.xs) {
             Text("The window closes when the clock does. Accept it and miss it, and it costs XP.")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.statusWarning)
+                .font(TelosType.footnote)
+                .foregroundStyle(TelosColor.textSecondary)
                 .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
             QuestCountdownView(quest: quest, fontSize: 20)
         }
         .frame(maxWidth: .infinity)
@@ -227,22 +232,14 @@ struct QuestPopupView: View {
 
     private var acceptButton: some View {
         Button {
-            SystemHaptics.play(.confirm)
+            TelosHaptics.play(.commit)
             onAccept()
         } label: {
             Text("ACCEPT")
-                .font(StrandFont.headline.weight(.bold))
-                .tracking(4)
-                .foregroundStyle(done ? StrandPalette.surfaceBase : StrandPalette.textTertiary)
-                .frame(maxWidth: .infinity, minHeight: 56)
-                .background(done ? StrandPalette.accent : StrandPalette.surfaceInset,
-                            in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                // The glow fades in with the button becoming live, so "you may answer now" is visible
-                // from across the room rather than only legible up close.
-                .opacity(done ? 1 : 0.55)
-                .animation(.easeOut(duration: 0.25), value: done)
+                .tracking(TelosType.Tracking.labelLarge)
+                .frame(maxWidth: .infinity)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(.noopPrimary)
         // Until the line has finished typing there is nothing to accept yet — the wearer has not been
         // told what they are agreeing to.
         .disabled(!done)
@@ -260,15 +257,17 @@ private struct TypedLine: View {
     var body: some View {
         ZStack {
             Text(text)
-                .font(StrandFont.subhead)
+                .font(TelosType.subhead)
                 .foregroundStyle(Color.clear)
                 .multilineTextAlignment(.center)
             Text(String(text.prefix(shown)))
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.textSecondary)
+                .font(TelosType.subhead)
+                .foregroundStyle(TelosColor.textSecondary)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, alignment: .center)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(text))
     }
 }
 
@@ -302,9 +301,9 @@ struct QuestHostModifier: ViewModifier {
                 .transition(.opacity)
             }
         }
-        .animation(.easeOut(duration: 0.25), value: store.offered?.id)
-        .animation(.easeOut(duration: 0.25), value: store.completions.first?.id)
-        .animation(.easeOut(duration: 0.25), value: store.failures.first?.id)
+        .animation(TelosMotion.fade, value: store.offered?.id)
+        .animation(TelosMotion.fade, value: store.completions.first?.id)
+        .animation(TelosMotion.fade, value: store.failures.first?.id)
         // A WINDOW CAN CLOSE WITH NOTHING ELSE HAPPENING — no refresh, no sync — so the host checks the
         // clock itself once a minute while the app is open. Cheap: it only compares timestamps.
         // Tied to the scene: the loop stops when the app leaves the foreground (rather than waking the
@@ -320,27 +319,29 @@ struct QuestHostModifier: ViewModifier {
     }
 }
 
-// MARK: - The quest running out
+// MARK: - The quest running out (the failure card)
 //
-// The completion card's twin in red: the same card, the same typed line, saying the window closed and
-// the quest is gone. Nothing to accept or retry — the pop-up is the notice, and the quest has already
-// been cancelled by the time it shows.
+// RED AND CONSEQUENTIAL, NOT ALARMING (HEALTH_V2 H3b/d + coordinator decision 1). The same card family as
+// the offer, now in critical: a 3 pt critical rail, the overline MISSED, the quest in plain `title2`, the
+// whole summary on as many lines as it needs (no typewriter, no per-letter ticks), the reading behind it,
+// and the price exactly as the ledger judged it — in critical ink. No countdown (the window has closed;
+// "00:00:00" said nothing), no strike-through, no warning triangle. One acknowledgement button.
+// Physiology / unmeasured quests read "No penalty" from the ledger itself and never in critical.
 
 struct QuestFailedPopupView: View {
     let failure: QuestStore.Completion
     let onDismiss: () -> Void
 
-    @State private var typed = 0
-    @State private var hapticsOn = SystemHaptics.enabled
     /// The penalty, as the ledger judged it. Observed: the card is usually up before the assessor has
     /// read the day's data, and the price lands on it the moment the judgement is made.
     @ObservedObject private var penalties = QuestPenaltyStore.shared
 
     private var judgement: QuestJudgement? { penalties.judgement(for: quest.id) }
     private var pending: Bool { penalties.isPending(quest.id) }
+    private var charged: Bool { judgement?.outcome == .penalised }
 
-    /// The figure in the corner: the price once judged, "PENDING" while the data is awaited, and the old
-    /// "+0 XP" only for a quest nothing can judge (no goal).
+    /// The figure in the corner: the price once judged, "PENDING" while the data is awaited, and "+0 XP"
+    /// only for a quest nothing can judge (no goal).
     private var costText: String {
         if let judgement { return judgement.costText.uppercased() }
         if pending { return "PENDING" }
@@ -348,180 +349,126 @@ struct QuestFailedPopupView: View {
     }
 
     private var quest: Quest { failure.quest }
-    private var full: String { failure.summary }
-    private var done: Bool { typed >= full.count }
-    private var red: Color { StrandPalette.statusCritical }
+    private var red: Color { TelosColor.critical }
 
-    // THE DIRECTIVE POP-UP, IN RED. The same card the quest was offered on — the same header, the same
-    // panel with the typed line, the same systems it touched, the same clock — now saying the clock ran
-    // out. The quest is already cancelled when this shows; the only button acknowledges it.
     var body: some View {
         ZStack {
-            StrandPalette.surfaceBase.opacity(questScrimAlpha)
-                .ignoresSafeArea()
+            questScrim
                 .contentShape(Rectangle())
-                .onTapGesture { if !done { typed = full.count } }
-
             card
                 .padding(questScreenMargin)
         }
-        .task(id: failure.id) { await run() }
-    }
-
-    /// The summon, then the typing, exactly as the offer does it.
-    private func run() async {
-        SystemHaptics.play(.summon)
-        typed = 0
-        let letters = Array(full)
-        if hapticsOn { SystemHaptics.holdTickEngine(true) }
-        defer { if hapticsOn { SystemHaptics.holdTickEngine(false) } }
-        while typed < letters.count {
-            try? await Task.sleep(nanoseconds: UInt64(typeInterval * 1_000_000_000))
-            if Task.isCancelled { return }
-            guard typed < letters.count else { return }
-            let next = letters[typed]
-            typed += 1
-            if hapticsOn, !next.isWhitespace { SystemHaptics.tick() }
-        }
+        // ONE haptic for one event, from the vocabulary (the heavier penalty pattern) — never a tick per
+        // letter. Keyed on the failure's id so a re-render cannot replay it.
+        .task(id: failure.id) { TelosHaptics.play(.penalty) }
     }
 
     private var card: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 12) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.system(size: 13, weight: .semibold))
+        VStack(alignment: .leading, spacing: TelosSpace.m) {
+            HStack(alignment: .center, spacing: TelosSpace.s) {
+                Image(systemName: "arrow.down.right.circle")
+                    .font(TelosType.glyphRow)
                     .foregroundStyle(red)
-                Text("DIRECTIVE FAILED")
-                    .font(StrandFont.headline.weight(.bold))
-                    .tracking(3)
-                    .foregroundStyle(StrandPalette.textPrimary)
+                    .accessibilityHidden(true)
+                PGOverline("MISSED", ink: red)
+                Spacer(minLength: TelosSpace.s)
+                Text(verbatim: costText)
+                    .font(TelosType.numeralS)
+                    .foregroundStyle(charged ? red : TelosColor.textTertiary)
             }
+            .accessibilityElement(children: .combine)
 
-            VStack(spacing: 0) {
-                Text(quest.title.uppercased())
-                    .font(StrandFont.title2)
-                    .tracking(2)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                    .multilineTextAlignment(.center)
-                Spacer().frame(height: 12)
-                TypedLine(text: full, shown: typed)
-                Spacer().frame(height: 14)
+            VStack(alignment: .leading, spacing: TelosSpace.xs) {
+                Text(quest.title)
+                    .font(TelosType.title2)
+                    .foregroundStyle(TelosColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text(quest.target)
-                    .font(StrandFont.headline)
-                    .foregroundStyle(red)
-                    .strikethrough(true, color: red.opacity(0.7))
-                    .multilineTextAlignment(.center)
+                    .font(TelosType.subhead)
+                    .foregroundStyle(TelosColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .frame(maxWidth: .infinity)
-            .padding(14)
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(red.opacity(0.35), lineWidth: 1)
-            )
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("WHAT IT WOULD HAVE TOUCHED")
-                    .font(StrandFont.overline)
-                    .tracking(1.4)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                HStack(spacing: 12) {
+            // THE SUMMARY, WHOLE. Multi-line, shown at once — the consequence is carried by the numbers.
+            Text(failure.summary)
+                .font(TelosType.body)
+                .foregroundStyle(TelosColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            // THE PRICE, SPELLED OUT: the reading behind the miss, how far short, which multipliers, the
+            // streak, the make-up — or, for a quest the data never carried, that it is not being punished.
+            penaltyPanel
+
+            VStack(alignment: .leading, spacing: TelosSpace.s) {
+                PGOverline("WHAT IT WOULD HAVE TOUCHED")
+                HStack(spacing: TelosSpace.m) {
                     ForEach(quest.rewards, id: \.rawValue) { reward in
-                        Image(systemName: questRewardIcon(reward))
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(questRewardTint(reward).opacity(0.45))
-                            .frame(width: 34, height: 34)
-                            .background(StrandPalette.surfaceInset, in: Capsule())
-                            .accessibilityLabel(Text(questRewardLabel(reward)))
+                        QuestRewardGlyph(reward: reward, dimmed: true)
                     }
-                    Spacer(minLength: 0)
-                    Text(costText)
-                        .font(StrandFont.headline.weight(.bold))
-                        .monospacedDigit()
-                        .foregroundStyle(judgement.map { $0.outcome != .penalised } == true ? StrandPalette.textTertiary : red)
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
 
-            // THE PRICE, SPELLED OUT: how far short, which multipliers, the streak, the make-up — or, for a
-            // quest the data never carried, that it is not being punished. Game layer only; the note under
-            // it says the Level is untouched.
-            penaltyPanel
-
-            VStack(spacing: 6) {
-                Text("The window has closed.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(red)
-                Text("00:00:00")
-                    .font(.system(size: 20, weight: .bold, design: .monospaced))
-                    .foregroundStyle(red)
-            }
-            .frame(maxWidth: .infinity)
-
             Button {
-                SystemHaptics.play(.tap)
+                TelosHaptics.play(.select)
                 onDismiss()
             } label: {
                 Text("UNDERSTOOD")
-                    .font(StrandFont.headline.weight(.bold))
-                    .tracking(4)
-                    .foregroundStyle(done ? StrandPalette.surfaceBase : StrandPalette.textTertiary)
-                    .frame(maxWidth: .infinity, minHeight: 56)
-                    .background(done ? red : StrandPalette.surfaceInset,
-                                in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .opacity(done ? 1 : 0.55)
-                    .animation(.easeOut(duration: 0.25), value: done)
+                    .tracking(TelosType.Tracking.labelLarge)
+                    .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.plain)
-            .disabled(!done)
+            .buttonStyle(.noopPrimary)
         }
-        .padding(16)
-        .background(
-            LinearGradient(
-                colors: [red.opacity(0.16), StrandPalette.surfaceBase],
-                startPoint: .top, endPoint: .bottom)
-                .background(StrandPalette.surfaceRaised)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .strokeBorder(red.opacity(0.70), lineWidth: 1)
-        )
-        .shadow(color: red.opacity(0.55), radius: questGlowRadius)
+        .overlay(alignment: .leading) {
+            // The rail: the card's seriousness, drawn once, down the leading edge of the content.
+            Capsule(style: .continuous)
+                .fill(red)
+                .frame(width: TelosStroke.rail)
+                .offset(x: -TelosSpace.l + TelosStroke.rail)
+                .accessibilityHidden(true)
+        }
+        .questCard(red)
     }
 
     @ViewBuilder
     private var penaltyPanel: some View {
         if let judgement {
-            VStack(alignment: .leading, spacing: 3) {
+            VStack(alignment: .leading, spacing: TelosSpace.xs) {
                 Text(judgement.detailText)
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(TelosColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
                 if !judgement.reasonText.isEmpty {
                     Text(judgement.reasonText)
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
+                        .font(TelosType.caption)
+                        .foregroundStyle(TelosColor.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let streak = judgement.streakText {
-                    Text(streak.uppercased())
-                        .font(StrandFont.overline)
-                        .tracking(1.4)
+                    Text(verbatim: streak.uppercased())
+                        .font(TelosType.scaleNumber)
                         .foregroundStyle(red)
                 }
                 if let debt = judgement.debtText {
                     Text(debt)
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.statusWarning)
+                        .font(TelosType.caption)
+                        .foregroundStyle(TelosColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 Text(questPenaltyLevelNote)
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .font(TelosType.caption)
+                    .foregroundStyle(TelosColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .fixedSize(horizontal: false, vertical: true)
+            .padding(TelosSpace.m)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
+                            .fill(charged ? TelosColor.criticalWash : TelosColor.surfaceInset))
         } else if pending {
             Text("The penalty is decided by the data, not the clock. It lands here, and on Today's board, as soon as the day is read.")
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textTertiary)
+                .font(TelosType.caption)
+                .foregroundStyle(TelosColor.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -529,10 +476,14 @@ struct QuestFailedPopupView: View {
 
 // MARK: - The diagnostic screen
 //
-// THE WHOLE SCREEN, the way a diagnostic takes it: a dark, faintly red-gridded field, the warning line at
-// the top, one glowing outline symbol for the subject, the name in heavy wide capitals, the line under
-// it, one white button and a quieter second choice. The stress alarm uses it: high stress at rest is
-// the one thing that interrupts whatever the wearer was doing.
+// THE WHOLE SCREEN, the way a diagnostic takes it: the black diagnostic field, faintly critical-gridded,
+// the overline at the top, one outline symbol for the subject, the name in heavy expanded capitals, the
+// line under it, one white button and a quieter second choice. The stress alarm uses it (opt-in).
+//
+// TELOS 2.0 (DESIGN_V2 §5.12): tokens only (`diagField`, `diagAlarm` = critical, `diagText`/`diagMuted`,
+// `diagnostic`/`diagnosticS`, the `scale` overline); the grid is `hair` critical @ 0.07; ONE shadow (the
+// symbol's, radius 12) — the glowing title shadow and the button glow are gone; no summon haptic; the
+// typewriter shows the full text under Reduce Motion (`TypewriterText`). API unchanged.
 
 struct DiagnosticAlertView: View {
     let overline: String
@@ -542,123 +493,128 @@ struct DiagnosticAlertView: View {
     let message: String
     let primary: (label: String, action: () -> Void)
     var secondary: (label: String, action: () -> Void)? = nil
-    /// Draw the symbol inside a thin glowing ring, the gauge look.
+    /// Draw the symbol inside a thin ring, the gauge look.
     var ringed = false
 
     @State private var typed = 0
 
-    private let red = Color(.sRGB, red: 1.0, green: 0.23, blue: 0.23, opacity: 1)
+    private var red: Color { TelosColor.diagAlarm }
 
     var body: some View {
         ZStack {
-            Color(.sRGB, red: 0.07, green: 0.035, blue: 0.04, opacity: 1)
+            TelosColor.diagField
                 .ignoresSafeArea()
             DiagnosticGrid()
-                .stroke(red.opacity(0.07), lineWidth: 0.5)
+                .stroke(red.opacity(0.07), lineWidth: TelosStroke.hair)
                 .ignoresSafeArea()
-            RadialGradient(colors: [red.opacity(0.28), .clear], center: .center,
-                           startRadius: 0, endRadius: 220)
+            TelosRadialGlow(color: red, intensity: 0.22, radius: 220)
                 .offset(y: -120)
                 .ignoresSafeArea()
-                .allowsHitTesting(false)
 
             VStack(spacing: 0) {
-                HStack(spacing: 10) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 18, weight: .bold))
+                HStack(spacing: TelosSpace.s) {
+                    Image(systemName: "waveform.path.ecg")
+                        .font(TelosType.glyphControl)
+                        .accessibilityHidden(true)
                     Text(overline)
-                        .font(.system(size: 18, weight: .bold, design: .monospaced))
-                        .tracking(5)
+                        .font(TelosType.labelLarge)
+                        .tracking(TelosType.Tracking.labelLarge)
+                        .textCase(.uppercase)
                 }
                 .foregroundStyle(red)
-                .padding(.top, 24)
+                .padding(.top, TelosSpace.xl)
 
-                Spacer(minLength: 24)
+                Spacer(minLength: TelosSpace.xl)
 
-                if ringed {
-                    ZStack {
-                        Circle()
-                            .fill(RadialGradient(colors: [red.opacity(0.18), .clear], center: .center,
-                                                 startRadius: 0, endRadius: 130))
-                        Circle()
-                            .strokeBorder(red.opacity(0.7), lineWidth: 2)
-                            .shadow(color: red.opacity(0.6), radius: 10)
-                        Image(systemName: symbol)
-                            .font(.system(size: 92, weight: .light))
-                            .symbolRenderingMode(.monochrome)
-                            .foregroundStyle(red)
-                            .shadow(color: red.opacity(0.9), radius: 12)
-                            .shadow(color: red.opacity(0.5), radius: 26)
-                    }
-                    .frame(width: 250, height: 250)
-                } else {
-                    Image(systemName: symbol)
-                        .font(.system(size: 130, weight: .ultraLight))
-                        .foregroundStyle(red)
-                        .shadow(color: red.opacity(0.9), radius: 14)
-                        .shadow(color: red.opacity(0.5), radius: 30)
-                }
+                symbolView
 
-                Spacer(minLength: 24)
+                Spacer(minLength: TelosSpace.xl)
 
                 Text(title.uppercased())
-                    .font(.system(size: 38, weight: .black).width(.expanded))
-                    .foregroundStyle(.white)
+                    .font(TelosType.diagnostic)
+                    .tracking(TelosType.Tracking.diagnostic)
+                    .foregroundStyle(TelosColor.diagText)
                     .multilineTextAlignment(.center)
-                    .minimumScaleFactor(0.6)
-                    .shadow(color: .white.opacity(0.45), radius: 10)
-                    .padding(.horizontal, 20)
+                    .minimumScaleFactor(0.7)
+                    .padding(.horizontal, TelosSpace.l)
                 Text(subtitle)
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(red.opacity(0.9))
+                    .font(TelosType.diagnosticS)
+                    .tracking(TelosType.Tracking.diagnosticS)
+                    .foregroundStyle(red)
                     .multilineTextAlignment(.center)
-                    .padding(.top, 12)
-                    .padding(.horizontal, 28)
+                    .padding(.top, TelosSpace.m)
+                    .padding(.horizontal, TelosSpace.xl)
                 TypewriterText(text: message, shown: $typed)
-                    .font(.system(size: 18))
-                    .foregroundStyle(Color(white: 0.72))
+                    .font(TelosType.body)
+                    .foregroundStyle(TelosColor.diagMuted)
                     .multilineTextAlignment(.center)
-                    .padding(.top, 10)
-                    .padding(.horizontal, 28)
+                    .padding(.top, TelosSpace.s)
+                    .padding(.horizontal, TelosSpace.xl)
 
-                Spacer(minLength: 24)
+                Spacer(minLength: TelosSpace.xl)
 
                 Button {
-                    SystemHaptics.play(.tap)
+                    TelosHaptics.play(.commit)
                     primary.action()
                 } label: {
                     Text(primary.label)
-                        .font(.system(size: 18, weight: .heavy))
-                        .tracking(3)
-                        .foregroundStyle(.black)
+                        .font(TelosType.diagnosticS)
+                        .tracking(TelosType.Tracking.diagnosticS)
+                        .foregroundStyle(TelosColor.diagField)
                         .frame(maxWidth: .infinity)
-                        .frame(height: 64)
-                        .background(Color.white, in: Capsule())
-                        .shadow(color: .white.opacity(0.35), radius: 18)
+                        .frame(height: 60)
+                        .background(Capsule(style: .continuous).fill(TelosColor.diagText))
                 }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 28)
+                .buttonStyle(TelosPressButtonStyle())
+                .padding(.horizontal, TelosSpace.xl)
                 if let secondary {
                     Button {
-                        SystemHaptics.play(.select)
+                        TelosHaptics.play(.select)
                         secondary.action()
                     } label: {
                         Text(secondary.label)
-                            .font(.system(size: 16, weight: .bold))
-                            .tracking(3)
-                            .foregroundStyle(Color(white: 0.7))
+                            .font(TelosType.headline)
+                            .tracking(TelosType.Tracking.diagnosticS)
+                            .foregroundStyle(TelosColor.diagMuted)
                             .frame(maxWidth: .infinity)
-                            .frame(height: 48)
+                            .frame(minHeight: 48)
+                            .contentShape(Rectangle())
                     }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 28)
-                    .padding(.top, 6)
+                    .buttonStyle(TelosPressButtonStyle())
+                    .padding(.horizontal, TelosSpace.xl)
+                    .padding(.top, TelosSpace.xs)
                 }
-                Spacer().frame(height: 20)
+                Spacer().frame(height: TelosSpace.l)
             }
         }
+        .environment(\.colorScheme, .dark)
         .contentShape(Rectangle())
         .onTapGesture { typed = message.count }
+    }
+
+    @ViewBuilder
+    private var symbolView: some View {
+        if ringed {
+            ZStack {
+                TelosRadialGlow(color: red, intensity: 0.18, radius: 130)
+                Circle()
+                    .strokeBorder(red.opacity(0.7), lineWidth: TelosStroke.data)
+                Image(systemName: symbol)
+                    .font(TelosType.numeralFont(size: 92, weight: .light))
+                    .symbolRenderingMode(.monochrome)
+                    .foregroundStyle(red)
+                    // The ONE shadow on this screen (§5.12).
+                    .shadow(color: red.opacity(0.8), radius: 12)
+            }
+            .frame(width: 250, height: 250)
+            .accessibilityHidden(true)
+        } else {
+            Image(systemName: symbol)
+                .font(TelosType.numeralFont(size: 130, weight: .ultraLight))
+                .foregroundStyle(red)
+                .shadow(color: red.opacity(0.8), radius: 12)
+                .accessibilityHidden(true)
+        }
     }
 }
 
@@ -682,7 +638,7 @@ private struct DiagnosticGrid: Shape {
 // MARK: - The quest closing itself
 //
 // The other half of the pop-up above: the system telling the wearer that it has seen the thing done.
-// Same card, same blue, same typed line — it is the same voice closing the loop it opened.
+// Same card family, in the positive green — the same voice closing the loop it opened.
 //
 // IT SAYS WHAT WAS MEASURED. "Quest complete" alone would be the app asking to be believed; the line
 // underneath is the figure the data actually showed against the figure the quest asked for, written
@@ -713,90 +669,62 @@ struct QuestCompletedPopupView: View {
 
     var body: some View {
         ZStack {
-            StrandPalette.surfaceBase.opacity(questScrimAlpha)
-                .ignoresSafeArea()
+            questScrim
                 .contentShape(Rectangle())
                 .onTapGesture { typed = explanation.count }
 
-            VStack(alignment: .leading, spacing: 14) {
-                HStack(spacing: 12) {
-                    Image(systemName: "checkmark.seal.fill")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(StrandPalette.statusPositive)
-                    Text("QUEST COMPLETE")
-                        .font(StrandFont.headline.weight(.bold))
-                        .tracking(3)
-                        .foregroundStyle(StrandPalette.textPrimary)
+            VStack(alignment: .leading, spacing: TelosSpace.m) {
+                HStack(spacing: TelosSpace.s) {
+                    Image(systemName: "checkmark.seal")
+                        .font(TelosType.glyphRow)
+                        .foregroundStyle(TelosColor.positive)
+                        .accessibilityHidden(true)
+                    PGOverline("QUEST COMPLETE", ink: TelosColor.positive)
+                    Spacer(minLength: TelosSpace.s)
+                    Text(verbatim: xpText)
+                        .font(TelosType.numeralS)
+                        .foregroundStyle(TelosColor.positive)
                 }
+                .accessibilityElement(children: .combine)
 
-                VStack(spacing: 12) {
-                    Text(quest.title.uppercased())
-                        .font(StrandFont.title2)
-                        .tracking(2)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .multilineTextAlignment(.center)
+                VStack(alignment: .leading, spacing: TelosSpace.s) {
+                    Text(quest.title)
+                        .font(TelosType.title2)
+                        .foregroundStyle(TelosColor.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
                     Text(quest.target)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .multilineTextAlignment(.center)
+                        .font(TelosType.subhead)
+                        .foregroundStyle(TelosColor.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                     TypewriterText(text: explanation, shown: $typed)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .multilineTextAlignment(.center)
+                        .font(TelosType.subhead)
+                        .foregroundStyle(TelosColor.textSecondary)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(14)
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .strokeBorder(StrandPalette.statusPositive.opacity(0.35), lineWidth: 1)
-                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(TelosSpace.m)
+                .pgInsetBand(tint: TelosColor.positive)
 
-                HStack(spacing: 12) {
+                HStack(spacing: TelosSpace.m) {
                     ForEach(quest.rewards, id: \.rawValue) { reward in
-                        Image(systemName: questRewardIcon(reward))
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(questRewardTint(reward))
-                            .frame(width: 34, height: 34)
-                            .background(StrandPalette.surfaceInset, in: Capsule())
-                            .accessibilityLabel(Text(questRewardLabel(reward)))
+                        QuestRewardGlyph(reward: reward)
                     }
-                    Spacer(minLength: 0)
-                    Text(xpText)
-                        .font(StrandFont.headline.weight(.bold))
-                        .foregroundStyle(StrandPalette.statusPositive)
                 }
 
                 Button {
-                    SystemHaptics.play(.tap)
+                    TelosHaptics.play(.select)
                     onDismiss()
                 } label: {
                     Text("ACKNOWLEDGED")
-                        .font(StrandFont.headline.weight(.bold))
-                        .tracking(4)
-                        .foregroundStyle(StrandPalette.surfaceBase)
-                        .frame(maxWidth: .infinity, minHeight: 56)
-                        .background(StrandPalette.statusPositive,
-                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .tracking(TelosType.Tracking.labelLarge)
+                        .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.noopPrimary)
             }
-            .padding(16)
-            .background(
-                LinearGradient(
-                    colors: [StrandPalette.statusPositive.opacity(0.14), StrandPalette.surfaceBase],
-                    startPoint: .top, endPoint: .bottom)
-                    .background(StrandPalette.surfaceRaised)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .strokeBorder(StrandPalette.statusPositive.opacity(0.70), lineWidth: 1)
-            )
-            .shadow(color: StrandPalette.statusPositive.opacity(0.45), radius: questGlowRadius)
+            .questCard(TelosColor.positive)
             .padding(questScreenMargin)
         }
-        // The confirm cue, not the summon: this is the system handing something back, not asking.
-        .task(id: completion.id) { SystemHaptics.play(.confirm) }
+        // The success cue, not the summon: this is the system handing something back, not asking.
+        .task(id: completion.id) { TelosHaptics.play(.success) }
     }
 }
 

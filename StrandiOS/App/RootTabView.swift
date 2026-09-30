@@ -6,6 +6,11 @@ import StrandDesign
 /// iOS navigation shell. macOS uses a `NavigationSplitView` sidebar (`RootView`); on iPhone the
 /// natural analogue is a `TabView` with the most-used screens as tabs and everything else under a
 /// "More" list. Every screen is the same `StrandDesign`-built view the macOS app uses.
+///
+/// TELOS 2.0 (FRAME): the tabs are Home · Biometrics · Focus · System · More, switched by the floating
+/// faux-glass `TelosTabBar` (the system bar is hidden; the custom bar does every job it did — see the notes in
+/// `TelosTabBar.swift`), and every full-screen moment goes through the ONE `TelosMomentPresenter` hosted as
+/// this shell's outermost overlay.
 struct RootTabView: View {
     /// #1841: shared with Android by NAME and meaning, not by storage — the two platforms keep their own
     /// stores, exactly as the Clock format setting does.
@@ -71,9 +76,10 @@ struct RootTabView: View {
     /// The game layer's books, for the prices on the day's card. Publishes only when a judgement, a
     /// payout or a make-up changes — rarely, like the quest list.
     @ObservedObject private var penaltyStore = QuestPenaltyStore.shared
-    /// The full-screen stress alarm. Separate from the pill in the level strip, which follows the live
-    /// reading alone — ignoring the screen does not hide the pill.
-    @State private var showStressScreen = false
+    /// The id of the automatic full-screen stress alert while it is queued or on screen (it goes through the
+    /// moment presenter). Separate from the pill in the level strip, which follows the live reading alone —
+    /// ignoring the screen does not hide the pill.
+    @State private var stressMomentId: String?
     /// When the stress screen was last shown, so an ignored alarm does not come back two minutes later.
     @AppStorage("stress.alertScreen.shownAt") private var stressScreenShownAt: Double = 0
     /// Once an hour at most: often enough to catch a new spell, rarely enough not to nag through one.
@@ -160,6 +166,18 @@ struct RootTabView: View {
     /// level: a flag would re-fire on every re-render.
     @State private var coachFinishedElsewhere = 0
 
+    /// The one moment presenter. NOT observed here: the shell needs one bool (`momentShowing`, fed by a
+    /// de-duplicated publisher) and the route requests; the overlay view observes the presenter itself.
+    private let momentPresenter = TelosMomentPresenter.shared
+    /// Whether a full-screen moment is on screen — the tabs underneath stand still while it is.
+    @State private var momentShowing = false
+    /// The keyboard is up: the floating bar steps aside (as the system bar did) and its inset drops.
+    @State private var keyboardVisible = false
+    /// Goals, opened by a moment's "Set the next goal".
+    @State private var showGoals = false
+    /// The Telos Lift plan editor, opened from More (the editor owns its own NavigationStack).
+    @State private var showLiftPlan = false
+
     // MARK: - Today's meditation is still open (the Focus tab's reminder)
     //
     // WHAT "DONE" MEANS IS NOT DECIDED HERE. `MeditationLog.isDayDone` is the single rule — the level's
@@ -199,13 +217,6 @@ struct RootTabView: View {
     /// and "Focus, one item" is not a thing anybody can act on. `nil` = read the plain tab title.
     private var meditationA11yLabel: LocalizedStringKey? {
         meditationDue ? "Focus, today's meditation is still open" : nil
-    }
-
-    /// The corner mark itself, or nothing. Typed `Text?` deliberately: `.badge` is overloaded on `Int`,
-    /// `LocalizedStringKey?`, `StringProtocol?` and `Text?`, and a bare `nil` in a ternary leaves the
-    /// compiler to guess which. `verbatim` because "!" is punctuation, not a string to translate.
-    private var meditationBadge: Text? {
-        meditationDue ? Text(verbatim: "!") : nil
     }
 
     /// Whether the badge should be pulsing right now — as opposed to merely showing.
@@ -263,11 +274,96 @@ struct RootTabView: View {
 
     /// Show the stress screen for a high reading, unless one was shown within the hour or the morning flow
     /// or another sheet is up.
+    ///
+    /// OFF BY DEFAULT (HEALTH_V2 H1, owner decision): the FINAL guard is `claimScreenSlot()`, which refuses
+    /// outright while `stress.alertScreen.enabled` is off and otherwise takes one of the day's two slots in
+    /// one step. The diagnostic stays reachable from the stress tile (`diagnosticRequested`, below).
     private func presentStressScreenIfDue() {
-        guard stressAlert != nil, !showStressScreen, !showMorning, !backgroundCovered,
-              Date().timeIntervalSince1970 - stressScreenShownAt > Self.stressScreenEvery else { return }
+        guard let level = stressAlert, stressMomentId == nil, !showMorning, !backgroundCovered,
+              Date().timeIntervalSince1970 - stressScreenShownAt > Self.stressScreenEvery,
+              LiveStressMonitor.shared.claimScreenSlot() else { return }
         stressScreenShownAt = Date().timeIntervalSince1970
-        showStressScreen = true
+        let id = "stress.alert.\(Int(stressScreenShownAt))"
+        stressMomentId = id
+        momentPresenter.enqueue(
+            stressMoment(id: id, level: level, requested: false),
+            onPrimary: { quickAction = .breathe },
+            onClose: { stressMomentId = nil },
+            secondary: TelosMomentSecondaryAction(String(localized: "IGNORE")))
+    }
+
+    /// The diagnostic the wearer opened from the stress tile: shown whatever the reading and whether or not
+    /// the automatic alert is on, never counted against its cap, and closed through `closeDiagnostic()`.
+    private func presentRequestedStressDiagnostic() {
+        let level = stressMonitor.current
+        momentPresenter.enqueue(
+            stressMoment(id: "stress.diagnostic.\(Int(Date().timeIntervalSince1970 * 1000))",
+                         level: level, requested: true),
+            onPrimary: { quickAction = .breathe },
+            onClose: { LiveStressMonitor.shared.closeDiagnostic() },
+            secondary: TelosMomentSecondaryAction(String(localized: "IGNORE")),
+            requestedByWearer: true)
+    }
+
+    /// The stress diagnostic as a full-screen moment (decision 7): the diagnostic register, the reading as a
+    /// word and what it is measured from (`alertSubtitle`), never "x.x of 3"; BREATHE / IGNORE.
+    private func stressMoment(id: String, level: Double?, requested: Bool) -> TelosMoment {
+        let high = (level ?? 0) >= LiveStressMonitor.highThreshold
+        let subtitle = LiveStressMonitor.alertSubtitle(level: level)
+        let message = high
+            ? String(localized: "Your last ten minutes read high while you were still. A few minutes of slow breathing is the fastest way down.")
+            : String(localized: "Measured over the last ten minutes against your own calm reference. A few minutes of slow breathing brings it down.")
+        return TelosMoment(
+            id: id,
+            kind: .stressDiagnostic,
+            overline: String(localized: "STRESS ALERT"),
+            headline: high || !requested ? String(localized: "High stress") : String(localized: "Stress right now"),
+            detail: subtitle + "\n\n" + message,
+            primaryActionTitle: String(localized: "BREATHE"))
+    }
+
+    /// The day's optimum as a full-screen moment (decision 4 keeps it; decision 7 makes it a moment — the
+    /// shell's own overlay for it is gone). `DayAlerts` raises it once a day; closing it clears it there.
+    private func presentOptimum(_ optimum: DayAlerts.Optimum) {
+        let moment = TelosMoment(
+            id: "optimum." + Repository.localDayKey(Date()),
+            kind: .optimumReached,
+            overline: String(localized: "SYSTEM DIAGNOSTICS"),
+            headline: String(localized: "Optimum reached"),
+            detail: optimum.message,
+            figures: [
+                TelosMoment.Figure(label: String(localized: "Effort"), value: optimum.effort),
+                TelosMoment.Figure(label: String(localized: "Recommended"), value: optimum.target),
+            ],
+            primaryActionTitle: String(localized: "UNDERSTOOD"))
+        momentPresenter.enqueue(moment, onPrimary: {}, onClose: { dayAlerts.dismissOptimum() })
+    }
+
+    /// What holds full-screen moments back right now (decision 7): a workout, the morning flow, or anything
+    /// else already over the tabs — a sheet, a first-run gate, the day's penalty card, a quest pop-up.
+    private var momentSuppression: TelosMomentPresenter.Suppression {
+        let questPopupUp = questStore.offered != nil
+            || !questStore.completions.isEmpty
+            || !questStore.failures.isEmpty
+        return TelosMomentPresenter.Suppression(
+            workout: workoutActive,
+            morningFlow: showMorning,
+            covered: backgroundCovered || questStore.planReport != nil || questPopupUp)
+    }
+
+    /// The five items of the floating bar, with the live state the system items used to carry.
+    private var tabBarItems: [TelosTabItem] {
+        [
+            TelosTabItem(tag: 0, title: "Home", systemImage: "house"),
+            TelosTabItem(tag: 1, title: "Biometrics", systemImage: "waveform.path.ecg"),
+            TelosTabItem(tag: 2, title: "Focus", systemImage: "figure.mind.and.body",
+                         a11yLabel: meditationA11yLabel,
+                         showsMark: meditationDue,
+                         pulsing: meditationPulsing),
+            TelosTabItem(tag: 3, title: "System", systemImage: coachWorking ? "circle.dotted" : "sparkles",
+                         bounceTrigger: coachFinishedElsewhere),
+            TelosTabItem(tag: 4, title: "More", systemImage: "ellipsis"),
+        ]
     }
 
     /// Whether something is already over the tabs — one of this shell's own sheets, or a mandatory
@@ -276,6 +372,7 @@ struct RootTabView: View {
     private var backgroundCovered: Bool {
         !launchGatesCleared
             || quickAction != nil || showDevices || routedPillar != nil || showLevelTimeline
+            || showGoals || showLiftPlan
     }
 
     private func reselectTab(_ tag: Int) {
@@ -292,61 +389,60 @@ struct RootTabView: View {
     // dragged, or a back-swipe that started a few points from the edge — and each of those throwing the
     // wearer onto a different tab cost more than the gesture ever saved.
 
+    /// Select a tab from the floating bar. A tap on the ALREADY-selected item is the reselect the system bar
+    /// used to send through its binding: refresh, then pop to root, or scroll to the top when at the root.
+    private func selectTab(_ tag: Int) {
+        if tag == selectedTab {
+            reselectTab(tag)
+        } else {
+            selectedTab = tag
+        }
+    }
+
     var body: some View {
-        // The platform tab bar is intentionally left fully native. iOS 26 supplies Liquid Glass and
-        // its dynamic interaction with scrolling content automatically; older supported releases use
-        // the corresponding system material and safe-area behaviour from the same TabView.
+        // Split in four (core → presentations → routing → the moment overlay) to keep each chain well
+        // inside the type-checker's budget.
+        shellRouting
+            // THE ONE MOMENT PRESENTER (decision 7), the OUTERMOST overlay: above the tabs, the level strip,
+            // the floating bar and the shell's cards. Sheets and the morning flow present above it, which is
+            // why the queue is held while any of them is up (`momentSuppression`).
+            .overlay {
+                TelosMomentOverlay(presenter: momentPresenter)
+            }
+            // Connect the stores that raise moments (goals today; see the FRAME hand-offs for the rest).
+            // Idempotent.
+            .onAppear { momentPresenter.wireSources() }
+    }
+
+    /// The tabs, the level strip, the floating bar and the shell's always-on work.
+    private var shellCore: some View {
+        // THE SYSTEM BAR IS HIDDEN (per tab, in `tab(...)` / `moreTab`) and the floating `TelosTabBar` below
+        // replaces it. The TabView stays: it keeps each tab's root alive once visited (scroll positions,
+        // chart ranges, `.task`s run once) exactly as before, and lazily builds a tab on first visit.
         TabView(selection: nativeTabSelection) {
-            // A SUN, not a grid. Today is the day you are in, and a grid glyph says "a page of tiles" —
-            // which is what the screen is made of, not what it is for. The sun also pairs with the moon
-            // the Sleep and level surfaces already use, so the two halves of a day read as a pair in the
-            // bar. Matches the Android lane's `Icons.Filled.WbSunny`.
-            tab(todayTabRoot, "Today", "sun.max", path: $tabPaths[0], scrollSignal: scrollTop[0]).tag(0)
-            // Labelled Health, as on Android; the screen behind it is still Trends.
-            tab(TrendsView(), "Health", "chart.line.uptrend.xyaxis", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
-            // FOCUS TOOK SLEEP'S SLOT, matching the Android bar. Sleep is not gone — it is reached from
-            // the Health tab and from its own More row below — and Focus is the tab with something to do
-            // on it, which is what earns a slot in a five-slot bar.
-            //
-            // TODAY'S MEDITATION IS STILL OPEN → the item carries a warning mark until it is done.
-            //
-            // THE PLATFORM'S OWN BADGE, not a drawn one. `.tabItem` renders a Text + Image and nothing
-            // else: a `ZStack` with a dot in the corner is simply dropped, so an overlay here would be a
-            // badge that never appeared. `.badge` puts the mark exactly where the corner mark belongs, in
-            // the system's own attention colour, and it clears the moment the state does.
-            //
-            // THE PULSE IS THE GLYPH'S, for the same reason — nothing can animate the badge itself, so the
-            // gentle ~1 s `.pulse` rides the Focus symbol underneath it (the same channel the System tab's
-            // finished-generation bounce uses). Reduce Motion / Low Power / quiet motion, the background,
-            // and being on Focus already all leave a STATIC badge, which is the correct degradation: the
-            // mark is the message and the movement is only what draws the eye to it.
+            // HOME is the day you are in (the reference's house). Its hero belongs to Today itself
+            // (LiquidTodayView); the shell only hosts it.
+            tab(todayTabRoot, "Home", "house", path: $tabPaths[0], scrollSignal: scrollTop[0]).tag(0)
+            // BIOMETRICS: the Health/Trends screen, renamed to the reference's word. Sleep is reached from it
+            // and from its own More row.
+            tab(TrendsView(), "Biometrics", "waveform.path.ecg", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
+            // FOCUS STAYS (coordinator decision 3 — not swapped for Habits). Its "today's meditation is still
+            // open" mark and pulse are drawn by the floating bar (`tabBarItems`), with the same VoiceOver label.
             tab(MindfulnessView(), "Focus", "figure.mind.and.body",
                 path: $tabPaths[2], scrollSignal: scrollTop[2],
-                // The label must SAY it, not leave VoiceOver to infer a warning from a punctuation mark.
                 a11yLabel: meditationA11yLabel)
                 .tag(2)
-                .badge(meditationBadge)
-                .symbolEffectPulseCompat(isActive: meditationPulsing)
-            // K3: Coach promoted to a top-level tab (was behind the More list). The sparkles icon
-            // matches the More-tab row and the macOS sidebar entry.
-            // THE GLYPH SAYS WHETHER THE SYSTEM IS WORKING. While a generation is in flight — the
-            // visible chat OR any of the headless ones — the sparkles become a progress glyph, so a
-            // wearer on another tab can see that something is being written. The platform tab bar owns
-            // its own item, so this is a glyph swap rather than the Android lane's spinner-in-the-slot;
-            // it lands in the same place and says the same thing.
+            // SYSTEM (the coach). Its working glyph and finished-elsewhere pop live on the floating bar.
             tab(CoachView(), "System", coachWorking ? "circle.dotted" : "sparkles",
                 path: $tabPaths[3], scrollSignal: scrollTop[3])
                 .tag(3)
-                // THE POP IS A NOTIFICATION, and it only fires for somebody who cannot see the answer
-                // arrive: on the System tab itself the reply is right there filling the screen, and a
-                // bouncing icon underneath it would be telling you something you are already reading.
-                .symbolEffectPopCompat(trigger: coachFinishedElsewhere)
             moreTab(path: $tabPaths[4], scrollSignal: scrollTop[4]).tag(4)
         }
         .tint(StrandPalette.accent)
-        // THE TABS BEHIND A SHEET STAND STILL. Applied here, on the TabView itself, so it reaches every
-        // tab root and none of the sheets below — they are attached further out and do not inherit it.
-        .environment(\.noopBackgroundCovered, backgroundCovered)
+        // THE TABS BEHIND A SHEET — OR A FULL-SCREEN MOMENT — STAND STILL. Applied here, on the TabView
+        // itself, so it reaches every tab root and none of the sheets below — they are attached further out
+        // and do not inherit it.
+        .environment(\.noopBackgroundCovered, backgroundCovered || momentShowing)
         // THE LEVEL STRIP, over every tab. An overlay rather than a toolbar: the radar hangs a third of
         // its own height past the bar's bottom edge, and a toolbar clips its content.
         //
@@ -363,6 +459,22 @@ struct RootTabView: View {
                 onStressAlert: { quickAction = .breathe }
             )
             .allowsHitTesting(true)
+        }
+        // THE FLOATING TAB BAR. Over the content, which scrolls beneath it (every tab's safe area is inset
+        // by the bar's height, so nothing ends up hidden under it). Steps aside for the keyboard, as the
+        // system bar did; `ignoresSafeArea(.keyboard)` keeps it from riding up on the way out.
+        .overlay(alignment: .bottom) {
+            TelosTabBar(items: tabBarItems, selected: selectedTab, onSelect: selectTab)
+                .opacity(keyboardVisible ? 0 : 1)
+                .allowsHitTesting(!keyboardVisible)
+                .accessibilityHidden(keyboardVisible)
+                .ignoresSafeArea(.keyboard, edges: .bottom)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            if !keyboardVisible { keyboardVisible = true }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            if keyboardVisible { keyboardVisible = false }
         }
         .task(id: repo.refreshSeq) {
             await levelBar.refresh(repo: repo, tick: repo.refreshSeq)
@@ -394,10 +506,16 @@ struct RootTabView: View {
         // #1841: the same "Hide bar when scrolling" preference Android drives its own bar with. Here the
         // system owns the behaviour — iOS 26's tab bar MINIMISES to a pill on scroll down rather than
         // sliding away entirely, so this is the platform's read of the same intent, not a copy of ours.
+        // With the floating bar replacing the system one this is inert (the system bar is hidden); kept so the
+        // preference keeps its one reader and the minimise behaviour returns if the system bar ever does.
         .noopTabBarAutoHide(bottomBarAutoHide)
-            // Tab crossfade — README §Motion: ~240ms opacity swap between tab roots, global calm
-            // easing cubic-bezier(0.22,1,0.36,1).
-            .animation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24), value: selectedTab)
+        // NO TAB CROSSFADE (§6.1): tab switches are instant. The fade encoded nothing and animated the whole
+        // subtree of both tabs.
+    }
+
+    /// The shell's covers, cards, sheets, routing and change handlers, over `shellCore`.
+    private var shellPresentations: some View {
+        shellCore
         .task {
             // The room sensor is read every ten minutes for as long as the app runs, which is what the
             // bedroom history is made of.
@@ -446,43 +564,16 @@ struct RootTabView: View {
         .onChange(of: launchGatesCleared) { _, cleared in
             if cleared { presentMorningIfDue() }
         }
-        // THE STRESS ALARM, full screen, when the live reading turns high — on opening, on a refresh, or
-        // mid-session. The same diagnostic look as a failed quest, with a way out that helps and one that
-        // does not.
-        .overlay {
-            if showStressScreen, let level = stressAlert {
-                DiagnosticAlertView(
-                    overline: "STRESS ALERT",
-                    symbol: "bolt.heart",
-                    title: "High stress",
-                    subtitle: String(format: "%.1f of 3, at rest", level),
-                    message: "Your last ten minutes read high while you were still. A few minutes of slow breathing is the fastest way down.",
-                    primary: ("BREATHE", {
-                        showStressScreen = false
-                        quickAction = .breathe
-                    }),
-                    secondary: ("IGNORE", { showStressScreen = false }))
-                .transition(.opacity)
-                .task { SystemHaptics.play(.summon) }
-            }
+        // THE STRESS ALARM and THE DAY'S OPTIMUM are full-screen MOMENTS now (decision 7): they go through the
+        // one presenter (see `presentStressScreenIfDue`, `presentRequestedStressDiagnostic`, `presentOptimum`
+        // and the change handlers below) instead of overlays of their own. Both features stay (decision 4);
+        // the automatic stress alert is off by default (H1) and only its opt-in presents itself.
+        .onChange(of: stressMonitor.diagnosticRequested, initial: true) { _, requested in
+            if requested { presentRequestedStressDiagnostic() }
         }
-        .animation(.easeOut(duration: 0.25), value: showStressScreen)
-        // THE DAY'S OPTIMUM, reached: the effort the night's recovery can carry has been spent.
-        .overlay {
-            if let optimum = dayAlerts.optimum {
-                DiagnosticAlertView(
-                    overline: "SYSTEM DIAGNOSTICS",
-                    symbol: "battery.25percent",
-                    title: "Optimum reached",
-                    subtitle: "Effort \(optimum.effort) of \(optimum.target) recommended",
-                    message: "Today's load has reached what last night's recovery can carry. Anything more now is paid for tomorrow: keep the rest of the day easy and get to bed on time.",
-                    primary: ("UNDERSTOOD", { dayAlerts.dismissOptimum() }),
-                    ringed: true)
-                .transition(.opacity)
-                .task { SystemHaptics.play(.summon) }
-            }
+        .onChange(of: dayAlerts.optimum, initial: true) { _, optimum in
+            if let optimum { presentOptimum(optimum) }
         }
-        .animation(.easeOut(duration: 0.25), value: dayAlerts.optimum)
         // YESTERDAY'S PLAN, CLOSED IN ONE CARD — WITH ITS PRICE. The directives a difficulty choice issues
         // still do not each get a red card when they run out (four modal cards in a row is noise, not
         // teeth), so `QuestStore.sweepExpired` cancels them without cards and `QuestPlanReporter`
@@ -525,8 +616,53 @@ struct RootTabView: View {
             }
         }
         .onChange(of: stressAlert != nil) { _, high in
-            if high { presentStressScreenIfDue() } else { showStressScreen = false }
+            if high {
+                presentStressScreenIfDue()
+            } else if let id = stressMomentId {
+                // The reading came down: the automatic alert is taken back, queued or on screen.
+                momentPresenter.withdraw(id: id)
+                stressMomentId = nil
+            }
         }
+        // The strap-cue engine holds its ambient cues while the morning flow is up.
+        .onChange(of: showMorning) { _, v in StrapCueEngine.shared.morningFlowActive = v }
+        // The moment queue waits for whatever is over the tabs, and shows the next one the moment it clears.
+        .onChange(of: momentSuppression, initial: true) { _, suppression in
+            momentPresenter.setSuppression(suppression)
+        }
+        .onReceive(momentPresenter.$current.map { $0 != nil }.removeDuplicates()) { showing in
+            if momentShowing != showing { momentShowing = showing }
+        }
+        // A moment's primary action asked for a screen ("Set the next goal" → Goals).
+        .onReceive(momentPresenter.$requestedRoute.removeDuplicates()) { route in
+            guard let route else { return }
+            switch route {
+            case .goals: showGoals = true
+            }
+            momentPresenter.consumeRoute()
+        }
+        .sheet(isPresented: $showGoals) {
+            NavigationStack {
+                GoalsView()
+                    .background(StrandPalette.surfaceBase.ignoresSafeArea())
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button("Done") { showGoals = false }
+                                .foregroundStyle(StrandPalette.accent)
+                        }
+                    }
+            }
+        }
+        .sheet(isPresented: $showLiftPlan) {
+            LiftProgramEditorView(programs: LiftProgramStore.shared)
+        }
+    }
+
+    /// Scene phase, the quick-action / Devices / pillar sheets, router requests and Home Screen actions,
+    /// over `shellPresentations`.
+    private var shellRouting: some View {
+        shellPresentations
         .onChange(of: scenePhase) { _, phase in
             LiveStressMonitor.shared.foreground = phase == .active
             if phase == .active { presentMorningIfDue() }
@@ -557,11 +693,11 @@ struct RootTabView: View {
             case .coach:
                 // K3: Coach is now a top-level tab (tag 3) — switch to it directly instead of
                 // presenting it as a pillar sheet.
-                withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = 3 }
+                selectedTab = 3
                 router.requestedDestination = nil
             case .trends:
                 // Trends is a primary tab on iPhone (not a pillar sheet) — switch to it.
-                withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = 1 }
+                selectedTab = 1
                 router.requestedDestination = nil
             case .activeWorkout:
                 // The Today active-workout indicator opens Live through the quick-action Live sheet; once
@@ -572,7 +708,7 @@ struct RootTabView: View {
             case .liveSession:
                 // Live Sessions is presented from Today's own Start entry (a cover, not a routed sheet),
                 // so a deep-link lands on the Today tab where that entry lives.
-                withAnimation(.timingCurve(0.22, 1, 0.36, 1, duration: 0.24)) { selectedTab = 0 }
+                selectedTab = 0
                 router.requestedDestination = nil
             case .coach:
                 // #1862: the Today Coach launcher hands its question here. Coach is a pillar sheet on
@@ -765,7 +901,17 @@ struct RootTabView: View {
                 }
                 .background(StrandPalette.surfaceBase.ignoresSafeArea())
                 .toolbar(.hidden, for: .navigationBar)
+                .toolbar(.hidden, for: .tabBar)
                 .tabRouteDestinations()
+        }
+        // THE SYSTEM BAR IS HIDDEN for the whole stack (root and every pushed screen); the floating
+        // `TelosTabBar` replaces it.
+        .toolbar(.hidden, for: .tabBar)
+        // THE FLOATING BAR'S ROOM, on the stack so every pushed screen gets it too: scroll content ends above
+        // the bar (and still scrolls beneath it), bottom-pinned rows (the coach's input) sit above it. Drops
+        // to zero while the keyboard is up, when the bar steps aside.
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            Color.clear.frame(height: keyboardVisible ? 0 : TelosTabBarMetrics.contentInset)
         }
         // Drive this tab's root scroll-to-top on an at-root re-tap (#198 follow-up); read by ScreenScaffold
         // / LiquidTodayView inside. Only THIS tab's token changes on its reselect, so the others don't scroll.
@@ -780,11 +926,10 @@ struct RootTabView: View {
         }
     }
 
-    // The "More" tab is the app's catch-all index. It was a plain SwiftUI `List` with system large-title
-    // + system title-case section headers, so it didn't match any other page (which all use ScreenScaffold
-    // + SectionHeader's UPPERCASE overline + the 28pt section rhythm). Rebuilt on the shared page chrome:
-    // ScreenScaffold for the title1 "More" + subtitle, a `SectionHeader` overline per group, and the group's
-    // rows in a single grouped NoopCard with hairline dividers — the same row idiom Settings/Health use.
+    // The "More" tab is the app's catch-all index, on the shared page chrome: ScreenScaffold for the title +
+    // subtitle, a small-caps overline per group, and the group's rows in ONE glass card with hairline
+    // dividers (§5.8 / the reference family). Every existing row stays; 2.0 adds Goals, Look ahead, Habits
+    // (Insights), the Lift plan (Body) and Strap cues (App).
     private func moreTab(path: Binding<NavigationPath>, scrollSignal: Int) -> some View {
         NavigationStack(path: path) {
             ScreenScaffold(title: "More", subtitle: "Everything else, one tap away",
@@ -794,12 +939,17 @@ struct RootTabView: View {
                     // Routines head Insights: everything else on this list reports on the body, and
                     // this is the one row that says what the day around it looks like.
                     MoreRow("Routines", "clock.badge.checkmark", .routines)
+                    // 2.0 (decisions 13 + 14): where the wearer is heading, and what they are aiming at.
+                    MoreRow("Goals", "flag.checkered", .goals)
+                    MoreRow("Look ahead", "chart.line.uptrend.xyaxis", .lookAhead)
+                    // The Habits hub (decision 3: reached from More, Today and the Coach — not a tab).
+                    MoreRow("Habits", "flask", .habits)
                     MoreRow("What Moves You", "wand.and.sparkles", .insightsHub)
                     MoreRow("Intelligence", "brain.head.profile", .intelligence)
                     // K3: Coach promoted to a top-level tab — no longer listed under More.
                     MoreRow("Insights", "lightbulb.fill", .insights)
                     MoreRow("Explore", "square.grid.2x2.fill", .explore)
-                    MoreRow("Compare", "rectangle.split.2x1.fill", .compare)
+                    MoreRow("Compare", "rectangle.split.2x1.fill", .compare, last: true)
                 }
                 moreSection("Body") {
                     MoreRow("Sleep", "bed.double.fill", .sleep)
@@ -808,13 +958,16 @@ struct RootTabView: View {
                     MoreRow("Smart Lights", "lightbulb.2.fill", .smartLights)
                     MoreRow("Live", "waveform.path.ecg", .live)
                     MoreRow("Workouts", "figure.run", .workouts)
+                    // Telos Lift's plan editor (decision 16). A SHEET, not a push: the editor owns its own
+                    // NavigationStack.
+                    MoreSheetRow("Lift plan", "dumbbell.fill") { showLiftPlan = true }
                     MoreRow("Health", "heart.text.square.fill", .health)
                     MoreRow("Lab Book", "books.vertical.fill", .labBook)
                     MoreRow("Stress", "bolt.heart.fill", .stress)
                     MoreRow("Breathe", "wind", .breathe)
                     MoreRow("Intervals", "timer", .intervals)
                     // Experimental beat-to-beat regularity visualization — self-gates on its own consent.
-                    MoreRow("Rhythm", "waveform.path", .rhythm)
+                    MoreRow("Rhythm", "waveform.path", .rhythm, last: true)
                 }
                 moreSection("Data") {
                     MoreRow("Your Data, Fused", "square.stack.3d.up.fill", .fusedRecord)
@@ -826,7 +979,7 @@ struct RootTabView: View {
                     // reads the opt-in Documents/noop_sync.txt drop file).
                     MoreRow("Shortcuts Export", "square.and.arrow.up.fill", .shortcutsExport)
                     // The plain 4.0 vs 5.0/MG capability grid — what NOOP reads live off each strap.
-                    MoreRow("NOOP Limitations", "list.bullet.rectangle", .noopLimitations)
+                    MoreRow("NOOP Limitations", "list.bullet.rectangle", .noopLimitations, last: true)
                 }
                 moreSection("App") {
                     // #805/#811: the v7.3.1 #766 alarm consolidation moved Smart Alarm under a single
@@ -841,6 +994,8 @@ struct RootTabView: View {
                     // Automations screen instead. Its absence from the iPhone More list is correct.
                     MoreRow("Alarms", "alarm.fill", .alarms)
                     MoreRow("Automations", "wand.and.stars", .automations)
+                    // The strap's purposeful vibrations (sitting break, rewards, penalties, timers).
+                    MoreRow("Strap cues", "hand.tap.fill", .strapCues)
                     // The Test Centre (the diagnostics + bug-report hub) gets a first-class home here, not
                     // just buried in Settings, so the feedback loop is one tap from the More tab.
                     MoreRow("Test Centre", "stethoscope", .testCentre)
@@ -848,7 +1003,7 @@ struct RootTabView: View {
                     // #477 lives here rather than inside Settings: the strap-battery levers are the
                     // ones people reach for when a strap is running down, so they get their own row.
                     MoreRow("Power saving", "battery.25", .powerSaving)
-                    MoreRow("Settings", "gearshape.fill", .settings)
+                    MoreRow("Settings", "gearshape.fill", .settings, last: true)
                 }
             }
             // The strip's own room, as in `tab(_:_:_:path:scrollSignal:)` — the More tab builds its own
@@ -868,7 +1023,14 @@ struct RootTabView: View {
                     .background(StrandPalette.surfaceBase.ignoresSafeArea())
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbarBackground(.hidden, for: .navigationBar)
+                    .toolbar(.hidden, for: .tabBar)
             }
+            .toolbar(.hidden, for: .tabBar)
+        }
+        // The system bar hidden for the whole stack, and the floating bar's room — as in `tab(...)`.
+        .toolbar(.hidden, for: .tabBar)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            Color.clear.frame(height: keyboardVisible ? 0 : TelosTabBarMetrics.contentInset)
         }
         // Scroll the More index to the top on an at-root re-tap (#198 follow-up); read by its ScreenScaffold.
         .environment(\.scrollToTopSignal, scrollSignal)
@@ -898,15 +1060,19 @@ struct RootTabView: View {
                     expandedMoreSectionsCSV = MoreSectionPrefs.encode(open)
                 }
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: TelosSpace.s) {
+                    // The label voice (small caps, +1.6 tracking). Allowed to wrap rather than truncate at
+                    // large text sizes (the wide tracking makes a one-line cap clip first).
                     Text(title).strandOverline()
-                    Spacer(minLength: 8)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: TelosSpace.s)
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(StrandPalette.textTertiary)
+                        .font(TelosType.glyphChevron)
+                        .foregroundStyle(TelosColor.textTertiary)
                         .rotationEffect(.degrees(isOpen ? 0 : -90))
+                        .accessibilityHidden(true)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(maxWidth: .infinity, minHeight: TelosSpace.hitTarget, alignment: .leading)
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -936,13 +1102,20 @@ struct RootTabView: View {
 /// registration in `moreTab`.
 private enum MoreDestination: Hashable {
     case insightsHub, intelligence, coach, insights, explore, compare
+    case goals, lookAhead, habits
     case live, workouts, health, labBook, sleep, stress, breathe, intervals, rhythm
     case routines, bedroom, dreamJournal, smartLights
     case fusedRecord, appleHealth, miBand, dataSources, backupSync, shortcutsExport, noopLimitations
-    case alarms, automations, testCentre, siriShortcuts, powerSaving, settings
+    case alarms, automations, strapCues, testCentre, siriShortcuts, powerSaving, settings
 
-    @ViewBuilder var destination: some View {
+    /// Main actor: some destinations read main-actor singletons (the strap-cue engine).
+    @MainActor @ViewBuilder var destination: some View {
         switch self {
+        // 2.0: Goals / Look ahead / Habits read the app model from the environment the app root injects.
+        case .goals:           GoalsView()
+        case .lookAhead:       LookAheadView()
+        case .habits:          HabitsHubView()
+        case .strapCues:       StrapCuesSettingsView(engine: StrapCueEngine.shared)
         case .insightsHub:     InsightsHubView()
         case .intelligence:    IntelligenceView()
         case .coach:           CoachView()
@@ -982,51 +1155,57 @@ private enum MoreDestination: Hashable {
 }
 
 
-/// One tappable destination row in the More index. A `NavigationLink` whose label is the standard app row:
-/// the SF Symbol icon tinted `StrandPalette.accent`, the title in the body text colour, a `Spacer`, and a
-/// trailing `chevron.right` in `textTertiary`. ~44pt min height + the card's row insets keep the whole row a
-/// comfortable tap target.
+/// One tappable destination row in the More index (§5.8): the 28 pt icon plate (the symbol pinned to the
+/// accent explicitly — an inherited tint was re-resolved to the system blue a beat after first render, #184),
+/// the title in `body`, a chevron; min height 52; a `lineSoft` divider inset to the title under every row
+/// but the group's last. Pressed: the row fill steps to `surfaceInset`.
 private struct MoreRow: View {
     let title: LocalizedStringKey
     let icon: String
     let route: MoreDestination
+    let last: Bool
 
-    init(_ title: LocalizedStringKey, _ icon: String, _ route: MoreDestination) {
-        self.title = title; self.icon = icon; self.route = route
+    init(_ title: LocalizedStringKey, _ icon: String, _ route: MoreDestination, last: Bool = false) {
+        self.title = title; self.icon = icon; self.route = route; self.last = last
     }
 
     var body: some View {
         NavigationLink(value: route) {
-            HStack(spacing: 14) {
-                // Pin the icon to the accent explicitly. A plain inherited tint gets re-resolved by iOS to
-                // its default blue a beat after first render — so the icons flashed green→blue (#184). The
-                // explicit foregroundStyle on the image overrides that; the title keeps the primary colour.
-                Image(systemName: icon)
-                    .font(.system(size: 17, weight: .regular))
-                    .foregroundStyle(StrandPalette.accent)
-                    .frame(width: 26, alignment: .center)
-                Text(title)
-                    .font(StrandFont.body)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Spacer(minLength: 8)
-                Image(systemName: "chevron.right")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-            .padding(.horizontal, 16)
-            .frame(minHeight: 44)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            // Hairline under every row; the grouped container clips the last one's overflow so the bottom
-            // edge stays clean (the divider sits inside the card's rounded corners).
-            .overlay(alignment: .bottom) {
-                Rectangle()
-                    .fill(StrandPalette.hairline)
-                    .frame(height: 1)
-                    .padding(.leading, 16)
-            }
+            MoreRowLabel(title: title, icon: icon, last: last)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(TelosRowButtonStyle())
+    }
+}
+
+/// A More row that presents a sheet instead of pushing (the Lift plan editor owns its NavigationStack).
+private struct MoreSheetRow: View {
+    let title: LocalizedStringKey
+    let icon: String
+    let last: Bool
+    let action: () -> Void
+
+    init(_ title: LocalizedStringKey, _ icon: String, last: Bool = false, action: @escaping () -> Void) {
+        self.title = title; self.icon = icon; self.last = last; self.action = action
+    }
+
+    var body: some View {
+        Button(action: action) {
+            MoreRowLabel(title: title, icon: icon, last: last)
+        }
+        .buttonStyle(TelosRowButtonStyle())
+    }
+}
+
+private struct MoreRowLabel: View {
+    let title: LocalizedStringKey
+    let icon: String
+    let last: Bool
+
+    var body: some View {
+        TelosListRow(title, systemImage: icon, iconTint: TelosColor.mint, showsChevron: true)
+            .overlay(alignment: .bottom) {
+                if !last { TelosListDivider() }
+            }
     }
 }
 
@@ -1093,9 +1272,9 @@ private struct QuickActionSheet: View {
                 .padding(.bottom, 14)
 
             Text("QUICK ACTIONS")
-                .font(StrandFont.overline)
-                .tracking(1.6)
-                .foregroundStyle(StrandPalette.textTertiary)
+                .telosScale()
+                .foregroundStyle(TelosColor.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.horizontal, 16)
                 .padding(.bottom, 10)
@@ -1111,16 +1290,8 @@ private struct QuickActionSheet: View {
             Spacer(minLength: 0)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(
-            NoopChromeSurface()
-                .overlay(alignment: .top) {
-                    // Gold hairline top edge per the bottom-sheet spec.
-                    Rectangle()
-                        .fill(StrandPalette.gold.opacity(0.35))
-                        .frame(height: 1)
-                }
-                .ignoresSafeArea()
-        )
+        // §6.1: the rows sit on the solid canvas — no material, no hairline "gold" top edge.
+        .background(TelosColor.canvas.ignoresSafeArea())
     }
 
     /// One flat action row: hued line-icon tile + title, inset surface, hairline border.
@@ -1167,43 +1338,6 @@ extension View {
         if #available(iOS 26.0, *) {
             // `.onScrollDown` minimises to a pill on downward scroll; `.never` pins it fully visible.
             self.tabBarMinimizeBehavior(enabled ? .onScrollDown : .never)
-        } else {
-            self
-        }
-    }
-}
-
-// MARK: - The finished-generation pop
-
-private extension View {
-    /// Bounce a symbol once when `trigger` changes, where the OS can do it.
-    ///
-    /// `symbolEffect(.bounce, value:)` is iOS 17; below that the glyph simply does not bounce, which is
-    /// the correct degradation — the swap to and from the progress glyph already carries the state, and
-    /// the bounce is the flourish on top of it.
-    @ViewBuilder
-    func symbolEffectPopCompat(trigger: Int) -> some View {
-        if #available(iOS 17.0, *) {
-            self.symbolEffect(.bounce, value: trigger)
-        } else {
-            self
-        }
-    }
-
-    /// Breathe a tab's symbol for as long as `isActive`, where the OS can do it.
-    ///
-    /// `.pulse` is the platform's own ~1 s opacity breath, which is exactly the tempo asked for and costs
-    /// nothing we render ourselves — no `repeatForever` of ours, so nothing for the quiet-motion census to
-    /// find and nothing left looping if this view goes away.
-    ///
-    /// `isActive` is the whole gate: false leaves the symbol still, so Reduce Motion, Low Power Mode,
-    /// "Reduce motion in NOOP", the background and being on the tab already are all handled by the CALLER
-    /// passing false rather than by a branch here. Below iOS 17 the glyph simply never moves, which is the
-    /// same correct degradation the pop above documents — the badge is the message.
-    @ViewBuilder
-    func symbolEffectPulseCompat(isActive: Bool) -> some View {
-        if #available(iOS 17.0, *) {
-            self.symbolEffect(.pulse, options: .repeating, isActive: isActive)
         } else {
             self
         }

@@ -113,7 +113,7 @@ struct LabBookView: View {
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
                     Image(systemName: "books.vertical.fill")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(TelosType.glyphField)
                         .foregroundStyle(StrandPalette.metricCyan)
                         .frame(width: 30, height: 30)
                         .background(StrandPalette.metricCyan.opacity(0.14), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
@@ -128,7 +128,7 @@ struct LabBookView: View {
                         showingDisclaimer = true
                     } label: {
                         Image(systemName: "info.circle")
-                            .font(.system(size: 16, weight: .regular))
+                            .font(TelosType.glyphField)
                             .foregroundStyle(StrandPalette.textTertiary)
                     }
                     .buttonStyle(.plain)
@@ -172,7 +172,7 @@ struct LabBookView: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
                     Image(systemName: "tray.and.arrow.down.fill")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(TelosType.glyphField)
                         .foregroundStyle(StrandPalette.metricAmber)
                         .frame(width: 30, height: 30)
                         .background(StrandPalette.metricAmber.opacity(0.14), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
@@ -394,7 +394,7 @@ struct LabBookView: View {
                         .foregroundStyle(StrandPalette.textPrimary)
                         .lineLimit(1)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(TelosType.glyphChevron)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .accessibilityHidden(true)
                 }
@@ -860,7 +860,7 @@ private struct MarkerDetailView: View {
                 Task { await onDelete(row.id) }
             } label: {
                 Image(systemName: "trash")
-                    .font(.system(size: 13))
+                    .font(TelosType.glyphChevron)
                     .foregroundStyle(StrandPalette.statusCritical)
             }
             .buttonStyle(.plain)

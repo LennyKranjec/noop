@@ -322,10 +322,12 @@ struct ManualWorkoutSheet: View {
         HStack(alignment: .top, spacing: 12) {
             // A small Effort-world glyph so the sheet reads as part of the workouts (amber) world.
             Image(systemName: "figure.run")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(StrandPalette.effortColor)
+                .font(TelosType.glyphRow)
+                .foregroundStyle(TelosColor.effortInk)
                 .frame(width: 30, height: 30)
-                .background(StrandPalette.effortColor.opacity(0.14), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .background(TelosColor.glassFill, in: RoundedRectangle(cornerRadius: TelosRadius.plate, style: .continuous))
+                .overlay(RoundedRectangle(cornerRadius: TelosRadius.plate, style: .continuous)
+                    .strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line))
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
                 Text(editing == nil ? "Add Workout" : "Edit Workout")
@@ -391,7 +393,7 @@ struct ManualWorkoutSheet: View {
 
     // MARK: - Validation / build
 
-    private var inputShape: RoundedRectangle { RoundedRectangle(cornerRadius: 10, style: .continuous) }
+    private var inputShape: RoundedRectangle { RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous) }
 
     /// Moving the START keeps the workout's LENGTH and carries the end with it, which is what correcting
     /// "this began an hour earlier" means. Computed from the old start before it is reassigned.

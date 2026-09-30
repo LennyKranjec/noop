@@ -6,6 +6,10 @@ import StrandDesign
 //
 // SwiftUI twins of the Android `QuestCountdown` / `QuestStrip` / `QuestReviewCard`. The pop-up — the
 // part that interrupts — is `QuestPopupView` in its own file.
+//
+// TELOS 2.0 (PROGRESS part B): restyled WITHOUT restructuring. The strip's root is still one `VStack` with
+// the penalty board as its first child and the ONE `.sheet(item:)` on that root; chips are glass capsules
+// (the gear chip lit in the accent), the review sheet sits on the solid canvas. Tokens only.
 
 // MARK: - The clock on a quest
 //
@@ -34,9 +38,9 @@ struct QuestCountdownView: View {
     private static let everySecond = PeriodicTimelineSchedule(from: Date(timeIntervalSinceReferenceDate: 0), by: 1)
 
     private func tint(_ remaining: Int64) -> Color {
-        if remaining <= 0 { return StrandPalette.statusCritical }
-        if remaining <= questUrgentMs { return StrandPalette.statusWarning }
-        return StrandPalette.accent
+        if remaining <= 0 { return TelosColor.critical }
+        if remaining <= questUrgentMs { return TelosColor.warning }
+        return TelosColor.mint
     }
 
     var body: some View {
@@ -47,12 +51,11 @@ struct QuestCountdownView: View {
             HStack(spacing: 6) {
                 if showIcon {
                     Image(systemName: "timer")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(TelosType.glyphChevron)
                         .foregroundStyle(tint(remaining))
                 }
                 Text(Quest.formatRemaining(remaining))
-                    .font(.system(size: fontSize, weight: .medium, design: .rounded))
-                    .monospacedDigit()
+                    .font(TelosType.numeralFont(size: fontSize, weight: .medium))
                     .foregroundStyle(tint(remaining))
             }
         }
@@ -130,7 +133,7 @@ struct QuestStripView: View {
     // plus any make-up still open — comes first, so yesterday's miss is read before today's directives.
     // It is its own child of the root, so the board appearing or clearing cannot touch the presenter.
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: TelosSpace.s) {
             if QuestPenaltyBoard.hasContent(ledger: penalties.ledger, today: dayKey) {
                 QuestPenaltyBoard(ledger: penalties.ledger, today: dayKey) { sheet = .history }
             }
@@ -173,17 +176,17 @@ struct QuestStripView: View {
     /// The row itself — one concrete view, so nothing about it can replace the presenter above it.
     private var row: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
+            HStack(spacing: TelosSpace.s) {
                 if let mode { GearChip(difficulty: mode) }
                 ForEach(store.active, id: \.id) { quest in
                     QuestChip(quest: quest) {
-                        SystemHaptics.play(.tap)
+                        TelosHaptics.play(.select)
                         sheet = .review(quest)
                     }
                 }
                 if showsLedgerChip {
                     QuestLedgerChip(ledger: penalties.ledger) {
-                        SystemHaptics.play(.tap)
+                        TelosHaptics.play(.select)
                         sheet = .history
                     }
                 }
@@ -207,17 +210,23 @@ private struct GearChip: View {
     }
 
     var body: some View {
-        HStack(spacing: 6) {
+        let shape = Capsule(style: .continuous)
+        HStack(spacing: TelosSpace.xs) {
             Image(systemName: symbol)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(StrandPalette.accent)
+                .font(TelosType.glyphChevron)
+                .foregroundStyle(TelosColor.mint)
             Text(difficulty.title.uppercased())
-                .font(StrandFont.overline)
-                .foregroundStyle(StrandPalette.accent)
+                .telosScale()
+                .foregroundStyle(TelosColor.mint)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 4)
-        .background(StrandPalette.accent.opacity(0.14), in: Capsule())
+        .padding(.horizontal, TelosSpace.m)
+        .frame(minHeight: 32)
+        .background(shape.fill(TelosColor.mintMuted))
+        .overlay(shape.strokeBorder(LinearGradient(colors: [TelosColor.mint.opacity(0.9), TelosColor.mint.opacity(0.25)],
+                                                   startPoint: .topLeading, endPoint: .bottomTrailing),
+                                    lineWidth: TelosStroke.line))
+        .frame(minHeight: TelosSpace.hitTarget)
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("Today's gear: \(difficulty.title)"))
     }
 }
@@ -230,37 +239,41 @@ private struct QuestChip: View {
     let onTap: () -> Void
 
     var body: some View {
-        Button(action: onTap) {
-            HStack(spacing: 6) {
+        let shape = Capsule(style: .continuous)
+        return Button(action: onTap) {
+            HStack(spacing: TelosSpace.xs) {
                 // The first reward icon stands for the quest: a chip has room for one mark, and the
                 // whole set is on the review sheet a tap away. The wearer's own task shows a person
                 // instead — the one mark that says "you asked for this", kept quiet on purpose.
                 if quest.kind == .custom {
                     Image(systemName: "person.fill")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundStyle(StrandPalette.textTertiary)
+                        .font(TelosType.glyphDelta)
+                        .foregroundStyle(TelosColor.textTertiary)
                         .accessibilityLabel(Text("Your task"))
                 } else if let reward = quest.rewards.first {
                     Image(systemName: questRewardIcon(reward))
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(TelosType.glyphChevron)
                         .foregroundStyle(questRewardTint(reward))
                 }
                 Text(quest.title)
-                    .font(StrandFont.overline)
+                    .telosScale()
                     // The daily quest is tinted; side quests are not. One accent on the strip keeps the
                     // eye on the thing that is supposed to happen today, however many side quests ride
                     // along.
-                    .foregroundStyle(quest.kind == .daily ? StrandPalette.accent : StrandPalette.textSecondary)
+                    .foregroundStyle(quest.kind == .daily ? TelosColor.mint : TelosColor.textSecondary)
                     .lineLimit(1)
                 // The clock, at chip scale and without its icon — the row is already a row of small
                 // things, and a second glyph per chip turns the strip into a toolbar.
                 QuestCountdownView(quest: quest, fontSize: 11, showIcon: false)
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 4)
-            .background(StrandPalette.surfaceInset, in: Capsule())
+            .padding(.horizontal, TelosSpace.m)
+            .frame(minHeight: 32)
+            .background(shape.fill(TelosColor.glassFill))
+            .overlay(shape.strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line))
+            .frame(minHeight: TelosSpace.hitTarget)
+            .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(TelosPressButtonStyle())
     }
 }
 
@@ -283,34 +296,32 @@ struct QuestReviewSheet: View {
     private var isCustom: Bool { quest.kind == .custom }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: TelosSpace.m) {
             if isCustom {
                 Label("BY YOU · VIA THE COACH", systemImage: "person.fill")
-                    .font(StrandFont.overline)
-                    .tracking(1.4)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .font(TelosType.scale)
+                    .tracking(TelosType.Tracking.scale)
+                    .foregroundStyle(TelosColor.textTertiary)
             }
-            Text(quest.title.uppercased())
-                .font(StrandFont.headline)
-                .foregroundStyle(StrandPalette.textPrimary)
+            PGOverline("Quest", ink: TelosColor.mint)
+            Text(quest.title)
+                .font(TelosType.title2)
+                .foregroundStyle(TelosColor.textPrimary)
+                .fixedSize(horizontal: false, vertical: true)
             if !quest.taunt.isEmpty {
                 TypewriterText(text: quest.taunt, shown: $typed)
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .font(TelosType.subhead)
+                    .foregroundStyle(TelosColor.textTertiary)
             }
             Text(quest.target)
-                .font(StrandFont.body)
-                .foregroundStyle(StrandPalette.textPrimary)
+                .font(TelosType.headline)
+                .foregroundStyle(TelosColor.mint)
+                .fixedSize(horizontal: false, vertical: true)
             QuestCountdownView(quest: quest)
 
-            HStack(spacing: 8) {
+            HStack(spacing: TelosSpace.s) {
                 ForEach(quest.rewards, id: \.rawValue) { reward in
-                    Image(systemName: questRewardIcon(reward))
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(questRewardTint(reward))
-                        .frame(width: 34, height: 34)
-                        .background(StrandPalette.surfaceInset, in: Capsule())
-                        .accessibilityLabel(Text(questRewardLabel(reward)))
+                    QuestRewardGlyph(reward: reward)
                 }
             }
 
@@ -319,19 +330,15 @@ struct QuestReviewSheet: View {
             // the sentence already exists, and spending a round trip to restate it would be a request
             // for nothing.
             Button {
-                SystemHaptics.play(.tap)
+                TelosHaptics.play(.select)
                 coach.surfaceQuest(title: quest.title, target: quest.target, taunt: quest.taunt)
                 onClose()
                 router.openCoach()
             } label: {
                 Label("Ask the system about this", systemImage: "sparkles")
-                    .font(StrandFont.footnote)
-                    .frame(maxWidth: .infinity, minHeight: 40)
-                    .background(StrandPalette.surfaceInset,
-                                in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .foregroundStyle(StrandPalette.accent)
+                    .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.noopSecondary)
 
             // NO "MARK IT DONE" for a system quest. It closes itself when the data meets its goal — see
             // `QuestAutoComplete` — so what sits here is where the data stands, not a button asking the
@@ -343,25 +350,21 @@ struct QuestReviewSheet: View {
             }
             if isCustom {
                 Button {
-                    SystemHaptics.play(.tap)
+                    TelosHaptics.play(.commit)
                     store.checkOff(id: quest.id)
                     onClose()
                 } label: {
                     Label("Mark it done", systemImage: "checkmark.circle.fill")
-                        .font(StrandFont.footnote.weight(.semibold))
-                        .frame(maxWidth: .infinity, minHeight: 40)
-                        .background(StrandPalette.accent.opacity(0.14),
-                                    in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                        .foregroundStyle(StrandPalette.accent)
+                        .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(.noopPrimary)
             }
 
             // ABANDONING IS CONCEDING, NOT ESCAPING. An accepted system quest given up here is still judged
             // on its data at the deadline it would have had (`QuestStore.abandon`) — otherwise "Abandon it"
             // would be a button that deletes the penalty. The label says so.
             Button {
-                SystemHaptics.play(.tap)
+                TelosHaptics.play(.select)
                 if isCustom {
                     store.removeCustom(id: quest.id)
                 } else {
@@ -370,16 +373,20 @@ struct QuestReviewSheet: View {
                 onClose()
             } label: {
                 Text(isCustom ? "Remove task" : "Abandon it (still judged at the deadline)")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .frame(maxWidth: .infinity)
+                    .font(TelosType.footnote)
+                    .foregroundStyle(TelosColor.textTertiary)
+                    .frame(maxWidth: .infinity, minHeight: TelosSpace.hitTarget)
+                    .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(TelosPressButtonStyle())
 
             Spacer(minLength: 0)
         }
-        .padding(16)
-        .background(StrandPalette.surfaceBase)
+        .padding(TelosSpace.l)
+        .background(TelosColor.canvas.ignoresSafeArea())
+        #if os(iOS)
+        .presentationBackground(TelosColor.canvas)
+        #endif
     }
 }
 
@@ -391,25 +398,23 @@ private struct QuestProgressPanel: View {
     @State private var line: String?
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        HStack(alignment: .top, spacing: TelosSpace.s) {
             Image(systemName: "gauge.with.dots.needle.33percent")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(StrandPalette.accent)
+                .font(TelosType.glyphChevron)
+                .foregroundStyle(TelosColor.mint)
                 .padding(.top, 1)
-            VStack(alignment: .leading, spacing: 3) {
-                Text("CHECKED AUTOMATICALLY")
-                    .font(StrandFont.overline)
-                    .tracking(1.4)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: TelosSpace.xxs) {
+                PGOverline("CHECKED AUTOMATICALLY")
                 Text(line ?? " ")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .font(TelosType.footnote)
+                    .foregroundStyle(TelosColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(12)
+        .padding(TelosSpace.m)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .pgInsetBand()
         .task(id: quest.id) { await load() }
     }
 
@@ -460,15 +465,31 @@ func questRewardLabel(_ reward: QuestReward) -> String {
 
 func questRewardTint(_ reward: QuestReward) -> Color {
     switch reward {
-    case .heart: return StrandPalette.statusCritical
-    case .lungs: return StrandPalette.metricCyan
-    case .brain: return StrandPalette.accent
-    case .muscle: return StrandPalette.statusWarning
-    case .sleep: return StrandPalette.restColor
-    case .stress: return StrandPalette.statusWarning
+    case .heart: return TelosColor.heart
+    case .lungs: return TelosColor.lungs
+    case .brain: return TelosColor.focusInk
+    case .muscle: return TelosColor.muscle
+    case .sleep: return TelosColor.rest
+    case .stress: return TelosColor.stress
     }
 }
 
+
+/// One reward mark: the system's glyph in its identity colour on a small glass disc (34 pt).
+struct QuestRewardGlyph: View {
+    let reward: QuestReward
+    var dimmed = false
+
+    var body: some View {
+        Image(systemName: questRewardIcon(reward))
+            .font(TelosType.glyphRow)
+            .foregroundStyle(questRewardTint(reward).opacity(dimmed ? 0.45 : 1))
+            .frame(width: 34, height: 34)
+            .background(Circle().fill(questRewardTint(reward).opacity(TelosOpacity.wash)))
+            .overlay(Circle().strokeBorder(questRewardTint(reward).opacity(TelosOpacity.border), lineWidth: TelosStroke.hair))
+            .accessibilityLabel(Text(questRewardLabel(reward)))
+    }
+}
 
 // MARK: - The typewriter
 //
@@ -493,6 +514,8 @@ struct TypewriterText: View {
     @Binding var shown: Int
 
     @State private var hapticsOn = SystemHaptics.enabled
+    /// Reduce Motion (DESIGN_V2 §5.12 / §7.5): the full line, at once, with no per-letter ticks.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         ZStack(alignment: .topLeading) {
@@ -505,6 +528,10 @@ struct TypewriterText: View {
     }
 
     private func run() async {
+        if reduceMotion {
+            shown = text.count
+            return
+        }
         shown = 0
         let letters = Array(text)
         // HELD OPEN FOR THE LINE. The engine idles out between letters otherwise, and each restart

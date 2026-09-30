@@ -13,8 +13,19 @@ import StrandDesign
 // axes by weight too would have drawn lungs as permanently stunted at 0.07 and read as a deficiency
 // rather than as a small term.
 //
-// A PART WITH NO DATA IS DRAWN AT THE CENTRE AND ITS GLYPH IS DIMMED. Not at some middle default: an
-// unmeasured part is a hole in the shape, and filling it in would draw a body we did not measure.
+// A PART WITH NO DATA IS A HOLLOW VERTEX AT THE CENTRE ON A DASHED SPOKE, its glyph dimmed. Not at some
+// middle default: an unmeasured part is a hole in the shape, and filling it in would draw a body we did
+// not measure.
+//
+// TELOS 2.0 (§5.6, FRAME): the plate is `surfaceRaised` with the `raised` elevation; the web is luminous
+// bioluminescent green (a crisp core over one faint halo stroke — no blur); each measured vertex carries a
+// dot in its part's identity colour; the personal best is dashed `bestGold`. The level counts up with ONE
+// `Animatable` numeral (no dispatch queue), posed at its value under Reduce Motion / Low Power / quiet
+// motion. THE LEVEL IS UNBOUNDED (decision 9): a part past the plate's reach shrinks the whole scale — the
+// wearer's own-100 ring included — so the shape stays honest instead of clipping at the edge.
+//
+// COST (§2.1 rule 8): one static `Canvas` redrawn when the breakdown or the reveal changes; the reveal and
+// the count-up animate for 0.9 s on open / on a new level, then rest. Nothing loops.
 
 /// The five axes, in the order they are drawn: clockwise from the top.
 private let radarParts: [LevelPart] = [.sleep, .heart, .lungs, .muscle, .focus]
@@ -25,8 +36,8 @@ private let levelSlotSeconds: Double = 0.9
 /// Where the glyphs sit, as a fraction of the box — just inside the plate's corners.
 private let glyphRadiusFraction: CGFloat = 0.37
 
-/// The plate's lift. Enough to read as floating over the screen it hangs above, not as a card.
-private let plateElevation: CGFloat = 10
+/// How far past the wearer's own 100 a vertex may reach before the scale shrinks to keep it on the plate.
+private let radarReach: Double = 1.25
 
 /// A pentagon, point-up, built from the same vertex maths the axes use.
 ///
@@ -52,6 +63,14 @@ private func radarVertex(centre: CGPoint, radius: CGFloat, index: Int) -> CGPoin
     return CGPoint(x: centre.x + radius * CGFloat(cos(angle)), y: centre.y + radius * CGFloat(sin(angle)))
 }
 
+/// The divisor that keeps every vertex on the plate: 1 while all fractions fit inside the reach (1.25 × the
+/// wearer's own 100), otherwise the largest fraction over the reach. Pure; never below 1 — the scale only
+/// ever shrinks, it never clips.
+func levelRadarScaleDivisor(_ fractions: [Double]) -> Double {
+    let top = fractions.filter { $0.isFinite }.max() ?? 0
+    return max(1, top / radarReach)
+}
+
 /// One pentagon, the level in its middle.
 struct LevelRadarView: View {
     let breakdown: LevelBreakdown?
@@ -67,84 +86,30 @@ struct LevelRadarView: View {
     /// would be a target nobody set.
     var best: [LevelPart: Double]? = nil
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var motion = NoopMotionState.shared
+
     @State private var reveal: Double = 0
-    @State private var shown: Int = 0
+    @State private var shown: Double = 0
 
     private var level: Double? { breakdown?.level }
 
     var body: some View {
         ZStack {
             PentagonShape()
-                .fill(StrandPalette.surfaceRaised)
-                .shadow(color: .black.opacity(0.45), radius: plateElevation, y: 3)
+                .fill(TelosColor.surfaceRaised)
+                .overlay(PentagonShape().stroke(TelosColor.glassEdge, lineWidth: TelosStroke.line))
+                .telosElevation(.raised)
 
             Canvas { context, size in
-                let centre = CGPoint(x: size.width / 2, y: size.height / 2)
-                let radius = min(size.width, size.height) / 2 * 0.66
-                let grid = StrandPalette.textTertiary.opacity(0.30)
-
-                // Two rings, at a half and at full. More would be graph paper at this size; none at all
-                // would leave the shape floating with nothing to be big or small against.
-                for ring in [0.5, 1.0] {
-                    var path = Path()
-                    for i in radarParts.indices {
-                        let point = radarVertex(centre: centre, radius: radius * ring, index: i)
-                        if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
-                    }
-                    path.closeSubpath()
-                    context.stroke(path, with: .color(grid), lineWidth: 1)
-                }
-
-                // The spokes, so a vertex reads as a measured axis rather than a corner of a blob.
-                for i in radarParts.indices {
-                    var spoke = Path()
-                    spoke.move(to: centre)
-                    spoke.addLine(to: radarVertex(centre: centre, radius: radius, index: i))
-                    context.stroke(spoke, with: .color(grid), lineWidth: 1)
-                }
-
-                let scores = radarParts.map { part in
-                    breakdown?.components.first { $0.part == part }?.score
-                }
-                guard scores.contains(where: { $0 != nil }) else { return }
-
-                // NO CEILING ON THE SCORES, so none on the drawing: the outer grid ring is still the
-                // wearer's own 100, and a part past it draws past it — up to the edge of the plate, where
-                // the geometry has to stop. Below 0 collapses to the centre.
-                let reach: Double = 1.25
-                var web = Path()
-                for i in radarParts.indices {
-                    let frac = min(max((scores[i] ?? 0) / 100 * reveal, 0), reach)
-                    let point = radarVertex(centre: centre, radius: radius * frac, index: i)
-                    if i == 0 { web.move(to: point) } else { web.addLine(to: point) }
-                }
-                web.closeSubpath()
-
-                // THE PERSONAL BEST, UNDER the live web and only where it is genuinely ahead of it.
-                // Drawn first so the current shape sits on top: the reading is the subject, and the
-                // best is the frame around it. Gold rather than another tint because nothing else in
-                // this palette is gold, so it cannot be mistaken for one of the five parts.
-                if let best {
-                    var crown = Path()
-                    for i in radarParts.indices {
-                        let frac = min(max((best[radarParts[i]] ?? 0) / 100 * reveal, 0), reach)
-                        let point = radarVertex(centre: centre, radius: radius * frac, index: i)
-                        if i == 0 { crown.move(to: point) } else { crown.addLine(to: point) }
-                    }
-                    crown.closeSubpath()
-                    context.stroke(crown, with: .color(radarBestGold.opacity(0.85)),
-                                   style: StrokeStyle(lineWidth: 1.5, dash: [3, 3]))
-                }
-
-                context.fill(web, with: .color(StrandPalette.accent.opacity(0.16)))
-                context.stroke(web, with: .color(StrandPalette.accent.opacity(0.75)), lineWidth: 1.5)
+                drawRadar(context: context, size: size)
             }
 
             // The glyphs, one per axis, on the same geometry the canvas used.
             ForEach(Array(radarParts.enumerated()), id: \.offset) { index, part in
-                let measured = breakdown?.components.first { $0.part == part }?.score != nil
+                let measured = score(part) != nil
                 Image(systemName: levelPartSymbol(part))
-                    .font(.system(size: 9, weight: .semibold))
+                    .font(.system(size: glyphSize, weight: .semibold))
                     .foregroundStyle(levelPartTint(part).opacity(measured ? 0.95 : 0.30))
                     .offset(glyphOffset(index: index))
             }
@@ -152,6 +117,8 @@ struct LevelRadarView: View {
             levelNumber
         }
         .frame(width: diameter, height: diameter)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilityText)
         .onAppear { runCountUp() }
         // `onChangeCompat`, not `onChange`: the two-parameter form needs macOS 14 and this target is
         // 13.0. The shim already exists for exactly this and is what the rest of the app uses.
@@ -159,43 +126,161 @@ struct LevelRadarView: View {
         .onChangeCompat(of: level) { _ in runCountUp() }
     }
 
-    /// The figure, counting up from zero on every open.
+    private var glyphSize: CGFloat { min(max(diameter * 0.11, 9), 15) }
+
+    private func score(_ part: LevelPart) -> Double? {
+        breakdown?.components.first { $0.part == part }?.score
+    }
+
+    private func drawRadar(context: GraphicsContext, size: CGSize) {
+        let centre = CGPoint(x: size.width / 2, y: size.height / 2)
+        let radius: CGFloat = min(size.width, size.height) / 2 * 0.66
+        let grid = TelosColor.textTertiary.opacity(0.30)
+        let scores: [Double?] = radarParts.map { score($0) }
+
+        // THE SCALE ONLY SHRINKS (decision 9): the grid rings shrink with it, so a web past the old edge
+        // reads as "past your own 100", not as a shape cut off at the plate.
+        var fractions: [Double] = scores.map { ($0 ?? 0) / 100 }
+        if let best {
+            fractions += radarParts.map { (best[$0] ?? 0) / 100 }
+        }
+        let divisor = CGFloat(levelRadarScaleDivisor(fractions))
+
+        // Two rings, at a half and at the wearer's own 100. More would be graph paper at this size.
+        for ring in [CGFloat(0.5), CGFloat(1.0)] {
+            var path = Path()
+            for i in radarParts.indices {
+                let point = radarVertex(centre: centre, radius: radius * ring / divisor, index: i)
+                if i == 0 { path.move(to: point) } else { path.addLine(to: point) }
+            }
+            path.closeSubpath()
+            context.stroke(path, with: .color(grid), lineWidth: 0.75)
+        }
+
+        // The spokes: solid for a measured axis, DASHED for one with no data.
+        for i in radarParts.indices {
+            var spoke = Path()
+            spoke.move(to: centre)
+            spoke.addLine(to: radarVertex(centre: centre, radius: radius, index: i))
+            let style = scores[i] == nil
+                ? StrokeStyle(lineWidth: 0.75, dash: [2, 3])
+                : StrokeStyle(lineWidth: 0.75)
+            context.stroke(spoke, with: .color(grid), style: style)
+        }
+
+        guard scores.contains(where: { $0 != nil }) else { return }
+
+        let shownReveal = CGFloat(reveal)
+        func point(_ i: Int, _ value: Double?) -> CGPoint {
+            let raw: Double = max((value ?? 0) / 100, 0)
+            let frac: CGFloat = CGFloat(raw) * shownReveal / divisor
+            return radarVertex(centre: centre, radius: radius * frac, index: i)
+        }
+
+        var web = Path()
+        for i in radarParts.indices {
+            let p = point(i, scores[i])
+            if i == 0 { web.move(to: p) } else { web.addLine(to: p) }
+        }
+        web.closeSubpath()
+
+        // THE PERSONAL BEST, UNDER the live web. Drawn first so the current shape sits on top: the
+        // reading is the subject, and the best is the frame around it. Gold, the only gold in the app.
+        if let best {
+            var crown = Path()
+            for i in radarParts.indices {
+                let p = point(i, best[radarParts[i]])
+                if i == 0 { crown.move(to: p) } else { crown.addLine(to: p) }
+            }
+            crown.closeSubpath()
+            context.stroke(crown, with: .color(TelosColor.bestGold.opacity(0.85)),
+                           style: StrokeStyle(lineWidth: TelosStroke.strong, dash: [3, 3]))
+        }
+
+        // The web: a faint fill, then the luminous line — one wide faint halo under a crisp core.
+        context.fill(web, with: .color(TelosColor.mint.opacity(0.14)))
+        context.stroke(web, with: .color(TelosColor.mint.opacity(0.22)),
+                       style: StrokeStyle(lineWidth: TelosStroke.strong * 3, lineJoin: .round))
+        context.stroke(web, with: .color(TelosColor.mint.opacity(0.9)),
+                       style: StrokeStyle(lineWidth: TelosStroke.strong, lineJoin: .round))
+
+        // Vertex dots in each part's identity colour; an unmeasured part is a HOLLOW dot at the centre.
+        let dot: CGFloat = diameter >= 120 ? 7 : 5
+        for i in radarParts.indices {
+            let tint = levelPartTint(radarParts[i])
+            if scores[i] == nil {
+                let r = CGRect(x: centre.x - dot / 2, y: centre.y - dot / 2, width: dot, height: dot)
+                context.stroke(Path(ellipseIn: r), with: .color(tint.opacity(0.6)), lineWidth: 1)
+            } else {
+                let p = point(i, scores[i])
+                let r = CGRect(x: p.x - dot / 2, y: p.y - dot / 2, width: dot, height: dot)
+                context.fill(Path(ellipseIn: r), with: .color(tint))
+            }
+        }
+    }
+
+    /// The figure, counting up from zero on open and on a new level.
     ///
-    /// A slot machine, and it earns its place: the level moves by a point or two a day, so a number that
-    /// simply appears looks the same whether it changed or not. Spinning up to it makes the wearer READ
-    /// it every time instead of glancing past it.
+    /// It earns its place: the level moves by a point or two a day, so a number that simply appears looks
+    /// the same whether it changed or not. Counting up to it makes the wearer READ it. ONE animatable
+    /// numeral drives it (§5.6) — no queue of dispatched steps.
     ///
-    /// MONOSPACED DIGITS are not decoration here. Proportional digits are different widths, so a number
-    /// counting 0…80 through every digit in between jitters sideways the whole way up and lands somewhere
-    /// other than where it started.
+    /// MONOSPACED DIGITS are not decoration here: proportional digits jitter sideways while counting.
     private var levelNumber: some View {
         ZStack {
-            Text(level == nil ? "–" : "\(shown)")
-                .font(.system(size: 30, weight: .black, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(level == nil ? StrandPalette.textTertiary : StrandPalette.textPrimary)
+            if level == nil {
+                Text(verbatim: TelosType.absent)
+                    .font(TelosType.numeralFont(size: numeralSize, weight: .medium))
+                    .foregroundStyle(TelosColor.textTertiary)
+            } else {
+                LevelCountingNumeral(value: shown)
+                    .font(TelosType.numeralFont(size: numeralSize, weight: .semibold))
+                    .foregroundStyle(TelosColor.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                    .frame(maxWidth: diameter * 0.62)
+            }
             coverageCaption
         }
     }
 
+    /// Geometry-bound (it lives inside the plate): scales with the plate, never with Dynamic Type.
+    private var numeralSize: CGFloat { min(max(diameter * 0.35, 22), 48) }
+
     /// HOW MUCH OF THE FORMULA THE NUMBER ACTUALLY RESTS ON, said out loud whenever it is not all of it.
-    ///
-    /// `coverage` was computed, persisted and read by NOTHING. The engine shares an absent part's weight
-    /// out over the parts that have data, which is the right arithmetic and completely invisible: a level
-    /// built from sleep and heart alone drew exactly like one built from all five, same glyphs, same
-    /// number, same confidence. `LevelEngine.minCoverage` now refuses the thinnest of them outright; this
-    /// is the rest of the answer, for every level between that floor and a full one.
     ///
     /// AN OVERLAY, NOT A ROW UNDER THE NUMBER: the figure is the subject and must not move on the days
     /// this line is absent. Offset with the plate so it lands in the same place at any size.
     @ViewBuilder private var coverageCaption: some View {
         if let breakdown, level != nil, breakdown.isPartialCoverage {
             Text("\(breakdown.coveragePercent)% measured")
-                .font(.system(size: 9, weight: .semibold, design: .rounded))
+                .font(TelosType.scaleFixed)
                 .monospacedDigit()
-                .foregroundStyle(StrandPalette.textTertiary)
-                .offset(y: diameter * 0.15)
+                .foregroundStyle(TelosColor.textSecondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+                .frame(maxWidth: diameter * 0.8)
+                .offset(y: diameter * 0.2)
         }
+    }
+
+    /// What VoiceOver reads for the radar: the level, how much of it is measured, and each part.
+    private var accessibilityText: Text {
+        guard let breakdown, let level else { return Text("Level, not scored yet") }
+        var parts: [String] = []
+        for part in radarParts {
+            let name = levelPartLabel(part)
+            if let s = score(part) {
+                parts.append("\(name) \(Int(s.rounded()))")
+            } else {
+                parts.append("\(name) " + String(localized: "not measured"))
+            }
+        }
+        let rounded = Int(level.rounded())
+        let head = breakdown.isPartialCoverage
+            ? String(localized: "Level \(rounded), \(breakdown.coveragePercent)% measured")
+            : String(localized: "Level \(rounded)")
+        return Text(verbatim: head + ". " + parts.joined(separator: ", "))
     }
 
     private func glyphOffset(index: Int) -> CGSize {
@@ -205,33 +290,45 @@ struct LevelRadarView: View {
     }
 
     private func runCountUp() {
-        guard let target = level.map({ Int($0.rounded()) }) else {
+        guard let target = level.map({ $0.rounded() }) else {
             reveal = 0
             shown = 0
             return
         }
+        if motion.poseStill(reduceMotion) {
+            // Posed at the value: no reveal, no count.
+            reveal = 1
+            shown = target
+            return
+        }
         reveal = 0
         shown = 0
-        withAnimation(.linear(duration: levelSlotSeconds)) { reveal = 1 }
-        // Eased so it sprints through the middle and creeps onto the last few points, which is what
-        // makes it read as landing rather than as stopping.
-        let steps = min(34, max(target, 1) * 4)
-        for step in 1...steps {
-            let t = Double(step) / Double(steps)
-            let eased = 1 - (1 - t) * (1 - t)
-            DispatchQueue.main.asyncAfter(deadline: .now() + levelSlotSeconds * t) {
-                shown = Int((Double(target) * eased).rounded())
-                if step == steps { shown = target }
-            }
+        withAnimation(.easeOut(duration: levelSlotSeconds)) {
+            reveal = 1
+            shown = target
         }
     }
 }
 
-/// The SF Symbol for each part. Chosen to match the Android glyphs as closely as the two sets allow.
-/// The personal-best ring's colour. A real gold, and the only gold in the app — see the note at the
-/// draw site on why it is not one of the metric tints.
-let radarBestGold = Color(.sRGB, red: 0xE5 / 255, green: 0xB8 / 255, blue: 0x4B / 255, opacity: 1)
+/// The level numeral, animatable: SwiftUI interpolates `value` and the text shows the whole number under it.
+private struct LevelCountingNumeral: View, Animatable {
+    var value: Double
 
+    var animatableData: Double {
+        get { value }
+        set { value = newValue }
+    }
+
+    var body: some View {
+        Text(verbatim: "\(Int(value.rounded()))")
+            .monospacedDigit()
+    }
+}
+
+/// The personal-best ring's colour: the design system's one gold (`TelosColor.bestGold`).
+let radarBestGold = TelosColor.bestGold
+
+/// The SF Symbol for each part. Chosen to match the Android glyphs as closely as the two sets allow.
 func levelPartSymbol(_ part: LevelPart) -> String {
     switch part {
     case .sleep: return "moon.fill"
@@ -242,17 +339,23 @@ func levelPartSymbol(_ part: LevelPart) -> String {
     }
 }
 
+/// Each part's identity colour (TelosColor): sleep → rest, heart → heart, lungs → lungs, muscle → muscle,
+/// focus → focus. Stored tokens — no per-access dynamic provider (§2.1 rule 6).
 func levelPartTint(_ part: LevelPart) -> Color {
     switch part {
-    case .sleep: return StrandPalette.restBright
-    case .heart: return StrandPalette.statusCritical
-    case .lungs: return StrandPalette.metricCyan
-    case .muscle: return StrandPalette.statusWarning
-    case .focus: return StrandPalette.accent
+    case .sleep: return TelosColor.rest
+    case .heart: return TelosColor.heart
+    case .lungs: return TelosColor.lungs
+    case .muscle: return TelosColor.muscle
+    case .focus: return TelosColor.focus
     }
 }
 
 /// The metric a lever names, in the wearer's language.
+///
+/// `.meditation` keeps its label for exhaustiveness, but no Level surface shows it as a contributor
+/// (decision 10): the lever clusters map a meditation driver to its part, and the breakdown shows the
+/// meditation DEDUCTION as its own line.
 func levelDriverLabel(_ driver: LevelDriver) -> LocalizedStringKey {
     switch driver {
     case .restorativeSleep: return "deep + rem"

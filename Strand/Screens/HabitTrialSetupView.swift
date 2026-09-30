@@ -36,31 +36,39 @@ struct HabitTrialSetupView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
-                NoopCard {
-                    VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                        Text(entry.title).font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
-                        Text(entry.evidence).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
-                        Text(designText).font(StrandFont.body).foregroundStyle(StrandPalette.textPrimary)
+            VStack(alignment: .leading, spacing: TelosSpace.sectionGap) {
+                StrandCard(tint: TelosColor.teal) {
+                    VStack(alignment: .leading, spacing: TelosSpace.s) {
+                        PGOverline("New trial", ink: TelosColor.teal)
+                        Text(entry.title).font(TelosType.headline).foregroundStyle(TelosColor.textPrimary)
+                        Text(entry.evidence).font(TelosType.subhead).foregroundStyle(TelosColor.textSecondary)
+                        Text(designText).font(TelosType.body).foregroundStyle(TelosColor.textPrimary)
                         Text("How adherence is seen: \(entry.autoAdherence)")
-                            .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                            .font(TelosType.caption).foregroundStyle(TelosColor.textTertiary)
                     }
                 }
-                NoopCard {
-                    VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                        Text(entry.contrastQuestion).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
-                        Stepper("\(usualPerWeek) of 7", value: $usualPerWeek, in: 0...7)
+                StrandCard {
+                    VStack(alignment: .leading, spacing: TelosSpace.s) {
+                        Text(entry.contrastQuestion).font(TelosType.subhead).foregroundStyle(TelosColor.textSecondary)
+                        Stepper(value: $usualPerWeek, in: 0...7) {
+                            Text("\(usualPerWeek) of 7")
+                                .font(TelosType.numeralS)
+                                .foregroundStyle(TelosColor.textPrimary)
+                        }
+                        .tint(TelosColor.teal)
                         if !HabitTrialCatalog.hasContrast(entry, usualPerWeek: usualPerWeek) {
                             Text(HabitTrialIneligibility.noContrast.text)
-                                .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                                .font(TelosType.caption).foregroundStyle(TelosColor.textTertiary)
                         }
                         if entry.needsClimateSensor {
                             Toggle("My bedroom can reach about 18 °C", isOn: $coolRoomConfirmed)
+                                .font(TelosType.subhead)
+                                .tint(TelosColor.teal)
                         }
                     }
                 }
-                NoopCard {
-                    VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                StrandCard {
+                    VStack(alignment: .leading, spacing: TelosSpace.s) {
                         Picker("Length", selection: $lengthDays) {
                             ForEach(entry.allowedLengths, id: \.self) { Text("\($0) days").tag($0) }
                         }
@@ -69,16 +77,18 @@ struct HabitTrialSetupView: View {
                     }
                 }
                 if let error {
-                    Text(error).font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
+                    Text(error).font(TelosType.caption).foregroundStyle(TelosColor.textSecondary)
                 }
-                Text(HabitTrialCopy.blinding).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                Text(HabitTrialCopy.blinding).font(TelosType.caption).foregroundStyle(TelosColor.textTertiary)
                 Button(starting ? "Starting…" : "Start trial tomorrow") { start() }
                     .buttonStyle(.noopPrimary)
                     .disabled(starting || trials.running != nil
                               || !HabitTrialCatalog.hasContrast(entry, usualPerWeek: usualPerWeek))
             }
-            .padding(NoopMetrics.screenPadding)
+            .padding(.horizontal, TelosSpace.pageGutter)
+            .padding(.vertical, TelosSpace.l)
         }
+        .background(TelosColor.groundGradient.ignoresSafeArea())
         .navigationTitle("New trial")
         .task { await loadBaseline() }
     }
@@ -101,19 +111,19 @@ struct HabitTrialSetupView: View {
     private var powerText: some View {
         switch preview {
         case .none:
-            Text(HealthAbsence.dash).foregroundStyle(StrandPalette.textTertiary)
+            Text(HealthAbsence.dash).foregroundStyle(TelosColor.textTertiary)
         case .some(.failure(let e)):
             Text(HabitTrialStartError.registration(e).text)
-                .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                .font(TelosType.caption).foregroundStyle(TelosColor.textTertiary)
         case .some(.success(let reg)):
             let o = reg.primaryOutcome
             let mde = reg.mde.map { HabitTrialCopy.bare($0 * o.betterDirection.sign, outcome: o) } ?? HealthAbsence.dash
             Text("Smallest change this length can reliably detect: \(mde) \(o.displayUnit). Meaningful change: \(HabitTrialCopy.bare(reg.mcid * o.betterDirection.sign, outcome: o)) \(o.displayUnit).")
-                .font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
+                .font(TelosType.caption).foregroundStyle(TelosColor.textSecondary)
             if reg.isUnderpowered {
                 Text(reg.recommendedLength().map { "This is likely too short to tell. \($0) days would give it a fair chance." }
                      ?? "Even the longest trial may be too short to tell for your nights. You can still run it.")
-                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
+                    .font(TelosType.caption).foregroundStyle(TelosColor.textSecondary)
             }
         }
     }

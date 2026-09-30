@@ -60,8 +60,9 @@ struct WaterWidgetView: View {
     private var goal: Int { max(1, entry.snapshot?.waterGoalMl ?? 2500) }
     private var fraction: Double { min(1, Double(ml) / Double(goal)) }
 
-    private var water: Color { Color(.sRGB, red: 0.30, green: 0.71, blue: 0.96, opacity: 1) }
-
+    /// Water's hue: the Telos luminous `teal` (the reference palette's cyan). A token, so light mode gets
+    /// its deepened pair and every sheet below derives from this one colour.
+    private var water: Color { TelosColor.teal }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -70,21 +71,26 @@ struct WaterWidgetView: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(water)
                 Text("Water")
-                    .font(.system(size: 12, weight: .semibold, design: .rounded))
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .font(TelosType.scale)
+                    .tracking(TelosType.Tracking.scale)
+                    .textCase(.uppercase)
+                    .foregroundStyle(TelosColor.textSecondary)
             }
             Spacer(minLength: 0)
             if enabled {
                 Text(litres(ml))
-                    .font(.system(size: 30, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(StrandPalette.textPrimary)
+                    .font(TelosType.numeralM)
+                    .tracking(TelosType.Tracking.numeralM)
+                    .foregroundStyle(TelosColor.textPrimary)
                     .minimumScaleFactor(0.7)
                     .lineLimit(1)
+                    // The one motion here: the figure rolls when a + / − tap changes it (motion encodes a
+                    // value change, §7.1). Cost: a system text transition between two timeline renders;
+                    // zero while idle.
                     .contentTransition(.numericText())
                 Text("of \(litres(goal))")
-                    .font(.system(size: 11, weight: .medium, design: .rounded))
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(TelosColor.textSecondary)
                 Spacer(minLength: 0)
                 HStack(spacing: 10) {
                     Button(intent: RemoveWaterIntent()) {
@@ -100,8 +106,8 @@ struct WaterWidgetView: View {
                 }
             } else {
                 Text(WaterWidgetView.message(for: tracking))
-                    .font(.system(size: 12, weight: .medium, design: .rounded))
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .font(TelosType.caption)
+                    .foregroundStyle(TelosColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
             }
@@ -120,13 +126,15 @@ struct WaterWidgetView: View {
         }
     }
 
+    /// Faux glass (DESIGN_V2 "Tiles"): the translucent `glassFill` plus a teal hairline — NOT a material.
+    /// Cost: one capsule fill + one 1 pt stroke.
     private func glassButton(_ symbol: String) -> some View {
         Image(systemName: symbol)
-            .font(.system(size: 17, weight: .bold))
-            .foregroundStyle(StrandPalette.textPrimary)
+            .font(TelosType.glyphControl)
+            .foregroundStyle(TelosColor.textPrimary)
             .frame(maxWidth: .infinity)
             .frame(height: 34)
-            .background(water.opacity(0.28), in: Capsule())
+            .background(TelosColor.glassFill, in: Capsule())
             .overlay(Capsule().strokeBorder(water.opacity(0.6), lineWidth: 1))
     }
 
@@ -137,30 +145,34 @@ struct WaterWidgetView: View {
     /// The water itself — the Today tile's own: three sheets, lit at the surface and dark at the floor,
     /// the dashed quarter rules behind them and the glint along the waterline. Still rather than moving:
     /// a widget is a picture, so it is posed at one moment of the tile's swell.
+    ///
+    /// Telos: the water is bioluminescent rather than opaque — translucent teal sheets on the Telos ground,
+    /// lit at the surface and fading to the floor, with a luminous teal waterline. Kept translucent so the
+    /// figure above stays legible over it (the old 83 % blue sheet sat under white text).
+    /// Cost: the ground's two gradients + one dashed stroke + three gradient-filled 48-segment paths + one
+    /// stroke, all static; no blur, no material, no animation.
     var background: some View {
         let level = enabled ? fraction : 0
         return ZStack {
-            StrandPalette.surfaceRaised
+            TelosWidgetGround()
             WaterRules()
-                .stroke(StrandPalette.hairlineStrong, style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
+                .stroke(TelosColor.lineStrong, style: StrokeStyle(lineWidth: 1, dash: [5, 5]))
             WaterSheet(fraction: level, depth: 6, offset: 1.7, wobble: 0.6)
-                .fill(LinearGradient(colors: [bright.opacity(0.44), deep.opacity(0.38)],
+                .fill(LinearGradient(colors: [water.opacity(0.12), water.opacity(0.05)],
                                      startPoint: .top, endPoint: .bottom))
             WaterSheet(fraction: level, depth: 3, offset: 0.6, wobble: 0.8)
-                .fill(LinearGradient(colors: [bright.opacity(0.60), deep.opacity(0.52)],
+                .fill(LinearGradient(colors: [water.opacity(0.18), water.opacity(0.07)],
                                      startPoint: .top, endPoint: .bottom))
             WaterSheet(fraction: level, depth: 0, offset: 0, wobble: 1.0)
-                .fill(LinearGradient(colors: [bright.opacity(0.83), deep.opacity(0.72)],
+                .fill(LinearGradient(colors: [water.opacity(0.26), water.opacity(0.10)],
                                      startPoint: .top, endPoint: .bottom))
             if level > 0.02 {
+                // The luminous waterline. Cost: one 1.2 pt stroke.
                 WaterSheet(fraction: level, depth: 0, offset: 0, wobble: 1.0, surfaceOnly: true)
-                    .stroke(Color.white.opacity(0.55), lineWidth: 1.2)
+                    .stroke(water.opacity(0.9), lineWidth: 1.2)
             }
         }
     }
-
-    private var deep: Color { Color(.sRGB, red: 0.06, green: 0.36, blue: 0.62, opacity: 1) }
-    private var bright: Color { Color(.sRGB, red: 0.30, green: 0.71, blue: 0.96, opacity: 1) }
 }
 
 /// The dashed rules at a quarter, half and three quarters — a scale to judge the level against.

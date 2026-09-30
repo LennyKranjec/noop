@@ -176,7 +176,7 @@ struct AutomationsView: View {
                  active: wristAlertsMaster) {
             VStack(spacing: 0) {
                 ToggleRow(label: String(localized: "Enable wrist alerts"),
-                          help: String(localized: "The master switch for every wrist buzz (inactivity, stress, alerts). Off keeps the strap quiet no matter what else is on."),
+                          help: String(localized: "Heart-rate, strain, stress and inactivity alerts on your strap, plus the wind-down and screens-off cues. The sitting-break nudge, rewards and penalties have their own switches in Strap cues."),
                           isOn: $wristAlertsMaster)
             }
         }
@@ -346,6 +346,8 @@ struct AutomationsView: View {
                           help: String(localized: "Buzzes after you've been sitting past your threshold."),
                           isOn: $inactivity.enabled)
                 if inactivity.enabled {
+                    // Leaf observer: the engine publishes on its minute tick, so only this line re-renders.
+                    LegacyInactivityPausedNote(engine: StrapCueEngine.shared)
                     if !notifMasterOn {
                         Text("Notifications are off, so this can't buzz yet. Turn on the master switch in Notifications to let it through.")
                             .font(StrandFont.footnote)
@@ -667,5 +669,27 @@ private struct ToggleRow: View {
                 .accessibilityLabel(label)
         }
         .frame(minHeight: 42).padding(.vertical, 4)
+    }
+}
+
+
+// MARK: - Legacy inactivity reminder: paused while the strap-cue sitting break runs
+
+/// "Paused" line under the legacy inactivity toggle. `BLEManager.maybeBuzzInactivity` stands down while
+/// `StrapCueEngine.supersedesLegacyInactivityBuzz` (sitting-break switch on, engine running, Motion &
+/// Fitness granted), so the switch reading ON must not promise a buzz it will not send. Observes only the
+/// engine, in this leaf, so the minute tick never re-renders the Automations column.
+private struct LegacyInactivityPausedNote: View {
+    @ObservedObject var engine: StrapCueEngine
+
+    var body: some View {
+        if engine.supersedesLegacyInactivityBuzz {
+            Text("Paused: the sitting-break nudge in Strap cues handles this.")
+                .font(TelosType.footnote)
+                .foregroundStyle(TelosColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, TelosSpace.xs)
+        }
     }
 }

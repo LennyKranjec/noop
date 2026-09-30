@@ -414,7 +414,7 @@ struct MetricExplorerView: View {
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
                         .fill(StrandPalette.metricRose.opacity(0.16))
                     Image(systemName: "waveform.path.ecg")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(TelosType.glyphControl)
                         .foregroundStyle(StrandPalette.metricRose)
                 }
                 .frame(width: 42, height: 42)
@@ -430,7 +430,7 @@ struct MetricExplorerView: View {
                 }
                 Spacer(minLength: 8)
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(TelosType.glyphChevron)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
         }
@@ -489,7 +489,7 @@ private struct MetricRow: View {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .fill(StrandPalette.surfaceInset)
                 Image(systemName: metric.icon)
-                    .font(.system(size: 15, weight: .medium))
+                    .font(TelosType.glyphRow)
                     .foregroundStyle(metricAccent(metric))
             }
             .frame(width: 34, height: 34)
@@ -518,7 +518,7 @@ private struct MetricRow: View {
                     .accessibilityLabel("No data")
             }
             Image(systemName: "chevron.right")
-                .font(.system(size: 11, weight: .semibold))
+                .font(TelosType.glyphChevron)
                 .foregroundStyle(StrandPalette.textTertiary)
         }
         .padding(.horizontal, 14)
@@ -581,7 +581,10 @@ struct MetricDetailView: View {
         SkinTempDisplay.Kind(rawValue: skinTempDisplayRaw) ?? .absolute
     }
     private func fmt(_ v: Double) -> String {
-        metric.format(v, system: unitSystem, temperature: temperatureUnit, effortScale: effortScale)
+        // H15: VO₂max is an estimate with a ±5 error band — shown as a whole number (the band and the
+        // method ride the hero's provenance), never to one decimal.
+        if metric.key == "vo2max_est" { return TelosFormat.integer(v) }
+        return metric.format(v, system: unitSystem, temperature: temperatureUnit, effortScale: effortScale)
     }
 
     @State private var range: ExploreRange = .month
@@ -820,7 +823,7 @@ struct MetricDetailView: View {
                         NoopCard {
                             HStack(alignment: .top, spacing: 10) {
                                 Image(systemName: "info.circle")
-                                    .font(.system(size: 14, weight: .medium))
+                                    .font(TelosType.glyphRow)
                                     .foregroundStyle(StrandPalette.textTertiary)
                                     .accessibilityHidden(true)
                                 Text(note)
@@ -1067,9 +1070,8 @@ struct MetricDetailView: View {
                             windowFellBack: Bool) -> some View {
         let domain = metricDomain(metric)
         let value = latest?.value
-        let heroValue = latest.map { fmt($0.value) } ?? "—"
         let asOf: String = {
-            guard let day = latest?.day, let d = parseDay(day) else { return "—" }
+            guard let day = latest?.day, let d = parseDay(day) else { return TelosType.absent }
             return String(localized: "as of \(longDate(d))")
         }()
         let fraction = value.flatMap { metricGaugeFraction(metric, value: $0) }
@@ -1088,73 +1090,35 @@ struct MetricDetailView: View {
                         .foregroundStyle(StrandPalette.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
-                // Range control on its own row beneath the title.
+                // THE DOSSIER HERO (DESIGN_V2 §6.5): the latest reading as a `MetricReadout` — label,
+                // numeral + unit, provenance (source · as-of day · window) — and, for a 0–100 score, a thin
+                // luminous ring beside it. No scenic starfield, no sloshing vessel: the number is the hero.
+                // An absent latest value reads "—" with its reason (the readout's own absent state).
+                HStack(alignment: .center, spacing: TelosSpace.l) {
+                    MetricReadout("Latest",
+                                  value: value,
+                                  unit: value.flatMap { Self.unitPart(fmt($0)) },
+                                  size: .hero,
+                                  format: { Self.numberPart(fmt($0)) },
+                                  absentReason: Text("Not enough data yet"),
+                                  provenance: heroProvenance(asOf: asOf, windowCount: windowed.count),
+                                  ink: domain.bright)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if let fraction {
+                        // Static ring: redraws only when the latest value changes (no draw-in on appear).
+                        TelosRing(value: fraction * 100,
+                                  scale: 100,
+                                  color: domain.bright,
+                                  diameter: 76,
+                                  showsValue: false)
+                            .accessibilityHidden(true)
+                    }
+                }
+
+                // Range control under the hero (dossier order: hero → range → chart).
                 SegmentedPillControl(ExploreRange.allCases, selection: selectionBinding,
                                      adaptsToAvailableWidth: true,
                                      isEnabled: isUnlocked) { $0.label }
-
-                // The headline read-out in the liquid language: for a 0–100 score, the signature
-                // LiquidVessel gauge filled to the score (the same hero idiom as Today's rings / Health's
-                // Fitness-Age + Vitality heroes), with the integer counting up over it and the unit + "as
-                // of" line beneath. For a non-score metric, a big count-up number. The vessel fills from 0
-                // to its fraction on appear (`heroAnimatedFraction`), so it settles once like TodayView's
-                // rings; the number ticks itself. A liquid accent on the ONE headline value, where it reads
-                // well — never over the chart below.
-                HStack {
-                    Spacer(minLength: 0)
-                    if let fraction, let v = value {
-                        VStack(spacing: 10) {
-                            ZStack {
-                                // The big hero vessel stays live (animated) — the one sloshing gauge on the
-                                // screen, exactly like the hero gauges on Today.
-                                LiquidVessel(value: heroAnimatedFraction, tint: domain.bright, animated: true)
-                                    .frame(width: 188, height: 188)
-                                    .accessibilityHidden(true)
-                                VStack(spacing: 2) {
-                                    CountUpNumber(value: v, font: StrandFont.rounded(48))
-                                        .foregroundStyle(.white)
-                                        .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
-                                    if !metric.unit.isEmpty {
-                                        Text(metric.unit)
-                                            .font(StrandFont.footnote)
-                                            .foregroundStyle(.white.opacity(0.85))
-                                            .shadow(color: .black.opacity(0.5), radius: 4, y: 1)
-                                    }
-                                }
-                                .allowsHitTesting(false)
-                            }
-                            Text(asOf)
-                                .font(StrandFont.footnote)
-                                .foregroundStyle(StrandPalette.textTertiary)
-                        }
-                        // One VoiceOver stop for the hero read-out (the vessel is decorative above).
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel("\(heroValue), \(asOf)")
-                    } else if let v = value {
-                        VStack(spacing: 6) {
-                            CountUpText(value: v, format: { fmt($0) },
-                                        font: StrandFont.number(54),
-                                        color: StrandPalette.textPrimary)
-                                .lineLimit(1)
-                                .minimumScaleFactor(0.5)
-                            Text(asOf)
-                                .font(StrandFont.footnote)
-                                .foregroundStyle(StrandPalette.textTertiary)
-                        }
-                        .padding(.vertical, 18)
-                    } else {
-                        VStack(spacing: 6) {
-                            Text(heroValue)
-                                .font(StrandFont.number(54))
-                                .foregroundStyle(StrandPalette.textPrimary)
-                            Text(asOf)
-                                .font(StrandFont.footnote)
-                                .foregroundStyle(StrandPalette.textTertiary)
-                        }
-                        .padding(.vertical, 18)
-                    }
-                    Spacer(minLength: 0)
-                }
 
                 // The "N readings · range" caption (auto-widen flagged when it happens).
                 Text(rangeCaption(effectiveRange: effectiveRange,
@@ -1177,15 +1141,40 @@ struct MetricDetailView: View {
         .background {
             NoopPanelSurface(tint: domain.color,
                              cornerRadius: NoopMetrics.cardRadius,
-                             elevated: true)
+                             elevated: false)
         }
-        // The hero shows the LATEST available point (range-independent), so the vessel fills once on
-        // appear (0 → its fraction) and settles — like TodayView's rings.
-        .onAppear {
-            withAnimation(.easeOut(duration: 0.9)) {
-                heroAnimatedFraction = fraction ?? 0
-            }
-        }
+    }
+
+    /// SOURCE · as-of day · N readings — the provenance row closing the dossier hero.
+    private func heroProvenance(asOf: String, windowCount: Int) -> TelosProvenance? {
+        guard let latest else { return nil }
+        let raw = sourceByDay[latest.day] ?? metric.source
+        let label = TodayView.provenanceDisplayLabel(rawSource: raw, deviceId: repo.deviceId)
+        let band = metric.key == "vo2max_est" ? "± 5 · " : ""
+        return TelosProvenance(sourceText: Text(verbatim: label),
+                               window: Text(verbatim: band + asOf + " · ")
+                                   + (windowCount == 1 ? Text("1 reading") : Text("\(windowCount) readings")))
+    }
+
+    /// The number part of a formatted reading ("54" of "54 ms"): split at the last space only when what
+    /// precedes it is a plain number, so compound values ("7h 20m") stay whole.
+    static func numberPart(_ formatted: String) -> String {
+        guard let split = unitSplit(formatted) else { return formatted }
+        return split.number
+    }
+
+    /// The unit part ("ms" of "54 ms"), or nil when the reading does not split cleanly.
+    static func unitPart(_ formatted: String) -> String? {
+        unitSplit(formatted)?.unit
+    }
+
+    private static func unitSplit(_ formatted: String) -> (number: String, unit: String)? {
+        guard let space = formatted.lastIndex(of: " ") else { return nil }
+        let number = String(formatted[..<space])
+        let unit = String(formatted[formatted.index(after: space)...])
+        guard !unit.isEmpty,
+              Double(number.replacingOccurrences(of: "\u{2212}", with: "-")) != nil else { return nil }
+        return (number, unit)
     }
 
     // MARK: Range bar
@@ -1541,14 +1530,22 @@ struct MetricDetailView: View {
         let color = correlationColor(row.r)
         HStack(spacing: 12) {
             Image(systemName: row.metric.icon)
-                .font(.system(size: 14, weight: .medium))
+                .font(TelosType.glyphRow)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .frame(width: 22)
             VStack(alignment: .leading, spacing: 1) {
                 Text(row.metric.title)
                     .font(StrandFont.body)
                     .foregroundStyle(StrandPalette.textPrimary)
-                Text("\(MetricCatalog.categoryDisplayName(row.metric.category)) · n = \(row.n)")
+                // Every correlation row is tagged ASSOCIATION (§6.5 / §2.3 rule 7): moving together over
+                // a window is not a cause. r and n in the mono scale voice.
+                HStack(spacing: TelosSpace.xs) {
+                    TelosTag("Association")
+                    Text(verbatim: "r " + String(format: "%.2f", row.r) + " · n " + String(row.n))
+                        .font(TelosType.scaleNumber)
+                        .foregroundStyle(TelosColor.textTertiary)
+                }
+                Text(MetricCatalog.categoryDisplayName(row.metric.category))
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
             }

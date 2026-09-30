@@ -3,50 +3,85 @@ import StrandAnalytics
 import StrandDesign
 
 // HabitTrialResultView.swift — a finished trial's verdict (HEALTH_V2 §S1-B.6, DESIGN_V2 §5.15 "Result card").
-// Logic only; the PROGRESS package restyles it. Colour never encodes the verdict; exploratory numbers sit
-// in their own section and never beside the verdict as if they were one.
+// Colour never encodes the verdict; exploratory numbers sit in their own section and never beside the
+// verdict as if they were one.
+//
+// TELOS 2.0: the RESULT card — overline + outline verdict tag, the verdict word in `title2`, its sentence,
+// the effect line (estimate · 95 % CI) in mono, and the effect-interval plot drawn exactly as given against
+// zero and the meaningful band (identical styling for every verdict). Then the sample, then exploratory.
+// COST: static.
 
 struct HabitTrialResultView: View {
     let record: HabitTrialRecord
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+            VStack(alignment: .leading, spacing: TelosSpace.sectionGap) {
                 if let result = record.result {
                     content(result)
                 } else {
-                    Text(HealthAbsence.notLogged.line).foregroundStyle(StrandPalette.textTertiary)
+                    AbsentValue(verbatimReason: HealthAbsence.notLogged.text)
                 }
             }
-            .padding(NoopMetrics.screenPadding)
+            .padding(.horizontal, TelosSpace.pageGutter)
+            .padding(.vertical, TelosSpace.l)
         }
+        .background(TelosColor.groundGradient.ignoresSafeArea())
         .navigationTitle(record.entry?.title ?? record.registration.interventionId)
     }
 
     @ViewBuilder
     private func content(_ r: HabitTrialResult) -> some View {
         let outcome = r.primaryOutcome
-        NoopCard {
-            VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                Text("RESULT").font(StrandFont.overline).foregroundStyle(StrandPalette.textTertiary)
+        StrandCard(tint: TelosColor.teal) {
+            VStack(alignment: .leading, spacing: TelosSpace.m) {
+                HStack(spacing: TelosSpace.s) {
+                    PGOverline("Result", ink: TelosColor.teal)
+                    Spacer(minLength: TelosSpace.s)
+                    HabitVerdictTag(verdict: r.verdict)
+                }
+                Text(record.entry?.title ?? record.registration.interventionId)
+                    .font(TelosType.headline)
+                    .foregroundStyle(TelosColor.textSecondary)
+                Text("Outcome: \(outcome.label)")
+                    .font(TelosType.subhead)
+                    .foregroundStyle(TelosColor.textTertiary)
                 if let verdict = r.verdict {
-                    Text(verdict.headline).font(StrandFont.title2).foregroundStyle(StrandPalette.textPrimary)
+                    Text(verdict.headline)
+                        .font(TelosType.title2)
+                        .foregroundStyle(TelosColor.textPrimary)
                     Text(HabitTrialCopy.body(verdict: verdict, habit: record.entry?.title ?? "This habit", result: r))
-                        .font(StrandFont.body).foregroundStyle(StrandPalette.textSecondary)
+                        .font(TelosType.body)
+                        .foregroundStyle(TelosColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 } else {
-                    Text(HabitTrialCopy.altered).font(StrandFont.title2).foregroundStyle(StrandPalette.textPrimary)
+                    Text(HabitTrialCopy.altered)
+                        .font(TelosType.title2)
+                        .foregroundStyle(TelosColor.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
                 if let e = r.estimate, let lo = r.lower, let hi = r.upper {
-                    Text("\(HabitTrialCopy.signed(e, outcome: outcome)) · 95% interval \(HabitTrialCopy.bare(lo, outcome: outcome)) to \(HabitTrialCopy.bare(hi, outcome: outcome))")
-                        .font(StrandFont.mono(13)).foregroundStyle(StrandPalette.textPrimary)
+                    Text(verbatim: "\(HabitTrialCopy.signed(e, outcome: outcome)) · 95% CI \(HabitTrialCopy.bare(lo, outcome: outcome)) to \(HabitTrialCopy.bare(hi, outcome: outcome))")
+                        .font(TelosType.scaleNumber)
+                        .foregroundStyle(TelosColor.textPrimary)
+                    EffectIntervalPlot(estimate: outcome.display(e), lower: outcome.display(lo), upper: outcome.display(hi),
+                                       meaningfulLow: outcome.display(-r.mcid), meaningfulHigh: outcome.display(r.mcid),
+                                       betterIsHigher: outcome.betterDirection == .increase,
+                                       format: HabitsHubView.signedDisplay,
+                                       claimsHelped: r.verdict == .helped)
                     Text("Meaningful change set before the start: \(HabitTrialCopy.bare(outcome.betterDirection.sign * r.mcid, outcome: outcome))")
-                        .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                        .font(TelosType.caption)
+                        .foregroundStyle(TelosColor.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
+                Text(verbatim: "ON \(r.nOn) · OFF \(r.nOff) VALID NIGHTS · \(r.missingOn + r.missingOff) EXCLUDED")
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(TelosColor.textSecondary)
             }
         }
-        NoopCard {
-            VStack(alignment: .leading, spacing: NoopMetrics.space1) {
-                Text("SAMPLE").font(StrandFont.overline).foregroundStyle(StrandPalette.textTertiary)
+        StrandCard {
+            VStack(alignment: .leading, spacing: TelosSpace.xs) {
+                PGOverline("Sample")
                 row("Valid nights", "ON \(r.nOn) · OFF \(r.nOff) of \(r.plannedPerArm) each")
                 row("Missing", "ON \(r.missingOn) · OFF \(r.missingOff)")
                 if r.washoutDays > 0 { row("Washout days (not analysed)", "\(r.washoutDays)") }
@@ -60,17 +95,18 @@ struct HabitTrialResultView: View {
                     row("Night-to-night link", String(format: "%.2f", rho))
                     if rho > 0.3 {
                         Text("Your nights are strongly linked day to day — a trial like this needs more days.")
-                            .font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+                            .font(TelosType.caption)
+                            .foregroundStyle(TelosColor.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
         }
         let exploratory = [r.perProtocol, r.alcoholExcluded].compactMap { $0 } + r.secondaries
         if !exploratory.isEmpty {
-            NoopCard {
-                VStack(alignment: .leading, spacing: NoopMetrics.space1) {
-                    Text("EXPLORATORY — NOT PART OF THE VERDICT").font(StrandFont.overline)
-                        .foregroundStyle(StrandPalette.textTertiary)
+            StrandCard {
+                VStack(alignment: .leading, spacing: TelosSpace.xs) {
+                    PGOverline("Exploratory — not part of the verdict")
                     ForEach(Array(exploratory.enumerated()), id: \.offset) { _, x in
                         row(x.name, x.estimate.map { "\(HabitTrialCopy.signed($0, outcome: x.outcome)) (ON \(x.nOn) · OFF \(x.nOff))" }
                                 ?? HealthAbsence.tooFewNights(have: min(x.nOn, x.nOff), need: 3).line)
@@ -78,15 +114,25 @@ struct HabitTrialResultView: View {
                 }
             }
         }
-        Text(HabitTrialCopy.blinding).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
+        Text(HabitTrialCopy.blinding)
+            .font(TelosType.caption)
+            .foregroundStyle(TelosColor.textTertiary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func row(_ label: String, _ value: String) -> some View {
-        HStack {
-            Text(label).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
-            Spacer()
-            Text(value).font(StrandFont.mono(12)).foregroundStyle(StrandPalette.textPrimary)
+        HStack(alignment: .firstTextBaseline) {
+            Text(label)
+                .font(TelosType.subhead)
+                .foregroundStyle(TelosColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: TelosSpace.s)
+            Text(value)
+                .font(TelosType.scaleNumber)
+                .foregroundStyle(TelosColor.textPrimary)
+                .multilineTextAlignment(.trailing)
         }
+        .accessibilityElement(children: .combine)
     }
 
     private func percent(_ v: Double) -> String { "\(Int((v * 100).rounded()))%" }

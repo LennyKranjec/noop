@@ -24,6 +24,13 @@ private struct WorkoutRecoveryTrendPoint: Identifiable, Equatable {
 //  • an "ALL SESSIONS" NoopCard containing fixed-height rows (date · sport · dur · HR · kcal · dist · source).
 //
 // No custom card heights, paddings, colours or surfaces — uniformity is the bar.
+//
+// TELOS 2.0 (DESIGN_V2 §6.6, the "Training Coach" reference): Effort hero (typical effort, vessel) → range
+// control → ALL SESSIONS (moved up from seventh: it is what the screen is opened for) → summary tiles → HR
+// zones → activity breakdown → HR-recovery trend → active-calories heatmap. Session rows: a sport plate, the
+// name + source tag, date / time / duration in the mono number voice, and a thin Effort tube with its value
+// ("—" and no tube when the session has no Effort). Absent values are the em dash (`TelosType.absent`).
+// No material, no per-card shadow; everything flat glass on the ground.
 
 struct WorkoutsView: View {
     @EnvironmentObject var repo: Repository
@@ -200,18 +207,21 @@ struct WorkoutsView: View {
                 let groups = sportGroups(from: windowRows)
                 let zonesSummary = WorkoutZones.summary(from: windowRows)
 
+                // §6.6 order: hero → range → All sessions (what the screen is opened for) → tiles → zones →
+                // breakdown → recovery trend → heatmap. The Start / Add actions stay first — they are the
+                // screen's primary controls.
                 workoutActionRow
-                rangeBar(rows: windowRows, effectiveRange: resolved)
                 if let postLogNote { postLogBanner(postLogNote) }
                 effortHero(rows: windowRows, effectiveRange: resolved, groups: groups)
+                rangeBar(rows: windowRows, effectiveRange: resolved)
+                sessionsSection(rows: windowRows)
                 summarySection(rows: windowRows, effectiveRange: resolved, groups: groups)
-                heatmapSection()
-                breakdownSection(groups: groups, rows: windowRows)
                 if let z = zonesSummary {
                     zonesSection(z, totalSessions: windowRows.count)
                 }
+                breakdownSection(groups: groups, rows: windowRows)
                 recoveryTrendSection
-                sessionsSection(rows: windowRows)
+                heatmapSection()
             }
         }
         .task(id: repo.refreshSeq) {
@@ -432,7 +442,7 @@ struct WorkoutsView: View {
     private func postLogBanner(_ text: String) -> some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "chart.line.uptrend.xyaxis")
-                .font(.system(size: 14, weight: .semibold))
+                .font(TelosType.glyphRow)
                 .foregroundStyle(StrandPalette.effortColor)
                 .accessibilityHidden(true)
             Text(text)
@@ -441,11 +451,11 @@ struct WorkoutsView: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
-        .padding(NoopMetrics.space3)
-        .background(StrandPalette.effortColor.opacity(0.10),
-                    in: RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous)
-            .strokeBorder(StrandPalette.effortColor.opacity(0.22), lineWidth: 1))
+        .padding(TelosSpace.cardPadding)
+        .background(TelosColor.effort.opacity(TelosOpacity.wash),
+                    in: RoundedRectangle(cornerRadius: TelosRadius.card, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: TelosRadius.card, style: .continuous)
+            .strokeBorder(TelosColor.effort.opacity(TelosOpacity.border), lineWidth: TelosStroke.line))
         .transition(.opacity)
         .accessibilityElement(children: .combine)
         .accessibilityLabel(text)
@@ -563,18 +573,26 @@ struct WorkoutsView: View {
         Menu {
             content()
         } label: {
-            HStack(spacing: 4) {
-                Text(title).font(StrandFont.footnote).lineLimit(1)
-                Image(systemName: "chevron.down").font(.system(size: 9, weight: .semibold))
+            HStack(spacing: TelosSpace.xs) {
+                Text(title).font(TelosType.footnote.weight(.semibold)).lineLimit(1)
+                Image(systemName: "chevron.down").font(TelosType.glyphDelta)
             }
             .frame(maxWidth: .infinity)
-            .foregroundStyle(active ? StrandPalette.effortColor : StrandPalette.textSecondary)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .foregroundStyle(active ? TelosColor.effortInk : TelosColor.textSecondary)
+            .padding(.horizontal, TelosSpace.m)
+            .frame(minHeight: 36)
             .background(
-                (active ? StrandPalette.effortColor.opacity(0.14) : StrandPalette.surfaceInset.opacity(0.6)),
-                in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                Capsule(style: .continuous)
+                    .fill(active ? TelosColor.effort.opacity(TelosOpacity.fill) : TelosColor.glassFill)
             )
+            .overlay(
+                Capsule(style: .continuous)
+                    .strokeBorder(active ? LinearGradient(colors: [TelosColor.effort.opacity(0.8), TelosColor.effort.opacity(0.2)],
+                                                          startPoint: .topLeading, endPoint: .bottomTrailing)
+                                         : TelosColor.glassEdge,
+                                  lineWidth: TelosStroke.line)
+            )
+            .frame(minHeight: TelosSpace.hitTarget)
             .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
@@ -750,8 +768,8 @@ struct WorkoutsView: View {
         let fraction = max(0, min(1, displayValue / scaleMax))
         VStack(spacing: 18) {
             Text("TYPICAL EFFORT")
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
-                .foregroundStyle(StrandPalette.effortColor)
+                .telosScale()
+                .foregroundStyle(TelosColor.effortInk)
             if hasData {
                 ZStack {
                     // Hero vessel → animated (this is one of the page's live gauges, like the Sleep Rest
@@ -768,7 +786,6 @@ struct WorkoutsView: View {
                             font: StrandFont.rounded(46),
                             color: StrandPalette.textPrimary
                         )
-                        .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
                         Text(effortScale == .whoop ? "of 21" : "of 100")
                             .font(StrandFont.caption)
                             .foregroundStyle(StrandPalette.textSecondary)
@@ -974,7 +991,7 @@ struct WorkoutsView: View {
         let totalKcal = rows.compactMap(\.energyKcal).reduce(0, +)
         // Only POSITIVE distances count as "has distance" (a strap-detected sport with no GPS/manual
         // distance is nil, and an explicit 0 is not a real distance) — matches `distanceLabel`'s `m > 0`
-        // guard on the per-workout rows. When nothing in the window has distance, the tile shows "–"
+        // guard on the per-workout rows. When nothing in the window has distance, the tile shows "—"
         // instead of a misleading "0.0 km covered" (#reddit: rugby read as data loss).
         let distancesM = rows.compactMap(\.distanceM).filter { $0 > 0 }
         let totalKmRaw = distancesM.reduce(0, +) / 1000.0
@@ -994,7 +1011,7 @@ struct WorkoutsView: View {
                      caption: "kcal",
                      accent: StrandPalette.metricAmber)
             StatTile(label: "Total Distance",
-                     value: distancesM.isEmpty ? "–" : UnitFormatter.distanceFromKilometers(totalKmRaw, system: distanceUnitSystem),
+                     value: distancesM.isEmpty ? TelosType.absent : UnitFormatter.distanceFromKilometers(totalKmRaw, system: distanceUnitSystem),
                      caption: String(localized: "covered"),
                      accent: StrandPalette.metricCyan)
             StatTile(label: "Most Active",
@@ -1031,10 +1048,7 @@ struct WorkoutsView: View {
             VStack(alignment: .leading, spacing: 12) {
                 // Identical header for every card.
                 HStack(spacing: 10) {
-                    Image(systemName: sportIcon(g.sport))
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(StrandPalette.effortColor)
-                        .frame(width: 22, alignment: .center)
+                    WorkoutSportPlate(symbol: sportIcon(g.sport), tint: TelosColor.effortInk)
                     Text(WorkoutSource.displaySport(g.sport))
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
@@ -1220,13 +1234,16 @@ struct WorkoutsView: View {
                 }
             } label: {
                 Text(selectionMode ? String(localized: "Done") : String(localized: "Select"))
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(selectionMode ? StrandPalette.effortColor : StrandPalette.accent)
-                    .padding(.horizontal, 12).padding(.vertical, 6)
+                    .font(TelosType.footnote.weight(.semibold))
+                    .foregroundStyle(selectionMode ? TelosColor.effortInk : StrandPalette.accent)
+                    .padding(.horizontal, TelosSpace.m)
+                    .frame(minHeight: 32)
                     .background(
-                        (selectionMode ? StrandPalette.effortColor.opacity(0.14)
-                                       : StrandPalette.surfaceInset.opacity(0.6)),
+                        (selectionMode ? TelosColor.effort.opacity(TelosOpacity.fill) : TelosColor.glassFill),
                         in: Capsule())
+                    .overlay(Capsule().strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line))
+                    .frame(minHeight: TelosSpace.hitTarget)
+                    .contentShape(Rectangle())
             }
             .accessibilityLabel(selectionMode
                 ? String(localized: "Finish selecting")
@@ -1267,10 +1284,10 @@ struct WorkoutsView: View {
             .font(StrandFont.subhead)
             .foregroundStyle(StrandPalette.textSecondary)
         }
-        .padding(.horizontal, NoopMetrics.space3)
-        .padding(.vertical, NoopMetrics.space3)
-        .background(StrandPalette.effortColor.opacity(0.08),
-                    in: RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
+        .padding(.horizontal, TelosSpace.m)
+        .padding(.vertical, TelosSpace.m)
+        .background(TelosColor.effort.opacity(TelosOpacity.wash),
+                    in: RoundedRectangle(cornerRadius: TelosRadius.card, style: .continuous))
         .accessibilityElement(children: .contain)
     }
 
@@ -1304,11 +1321,9 @@ struct WorkoutsView: View {
         LazyVStack(spacing: 0) {
             ForEach(Array(rows.enumerated()), id: \.offset) { idx, row in
                 compactSessionRow(row)
-                    .background(idx % 2 == 1
-                                ? StrandPalette.surfaceInset.opacity(0.4)
-                                : Color.clear)
                 if idx != rows.count - 1 {
-                    Divider().overlay(StrandPalette.hairline.opacity(0.5))
+                    Rectangle().fill(TelosColor.lineSoft).frame(height: TelosStroke.line)
+                        .padding(.leading, TelosSpace.cardPadding + 28 + TelosSpace.m)
                 }
             }
         }
@@ -1321,11 +1336,8 @@ struct WorkoutsView: View {
             Divider().overlay(StrandPalette.hairline)
             ForEach(Array(rows.enumerated()), id: \.offset) { idx, row in
                 sessionRow(row)
-                    .background(idx % 2 == 1
-                                ? StrandPalette.surfaceInset.opacity(0.4)
-                                : Color.clear)
                 if idx != rows.count - 1 {
-                    Divider().overlay(StrandPalette.hairline.opacity(0.5))
+                    Rectangle().fill(TelosColor.lineSoft).frame(height: TelosStroke.line)
                 }
             }
         }
@@ -1392,8 +1404,8 @@ struct WorkoutsView: View {
             // Sport ("detected" reads as "Activity")
             HStack(spacing: 7) {
                 Image(systemName: sportIcon(row.sport))
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .font(TelosType.glyphChevron)
+                    .foregroundStyle(TelosColor.effortInk)
                     .frame(width: 16)
                 Text(WorkoutSource.displaySport(row.sport))
                     .font(StrandFont.subhead)
@@ -1403,14 +1415,14 @@ struct WorkoutsView: View {
             .frame(width: ColWidth.sport, alignment: .leading)
 
             cell(durationLabel(row.durationS), width: ColWidth.duration)
-            cell(row.avgHr.map { "\($0)" } ?? "–", width: ColWidth.hr,
-                 color: row.avgHr != nil ? StrandPalette.metricRose : nil)
-            cell(row.energyKcal.map { grouped($0) } ?? "–", width: ColWidth.kcal,
+            cell(row.avgHr.map { "\($0)" } ?? TelosType.absent, width: ColWidth.hr,
+                 color: row.avgHr != nil ? TelosColor.heartInk : nil)
+            cell(row.energyKcal.map { grouped($0) } ?? TelosType.absent, width: ColWidth.kcal,
                  color: row.energyKcal != nil ? StrandPalette.metricAmber : nil)
             cell(distanceLabel(row.distanceM), width: ColWidth.dist)
             // #796 - per-session Effort, on the user's scale, tinted the Effort colour when present.
-            cell(Self.effortCellLabel(strain: row.strain, scale: effortScale), width: ColWidth.effort,
-                 color: row.strain != nil ? StrandPalette.effortColor : nil)
+            cell(Self.effortCellDisplay(strain: row.strain, scale: effortScale), width: ColWidth.effort,
+                 color: row.strain != nil ? TelosColor.effortInk : nil)
 
             Spacer(minLength: 0)
 
@@ -1466,33 +1478,28 @@ struct WorkoutsView: View {
                 openDetail(row)
             }
         } label: {
-            HStack(spacing: 12) {
+            HStack(spacing: TelosSpace.m) {
                 if selectionMode {
                     compactSelectionGlyph(selectable: selectable, isSelected: isSelected)
                 }
-                Image(systemName: sportIcon(row.sport))
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .frame(width: 22)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 8) {
+                WorkoutSportPlate(symbol: sportIcon(row.sport), tint: TelosColor.effortInk)
+                VStack(alignment: .leading, spacing: TelosSpace.xxs) {
+                    HStack(spacing: TelosSpace.s) {
                         Text(WorkoutSource.displaySport(row.sport))
-                            .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.textPrimary)
+                            .font(TelosType.subhead.weight(.semibold))
+                            .foregroundStyle(TelosColor.textPrimary)
                             .lineLimit(1)
+                        sourceBadge(row.source)
                         Spacer(minLength: 0)
-                        Text(Self.effortCellLabel(strain: row.strain, scale: effortScale))
-                            .font(StrandFont.number(15))
-                            .foregroundStyle(row.strain != nil ? StrandPalette.effortColor : StrandPalette.textTertiary)
                     }
                     Text(compactRowSubtitle(row))
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
+                        .font(TelosType.scaleNumber)
+                        .foregroundStyle(TelosColor.textTertiary)
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
-                sourceBadge(row.source)
+                WorkoutEffortTube(strain: row.strain, scale: effortScale,
+                                  label: Self.effortCellDisplay(strain: row.strain, scale: effortScale))
                 // Reserve the ••• column width inside the label; the interactive Menu is overlaid on top
                 // (below) so it captures its own taps instead of being swallowed by the row button (#318).
                 if !selectionMode {
@@ -1527,13 +1534,13 @@ struct WorkoutsView: View {
     private func compactSelectionGlyph(selectable: Bool, isSelected: Bool) -> some View {
         if selectable {
             Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                .font(.system(size: 20, weight: .regular))
-                .foregroundStyle(isSelected ? StrandPalette.effortColor : StrandPalette.textTertiary)
+                .font(TelosType.glyphEmpty)
+                .foregroundStyle(isSelected ? TelosColor.effortInk : TelosColor.textTertiary)
                 .accessibilityHidden(true)
         } else {
             Image(systemName: "lock.fill")
-                .font(.system(size: 14, weight: .regular))
-                .foregroundStyle(StrandPalette.textTertiary.opacity(0.6))
+                .font(TelosType.glyphRow)
+                .foregroundStyle(TelosColor.textTertiary)
                 .frame(width: 20)
                 .accessibilityHidden(true)
         }
@@ -1574,8 +1581,8 @@ struct WorkoutsView: View {
             rowMenu(row)
         } label: {
             Image(systemName: "ellipsis")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(StrandPalette.textTertiary)
+                .font(TelosType.glyphChevron)
+                .foregroundStyle(TelosColor.textTertiary)
                 .frame(width: ColWidth.action, height: RowMetrics.rowHeight)
                 .contentShape(Rectangle())
         }
@@ -1620,16 +1627,25 @@ struct WorkoutsView: View {
 
     /// #796 - the per-session Effort cell label: the stored 0-100 strain mapped to the user's Effort scale
     /// (the SAME `UnitFormatter.effortDisplay` every other Effort read-out routes through, so the toggle and
-    /// rounding stay consistent), or "–" when the session has no captured strain. Pure + unit-testable.
+    /// rounding stay consistent), or an en dash when the session has no captured strain (pinned by
+    /// `WorkoutEffortCellTests`; the screen draws `effortCellDisplay`, the em dash). Pure + unit-testable.
     static func effortCellLabel(strain: Double?, scale: EffortScale) -> String {
-        guard let strain else { return "–" }
+        guard let strain else { return "\u{2013}" }
+        return UnitFormatter.effortDisplay(strain, scale: scale)
+    }
+
+    /// What the screen DRAWS for a session's Effort: the same value as `effortCellLabel`, but an absent
+    /// Effort is the V2 absent glyph (U+2014, `TelosType.absent`). `effortCellLabel` keeps its pinned
+    /// en-dash contract (`WorkoutEffortCellTests`) until that test migrates — see the MOVE hand-off.
+    static func effortCellDisplay(strain: Double?, scale: EffortScale) -> String {
+        guard let strain else { return TelosType.absent }
         return UnitFormatter.effortDisplay(strain, scale: scale)
     }
 
     private func cell(_ text: String, width: CGFloat, color: Color? = nil) -> some View {
         Text(text)
             .font(StrandFont.number(13, weight: .regular))
-            .foregroundStyle(color ?? (text == "–" ? StrandPalette.textTertiary : StrandPalette.textPrimary))
+            .foregroundStyle(color ?? (text == TelosType.absent ? TelosColor.textTertiary : TelosColor.textPrimary))
             .frame(width: width, alignment: .trailing)
     }
 
@@ -1691,7 +1707,7 @@ struct WorkoutsView: View {
 
     /// The most-frequent sport (modal), derived from the already-built groups.
     private func modalSport(from groups: [SportGroup]) -> (sport: String, count: Int) {
-        guard let top = groups.first else { return ("–", 0) }
+        guard let top = groups.first else { return (TelosType.absent, 0) }
         return (top.sport, top.count)
     }
 
@@ -1774,7 +1790,7 @@ struct WorkoutsView: View {
     }
 
     private func durationLabel(_ s: Double?) -> String {
-        guard let s, s > 0 else { return "–" }
+        guard let s, s > 0 else { return TelosType.absent }
         let total = Int(s.rounded())
         let h = total / 3600
         let m = (total % 3600) / 60
@@ -1783,14 +1799,14 @@ struct WorkoutsView: View {
     }
 
     /// #64: the duration label, or nil when there's no duration to show — so the compact row's summary
-    /// line can omit the field entirely rather than printing a bare "–".
+    /// line can omit the field entirely rather than printing a bare "—".
     private func durationLabelOrNil(_ s: Double?) -> String? {
         guard let s, s > 0 else { return nil }
         return durationLabel(s)
     }
 
     private func distanceLabel(_ m: Double?) -> String {
-        guard let m, m > 0 else { return "–" }
+        guard let m, m > 0 else { return TelosType.absent }
         return UnitFormatter.distanceFromMeters(m, system: distanceUnitSystem)
     }
 
@@ -1829,6 +1845,64 @@ struct WorkoutsView: View {
         static let effort: CGFloat = 64   // #796 per-session Effort column
         static let source: CGFloat = 80
         static let action: CGFloat = 36   // trailing "•••" per-row actions menu
+    }
+}
+
+// MARK: - Session row parts (Telos 2.0)
+
+/// The 28 pt sport plate (§5.8): a faux-glass rounded square (the glass fill + the luminous glass edge) with
+/// the sport glyph in the Effort ink. Static; no shadow.
+private struct WorkoutSportPlate: View {
+    let symbol: String
+    let tint: Color
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: TelosRadius.plate, style: .continuous)
+        Image(systemName: symbol)
+            .font(TelosType.glyphRow)
+            .foregroundStyle(tint)
+            .frame(width: 28, height: 28)
+            .background(shape.fill(TelosColor.glassFill))
+            .overlay(shape.strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line))
+            .accessibilityHidden(true)
+    }
+}
+
+/// The row's Effort: the value on the wearer's scale over a thin tube filled to value / scale top (one lap;
+/// a value past the top shows a full tube — the number beside it stays exact). No Effort ⇒ "—" and NO
+/// tube (§2.3 rule 2: nil never feeds a fill). Static — rows never animate.
+private struct WorkoutEffortTube: View {
+    let strain: Double?
+    let scale: EffortScale
+    let label: String
+
+    private static let width: CGFloat = 44
+
+    var body: some View {
+        VStack(alignment: .trailing, spacing: TelosSpace.xs) {
+            Text(verbatim: label)
+                .font(TelosType.numeralS)
+                .foregroundStyle(strain == nil ? TelosColor.textTertiary : TelosColor.effortInk)
+                .lineLimit(1)
+                .minimumScaleFactor(0.7)
+            if let strain {
+                tube(strain)
+            }
+        }
+        .frame(minWidth: Self.width, alignment: .trailing)
+        .accessibilityHidden(true)
+    }
+
+    private func tube(_ strain: Double) -> some View {
+        let top: Double = scale == .whoop ? 21 : 100
+        let value: Double = UnitFormatter.effortValue(strain, scale: scale)
+        let fraction: Double = value.isFinite ? min(max(value / top, 0), 1) : 0
+        return ZStack(alignment: .leading) {
+            Capsule().fill(TelosColor.effort.opacity(TelosOpacity.fill))
+            Capsule().fill(TelosColor.effort)
+                .frame(width: max(2, CGFloat(fraction) * Self.width))
+        }
+        .frame(width: Self.width, height: 4)
     }
 }
 
@@ -1872,7 +1946,9 @@ private struct WorkoutRecoveryTrendChart: View {
                 y: .value("Recovery", point.value)
             )
             .foregroundStyle(by: .value("Recovery interval", point.interval))
-            .interpolationMethod(.catmullRom)
+            // `.monotone`, never `.catmullRom`: a Catmull-Rom curve overshoots past the data extremes and
+            // would draw recoveries that never happened (§2.3 rule 5).
+            .interpolationMethod(.monotone)
             PointMark(
                 x: .value("Workout", point.date),
                 y: .value("Recovery", point.value)

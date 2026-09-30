@@ -110,40 +110,69 @@ struct HeartRateWidgetView: View {
     private var shown: (bpm: Int?, stale: Bool) {
         HrDisplay.resolve(bpm: entry.snap?.bpm, newestPointTs: series.last?.ts, now: entry.date)
     }
-    /// The palette's HR zone-5 token, which resolves to exactly the hexes the Android widget carries as
-    /// a local mirror (#C84E1E / #E0662F) — so the two widgets are the same colour rather than two
-    /// approximations of one. Named rather than hardcoded here because, unlike Glance, this target can
-    /// read the design package; and being a token it follows the Classic theme where a hex could not.
-    private var accent: Color { StrandPalette.zone5 }
+    /// The Telos `heart` identity hue (DESIGN_V2 §4.1): the trace, its fill and the glyph. The figure
+    /// itself uses `heartInk`, the text variant. (The Android twin still mirrors the old zone-5 hexes;
+    /// the two widgets now differ in hue, not in what they draw.)
+    private var accent: Color { TelosColor.heart }
+
+    /// When the headline figure was READ: the newest trace point. Shown only when the figure is stale, so
+    /// a dimmed number always says how old it is.
+    private var readAt: Date? {
+        series.last.map { Date(timeIntervalSince1970: TimeInterval($0.ts)) }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
+            // Title in the label voice; the publish time rides on the same row (it used to take a row of
+            // its own at the bottom, which the medium tile could not spare for the trace).
             HStack(spacing: 6) {
                 Image(systemName: "heart.fill")
-                    .font(.system(size: 12))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(accent)
                 Text("Heart rate")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(StrandPalette.textPrimary)
+                    .font(TelosType.scale)
+                    .tracking(TelosType.Tracking.scale)
+                    .textCase(.uppercase)
+                    .foregroundStyle(TelosColor.textSecondary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if let updated = entry.snap?.updated, updated != .distantPast {
+                    Text("Updated \(updated, format: .dateTime.hour().minute())")
+                        .font(TelosType.scaleNumber)
+                        .foregroundStyle(TelosColor.textTertiary)
+                        .lineLimit(1)
+                }
             }
 
             HStack(alignment: .lastTextBaseline, spacing: 4) {
-                Text(shown.bpm.map(String.init) ?? "—")
-                    .font(.system(size: 30, weight: .bold, design: .rounded))
-                    .foregroundStyle(shown.stale ? StrandPalette.textSecondary : StrandPalette.textPrimary)
+                // numeralL's 34 pt, fixed: the medium tile's height is fixed and the trace needs the rest.
+                Text(shown.bpm.map(String.init) ?? TelosType.absent)
+                    .font(TelosType.numeralFont(size: 34, weight: .light))
+                    .tracking(TelosType.Tracking.numeralL)
+                    .foregroundStyle(shown.bpm == nil ? TelosColor.textTertiary
+                                     : (shown.stale ? TelosColor.textSecondary : TelosColor.heartInk))
                 if shown.bpm != nil {
                     Text("bpm")
-                        .font(.system(size: 12))
-                        .foregroundStyle(StrandPalette.textSecondary)
+                        .font(TelosType.scaleNumber)
+                        .foregroundStyle(TelosColor.textSecondary)
                 }
+                if shown.stale, let readAt {
+                    // Stale → secondary + "as of HH:MM" (§6.13), so a carried reading never reads as live.
+                    Text("as of \(readAt, format: .dateTime.hour().minute())")
+                        .font(TelosType.scaleNumber)
+                        .foregroundStyle(TelosColor.textSecondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 0)
                 if let stats {
+                    // A faux-glass pill: translucent fill + the heart hue at 16 %. Cost: one capsule fill.
                     Text("Min \(stats.min) • Max \(stats.max)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(StrandPalette.textPrimary)
+                        .font(TelosType.scaleNumber)
+                        .foregroundStyle(TelosColor.textPrimary)
+                        .lineLimit(1)
                         .padding(.horizontal, 8)
                         .padding(.vertical, 3)
-                        .background(accent.opacity(0.18), in: Capsule())
-                        .padding(.leading, 6)
+                        .background(accent.opacity(TelosOpacity.fill), in: Capsule())
                 }
             }
 
@@ -160,8 +189,8 @@ struct HeartRateWidgetView: View {
                         VStack(alignment: .trailing) {
                             ForEach(Array(ticks.enumerated()), id: \.offset) { index, tick in
                                 Text("\(tick)")
-                                    .font(.system(size: 10))
-                                    .foregroundStyle(StrandPalette.textSecondary)
+                                    .font(TelosType.scaleNumber)
+                                    .foregroundStyle(TelosColor.textSecondary)
                                 if index < ticks.count - 1 { Spacer(minLength: 0) }
                             }
                         }
@@ -171,15 +200,6 @@ struct HeartRateWidgetView: View {
             }
 
             Spacer(minLength: 0)
-            if let updated = entry.snap?.updated, updated != .distantPast {
-                HStack {
-                    Spacer()
-                    Text("Updated \(updated, format: .dateTime.hour().minute())")
-                        .font(.system(size: 10))
-                        .foregroundStyle(StrandPalette.textSecondary)
-                    Spacer()
-                }
-            }
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityText)
@@ -231,8 +251,8 @@ private struct HrTimeAxis: View {
                 ForEach(Array(ticks.enumerated()), id: \.offset) { i, ts in
                     Text(Date(timeIntervalSince1970: TimeInterval(ts)),
                          format: .dateTime.hour().minute())
-                        .font(.system(size: 9))
-                        .foregroundStyle(StrandPalette.textSecondary)
+                        .font(TelosType.scaleNumber)
+                        .foregroundStyle(TelosColor.textSecondary)
                     if i < ticks.count - 1 { Spacer(minLength: 0) }
                 }
             }
@@ -247,11 +267,11 @@ struct HeartRateWidget: Widget {
         StaticConfiguration(kind: Self.kind, provider: HeartRateProvider()) { entry in
             if #available(iOS 17.0, *) {
                 HeartRateWidgetView(entry: entry)
-                    .containerBackground(StrandPalette.surfaceBase, for: .widget)
+                    .containerBackground(for: .widget) { TelosWidgetGround() }
             } else {
                 HeartRateWidgetView(entry: entry)
                     .padding()
-                    .background(StrandPalette.surfaceBase)
+                    .background(TelosColor.canvas)
             }
         }
         .configurationDisplayName("Heart Rate")

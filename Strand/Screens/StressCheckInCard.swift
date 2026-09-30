@@ -52,7 +52,7 @@ struct StressCheckInCard: View {
                 VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                     HStack(spacing: NoopMetrics.space2) {
                         Image(systemName: "wind")
-                            .font(.system(size: 14, weight: .semibold))
+                            .font(TelosType.glyphRow)
                             .foregroundStyle(StrandPalette.restBright)
                             .accessibilityHidden(true)
                         Text("Stress check-in").strandOverline()

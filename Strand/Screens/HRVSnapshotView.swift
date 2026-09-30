@@ -18,7 +18,8 @@ import WhoopStore
 /// 60-second deadline — countdown display and ingest cutoff both derive from it.
 struct HRVSnapshotView: View {
 
-    @EnvironmentObject private var model: AppModel
+    /// Only CALLED (the save writes through its repository), never observed (§2.1 rule 5).
+    @Environment(\.appModelRef) private var modelRef
     @EnvironmentObject private var live: LiveState
 
     /// Optional dismissal hook when presented as a sheet (Live → "Take an HRV reading").
@@ -118,7 +119,7 @@ struct HRVSnapshotView: View {
                     close()
                 } label: {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 18))
+                        .font(TelosType.glyphControl)
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
                 .buttonStyle(.plain)
@@ -133,8 +134,8 @@ struct HRVSnapshotView: View {
         StrandCard(padding: 24, tint: StrandPalette.restColor) {
             VStack(spacing: 18) {
                 ZStack {
-                    ScenicHeroBackground(domain: .rest, starCount: 48)
-                        .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
+                    // One static rest-hued radial pool (the retired scenic starfield is gone; no blur, no clock).
+                    TelosRadialGlow(color: TelosColor.rest, intensity: 0.2, radius: 150)
                     captureDial
                         .padding(.vertical, 6)
                 }
@@ -477,14 +478,15 @@ struct HRVSnapshotView: View {
         let day = Repository.dayString(Date())
         let point = MetricPoint(day: day, key: HRVSnapshot.metricKey, value: rmssd)
         saved = true                    // optimistic — the write is local + idempotent
+        let repo = resolvedAppModel(modelRef)?.repo
         Task {
-            guard let store = await model.repo.storeHandle() else {
+            guard let repo, let store = await repo.storeHandle() else {
                 saved = false
                 return
             }
             do {
                 try await store.upsertMetricSeries([point], deviceId: HRVSnapshot.sourceId)
-                await model.repo.refresh()
+                await repo.refresh()
             } catch {
                 saved = false
             }

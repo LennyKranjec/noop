@@ -7,158 +7,143 @@ import WhoopStore
 //
 // The Sleep tab's "Night detail" metric grid, extracted into a standalone view so it can ALSO be hosted
 // in the Today tab. Both the Sleep tab and the Today host render THIS view from the SAME `SleepModel`, so
-// the per-metric latest value / sparkline / typical caption can never diverge between the two surfaces
-// (the parity contract). The card body + its `pctValue` / `rrValue` / `vsTypical` / `debtCaption` /
-// `debtColor` / `spark` helpers are a verbatim lift of the former `SleepView.metricGrid` (and the helpers
-// only it used); the seven series are computed once in `SleepModel.build` and read here.
+// the per-metric latest value / sparkline / typical delta can never diverge between the two surfaces (the
+// parity contract). The seven series are computed once in `SleepModel.build` and read here.
+//
+// Telos 2.0 (coordinator decision 11): one attribute is a COMPACT tile, several per row — the grid is a
+// `TelosTileGrid` of `TelosMetricTile`s (2–3 per row by width, one column at accessibility sizes), each
+// hugging its content: glyph + label, numeral + unit, the vs-typical delta chip, a micro-sparkline, and
+// the honest states (absent → "—" + reason, carried → "Carried · d MMM").
 
-/// The "Night detail" card. A grid of UNIFORM fixed-height StatTiles (Rest, Efficiency, Consistency,
-/// Hours vs Needed, Restorative, Respiratory, Sleep Debt), each with its sparkline + typical caption,
-/// rendered from the shared [SleepModel].
+/// The "Night detail" card: Sleep Debt, Rest, Efficiency, Consistency, Hours vs Needed, Restorative and
+/// Respiratory as compact tiles, rendered from the shared [SleepModel].
 struct NightDetailCard: View {
     let model: SleepModel
 
-    private let tileColumns = [GridItem(.adaptive(minimum: 168), spacing: NoopMetrics.gap)]
-
     var body: some View {
-        // Per-tile latest value + history series (for the sparkline) + typical mean.
-        // All seven series are computed ONCE in the model build (each is a full pass over
-        // repo.days/repo.sleeps) — here we only read the memoized results.
-        let perf  = model.performance
-        let eff   = model.efficiency
-        let cons  = model.consistency
-        let need  = model.hoursVsNeeded
-        let rest  = model.restorative
-        let resp  = model.respiratory
-        let debt  = model.sleepDebt
-
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Night detail", overline: "Metrics")
-
-            #if os(iOS)
-            // On iOS, Sleep Debt is the actionable summary for the section, so it leads at the
-            // full two-column width. The remaining six peer metrics keep the established 2 × 3 grid.
-            StatTile(
-                label: "Sleep Debt",
-                value: debt.latest.map { durationText($0) } ?? "—",
-                caption: nightDetailDebtCaption(debt.latest),
-                accent: nightDetailDebtColor(debt.latest),
-                sparkline: spark(debt.series),
-                sparkColor: StrandPalette.metricRose)
-                .frame(maxWidth: .infinity)
-            #endif
-
-            LazyVGrid(columns: tileColumns, alignment: .leading, spacing: NoopMetrics.gap) {
-
-                StatTile(
-                    label: "Rest",
-                    value: pctValue(perf.latest),
-                    caption: tileCaption(latestDay: perf.latestDay, latest: perf.latest,
-                                         typical: perf.typical, suffix: "%"),
-                    accent: perf.latest.map { StrandPalette.recoveryColor($0) } ?? StrandPalette.textPrimary,
-                    sparkline: spark(perf.series),
-                    sparkColor: StrandPalette.restColor)
-
-                StatTile(
-                    label: "Efficiency",
-                    value: pctValue(eff.latest),
-                    caption: tileCaption(latestDay: eff.latestDay, latest: eff.latest,
-                                         typical: eff.typical, suffix: "%"),
-                    accent: StrandPalette.statusPositive,
-                    sparkline: spark(eff.series),
-                    sparkColor: StrandPalette.statusPositive)
-
-                StatTile(
-                    label: "Consistency",
-                    value: pctValue(cons.latest),
-                    caption: tileCaption(latestDay: cons.latestDay, latest: cons.latest,
-                                         typical: cons.typical, suffix: "%"),
-                    accent: cons.latest.map { StrandPalette.recoveryColor($0) } ?? StrandPalette.textPrimary,
-                    sparkline: spark(cons.series),
-                    sparkColor: StrandPalette.metricCyan)
-
-                StatTile(
-                    label: "Hours vs Needed",
-                    value: pctValue(need.latest),
-                    caption: tileCaption(latestDay: need.latestDay, latest: need.latest,
-                                         typical: need.typical, suffix: "%"),
-                    accent: need.latest.map { StrandPalette.recoveryColor(min(100, $0)) } ?? StrandPalette.textPrimary,
-                    sparkline: spark(need.series),
-                    sparkColor: StrandPalette.restColor)
-
-                StatTile(
-                    label: "Restorative",
-                    value: pctValue(rest.latest),
-                    caption: tileCaption(latestDay: rest.latestDay, latest: rest.latest,
-                                         typical: rest.typical, suffix: "%"),
-                    accent: StrandPalette.sleepREM,
-                    sparkline: spark(rest.series),
-                    sparkColor: StrandPalette.sleepREM)
-
-                StatTile(
-                    label: "Respiratory",
-                    value: rrValue(resp.latest),
-                    caption: tileCaption(latestDay: resp.latestDay, latest: resp.latest,
-                                         typical: resp.typical, suffix: " rpm", decimals: 1),
-                    accent: StrandPalette.metricPurple,
-                    sparkline: spark(resp.series),
-                    sparkColor: StrandPalette.metricPurple)
-
-                #if !os(iOS)
-                // macOS keeps the original adaptive dashboard instead of stretching one
-                // phone-width summary tile across an unbounded desktop detail pane.
-                StatTile(
-                    label: "Sleep Debt",
-                    value: debt.latest.map { durationText($0) } ?? "—",
-                    caption: nightDetailDebtCaption(debt.latest),
-                    accent: nightDetailDebtColor(debt.latest),
-                    sparkline: spark(debt.series),
-                    sparkColor: StrandPalette.metricRose)
-                #endif
+        // Per-tile latest value + history series (for the sparkline) + typical mean, all computed ONCE in
+        // the model build — here we only read the memoized results.
+        VStack(alignment: .leading, spacing: TelosSpace.sectionHeaderGap) {
+            SectionHeader("Night detail", overline: "Metrics", trailing: String(localized: "vs your typical"))
+            TelosTileGrid(maxColumns: 3) {
+                // Sleep Debt leads: it is the actionable summary of the section.
+                SleepMetricTile.debt(model.sleepDebt)
+                SleepMetricTile.make("Rest", metric: model.performance, unit: "%",
+                                     direction: .higherIsBetter, spark: TelosColor.rest, icon: "moon.fill")
+                SleepMetricTile.make("Efficiency", metric: model.efficiency, unit: "%",
+                                     direction: .higherIsBetter, spark: TelosColor.teal, icon: "waveform.path")
+                SleepMetricTile.make("Consistency", metric: model.consistency, unit: "%",
+                                     direction: .higherIsBetter, spark: TelosColor.lungs, icon: "clock")
+                SleepMetricTile.make("Hours vs Needed", metric: model.hoursVsNeeded, unit: "%",
+                                     direction: .higherIsBetter, spark: TelosColor.rest, icon: "scope")
+                SleepMetricTile.make("Restorative", metric: model.restorative, unit: "%",
+                                     direction: .higherIsBetter, spark: StrandPalette.sleepREM, icon: "sparkles")
+                // Breathing rate has no better/worse direction overnight: the chip shows movement only.
+                SleepMetricTile.make("Respiratory", metric: model.respiratory, unit: "rpm", digits: 1,
+                                     direction: .neutral, spark: TelosColor.violet, icon: "lungs")
             }
         }
     }
+}
 
-    // MARK: - Tile formatting (verbatim lift of the metricGrid-only SleepView helpers)
+// MARK: - The shared tile builder (Night detail + the hosted Hours-vs-Needed / Consistency cards)
 
-    private func pctValue(_ v: Double?) -> String {
-        v.map { "\(Int($0.rounded()))%" } ?? "—"
+/// One Sleep metric as a compact `TelosMetricTile`, built the SAME way on every surface that shows it so
+/// the Sleep tab's grid and Today's hosted single-metric cards can never disagree.
+enum SleepMetricTile {
+    /// Which way is better for THIS metric — decided here, never inferred from the sign alone (§5.5).
+    enum Direction { case higherIsBetter, lowerIsBetter, neutral }
+
+    /// Latest value, delta vs the wearer's typical, 30-night sparkline. A carried prior-day value is
+    /// stamped "Carried · d MMM" and gets no delta (#1946: never passed off as tonight's read). No value →
+    /// "—" + "Not enough data yet"; a value with no typical → a "—" delta chip (not computed).
+    static func make(_ label: LocalizedStringKey,
+                     metric: SleepModel.Metric,
+                     unit: String?,
+                     digits: Int = 0,
+                     direction: Direction,
+                     spark: Color,
+                     icon: String) -> TelosMetricTile {
+        let carried: Date? = carriedDate(metric)
+        let format: (Double) -> String = digits == 0 ? TelosFormat.integer : TelosFormat.decimal(digits)
+        let chip: TelosDelta? = carried == nil ? delta(metric, unit: unit, digits: digits, direction: direction) : nil
+        return TelosMetricTile(label,
+                               value: metric.latest,
+                               unit: unit,
+                               format: format,
+                               delta: chip,
+                               absentReason: Text("Not enough data yet"),
+                               carriedFrom: carried,
+                               sparkline: sparkline(metric.series),
+                               sparkColor: spark,
+                               icon: icon,
+                               iconTint: TelosColor.violetInk)
     }
 
-    private func rrValue(_ v: Double?) -> String {
-        v.map { String(format: "%.1f", $0) } ?? "—"
-    }
-
-    /// #1946: a carried prior-day value is stamped "Carried · <date>" instead of "vs typical", so it
-    /// is never passed off as tonight's read. Falls through to `vsTypical` when the value is today's
-    /// own (or there is no value).
-    private func tileCaption(latestDay: String?, latest: Double?, typical: Double?,
-                             suffix: String, decimals: Int = 0) -> String {
-        if let carried = SleepModel.carriedMetricCaption(latestDay: latestDay, latest: latest) {
-            return carried
+    /// Sleep debt: minutes shown as "1h 20m", with the on-target / below-need WORD as its chip (the word,
+    /// not colour alone, carries the status — `nightDetailDebtCaption`, the tested rule).
+    static func debt(_ metric: SleepModel.Metric) -> TelosMetricTile {
+        let carried: Date? = carriedDate(metric)
+        let status: TelosDelta? = metric.latest.map { debt in
+            TelosDelta(text: nightDetailDebtCaption(debt),
+                       tone: debt < SleepDebt.onTargetBandMin ? .better : .worse)
         }
-        return vsTypical(latest, typical, suffix: suffix, decimals: decimals)
+        return TelosMetricTile("Sleep Debt",
+                               value: metric.latest,
+                               format: { durationText($0) },
+                               delta: status,
+                               absentReason: Text("Not enough data yet"),
+                               carriedFrom: carried,
+                               sparkline: sparkline(metric.series),
+                               sparkColor: TelosColor.violet,
+                               icon: "arrow.down.right.circle",
+                               iconTint: TelosColor.violetInk)
     }
 
-    /// "+12% vs typical" / "−0.4 rpm vs typical" — the latest-vs-mean caption every tile carries.
-    private func vsTypical(_ latest: Double?, _ typical: Double?, suffix: String, decimals: Int = 0) -> String {
-        guard let latest, let typical, typical != 0 else { return String(localized: "vs typical - ") }
-        let diff = latest - typical
-        let sign = diff >= 0 ? "+" : "−"
-        let mag = abs(diff)
-        let num = decimals == 0 ? "\(Int(mag.rounded()))" : String(format: "%.\(decimals)f", mag)
-        return String(localized: "\(sign)\(num)\(suffix) vs typical")
+    private static func delta(_ metric: SleepModel.Metric, unit: String?, digits: Int,
+                              direction: Direction) -> TelosDelta? {
+        guard let latest = metric.latest else { return nil }
+        guard let typical = metric.typical, typical != 0 else { return .notComputed }
+        let diff: Double = latest - typical
+        let signed: String = TelosFormat.signedDelta(diff, digits: digits)
+        let tone: TelosDeltaTone
+        if signed.hasPrefix("\u{00B1}") || direction == .neutral {
+            tone = .flat
+        } else if (diff > 0) == (direction == .higherIsBetter) {
+            tone = .better
+        } else {
+            tone = .worse
+        }
+        let suffix: String = unit == "%" ? "%" : ""
+        return TelosDelta(text: signed + suffix, tone: tone)
     }
 
-    /// A sparkline needs at least two points; otherwise return nil so the tile stays clean.
-    private func spark(_ series: [Double]) -> [Double]? {
+    /// The day a carried value came from, or nil when the value is today's own (or absent). Same rule as
+    /// `SleepModel.carriedMetricCaption`.
+    private static func carriedDate(_ metric: SleepModel.Metric) -> Date? {
+        guard SleepModel.carriedMetricCaption(latestDay: metric.latestDay, latest: metric.latest) != nil,
+              let key = metric.latestDay else { return nil }
+        return dayKeyParser.date(from: key)
+    }
+
+    /// yyyy-MM-dd in the local zone (lenient, so a zone whose midnight is skipped still parses), so the
+    /// carried label names the same calendar day the key does.
+    private static let dayKeyParser: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        f.isLenient = true
+        return f
+    }()
+
+    /// A sparkline needs at least two points; otherwise nil so the tile stays clean.
+    static func sparkline(_ series: [Double]) -> [Double]? {
         let tail = Array(series.suffix(30))
         return tail.count > 1 ? tail : nil
     }
 
-    /// Minutes → "Xm" / "Yh Zm" (verbatim of `SleepView.durationText`). Kept local to the card so it
-    /// renders identically whether hosted in Today or shown in the Sleep tab.
-    private func durationText(_ minutes: Double) -> String {
+    /// Minutes → "Xm" / "Yh Zm" (verbatim of `SleepView.durationText`).
+    static func durationText(_ minutes: Double) -> String {
         let m = Swift.max(0, Int(minutes.rounded()))
         if m < 60 { return String(localized: "\(m)m") }
         return String(localized: "\(m / 60)h \(m % 60)m")

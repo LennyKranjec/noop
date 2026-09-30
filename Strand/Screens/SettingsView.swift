@@ -217,6 +217,12 @@ struct SettingsView: View {
     @AppStorage(SkyBehindCardsPrefs.enabledKey) private var skyBehindCards = true
     // Card-surface opacity percent (100 = solid). Reactive — moving the slider live-updates every card.
     @AppStorage(CardAppearancePrefs.opacityKey) private var cardOpacityPercent = CardAppearancePrefs.defaultPercent
+    /// The most transparency the slider offers: cards never draw below `TelosOpacity.cardRange` (55 %).
+    private var cardTransparencyMax: Double { (1 - TelosOpacity.cardRange.lowerBound) * 100 }
+    /// The transparency actually DRAWN for the stored opacity (clamped exactly as the cards clamp it).
+    private var cardTransparencyShown: Int {
+        100 - Int((TelosOpacity.cardOpacity(percent: cardOpacityPercent) * 100).rounded())
+    }
     // "Reduce motion in NOOP" (default OFF): pose every looping animation still and stop the decorative
     // tilt sensor, without needing system Low Power Mode or system Reduce Motion. Apple-only so far —
     // Android has no such toggle yet and its gate reads two signals, not three (#941).
@@ -623,7 +629,7 @@ struct SettingsView: View {
                                 .foregroundStyle(profile.stepsManualCoefficient > 0
                                                  ? StrandPalette.accent : StrandPalette.textTertiary)
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(TelosType.glyphChevron)
                                 .foregroundStyle(StrandPalette.textTertiary)
                         }
                     }
@@ -1291,27 +1297,49 @@ struct SettingsView: View {
                 rowDivider
                 // Theme presets — one-tap bundles coordinating accent + chart world + backdrop + card
                 // opacity. Derived (no stored value): tweaking any control below flips this to Custom.
-                FormRow(label: "Preset") {
-                    Picker("Preset", selection: themePresetBinding) {
-                        ForEach(ThemePreset.allCases) { p in
-                            Text(p.label).tag(p)
+                // 2.0 (§6.11): the presets as swatch chips — each shows its accent and its chart ramp — on
+                // the SAME derived binding the menu used. "Custom" is not a chip (it is what any hand-tuned
+                // combination reads as), so it is named beside the label instead.
+                VStack(alignment: .leading, spacing: TelosSpace.s) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text("Preset")
+                            .font(StrandFont.body)
+                            .foregroundStyle(TelosColor.textPrimary)
+                        Spacer(minLength: TelosSpace.s)
+                        if themePresetBinding.wrappedValue == .custom {
+                            Text(ThemePreset.custom.label)
+                                .telosScale()
+                                .textCase(.uppercase)
+                                .foregroundStyle(TelosColor.textTertiary)
                         }
                     }
-                    .labelsHidden()
-                    .pickerStyle(.menu)
-                    .tint(StrandPalette.accent)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: TelosSpace.s) {
+                            ForEach(ThemePreset.selectable) { preset in
+                                ThemePresetChip(preset: preset,
+                                                isOn: themePresetBinding.wrappedValue == preset) {
+                                    themePresetBinding.wrappedValue = preset
+                                }
+                            }
+                        }
+                        .padding(.vertical, TelosSpace.xxs)
+                    }
+                    .accessibilityElement(children: .contain)
                     .accessibilityLabel("Theme preset")
                 }
                 rowDivider
-                FormRow(label: "Theme") {
+                // Appearance mode as a segmented control (§6.11), same key and cases as the old menu.
+                VStack(alignment: .leading, spacing: TelosSpace.s) {
+                    Text("Theme")
+                        .font(StrandFont.body)
+                        .foregroundStyle(TelosColor.textPrimary)
                     Picker("Theme", selection: $appearanceRaw) {
                         ForEach(AppearanceMode.allCases) { mode in
                             Text(mode.label).tag(mode.rawValue)
                         }
                     }
                     .labelsHidden()
-                    .pickerStyle(.menu)
-                    .tint(StrandPalette.accent)
+                    .pickerStyle(.segmented)
                     .accessibilityLabel("Theme")
                 }
                 rowDivider   // #79: the segmented rows sat flush against each other (missing separator)
@@ -1467,23 +1495,27 @@ struct SettingsView: View {
 
                 // MARK: Card transparency — fade every frosted card's glass toward the background. Reactive
                 // @AppStorage, so all cards (incl. the ones on this screen) update live as you drag. The
-                // slider shows TRANSPARENCY (0 = solid, 100 = clear); we store the OPACITY percent.
+                // slider shows TRANSPARENCY (0 = solid); we store the OPACITY percent.
+                // 2.0 (§4.7): cards draw at 55…100 % opacity so text contrast holds, so the slider spans
+                // exactly that (transparency 0…45 %) and the figure shows what is DRAWN — an older stored
+                // value below 55 reads as 45 % (the stored percent itself is never rewritten here).
                 HStack {
                     Text("Card transparency")
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
-                    Text("\(100 - cardOpacityPercent)%")
-                        .font(StrandFont.subhead)
+                    Text("\(cardTransparencyShown)%")
+                        .font(TelosType.numeralS)
                         .foregroundStyle(StrandPalette.accent)
                 }
                 Slider(
                     value: Binding(
-                        get: { Double(100 - cardOpacityPercent) },
+                        get: { Double(cardTransparencyShown) },
                         set: { cardOpacityPercent = 100 - Int($0.rounded()) }
                     ),
-                    in: 0...100, step: 1
+                    in: 0...cardTransparencyMax, step: 1
                 )
+                .accessibilityValue(Text("\(cardTransparencyShown)%"))
                 .tint(StrandPalette.accent)
                 Text("How see-through the cards (Heart Rate, Key Metrics, Recovery Vitals, …) are. Left = solid, right = clear.")
                     .font(StrandFont.caption)
@@ -1746,7 +1778,7 @@ struct SettingsView: View {
                         .foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(TelosType.glyphChevron)
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
                 .contentShape(Rectangle())
@@ -1845,6 +1877,17 @@ struct SettingsView: View {
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
+
+                // 2.0 (HEALTH_V2 H1b / H4 / S2 + the energy check-in + strap cues): each group is its own
+                // small view so it owns its state (and its one store read) instead of widening this card.
+                rowDivider
+                FeaturesAlertsAndRituals()
+                rowDivider
+                SleepAnchorSettingsRows()
+                rowDivider
+                EnergySettingsRows()
+                rowDivider
+                FeaturesLinks()
             }
         }
     }
@@ -2702,7 +2745,7 @@ struct SettingsView: View {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "info.circle.fill")
                         .foregroundStyle(StrandPalette.textTertiary)
-                        .font(.system(size: 13))
+                        .font(TelosType.footnote)
                         .accessibilityHidden(true)
                     Text("Importing overwrites everything currently on \(Platform.deviceNounPhrase). Your old data is kept in a side file just in case. NOOP needs a relaunch for an import to take effect. Export CSV writes a WHOOP-format zip of your days, sleeps, workouts and journal that re-imports into NOOP on Mac, iPhone, or Android. On-device computed rows are marked APPROXIMATE in its Source column; the full backup stays the lossless restore path.")
                         .font(StrandFont.footnote)
@@ -2717,7 +2760,7 @@ struct SettingsView: View {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(StrandPalette.statusWarning)
-                        .font(.system(size: 13))
+                        .font(TelosType.footnote)
                         .accessibilityHidden(true)
                     Text("This is a plain, unencrypted archive — anyone who gets the file can open it with any zip tool. Store it somewhere you trust.")
                         .font(StrandFont.footnote)
@@ -2881,7 +2924,7 @@ struct SettingsView: View {
                         }
                         Spacer()
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(TelosType.glyphChevron)
                             .foregroundStyle(StrandPalette.textTertiary)
                             .accessibilityHidden(true)
                     }
@@ -2910,7 +2953,7 @@ struct SettingsView: View {
                         }
                         Spacer()
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(TelosType.glyphChevron)
                             .foregroundStyle(StrandPalette.textTertiary)
                             .accessibilityHidden(true)
                     }
@@ -2942,7 +2985,7 @@ struct SettingsView: View {
                         }
                         Spacer()
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(TelosType.glyphChevron)
                             .foregroundStyle(StrandPalette.textTertiary)
                             .accessibilityHidden(true)
                     }
@@ -2972,7 +3015,7 @@ struct SettingsView: View {
                         }
                         Spacer()
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(TelosType.glyphChevron)
                             .foregroundStyle(StrandPalette.textTertiary)
                             .accessibilityHidden(true)
                     }
@@ -3098,7 +3141,7 @@ struct SettingsView: View {
                         }
                         Spacer()
                         Image(systemName: "arrow.up.right")
-                            .font(.system(size: 12, weight: .semibold))
+                            .font(TelosType.glyphChevron)
                             .foregroundStyle(StrandPalette.textTertiary)
                             .accessibilityHidden(true)
                     }
@@ -3115,7 +3158,7 @@ struct SettingsView: View {
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: "exclamationmark.triangle.fill")
                         .foregroundStyle(StrandPalette.statusWarning)
-                        .font(.system(size: 13))
+                        .font(TelosType.footnote)
                         .accessibilityHidden(true)
                     Text("NOOP is not a medical device. It is for informational and personal-insight purposes only and is not intended to diagnose, treat, cure or prevent any condition. Talk to a clinician for medical advice.")
                         .font(StrandFont.footnote)
@@ -3149,7 +3192,7 @@ struct SettingsView: View {
     private func attribution(repo: String, note: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "chevron.right")
-                .font(.system(size: 9, weight: .semibold))
+                .font(TelosType.glyphDelta)
                 .foregroundStyle(StrandPalette.accent)
                 .accessibilityHidden(true)
             Text(repo)
@@ -3185,7 +3228,7 @@ struct SettingsView: View {
                 }
                 Spacer()
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(TelosType.glyphChevron)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .accessibilityHidden(true)
             }
@@ -3220,7 +3263,7 @@ struct SettingsView: View {
                 let warning = days <= 3
                 HStack(alignment: .top, spacing: 8) {
                     Image(systemName: warning ? "exclamationmark.triangle.fill" : "clock.badge.checkmark")
-                        .font(.system(size: 13))
+                        .font(TelosType.footnote)
                         .foregroundStyle(warning ? StrandPalette.statusWarning : StrandPalette.textTertiary)
                         .accessibilityHidden(true)
                     Text(expiryMessage(days))
@@ -3255,10 +3298,10 @@ struct SettingsView: View {
 
     private func iphoneExpectationLine(_ text: String) -> some View {
         HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "circle.fill")
-                .font(.system(size: 4))
-                .foregroundStyle(StrandPalette.textTertiary)
-                .padding(.top, 6)
+            Circle()
+                .fill(TelosColor.textTertiary)
+                .frame(width: 4, height: 4)
+                .padding(.top, 7)
                 .accessibilityHidden(true)
             Text(text)
                 .font(StrandFont.footnote)
@@ -3272,9 +3315,10 @@ struct SettingsView: View {
 
     private var rowDivider: some View {
         Rectangle()
-            .fill(StrandPalette.hairline)
-            .frame(height: 1)
-            .padding(.vertical, 4)
+            .fill(TelosColor.lineSoft)
+            .frame(height: TelosStroke.line)
+            .padding(.vertical, TelosSpace.xs)
+            .accessibilityHidden(true)
     }
 }
 
@@ -3330,7 +3374,7 @@ private struct SettingsDisclosureGroup<Content: View>: View {
                     }
                     Spacer(minLength: NoopMetrics.space2)
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(TelosType.glyphChevron)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .rotationEffect(.degrees(isExpanded ? 0 : -90))
                         .accessibilityHidden(true)
@@ -3360,23 +3404,42 @@ private struct SettingsSection<Content: View>: View {
     let blurb: LocalizedStringKey
     @ViewBuilder var content: () -> Content
 
+    // 2.0 (§6.11): a grouped row card — the glass card surface (radius `card`, 16 pt padding), a
+    // wide-tracked `scale` overline, the section's glyph on a 28 pt icon plate beside a `title2` title,
+    // the blurb in `subhead` secondary, then the section's rows. No shadow, no tint wash.
     var body: some View {
-        StrandCard(padding: NoopMetrics.space5) {
-            VStack(alignment: .leading, spacing: NoopMetrics.space4) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Settings").strandOverline()
-                    HStack(spacing: NoopMetrics.space2 + 2) {
+        StrandCard(padding: TelosSpace.l) {
+            VStack(alignment: .leading, spacing: TelosSpace.m) {
+                VStack(alignment: .leading, spacing: TelosSpace.xs) {
+                    Text("Settings")
+                        .telosScale()
+                        .textCase(.uppercase)
+                        .foregroundStyle(TelosColor.textTertiary)
+                    HStack(spacing: TelosSpace.s) {
                         Image(systemName: icon)
+                            .font(TelosType.glyphRow)
                             .foregroundStyle(StrandPalette.accent)
+                            .frame(width: 28, height: 28)
+                            .background(
+                                RoundedRectangle(cornerRadius: TelosRadius.plate, style: .continuous)
+                                    .fill(TelosColor.surfaceInset)
+                            )
+                            .overlay(
+                                RoundedRectangle(cornerRadius: TelosRadius.plate, style: .continuous)
+                                    .strokeBorder(TelosColor.line, lineWidth: TelosStroke.line)
+                            )
                             .accessibilityHidden(true)
                         Text(title)
-                            .font(StrandFont.title2)
-                            .foregroundStyle(StrandPalette.textPrimary)
+                            .font(TelosType.title2)
+                            .foregroundStyle(TelosColor.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityAddTraits(.isHeader)
                 }
                 Text(blurb)
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .font(TelosType.subhead)
+                    .foregroundStyle(TelosColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
                 content()
             }
@@ -3407,7 +3470,7 @@ private struct DiagnosticsSheet: View {
                 Spacer()
                 Button(action: onClose) {
                     Image(systemName: "xmark.circle.fill")
-                        .font(.system(size: 20))
+                        .font(TelosType.title2)
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
                 .buttonStyle(.plain)
@@ -3583,7 +3646,7 @@ struct StepsCalibrationSheet: View {
             Spacer()
             Button(action: onClose) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 22))
+                    .font(TelosType.title2)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             .buttonStyle(.plain)
@@ -3949,7 +4012,7 @@ private struct FormRow<Control: View>: View {
             control()
                 .layoutPriority(1)
         }
-        .frame(minHeight: 32)
+        .frame(minHeight: TelosSpace.hitTarget)
     }
 }
 
@@ -3988,5 +4051,400 @@ private extension Color {
         #endif
         return String(format: "#%02X%02X%02X",
                       Int((r * 255).rounded()), Int((g * 255).rounded()), Int((b * 255).rounded()))
+    }
+}
+
+
+// MARK: - 2.0 Features: alerts, rituals, sleep schedule, energy, strap cues (HEALTH_V2 H1b / H4 / S2)
+//
+// Each group reads its own store once (on appear) into local state and writes through the store's own
+// API, so no row here observes a broad model for a single field (§2.1 rule 5).
+
+/// A small wide-tracked group label inside a Settings card.
+private struct SettingsSubhead: View {
+    let title: LocalizedStringKey
+
+    var body: some View {
+        Text(title)
+            .telosScale()
+            .textCase(.uppercase)
+            .foregroundStyle(TelosColor.textTertiary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.top, TelosSpace.xs)
+            .accessibilityAddTraits(.isHeader)
+    }
+}
+
+/// A switch with its explanation underneath — the Features card's row shape.
+private struct SettingsToggleRow: View {
+    let title: LocalizedStringKey
+    let help: LocalizedStringKey?
+    @Binding var isOn: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: TelosSpace.xs) {
+            Toggle(isOn: $isOn) {
+                Text(title)
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(TelosColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .toggleStyle(.switch)
+            .tint(StrandPalette.accent)
+            .frame(minHeight: TelosSpace.hitTarget)
+            if let help {
+                Text(help)
+                    .font(StrandFont.caption)
+                    .foregroundStyle(TelosColor.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
+}
+
+/// The full-screen stress alert (H1b: OFF by default — the stress reading keeps running either way) and
+/// one switch per day-ritual slot (H4: morning on, midday and evening off by default).
+private struct FeaturesAlertsAndRituals: View {
+    /// Mirrors `LiveStressMonitor.alertScreenEnabledKey`; written only through `setAlertScreenEnabled`,
+    /// which also marks the one-time off-migration done so a switch turned back on stays on.
+    @AppStorage(LiveStressMonitor.alertScreenEnabledKey) private var stressScreen = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: TelosSpace.s) {
+            SettingsSubhead(title: "Alerts and rituals")
+            SettingsToggleRow(
+                title: "Full-screen stress alert",
+                help: "Interrupts you when two ten-minute readings in a row are high while you are still. Off by default; the stress reading itself keeps running, and the stress tile still opens the full screen.",
+                isOn: Binding(get: { stressScreen },
+                              set: { LiveStressMonitor.setAlertScreenEnabled($0) }))
+            #if canImport(UserNotifications)
+            RitualSlotToggles()
+            #endif
+        }
+        // Runs the one-time "off from 2.0" migration before the switch is trusted, so an install that
+        // had the old default-on value never shows ON for a screen that will not appear.
+        .onAppear { _ = LiveStressMonitor.alertScreenEnabled() }
+    }
+}
+
+#if canImport(UserNotifications)
+/// One switch per ritual slot, through `DayRitualScheduler` (which registers or cancels just that slot).
+private struct RitualSlotToggles: View {
+    /// Read once on appear; the scheduler's keys are the source of truth.
+    @State private var enabled: [DayRitual: Bool] = [:]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: TelosSpace.xs) {
+            ForEach(DayRitual.allCases) { slot in
+                Toggle(isOn: binding(slot)) {
+                    VStack(alignment: .leading, spacing: TelosSpace.xxs) {
+                        Text(LocalizedStringKey(slot.title))
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(TelosColor.textPrimary)
+                        Text(verbatim: clock(slot))
+                            .font(TelosType.scaleNumber)
+                            .foregroundStyle(TelosColor.textTertiary)
+                    }
+                }
+                .toggleStyle(.switch)
+                .tint(StrandPalette.accent)
+                .frame(minHeight: TelosSpace.hitTarget)
+            }
+            Text("A coach notification at each switched-on time. The morning one follows your sleep plan's wake when there is one. Midday and evening are off by default.")
+                .font(StrandFont.caption)
+                .foregroundStyle(TelosColor.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+        .onAppear {
+            for slot in DayRitual.allCases { enabled[slot] = DayRitualScheduler.isEnabled(slot: slot) }
+        }
+    }
+
+    private func binding(_ slot: DayRitual) -> Binding<Bool> {
+        Binding(
+            get: { enabled[slot] ?? DayRitualScheduler.defaultEnabled(slot) },
+            set: { on in
+                enabled[slot] = on
+                Task { await DayRitualScheduler.setEnabled(on, slot: slot) }
+            })
+    }
+
+    /// The slot's time: the morning's anchored minute for today when the sleep plan gives one.
+    private func clock(_ slot: DayRitual) -> String {
+        let minute = DayRitualScheduler.minute(
+            slot, morningAnchorMinute: SleepScheduleProvider.shared.morningRitualMinute(on: Date()))
+        return String(format: "%02d:%02d", minute / 60, minute % 60)
+    }
+}
+#endif
+
+/// The sleep anchor's two preferences (HEALTH_V2 S2) and whether the WiZ lights follow it.
+///
+/// TARGET WAKE is optional: off, the plan anchors on the median of the wearer's own wakes. Turning it on
+/// starts from the wake-buzz alarm when one is armed (the alarm is the wearer's own stated wake), else
+/// 07:00 — a setting the wearer then edits, never a measurement.
+private struct SleepAnchorSettingsRows: View {
+    @State private var targetWake: Int?
+    @State private var weekendOffset = 0
+    @State private var wizFollow = true
+    @State private var loaded = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: TelosSpace.s) {
+            SettingsSubhead(title: "Sleep schedule")
+            SettingsToggleRow(
+                title: "Target wake time",
+                help: targetHelp,
+                isOn: Binding(get: { targetWake != nil },
+                              set: { on in setTarget(on ? Self.startingWake() : nil) }))
+            if let wake = targetWake {
+                HStack(spacing: TelosSpace.m) {
+                    Text("Wake at")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(TelosColor.textPrimary)
+                    Spacer(minLength: 0)
+                    DatePicker("", selection: Binding(get: { Self.date(minutes: wake) },
+                                                      set: { setTarget(Self.minutes(from: $0)) }),
+                               displayedComponents: .hourAndMinute)
+                        .labelsHidden()
+                        .datePickerStyle(.compact)
+                        .accessibilityLabel(Text("Target wake time"))
+                }
+                .frame(minHeight: TelosSpace.hitTarget)
+                if WakeBuzzAlarm.isEnabled(), WakeBuzzAlarm.minutes() != wake {
+                    Button {
+                        setTarget(WakeBuzzAlarm.minutes())
+                    } label: {
+                        Text("Use my wake-buzz alarm (\(Self.clock(WakeBuzzAlarm.minutes())))")
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.accent)
+                            .frame(minHeight: TelosSpace.hitTarget)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            Stepper(value: Binding(get: { weekendOffset }, set: { setWeekend($0) }),
+                    in: 0...SleepAnchor.maxWeekendOffsetMin, step: 15) {
+                VStack(alignment: .leading, spacing: TelosSpace.xxs) {
+                    Text("Weekend wake")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(TelosColor.textPrimary)
+                    weekendLine
+                        .font(StrandFont.caption)
+                        .foregroundStyle(TelosColor.textTertiary)
+                }
+            }
+            .frame(minHeight: TelosSpace.hitTarget)
+            SettingsToggleRow(
+                title: "WiZ lights follow the sleep plan",
+                help: "Evening scene at lights-dim, wind-down at the wind-down start, daylight at your wake. Off, or with no plan yet, the fixed times in Smart lights apply.",
+                isOn: Binding(get: { wizFollow },
+                              set: { on in
+                                  wizFollow = on
+                                  WizLightStore.shared.followSleepAnchor = on
+                              }))
+        }
+        .onAppear {
+            guard !loaded else { return }
+            loaded = true
+            let provider = SleepScheduleProvider.shared
+            targetWake = provider.targetWakeMinutes
+            weekendOffset = provider.weekendOffsetMinutes
+            wizFollow = WizLightStore.shared.followSleepAnchor
+        }
+    }
+
+    private var targetHelp: LocalizedStringKey {
+        targetWake == nil
+            ? "Off: your sleep plan anchors on the usual time you wake."
+            : "Bedtime, wind-down and the morning ritual are planned back from this time."
+    }
+
+    private var weekendLine: Text {
+        weekendOffset == 0
+            ? Text("Same as weekdays")
+            : Text("\(weekendOffset) min later on Saturday and Sunday")
+    }
+
+    private func setTarget(_ minutes: Int?) {
+        targetWake = minutes
+        SleepScheduleProvider.shared.targetWakeMinutes = minutes
+    }
+
+    private func setWeekend(_ minutes: Int) {
+        SleepScheduleProvider.shared.weekendOffsetMinutes = minutes
+        weekendOffset = SleepScheduleProvider.shared.weekendOffsetMinutes
+    }
+
+    /// Where a newly switched-on target starts: the armed wake-buzz alarm, else 07:00.
+    private static func startingWake() -> Int {
+        WakeBuzzAlarm.isEnabled() ? WakeBuzzAlarm.minutes() : WakeBuzzAlarm.defaultMinutes
+    }
+
+    private static func clock(_ minutes: Int) -> String {
+        String(format: "%02d:%02d", minutes / 60, minutes % 60)
+    }
+
+    private static func date(minutes: Int) -> Date {
+        Calendar.current.date(bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: Date()) ?? Date()
+    }
+
+    private static func minutes(from date: Date) -> Int {
+        let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+        guard let h = c.hour, let m = c.minute else { return WakeBuzzAlarm.defaultMinutes }
+        return h * 60 + m
+    }
+}
+
+/// The energy tile's hide switch (`EnergyCheckInStore.hiddenKey`: the tile hides only once the wearer's
+/// check-ins show it does not track them) and a reset of the calibration.
+private struct EnergySettingsRows: View {
+    @AppStorage(EnergyCheckInStore.hiddenKey) private var hidden = false
+    @State private var confirmReset = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: TelosSpace.s) {
+            SettingsSubhead(title: "Energy")
+            SettingsToggleRow(
+                title: "Hide the energy tile if it doesn't track me",
+                help: "Only takes effect once your check-ins show the estimate doesn't match how you feel. Until then the tile stays, labelled as an estimate.",
+                isOn: $hidden)
+            Button {
+                confirmReset = true
+            } label: {
+                Text("Reset energy calibration")
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(TelosColor.critical)
+                    .frame(minHeight: TelosSpace.hitTarget, alignment: .leading)
+            }
+            .buttonStyle(.plain)
+            .confirmationDialog("Reset energy calibration?", isPresented: $confirmReset, titleVisibility: .visible) {
+                Button("Reset", role: .destructive) { EnergyCheckInStore.shared.clear() }
+                Button("Cancel", role: .cancel) { }
+            } message: {
+                Text("Forgets every energy check-in, so the tile calibrates against you from scratch.")
+            }
+        }
+    }
+}
+
+/// Doors to the settings that live on their own screens: Strap cues, and (iOS) the Telos Lift programs.
+private struct FeaturesLinks: View {
+    #if os(iOS)
+    @State private var showLiftPlan = false
+    #endif
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            NavigationLink {
+                StrapCuesSettingsView(engine: StrapCueEngine.shared)
+            } label: {
+                linkRow("Strap cues", systemImage: "applewatch.radiowaves.left.and.right",
+                        subtitle: "Sitting break, breathing pacer, evening cues and timers on your strap.")
+            }
+            .buttonStyle(TelosRowButtonStyle())
+            #if os(iOS)
+            Rectangle().fill(TelosColor.lineSoft).frame(height: TelosStroke.line).accessibilityHidden(true)
+            Button {
+                showLiftPlan = true
+            } label: {
+                linkRow("Strength programs", systemImage: "dumbbell",
+                        subtitle: "Edit the Telos Lift programs: exercises, sets, reps and rest.")
+            }
+            .buttonStyle(TelosRowButtonStyle())
+            .sheet(isPresented: $showLiftPlan) {
+                // The editor owns its NavigationStack.
+                LiftProgramEditorView(programs: LiftProgramStore.shared)
+            }
+            #endif
+        }
+    }
+
+    private func linkRow(_ title: LocalizedStringKey, systemImage: String,
+                         subtitle: LocalizedStringKey) -> some View {
+        HStack(spacing: TelosSpace.m) {
+            Image(systemName: systemImage)
+                .font(TelosType.glyphRow)
+                .foregroundStyle(TelosColor.textSecondary)
+                .frame(width: 28, height: 28)
+                .background(RoundedRectangle(cornerRadius: TelosRadius.plate, style: .continuous)
+                    .fill(TelosColor.surfaceInset))
+                .overlay(RoundedRectangle(cornerRadius: TelosRadius.plate, style: .continuous)
+                    .strokeBorder(TelosColor.line, lineWidth: TelosStroke.line))
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: TelosSpace.xxs) {
+                Text(title)
+                    .font(StrandFont.body)
+                    .foregroundStyle(TelosColor.textPrimary)
+                Text(subtitle)
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(TelosColor.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: TelosSpace.s)
+            Image(systemName: "chevron.right")
+                .font(TelosType.glyphChevron)
+                .foregroundStyle(TelosColor.textTertiary)
+                .accessibilityHidden(true)
+        }
+        .padding(.vertical, TelosSpace.s)
+        .frame(maxWidth: .infinity, minHeight: TelosSpace.rowMinHeight, alignment: .leading)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+    }
+}
+
+
+// MARK: - Theme preset swatch chip (§6.11)
+
+/// One preset as a chip: the preset's accent as a dot, its chart world as a three-stop ramp bar, and the
+/// name. Selected = the accent-lit edge; plays the `select` haptic like `TelosChip`.
+private struct ThemePresetChip: View {
+    let preset: ThemePreset
+    let isOn: Bool
+    let action: () -> Void
+
+    var body: some View {
+        let shape = Capsule(style: .continuous)
+        let accent = preset.recipe?.accent.accent ?? StrandPalette.accent
+        return Button {
+            TelosHaptics.play(.select)
+            action()
+        } label: {
+            HStack(spacing: TelosSpace.s) {
+                Circle()
+                    .fill(accent)
+                    .frame(width: 10, height: 10)
+                Capsule(style: .continuous)
+                    .fill(LinearGradient(colors: ramp, startPoint: .leading, endPoint: .trailing))
+                    .frame(width: 22, height: 6)
+                Text(preset.label)
+                    .font(TelosType.subhead.weight(.semibold))
+                    .foregroundStyle(isOn ? TelosColor.textPrimary : TelosColor.textSecondary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, TelosSpace.m)
+            .frame(minHeight: 32)
+            .background(shape.fill(isOn ? StrandPalette.accentMuted : TelosColor.glassFill))
+            .overlay(shape.strokeBorder(isOn ? accent : TelosColor.line, lineWidth: TelosStroke.line))
+            .frame(minHeight: TelosSpace.hitTarget)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(TelosPressButtonStyle())
+        .accessibilityLabel(Text(preset.label))
+        .accessibilityAddTraits(isOn ? .isSelected : [])
+    }
+
+    /// The preset's chart world, as the swatch draws it: the default ramp's own stops, or the Classic
+    /// throwback's red → amber → green read through the status tokens.
+    private var ramp: [Color] {
+        switch preset.recipe?.chart ?? .titanium {
+        case .titanium:
+            return [StrandPalette.recovery000, StrandPalette.recovery055, StrandPalette.recovery100]
+        case .classic:
+            return [TelosColor.critical, TelosColor.warning, TelosColor.positive]
+        }
     }
 }

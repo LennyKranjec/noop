@@ -22,7 +22,7 @@ struct StagesVsTypicalCard: View {
         // over repo.days) and read here.
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             SectionHeader("Stages vs typical", overline: "Last night")
-            NoopCard(tint: StrandPalette.restColor) {
+            NoopCard(tint: TelosColor.violet) {
                 VStack(alignment: .leading, spacing: NoopMetrics.space4) {
                     stageRow(stage: String(localized: "Deep"),  last: s.deep,  typical: model.typicalDeepMin,  nightTotal: s.total, color: StrandPalette.sleepDeep)
                     Divider().overlay(StrandPalette.hairline)

@@ -6,6 +6,11 @@ import StrandDesign
 // Full-screen activity picker for live start (and the merge-name reuse). Catalogue, recents, GPS
 // flags, and `onStart` / `RecentSportsPrefs` are unchanged — only the presentation is rebuilt into
 // large destination cards with native Liquid Glass search.
+//
+// TELOS 2.0 (DESIGN_V2 §4.9, §6.7): the canvas ground; activity cards and recent chips are FLAT faux glass
+// (translucent fill + the luminous 1 pt edge — no shadow, no material: they sit in a scroll view, where
+// glass is never allowed); the only glass is the close control (role 5), whose pre-iOS-26 fallback is the
+// solid `nativeLiquidGlassFallbackSurface`.
 
 /// Public entry used by Live / Workouts. Keeps the prior `onStart` + optional title overrides so the
 /// merge-name prompt can reuse the same browser.
@@ -65,7 +70,7 @@ struct WorkoutSelectionScreen: View {
                         emptyResults
                             .padding(.top, NoopMetrics.space8)
                     } else {
-                        LazyVStack(spacing: NoopMetrics.space4) {
+                        LazyVStack(spacing: TelosSpace.cardGap) {
                             ForEach(filtered) { sport in
                                 WorkoutSelectionCard(sport: sport, actionVerb: actionVerb) {
                                     select(sport.name)
@@ -84,16 +89,17 @@ struct WorkoutSelectionScreen: View {
             #endif
             .scrollDismissesKeyboard(.interactively)
             .background {
-                StrandPalette.surfaceBase.ignoresSafeArea()
+                TelosColor.canvas.ignoresSafeArea()
             }
             .navigationBarTitleDisplayModeCompat()
             .toolbar {
                 ToolbarItem(placement: .topBarTrailingCompat) {
                     Button { dismiss() } label: {
                         Image(systemName: "xmark")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(StrandPalette.textPrimary)
-                            .frame(width: 34, height: 34)
+                            .font(TelosType.glyphControl)
+                            .foregroundStyle(TelosColor.textPrimary)
+                            .frame(width: 36, height: 36)
+                            .frame(width: TelosSpace.hitTarget, height: TelosSpace.hitTarget)
                             .contentShape(Circle())
                     }
                     .nativeLiquidGlassWorkoutSelectionControl()
@@ -109,8 +115,8 @@ struct WorkoutSelectionScreen: View {
     private var headerCopy: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space2) {
             Text(heading)
-                .font(StrandFont.rounded(34, weight: .bold))
-                .foregroundStyle(StrandPalette.textPrimary)
+                .font(TelosType.title)
+                .foregroundStyle(TelosColor.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
             Text(explainer)
                 .font(StrandFont.subhead)
@@ -124,8 +130,9 @@ struct WorkoutSelectionScreen: View {
     private var recentSection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space3) {
             Text("Recent")
-                .font(StrandFont.overline).tracking(StrandFont.overlineTracking)
-                .foregroundStyle(StrandPalette.textSecondary)
+                .telosScale()
+                .textCase(.uppercase)
+                .foregroundStyle(TelosColor.textTertiary)
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: NoopMetrics.space2) {
                     ForEach(recentSports) { sport in
@@ -139,8 +146,8 @@ struct WorkoutSelectionScreen: View {
     private var emptyResults: some View {
         VStack(spacing: NoopMetrics.space3) {
             Image(systemName: "magnifyingglass")
-                .font(.system(size: 28, weight: .semibold))
-                .foregroundStyle(StrandPalette.textTertiary)
+                .font(TelosType.glyphEmpty)
+                .foregroundStyle(TelosColor.textTertiary)
             Text("No workouts found")
                 .font(StrandFont.headline)
                 .foregroundStyle(StrandPalette.textPrimary)
@@ -191,12 +198,14 @@ struct RecentWorkoutChip: View {
                     .foregroundStyle(StrandPalette.textPrimary)
                     .lineLimit(1)
             }
-            .padding(.horizontal, NoopMetrics.space3)
-            .padding(.vertical, NoopMetrics.space2)
-            .frame(minHeight: 44)
+            .padding(.horizontal, TelosSpace.m)
+            .padding(.vertical, TelosSpace.s)
+            .frame(minHeight: TelosSpace.hitTarget)
+            .background(Capsule(style: .continuous).fill(TelosColor.glassFill))
+            .overlay(Capsule(style: .continuous).strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line))
             .contentShape(Capsule())
         }
-        .nativeLiquidGlassWorkoutSelectionControl(capsule: true)
+        .buttonStyle(TelosPressButtonStyle())
         .accessibilityLabel(Text("\(sport.name) workout"))
         .accessibilityHint(Text("Double tap to start"))
     }
@@ -217,14 +226,16 @@ struct WorkoutSelectionCard: View {
     var body: some View {
         Button(action: onSelect) {
             HStack(alignment: .center, spacing: NoopMetrics.space4) {
-                WorkoutTypeIcon(workoutType: sport.name, size: 42, weight: .medium, color: accent)
+                WorkoutTypeIcon(workoutType: sport.name, size: 30, weight: .medium, color: accent)
                     .frame(width: 52, height: 52)
-                    .background(accent.opacity(0.12), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                    .background(accent.opacity(TelosOpacity.wash), in: RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
+                        .strokeBorder(accent.opacity(TelosOpacity.border), lineWidth: TelosStroke.line))
 
                 VStack(alignment: .leading, spacing: NoopMetrics.space1) {
                     Text(sport.name)
-                        .font(StrandFont.title2)
-                        .foregroundStyle(StrandPalette.textPrimary)
+                        .font(TelosType.headline)
+                        .foregroundStyle(TelosColor.textPrimary)
                         .multilineTextAlignment(.leading)
                         .fixedSize(horizontal: false, vertical: true)
                     if !meta.isEmpty {
@@ -234,21 +245,23 @@ struct WorkoutSelectionCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
                 Image(systemName: "play.fill")
-                    .font(.system(size: 18, weight: .bold))
-                    .foregroundStyle(StrandPalette.goldDeepText)
-                    .frame(width: 52, height: 52)
+                    .font(TelosType.glyphControl)
+                    .foregroundStyle(TelosColor.onAccent)
+                    .frame(width: TelosSpace.hitTarget, height: TelosSpace.hitTarget)
                     .background(Circle().fill(StrandPalette.accent))
                     .accessibilityHidden(true)
             }
-            .padding(.horizontal, NoopMetrics.space5)
-            .padding(.vertical, NoopMetrics.space5)
-            .frame(maxWidth: .infinity, minHeight: 96, alignment: .leading)
+            .padding(.horizontal, TelosSpace.l)
+            .padding(.vertical, TelosSpace.m)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            // Flat faux glass (the card surface honours the root card-opacity environment). NO shadow:
+            // these cards scroll, and a shadow per card is exactly the stacked cost §2.1 rule 4 forbids.
             .background {
-                NoopPanelSurface(tint: accent, cornerRadius: 28, elevated: true)
+                FrostedCardSurface(tint: nil, cornerRadius: TelosRadius.card)
             }
-            .contentShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+            .contentShape(RoundedRectangle(cornerRadius: TelosRadius.card, style: .continuous))
         }
-        .buttonStyle(LiquidPressStyle())
+        .buttonStyle(TelosPressButtonStyle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text(accessibilityLabelText))
         .accessibilityHint(Text("Double tap to \(actionVerb.lowercased())"))
@@ -305,12 +318,12 @@ struct WorkoutActivityMetadataView: View {
                 HStack(spacing: 4) {
                     if let symbol = item.symbol {
                         Image(systemName: symbol)
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(TelosType.glyphDelta)
                     }
                     Text(item.text)
-                        .font(StrandFont.footnote)
+                        .font(TelosType.footnote)
                 }
-                .foregroundStyle(StrandPalette.textSecondary)
+                .foregroundStyle(TelosColor.textSecondary)
             }
         }
         .accessibilityHidden(true)
@@ -345,21 +358,21 @@ extension View {
 // MARK: - Native Liquid Glass chrome (selection browser)
 
 private extension View {
-    /// Circular (or capsule) interactive Liquid Glass for close / recent chips. iOS 26 uses the
-    /// platform glass button; macOS and older iOS keep circular geometry with the shared material
-    /// fallback already used by Home header / live-workout controls.
+    /// The close control's chrome — glass role 5 (a close button on a full-screen cover). iOS 26 uses the
+    /// platform glass button; macOS and older iOS the ONE solid fallback (`nativeLiquidGlassFallbackSurface`:
+    /// `surfaceRaised` + 1 pt `line`) — no material, no blur.
     @ViewBuilder
     func nativeLiquidGlassWorkoutSelectionControl(capsule: Bool = false) -> some View {
         self.nativeLiquidGlassButtonChrome(controlSize: .regular, capsule: capsule) {
-            self
-                .buttonStyle(LiquidPressStyle())
-                .background {
-                    if capsule {
-                        Capsule().fill(.ultraThinMaterial)
-                    } else {
-                        Circle().fill(.ultraThinMaterial)
-                    }
+            Group {
+                if capsule {
+                    self.buttonStyle(TelosPressButtonStyle())
+                        .nativeLiquidGlassFallbackSurface(Capsule(style: .continuous))
+                } else {
+                    self.buttonStyle(TelosPressButtonStyle())
+                        .nativeLiquidGlassFallbackSurface(Circle())
                 }
+            }
         }
     }
 

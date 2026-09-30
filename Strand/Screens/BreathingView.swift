@@ -29,7 +29,13 @@ struct BreathingView: View {
 
 private struct BreathingContent: View {
 
-    @EnvironmentObject private var model: AppModel
+    /// NOT observed (§2.1 rule 5): the model is CALLED (buzz, realtime HR, the controller) and its one
+    /// displayed field, the spike-filtered `bpm`, arrives through a de-duplicated subscription below.
+    @Environment(\.appModelRef) private var modelRef
+    private var model: AppModel { requireAppModel(modelRef) }
+    @State private var bpm: Int?
+    /// The first pass reads the model directly (observes nothing) until the subscription lands.
+    private var currentBpm: Int? { bpm ?? model.bpm }
     @EnvironmentObject private var live: LiveState
     /// When the user has Reduce Motion on, the large repeating inhale/exhale orb zoom is
     /// suppressed — the breath is cued by the phase word + haptics instead. (a11y)
@@ -132,13 +138,15 @@ private struct BreathingContent: View {
     @State private var rrBuffer: [Int] = []
     @State private var rmssd: Double? = nil
 
-    @State private var baselineRmssd: Double? = nil
-    @State private var sessionRmssdSum: Double = 0
-    @State private var sessionRmssdCount: Int = 0
-    @State private var sessionRmssdPeak: Double = 0
-    @State private var endedOutcome: String? = nil
-
-    @AppStorage("breathe.lastOutcome") private var lastStoredOutcome = ""
+    /// The honest session flow around the pacer (HEALTH_V2 S4): 90 s quiet reading → the pacer →
+    /// 90 s quiet reading, scored from two gated quiet windows. Replaces the old "+X % vs start · peak Y ms"
+    /// outcome (H10): that figure came from 30 uncleaned beats against a start that could be two beats,
+    /// with a cherry-picked peak, so it is gone rather than shown. (`breathe.lastOutcome`, where that string
+    /// was kept, is no longer written or read.)
+    @StateObject private var recorder = BreathSessionRecorder()
+    /// The stored sessions (the "Last session" card when nothing is running). Publishes only on a new
+    /// session, so observing it is cheap.
+    @ObservedObject private var breathLog = BreathSessionLog.shared
 
     /// Opt-in audio pacer — a soft tone at each phase change (rising on the inhale, falling on the
     /// exhale). Default OFF (manual-first). The tones go through an ambient session category, so the
@@ -191,7 +199,7 @@ private struct BreathingContent: View {
             switch mode {
             case .breathe:   breatheMode
             case .resonance: ResonanceModeView(controller: controller, live: live, lockedBpm: lockedBpm)
-            case .calm:      CalmModeView(controller: controller, live: live, model: model)
+            case .calm:      CalmModeView(controller: controller, live: live, bpm: currentBpm)
             }
         }
         .onReceive(phaseTimer) { now in
@@ -208,9 +216,14 @@ private struct BreathingContent: View {
         // rrSeq-keyed: equal consecutive packets both count (see RRPacketObserver.swift).
         .onRRPackets(live) { rr in
             ingest(rr)
+            recorder.ingest(rr)
+        }
+        // The `!=` guard is load-bearing: the publisher is rebuilt each body pass and replays its value.
+        .onReceive(model.$bpm.removeDuplicates()) { next in
+            if bpm != next { bpm = next }
         }
         .onChangeCompat(of: pace) { newPace in
-            if running { stop() }
+            if running || recorder.isRunning { stop(abandon: true) }
             if case .catalog(let id) = newPace,
                let proto = BreathProtocolCatalog.protocolById(id) {
                 sessionLength = SessionLength.from(recommendedMs: proto.recommendedDurationMs)
@@ -220,8 +233,9 @@ private struct BreathingContent: View {
             breathEduSheet
         }
         .onChangeCompat(of: mode) { _ in
-            // Leaving a mode stops any session it owns so two clocks never run at once.
-            if running { stop() }
+            // Leaving a mode stops any session it owns so two clocks never run at once. The recorder is
+            // cancelled, not finished: a paced phase that ran is still stored, its post reading abstains.
+            if running || recorder.isRunning { stop(abandon: true) }
             controller.stop()
         }
         .onChangeCompat(of: audioCues) { on in
@@ -233,8 +247,16 @@ private struct BreathingContent: View {
             model.startRealtimeHR()
             controllerBox.prepare(model: model, live: live)
             if audioCues { tonePlayer.activate() }
+            // Report this screen's sessions to the strap-cue engine (no sitting-break buzz mid-session)
+            // and follow the strap's own pacer. Idempotent; the app model also attaches it (hand-off).
+            StrapBreathSessionBridge.shared.attach(to: StrapCueEngine.shared)
         }
-        .onDisappear { model.stopRealtimeHR(); stop(); controller.stop(); tonePlayer.deactivate() }
+        .onDisappear {
+            model.stopRealtimeHR()
+            stop(abandon: true)
+            controller.stop()
+            tonePlayer.deactivate()
+        }
     }
 
     // MARK: - Mode switch
@@ -249,13 +271,22 @@ private struct BreathingContent: View {
 
     @ViewBuilder private var breatheMode: some View {
         statusRow
+        BreathSessionPhaseBanner(recorder: recorder)
         orbCard
         controlRow
-        if let line = outcomeLine { outcomeCard(line) }
+        BreathSessionResultCard(recorder: recorder)
+        if recorder.phase == .idle, let last = breathLog.sessions.last {
+            BreathSessionResultPanel(result: last.outcome, comparison: nil, title: "Last session",
+                                     at: Date(timeIntervalSince1970: TimeInterval(last.startTs)))
+        }
         readoutRow
         coherenceCard
+        BreathPreRmssdTrendCard()
         if !live.bonded { hapticHint }
     }
+
+    /// A session is under way: the quiet reading before, the pacer, or the quiet reading after.
+    private var sessionActive: Bool { running || recorder.isRunning }
 
     /// Start a one-minute haptic breathing cue at the user's locked resonance pace (or 5.5 fallback) —
     /// the L3 card's "Breathe now" action. Switches to Resonance/Breathe context and runs the controller.
@@ -270,9 +301,9 @@ private struct BreathingContent: View {
 
     private var statusRow: some View {
         HStack(spacing: 10) {
-            StatePill(running ? "Session live" : "Ready",
-                      tone: running ? .accent : .neutral,
-                      pulsing: running)
+            StatePill(sessionActive ? "Session live" : "Ready",
+                      tone: sessionActive ? .accent : .neutral,
+                      pulsing: sessionActive)
 
             if live.bonded {
                 StatePill("Haptics on", tone: .positive, showsDot: true)
@@ -312,8 +343,10 @@ private struct BreathingContent: View {
                         showEdu = true
                     } label: {
                         Image(systemName: "info.circle")
-                            .font(.system(size: 16, weight: .semibold))
+                            .font(TelosType.glyphField)
                             .foregroundStyle(StrandPalette.textSecondary)
+                            .frame(minWidth: TelosSpace.hitTarget, minHeight: TelosSpace.hitTarget)
+                            .contentShape(Rectangle())
                     }
                     .accessibilityLabel(String(localized: "Protocol info"))
                     if selectedBpm > 0 {
@@ -328,12 +361,14 @@ private struct BreathingContent: View {
                 }
 
                 ZStack {
-                    ScenicHeroBackground(domain: .rest, starCount: 56)
-                        .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
+                    // The rest-hued bioluminescent pool behind the pacer — one static radial gradient
+                    // (no blur, no clock; the retired scenic starfield is gone). The orb is the one place
+                    // `breath` motion runs, as content (§6.10).
+                    TelosRadialGlow(color: TelosColor.rest, intensity: 0.22, radius: 170)
                     breathingOrb
                         .padding(.vertical, 6)
                 }
-                .frame(height: 320)
+                .frame(height: 300)
                 .frame(maxWidth: .infinity)
 
                 Text(running ? phaseWord : selectedTagline)
@@ -355,7 +390,7 @@ private struct BreathingContent: View {
     private var audioCueToggle: some View {
         HStack(spacing: 10) {
             Image(systemName: audioCues ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                .font(.system(size: 13, weight: .semibold))
+                .font(TelosType.glyphChevron)
                 .foregroundStyle(audioCues ? StrandPalette.restBright : StrandPalette.textTertiary)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 1) {
@@ -488,7 +523,7 @@ private struct BreathingContent: View {
                     .frame(width: maxDiameter, height: maxDiameter)
 
                 VStack(spacing: 2) {
-                    if let bpm = model.bpm {
+                    if let bpm = currentBpm {
                         CountUpText(value: Double(bpm),
                                     format: { "\(Int($0.rounded()))" },
                                     font: StrandFont.number(40),
@@ -513,12 +548,19 @@ private struct BreathingContent: View {
     // MARK: - Controls
 
     private var controlRow: some View {
-        HStack(spacing: NoopMetrics.space3) {
-            NoopButton(running ? "Stop session" : "Start session",
-                       systemImage: running ? "stop.fill" : "play.fill",
-                       kind: running ? .destructive : .primary, fullWidth: true) {
-                running ? stop() : start()
+        // Stop during the quiet reading BEFORE cancels the session (nothing paced yet); stop while pacing
+        // starts the quiet reading AFTER. During that reading the banner above owns the only action (skip),
+        // so Start waits until the result is in.
+        let stoppable = running || recorder.phase == .preQuiet
+        return HStack(spacing: NoopMetrics.space3) {
+            NoopButton(stoppable ? "Stop session" : "Start session",
+                       systemImage: stoppable ? "stop.fill" : "play.fill",
+                       kind: stoppable ? .destructive : .primary, fullWidth: true) {
+                if running { stop() }
+                else if recorder.phase == .preQuiet { stop(abandon: true) }
+                else { start() }
             }
+            .disabled(recorder.phase == .postQuiet)
 
             NoopButton("Test buzz", systemImage: "waveform.path", kind: .secondary) {
                 model.buzz(loops: 1)
@@ -528,76 +570,44 @@ private struct BreathingContent: View {
         }
     }
 
-    // MARK: - Session outcome
-
-    private var outcomeLine: String? {
-        if running { return nil }
-        if let endedOutcome {
-            return endedOutcome == "—" ? String(localized: "No RMSSD · not enough R-R data")
-                                       : String(localized: "RMSSD \(endedOutcome)")
-        }
-        if !lastStoredOutcome.isEmpty { return String(localized: "Last session: \(lastStoredOutcome)") }
-        return nil
-    }
-
-    private func outcomeCard(_ line: String) -> some View {
-        StrandCard(padding: 14, tint: StrandPalette.restColor) {
-            HStack(spacing: 10) {
-                Image(systemName: "wind")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(StrandPalette.restBright)
-                    .accessibilityHidden(true)
-                Text(line)
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                Spacer(minLength: 8)
-                if let chip = outcomeTrend {
-                    TrendChip(text: chip.text, color: chip.color)
-                }
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    private var outcomeTrend: (text: String, color: Color)? {
-        guard let source = endedOutcome ?? (lastStoredOutcome.isEmpty ? nil : lastStoredOutcome),
-              source != "—",
-              let pct = Self.leadingSignedPercent(source) else { return nil }
-        let sign = pct >= 0 ? "+" : "−"
-        let color = pct >= 0 ? StrandPalette.statusPositive : StrandPalette.textTertiary
-        return ("\(sign)\(abs(pct))% HRV", color)
-    }
-
-    private static func leadingSignedPercent(_ s: String) -> Int? {
-        guard let pctRange = s.range(of: "%") else { return nil }
-        let head = s[s.startIndex..<pctRange.lowerBound]
-            .replacingOccurrences(of: "+", with: "")
-            .trimmingCharacters(in: .whitespaces)
-        return Int(head)
-    }
-
     // MARK: - Readouts
 
+    /// Heart rate · live RMSSD · pace as compact tiles (decision 11): an absent reading is "—" with its
+    /// reason, never 0. The rolling RMSSD is a LIVE readout only — it is not the session's outcome.
     private var readoutRow: some View {
-        HStack(spacing: NoopMetrics.gap) {
-            readoutTile(label: String(localized: "Heart rate"),
-                        value: model.bpm.map { "\($0)" } ?? "—",
-                        unit: "bpm",
-                        accent: StrandPalette.metricRose,
-                        caption: live.worn ? String(localized: "Live") : String(localized: "Strap not worn"))
+        VStack(alignment: .leading, spacing: TelosSpace.xs) {
+            readoutTiles
+            if selectedBpm > 0 {
+                // The inhale / exhale split of the selected pace (was the Pace tile's caption).
+                Text(verbatim: paceCaption)
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(TelosColor.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+        }
+    }
 
-            readoutTile(label: String(localized: "HRV (RMSSD)"),
-                        value: rmssd.map { String(format: "%.0f", $0) } ?? "—",
-                        unit: "ms",
-                        accent: StrandPalette.metricPurple,
-                        caption: rrBuffer.isEmpty ? String(localized: "Waiting for R-R") : String(localized: "Last \(rrBuffer.count) beats"))
-
-            readoutTile(label: String(localized: "Pace"),
-                        value: selectedBpm > 0 ? String(format: "%.1f", selectedBpm) : (isGuided ? "—" : "—"),
-                        unit: "br/min",
-                        accent: StrandPalette.restBright,
-                        caption: paceCaption)
+    private var readoutTiles: some View {
+        TelosTileGrid(maxColumns: 3) {
+            TelosMetricTile("Heart rate",
+                            value: currentBpm.map(Double.init),
+                            unit: "bpm",
+                            absentReason: live.worn ? Text("Waiting for the strap") : Text("Strap not worn"),
+                            ink: TelosColor.heart,
+                            icon: "heart", iconTint: TelosColor.heart)
+            TelosMetricTile("HRV (RMSSD)",
+                            value: rmssd,
+                            unit: "ms",
+                            absentReason: Text("Waiting for R-R"),
+                            ink: TelosColor.focus,
+                            icon: "waveform.path.ecg", iconTint: TelosColor.focus)
+            TelosMetricTile("Pace",
+                            value: selectedBpm > 0 ? selectedBpm : nil,
+                            unit: "br/min",
+                            format: TelosFormat.decimal(1),
+                            absentReason: Text(verbatim: paceCaption),
+                            ink: TelosColor.rest,
+                            icon: "wind", iconTint: TelosColor.rest)
         }
     }
 
@@ -615,33 +625,6 @@ private struct BreathingContent: View {
         return parts.joined(separator: " · ") + "s"
     }
 
-    private func readoutTile(label: String, value: String, unit: String,
-                             accent: Color, caption: String) -> some View {
-        StrandCard(padding: 14, tint: StrandPalette.restColor) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text(label.uppercased()).strandOverline()
-                Spacer(minLength: 6)
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(value)
-                        .font(StrandFont.number(26))
-                        .foregroundStyle(accent)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.6)
-                        .contentTransition(.numericText())
-                    Text(unit)
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                }
-                Text(caption)
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .lineLimit(1)
-                    .padding(.top, 4)
-            }
-        }
-        .frame(height: NoopMetrics.tileHeight)
-    }
-
     // MARK: - Coherence estimate
 
     private var coherenceCard: some View {
@@ -656,9 +639,14 @@ private struct BreathingContent: View {
                 // The coherence estimate as a filling liquid tube (the same horizontal vessel Today's Key
                 // Metrics use), Rest-tinted, filling to the RMSSD-derived fraction — replaces the flat
                 // gradient capsule. Live so it sloshes as the reading updates through a session.
-                LiquidTube(frac: coherenceFraction, tint: StrandPalette.restBright, height: 10)
-                    .accessibilityLabel("Coherence estimate")
-                    .accessibilityValue("\(Int(coherenceFraction * 100)) percent")
+                // Nil RMSSD is "—" with its reason, never an empty tube that reads as a zero (§2.3).
+                if let fraction = coherenceFraction {
+                    LiquidTube(frac: fraction, tint: StrandPalette.restBright, height: 10)
+                        .accessibilityLabel("Coherence estimate")
+                        .accessibilityValue("\(Int(fraction * 100)) percent")
+                } else {
+                    AbsentValue(reason: "Waiting for R-R", arrangement: .inline)
+                }
 
                 Text("Estimate only: a higher RMSSD while paced usually means your parasympathetic \"rest\" branch is engaging. It is not a clinical reading; trends over a session matter more than any single number.")
                     .font(StrandFont.footnote)
@@ -668,8 +656,8 @@ private struct BreathingContent: View {
         }
     }
 
-    private var coherenceFraction: CGFloat {
-        guard let r = rmssd else { return 0 }
+    private var coherenceFraction: CGFloat? {
+        guard let r = rmssd else { return nil }
         return CGFloat(min(max(r / 120.0, 0), 1))
     }
 
@@ -715,18 +703,23 @@ private struct BreathingContent: View {
 
     // MARK: - Session control (catalog stages + guided timer)
 
+    /// Start: the 90 s quiet reading first (no pacer, no buzz), then the pacer exactly as before.
     private func start() {
+        guard !running, !recorder.isRunning else { return }
+        ScreenIdle.keepAwake(true)
+        sessionSeconds = 0
+        breathCount = 0
+        recorder.begin(paceBpm: selectedBpm, repo: model.repo) { startPacer() }
+    }
+
+    /// The pacer itself — unchanged from the pre-S4 trainer.
+    private func startPacer() {
         running = true
         ScreenIdle.keepAwake(true)
         sessionSeconds = 0
         breathCount = 0
         stageIndex = 0
         phaseLabel = nil
-        endedOutcome = nil
-        baselineRmssd = rmssd
-        sessionRmssdSum = 0
-        sessionRmssdCount = 0
-        sessionRmssdPeak = 0
         if isGuided {
             phase = .textOnly
             phaseLabel = selectedProtocol?.title
@@ -737,7 +730,10 @@ private struct BreathingContent: View {
         }
     }
 
-    private func stop() {
+    /// Stop the pacer. `abandon: false` (the wearer's Stop, or the session length reached) moves on to
+    /// the quiet reading after; `abandon: true` (mode/pace change, leaving the screen) cancels the
+    /// recorder — a paced phase that ran is still stored with its post reading abstaining.
+    private func stop(abandon: Bool = false) {
         let wasRunning = running
         running = false
         ScreenIdle.keepAwake(false)
@@ -748,7 +744,11 @@ private struct BreathingContent: View {
         // the strap to stop haptics too (best-effort; no-op when unbonded / on a 5/MG). Only when we were
         // actually buzzing, so a stop on an idle trainer stays silent.
         if wasRunning { model.stopHaptics() }
-        if wasRunning { captureOutcome() }
+        if abandon {
+            recorder.cancel()
+        } else if wasRunning {
+            recorder.finish()
+        }
         if reduceMotion {
             orbProgress = 0
         } else {
@@ -759,21 +759,6 @@ private struct BreathingContent: View {
     }
 
     private let reducedSteadyOrb: CGFloat = 0.5
-
-    private func captureOutcome() {
-        guard sessionSeconds >= 120 else { return }
-        guard let base = baselineRmssd, base > 0, sessionRmssdCount > 0 else {
-            endedOutcome = "—"
-            return
-        }
-        let mean = sessionRmssdSum / Double(sessionRmssdCount)
-        let pct = Int(((mean - base) / base * 100).rounded())
-        let pctStr = String(format: "%+d%%", pct)
-        let peakStr = String(format: "%.0f", sessionRmssdPeak)
-        let core = String(localized: "\(pctStr) vs start · peak \(peakStr) ms")
-        endedOutcome = core
-        lastStoredOutcome = core
-    }
 
     private func resonanceStages() -> [BreathStage] {
         let bpm = lockedBpm ?? ResonanceEngine.fallbackBpm
@@ -855,13 +840,9 @@ private struct BreathingContent: View {
         if rrBuffer.count > rrWindow {
             rrBuffer.removeFirst(rrBuffer.count - rrWindow)
         }
+        // A live readout only (the tile + the coherence estimate); the session outcome comes from the
+        // recorder's gated quiet windows.
         rmssd = computeRMSSD(rrBuffer)
-        if running, let r = rmssd {
-            if baselineRmssd == nil && sessionSeconds <= 60 { baselineRmssd = r }
-            sessionRmssdSum += r
-            sessionRmssdCount += 1
-            sessionRmssdPeak = max(sessionRmssdPeak, r)
-        }
     }
 
     private func computeRMSSD(_ intervals: [Int]) -> Double? {
@@ -1192,9 +1173,17 @@ private struct ResonanceModeView: View {
                         .frame(width: 34, alignment: .leading)
                     // Each pace's RSA amplitude as a static liquid tube — the same horizontal vessel used
                     // across the redesign. An unscored pace reads muted via a dimmed Rest tint.
-                    LiquidTube(frac: (s.rsaAmplitude ?? 0) / max(maxRsa, 0.0001),
-                               tint: StrandPalette.restBright.opacity(s.scored ? 1 : 0.35),
-                               height: 8, animated: false)
+                    // An unscored pace (no amplitude) is a bare dashed track, never a zero-filled tube.
+                    if let amp = s.rsaAmplitude {
+                        LiquidTube(frac: amp / max(maxRsa, 0.0001),
+                                   tint: StrandPalette.restBright.opacity(s.scored ? 1 : 0.35),
+                                   height: 8, animated: false)
+                    } else {
+                        Capsule(style: .continuous)
+                            .strokeBorder(TelosColor.lineStrong,
+                                          style: StrokeStyle(lineWidth: TelosStroke.line, dash: [2, 3]))
+                            .frame(height: 8)
+                    }
                     Text(s.rsaAmplitude.map { String(format: "%.1f", $0) } ?? "—")
                         .font(StrandFont.captionNumber)
                         .foregroundStyle(s.scored ? StrandPalette.textSecondary : StrandPalette.textTertiary)
@@ -1238,7 +1227,8 @@ private struct ResonanceModeView: View {
 private struct CalmModeView: View {
     @ObservedObject var controller: BiofeedbackController
     @ObservedObject var live: LiveState
-    @ObservedObject var model: AppModel
+    /// The spike-filtered heart rate, handed down by the parent (no model observation here).
+    let bpm: Int?
 
     private var running: Bool {
         if case .calmMe = controller.session { return true }
@@ -1275,7 +1265,7 @@ private struct CalmModeView: View {
     }
 
     /// L2 needs the encrypted channel (haptic-first) and a resting-band HR to read H₀.
-    private var canRun: Bool { controller.canBuzz && (model.bpm.map { $0 >= 55 && $0 <= 120 } ?? false) }
+    private var canRun: Bool { controller.canBuzz && (bpm.map { $0 >= 55 && $0 <= 120 } ?? false) }
 
     private var startCard: some View {
         StrandCard {
@@ -1311,7 +1301,7 @@ private struct CalmModeView: View {
                 }
 
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    if let bpm = model.bpm {
+                    if let bpm {
                         CountUpText(value: Double(bpm),
                                     format: { "\(Int($0.rounded()))" },
                                     font: StrandFont.number(48),
@@ -1355,7 +1345,7 @@ private struct CalmModeView: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 10) {
                     Image(systemName: controller.calmDidNotFall ? "minus.circle" : "checkmark.circle")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(TelosType.glyphRow)
                         .foregroundStyle(controller.calmDidNotFall ? StrandPalette.textTertiary : StrandPalette.statusPositive)
                         .accessibilityHidden(true)
                     Text(line)
@@ -1368,6 +1358,50 @@ private struct CalmModeView: View {
                     Text("That's normal. A paced breath often settles things when a metronome alone doesn't.")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+}
+
+// MARK: - Pre-session RMSSD trend (HEALTH_V2 S4: "a weekly trend of pre-session RMSSD")
+
+/// The weekly median of the quiet reading BEFORE each breathing session — descriptive, no target. Shown on
+/// Breathe, in the Focus tab and in Health Monitor. Only gated readings count
+/// (`BreathSessionLog.weeklyPreRmssd`); with no stored session at all the card is not drawn (nothing to
+/// describe yet), with one week it shows that week and no line.
+///
+/// COST: static. Observes the session log, which publishes only when a session is stored.
+struct BreathPreRmssdTrendCard: View {
+    @ObservedObject private var log = BreathSessionLog.shared
+
+    var body: some View {
+        if !log.sessions.isEmpty {
+            let weeks = BreathSessionLog.weeklyPreRmssd(log.sessions)
+            let latest = weeks.last
+            StrandCard(tint: TelosColor.rest) {
+                VStack(alignment: .leading, spacing: TelosSpace.s) {
+                    MetricReadout("Before-session HRV",
+                                  value: latest?.medianMs,
+                                  unit: "ms",
+                                  absentReason: Text("Not enough data yet"),
+                                  provenance: latest.map { w in
+                                      TelosProvenance(sourceText: Text("Weekly median"),
+                                                      window: Text("\(w.n) sessions"))
+                                  },
+                                  ink: TelosColor.rest)
+                    if weeks.count >= 2 {
+                        // Static micro-line over the last 12 weeks; a week without a gated reading is
+                        // simply not in the series (no bridging value is invented).
+                        TelosLuminousSparkline(values: weeks.suffix(12).map { $0.medianMs },
+                                               color: TelosColor.rest)
+                            .frame(height: 28)
+                            .accessibilityHidden(true)
+                    }
+                    Text("The quiet reading before each breathing session, as a weekly median. It describes, it is not a target.")
+                        .font(TelosType.caption)
+                        .foregroundStyle(TelosColor.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

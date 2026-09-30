@@ -29,8 +29,9 @@ struct NOOPProvider: TimelineProvider {
 }
 
 /// The glanceable widget — the iOS analogue of the macOS menu-bar extra.
-/// Home Screen families mirror Today's hero trio (Charge · Effort · Rest) as score rings. Lock Screen
-/// accessories are compact: a single line, a gauge, or the rectangular glyph-over-value trio.
+/// Home Screen families mirror Today's hero trio (Rest · Charge · Effort, the Telos 2.0 order) as thin
+/// luminous `TelosRing`s. Lock Screen accessories are compact: a single line, a gauge, or the rectangular
+/// glyph-over-value trio.
 struct NOOPWidgetView: View {
     @Environment(\.widgetFamily) private var family
     /// `.fullColor` on the home screen and in the gallery; `.vibrant` or `.accented` on the lock screen,
@@ -47,6 +48,7 @@ struct NOOPWidgetView: View {
             recoveryGauge
         case .accessoryInline:
             Text(inlineText)
+                .monospacedDigit()
         case .accessoryRectangular:
             rectangular
         case .systemLarge:
@@ -59,20 +61,20 @@ struct NOOPWidgetView: View {
         }
     }
 
-    // MARK: - Colours (match Today's GlowRing domain constants)
+    // MARK: - The trio (Telos metric identity: ring hue + text ink)
 
-    private var chargeColor: Color {
-        snap.recovery != nil ? StrandPalette.chargeColor : StrandPalette.textTertiary
-    }
-
-    /// Fixed domain accent — same as `TodayView.effortRing` (`StrandPalette.effortColor`), not the
-    /// value-sampled `effortTint` ramp the old footer bolt used.
-    private var effortColor: Color {
-        snap.effort != nil ? StrandPalette.effortColor : StrandPalette.textTertiary
-    }
-
-    private var restColor: Color {
-        snap.rest != nil ? StrandPalette.restColor : StrandPalette.textTertiary
+    /// One of the three hero scores, resolved once so every family draws the same figures.
+    private struct Score {
+        let label: String
+        /// SF Symbol naming the metric where a word does not fit (the small tile, the lock screen).
+        let symbol: String
+        /// The centre read-out, already formatted; nil = absent ("—").
+        let text: String?
+        /// The ring's value on the stored 0–100 axis; nil = absent (dashed bare track, never a zero arc).
+        let value: Double?
+        let color: Color
+        let ink: Color
+        let accessibilityOutOf: Int
     }
 
     /// Effort centre/accessory text: pre-formatted #313 display when present, else whole-number 0–100.
@@ -80,26 +82,74 @@ struct NOOPWidgetView: View {
         snap.effortDisplay ?? snap.effort.map(String.init)
     }
 
+    private var restScore: Score {
+        Score(label: "Rest", symbol: "moon.fill",
+              text: snap.rest.map(String.init), value: snap.rest.map { Double($0) },
+              color: TelosColor.rest, ink: TelosColor.restInk, accessibilityOutOf: 100)
+    }
+
+    private var chargeScore: Score {
+        Score(label: "Charge", symbol: "figure.mind.and.body",
+              text: snap.recovery.map(String.init), value: snap.recovery.map { Double($0) },
+              color: TelosColor.charge, ink: TelosColor.chargeInk, accessibilityOutOf: 100)
+    }
+
+    private var effortScore: Score {
+        // The ring is always the stored 0–100 axis so WHOOP 0–21 and native 0–100 agree on arc length;
+        // the centre prints the wearer's own scale.
+        Score(label: "Effort", symbol: "figure.strengthtraining.traditional",
+              text: effortText, value: snap.effort.map { Double($0) },
+              color: TelosColor.effort, ink: TelosColor.effortInk,
+              accessibilityOutOf: (snap.effortWhoop == true) ? 21 : 100)
+    }
+
+    /// Rest · Charge · Effort — the reference's order (DESIGN_V2 §6.13 and the Today hero).
+    private var scores: [Score] { [restScore, chargeScore, effortScore] }
+
+    /// "C 72 · E 41 · R 88" (DESIGN_V2 §6.13). Every slot is always present, so an absent figure reads
+    /// "C —" rather than vanishing — the slot's letter says WHICH figure is missing.
     private var inlineText: String {
-        var parts: [String] = []
-        if let r = snap.recovery { parts.append("Charge \(r)%") }
-        if let b = snap.bpm { parts.append("\(b) bpm") }
-        return parts.isEmpty ? "NOOP" : parts.joined(separator: " · ")
+        let absent = TelosType.absent
+        let c = snap.recovery.map(String.init) ?? absent
+        let e = effortText ?? absent
+        let r = snap.rest.map(String.init) ?? absent
+        return "C \(c) · E \(e) · R \(r)"
     }
 
     // MARK: - Lock Screen accessories
 
+    /// The Charge gauge. With NO Charge it does not draw a gauge at all: a `Gauge` has no absent state,
+    /// and an empty arc at 0 would read as a scored zero. The absent tile is the system's accessory disc
+    /// with the heart glyph over "—".
+    @ViewBuilder
     private var recoveryGauge: some View {
-        Gauge(value: Double(snap.recovery ?? 0), in: 0...100) {
-            Image(systemName: "heart.fill")
-        } currentValueLabel: {
-            Text(snap.recovery.map { "\($0)" } ?? "–")
+        if let recovery = snap.recovery {
+            Gauge(value: Double(recovery), in: 0...100) {
+                Image(systemName: "heart.fill")
+            } currentValueLabel: {
+                Text("\(recovery)")
+            }
+            .gaugeStyle(.accessoryCircular)
+            .tint(TelosColor.charge)
+        } else {
+            ZStack {
+                AccessoryWidgetBackground()
+                VStack(spacing: 0) {
+                    Image(systemName: "heart.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(HierarchicalShapeStyle.secondary)
+                    Text(verbatim: TelosType.absent)
+                        .font(TelosType.numeralFont(size: 20, weight: .medium))
+                        .foregroundStyle(HierarchicalShapeStyle.secondary)
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Text("Charge"))
+            .accessibilityValue(Text("No data"))
         }
-        .gaugeStyle(.accessoryCircular)
-        .tint(chargeColor)
     }
 
-    /// Lock-Screen rectangular accessory: Charge · Effort · Rest, same trio as the Home Screen rings.
+    /// Lock-Screen rectangular accessory: Rest · Charge · Effort, same trio as the Home Screen rings.
     private var rectangular: some View {
         // The lock screen gives this family roughly 72pt of height for everything. A "NOOP" title spent
         // a whole row of that restating which widget the user chose to add, leaving the three scores —
@@ -108,17 +158,14 @@ struct NOOPWidgetView: View {
         VStack(spacing: 2) {
             if let bpm = snap.bpm {
                 Text("\(bpm) bpm")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(HierarchicalShapeStyle.secondary)
                     .frame(maxWidth: .infinity, alignment: .trailing)
             }
             HStack(alignment: .top, spacing: 0) {
-                accessoryScore("Charge", symbol: "figure.mind.and.body",
-                               text: snap.recovery.map { "\($0)%" }, tint: chargeColor)
-                accessoryScore("Effort", symbol: "figure.strengthtraining.traditional",
-                               text: effortText, tint: effortColor)
-                accessoryScore("Rest", symbol: "moon.fill",
-                               text: snap.rest.map { "\($0)%" }, tint: restColor)
+                ForEach(scores.indices, id: \.self) { i in
+                    accessoryScore(scores[i])
+                }
             }
         }
     }
@@ -131,35 +178,39 @@ struct NOOPWidgetView: View {
     /// as that colour — it lands as an arbitrary grey whose luminance nobody chose, so Charge, Effort and
     /// Rest stopped being distinguishable AND stopped being legible. `.primary`/`.secondary` are the two
     /// levels the system is designed to map, so the value reads at full strength and the glyph above it
-    /// recedes, which is the hierarchy the tint was there to express in the first place.
+    /// recedes, which is the hierarchy the tint was there to express in the first place. The glyph —
+    /// not the colour — names the metric, so nothing here relies on colour alone.
     ///
     /// The `.fullColor` branch is defensive rather than hot: this family renders `.vibrant` on the lock
     /// screen and in StandBy, so the tint realistically only reaches a gallery preview.
-    private func accessoryScore(_ label: String, symbol: String, text: String?, tint: Color) -> some View {
+    private func accessoryScore(_ score: Score) -> some View {
         VStack(spacing: 1) {
             // Glyph over value, the shape the request asked for. A 9pt word under each number was
             // spending scarce height on text nobody needs twice — the icons carry the metric identity.
-            Image(systemName: symbol)
+            Image(systemName: score.symbol)
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(renderingMode == .fullColor
-                                 ? AnyShapeStyle(StrandPalette.textTertiary)
+                                 ? AnyShapeStyle(TelosColor.textTertiary)
                                  : AnyShapeStyle(HierarchicalShapeStyle.secondary))
-            Text(text ?? "–")
-                .font(.system(size: 15, weight: .semibold, design: .rounded))
-                .foregroundStyle(scoreStyle(hasValue: text != nil, tint: tint))
+            Text(score.text ?? TelosType.absent)
+                // Medium, not the app's light numerals: vibrant lock-screen rendering thins strokes, and
+                // a light 16 pt figure there stops being legible.
+                .font(TelosType.numeralFont(size: 16, weight: .medium))
+                .foregroundStyle(scoreStyle(hasValue: score.text != nil, tint: score.ink))
+                .lineLimit(1)
                 .minimumScaleFactor(0.7)
         }
         .frame(maxWidth: .infinity)
         // An icon says nothing to VoiceOver, and the word it replaced was the only thing naming this
         // metric. Collapse the cell to one element that still speaks "Charge, 68 percent".
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(label))
+        .accessibilityLabel(Text(score.label))
         // Plain literal, not String(localized:). This extension's sources are StrandiOSWidgets +
         // StrandiOSShared only — Strand/Resources/Localizable.xcstrings is NOT in the target, and
         // String(localized:) resolves against Bundle.main, which for an app extension is the extension's
         // own bundle. It would compile, look localized, and render English in every locale. Every other
         // string in this file is a bare literal for the same reason: the widget is not localized yet.
-        .accessibilityValue(Text(text ?? "No data"))
+        .accessibilityValue(Text(score.text ?? "No data"))
     }
 
     private func scoreStyle(hasValue: Bool, tint: Color) -> AnyShapeStyle {
@@ -169,35 +220,85 @@ struct NOOPWidgetView: View {
             return hasValue ? AnyShapeStyle(HierarchicalShapeStyle.primary)
                             : AnyShapeStyle(HierarchicalShapeStyle.secondary)
         }
-        return hasValue ? AnyShapeStyle(tint) : AnyShapeStyle(StrandPalette.textTertiary)
+        return hasValue ? AnyShapeStyle(tint) : AnyShapeStyle(TelosColor.textTertiary)
     }
 
     // MARK: - Home Screen: systemSmall
 
-    /// Compact three-ring hero. Diameter is capped so three hard-framed circles fit the narrowest
-    /// systemSmall content width (SE ~128pt after padding) without overlapping — see review on #1022.
+    /// Compact three-ring hero. The diameter is FITTED to the content width rather than fixed: three
+    /// 44 pt rings (§6.13) do not fit the narrowest small tile (SE: ~116 pt inside the system content
+    /// margins), so each ring takes a third of what is there, capped at 44. Under each ring the metric's
+    /// glyph, because a tracked word at the 11 pt floor does not fit a 36 pt column.
+    ///
+    /// No extra padding: on iOS 17 `containerBackground` already applies the system content margins, and
+    /// the old additional 10 pt pushed three fixed 40 pt rings wider than the tile.
     private var small: some View {
         VStack(spacing: 6) {
             headerRow
-            // 40pt × 3 = 120 ≤ 128 (SE) / 138 (15 Pro) content widths after 10pt padding.
-            scoreRings(diameter: 40, lineWidth: 4, labelFont: .system(size: 9, weight: .medium))
-            Spacer(minLength: 0)
+            GeometryReader { geo in
+                let d = min(44, max(28, (geo.size.width - 8) / 3))
+                scoreRings(diameter: d, showsLabels: false)
+                    .frame(width: geo.size.width, height: geo.size.height, alignment: .top)
+            }
             vitalsFooter(compact: true)
         }
-        .padding(10)
     }
 
     // MARK: - Home Screen: systemMedium
 
-    /// Wider three-ring row with room for a fuller vitals footer (live HR + strap battery).
+    /// The trio with its words, and the live heart beside it: HR as the big figure in the heart hue,
+    /// then HRV and the strap battery as mono qualifiers (§6.13).
     private var medium: some View {
-        VStack(spacing: 8) {
+        VStack(alignment: .leading, spacing: 8) {
             headerRow
-            scoreRings(diameter: 72, lineWidth: 7, labelFont: .caption2)
+            HStack(alignment: .center, spacing: 12) {
+                scoreRings(diameter: 58, showsLabels: true)
+                // Hairline divider. Cost: one 1 pt fill.
+                Rectangle()
+                    .fill(TelosColor.line)
+                    .frame(width: 1)
+                    .padding(.vertical, 4)
+                heartColumn
+            }
             Spacer(minLength: 0)
-            vitalsFooter(compact: false)
         }
-        .padding(12)
+    }
+
+    /// Live HR `numeralL`-sized in `heartInk`, then HRV and battery in `scaleNumber`.
+    private var heartColumn: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Image(systemName: "heart.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(TelosColor.heart)
+                Text("bpm")
+                    .font(TelosType.scaleFixed)
+                    .tracking(TelosType.Tracking.scale)
+                    .textCase(.uppercase)
+                    .foregroundStyle(TelosColor.textSecondary)
+            }
+            Text(snap.bpm.map(String.init) ?? TelosType.absent)
+                // Fixed at numeralL's 34 pt rather than the Dynamic-Type token: the medium tile's height
+                // is fixed, and a scaled 48 pt figure would push the rings out of it.
+                .font(TelosType.numeralFont(size: 34, weight: .light))
+                .tracking(TelosType.Tracking.numeralL)
+                .foregroundStyle(snap.bpm == nil ? TelosColor.textTertiary : TelosColor.heartInk)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Text("Heart rate"))
+                .accessibilityValue(Text(snap.bpm.map { "\($0) beats per minute" } ?? "No data"))
+            if let hrv = snap.hrv {
+                vital(symbol: "waveform.path.ecg", text: "\(hrv)",
+                      name: "Heart rate variability", spoken: "\(hrv) milliseconds")
+            }
+            vital(symbol: "battery.50", text: snap.batteryPct.map { "\($0)%" },
+                  name: "Strap battery", spoken: snap.batteryPct.map { "\($0) percent" })
+        }
+        .font(TelosType.scaleNumber)
+        .foregroundStyle(TelosColor.textSecondary)
+        .labelStyle(.titleAndIcon)
+        .fixedSize(horizontal: true, vertical: false)
     }
 
     // MARK: - Home Screen: systemLarge
@@ -206,8 +307,12 @@ struct NOOPWidgetView: View {
     private var large: some View {
         VStack(alignment: .leading, spacing: 12) {
             headerRow
-            scoreRings(diameter: 88, lineWidth: 8, labelFont: .caption)
-            Divider()
+            scoreRings(diameter: 88, showsLabels: true)
+            // Hairline divider (was the system `Divider`, which draws the system separator grey on the
+            // Telos ground). Cost: one 1 pt fill.
+            Rectangle()
+                .fill(TelosColor.line)
+                .frame(height: 1)
             HStack(alignment: .top, spacing: 0) {
                 statCell("HRV", value: snap.hrv.map { "\($0)" }, unit: "ms",
                          name: "Heart rate variability",
@@ -216,6 +321,7 @@ struct NOOPWidgetView: View {
                          name: "Resting heart rate",
                          spoken: snap.restingHr.map { "\($0) beats per minute" })
                 statCell("HR", value: snap.bpm.map { "\($0)" }, unit: "bpm",
+                         tint: TelosColor.heartInk,
                          name: "Heart rate",
                          spoken: snap.bpm.map { "\($0) beats per minute" })
                 statCell("Battery", value: snap.batteryPct.map { "\($0)%" },
@@ -224,59 +330,42 @@ struct NOOPWidgetView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(16)
     }
 
     // MARK: - Shared pieces
 
+    /// The widget's name in the label voice, and the strap link. The link dot differs in SHAPE as well
+    /// as hue (filled = connected, hollow ring = disconnected), so it does not rest on colour alone.
     private var headerRow: some View {
         HStack {
             Text("NOOP")
-                .font(.system(size: 13, weight: .bold))
-                .foregroundStyle(StrandPalette.textSecondary)
+                .font(TelosType.scaleFixed)
+                .tracking(TelosType.Tracking.scale)
+                .foregroundStyle(TelosColor.textSecondary)
             Spacer()
-            Circle()
-                .fill(snap.bonded ? StrandPalette.statusPositive : StrandPalette.statusCritical)
-                .frame(width: 8, height: 8)
-                .accessibilityLabel(snap.bonded ? Text("Connected") : Text("Disconnected"))
+            Group {
+                if snap.bonded {
+                    Circle().fill(TelosColor.positive)
+                } else {
+                    Circle().strokeBorder(TelosColor.critical, lineWidth: 1.5)
+                }
+            }
+            .frame(width: 8, height: 8)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(snap.bonded ? Text("Connected") : Text("Disconnected"))
         }
     }
 
-    /// The Today hero trio as static score rings (widget-safe: no draw-in animation / onAppear race).
-    /// Order matches TodayView: Charge · Effort · Rest. Each cell is honest-null ("–") until scored.
-    private func scoreRings(diameter: CGFloat, lineWidth: CGFloat, labelFont: Font) -> some View {
+    /// The Today hero trio as static Telos rings. Order: Rest · Charge · Effort. Each cell is
+    /// honest-null ("—" over a dashed bare track) until scored.
+    private func scoreRings(diameter: CGFloat, showsLabels: Bool) -> some View {
         HStack(alignment: .top, spacing: 0) {
-            WidgetScoreRing(
-                text: snap.recovery.map(String.init),
-                fraction: snap.recovery.map { Double($0) / 100 },
-                label: "Charge",
-                color: chargeColor,
-                diameter: diameter,
-                lineWidth: lineWidth,
-                labelFont: labelFont,
-                accessibilityOutOf: 100
-            )
-            WidgetScoreRing(
-                text: effortText,
-                // Fill is always the stored 0–100 axis so WHOOP 0–21 and native 0–100 agree on arc length.
-                fraction: snap.effort.map { Double($0) / 100 },
-                label: "Effort",
-                color: effortColor,
-                diameter: diameter,
-                lineWidth: lineWidth,
-                labelFont: labelFont,
-                accessibilityOutOf: (snap.effortWhoop == true) ? 21 : 100
-            )
-            WidgetScoreRing(
-                text: snap.rest.map(String.init),
-                fraction: snap.rest.map { Double($0) / 100 },
-                label: "Rest",
-                color: restColor,
-                diameter: diameter,
-                lineWidth: lineWidth,
-                labelFont: labelFont,
-                accessibilityOutOf: 100
-            )
+            ForEach(scores.indices, id: \.self) { i in
+                let score = scores[i]
+                WidgetScoreRing(text: score.text, value: score.value, label: score.label,
+                                symbol: score.symbol, color: score.color, diameter: diameter,
+                                showsLabel: showsLabels, accessibilityOutOf: score.accessibilityOutOf)
+            }
         }
         .frame(maxWidth: .infinity)
     }
@@ -306,8 +395,8 @@ struct NOOPWidgetView: View {
             vital(symbol: "battery.50", text: snap.batteryPct.map { "\($0)%" },
                   name: "Strap battery", spoken: snap.batteryPct.map { "\($0) percent" })
         }
-        .font(.caption2)
-        .foregroundStyle(StrandPalette.textSecondary)
+        .font(TelosType.scaleNumber)
+        .foregroundStyle(TelosColor.textSecondary)
         .labelStyle(.titleAndIcon)
     }
 
@@ -321,7 +410,7 @@ struct NOOPWidgetView: View {
     /// this extension does not carry the app's string catalog, so `String(localized:)` would look
     /// localized and render English anyway.
     private func vital(symbol: String, text: String?, name: String, spoken: String?) -> some View {
-        Label(text ?? "–", systemImage: symbol)
+        Label(text ?? TelosType.absent, systemImage: symbol)
             // Collapse first, like `accessoryScore` and `WidgetScoreRing` already do. A `Label` under
             // `.titleAndIcon` renders an image beside a text, so without this the bare number stays its
             // own element and whether the label below wins is SwiftUI container semantics rather than
@@ -339,18 +428,24 @@ struct NOOPWidgetView: View {
     /// speak "Heart rate variability, 64 milliseconds". `spoken` falls back to the rendered value rather
     /// than to "No data", so a caller that omits it degrades to the old reading instead of lying.
     private func statCell(_ label: String, value: String?, unit: String? = nil,
-                          tint: Color = StrandPalette.textPrimary,
+                          tint: Color = TelosColor.textPrimary,
                           name: String? = nil, spoken: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 2) {
-                Text(value ?? "–")
-                    .font(.system(size: 20, weight: .semibold, design: .rounded))
-                    .foregroundStyle(value == nil ? StrandPalette.textTertiary : tint)
+                Text(value ?? TelosType.absent)
+                    .font(TelosType.numeralFont(size: 22, weight: .light))
+                    .foregroundStyle(value == nil ? TelosColor.textTertiary : tint)
                 if let unit, value != nil {
-                    Text(unit).font(.caption2).foregroundStyle(StrandPalette.textTertiary)
+                    Text(unit).font(TelosType.scaleNumber).foregroundStyle(TelosColor.textTertiary)
                 }
             }
-            Text(label).font(.caption2).foregroundStyle(StrandPalette.textTertiary)
+            Text(label)
+                .font(TelosType.scale)
+                .tracking(TelosType.Tracking.scale)
+                .textCase(.uppercase)
+                .foregroundStyle(TelosColor.textSecondary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.92)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityElement(children: .ignore)
@@ -361,53 +456,60 @@ struct NOOPWidgetView: View {
 
 // MARK: - WidgetScoreRing
 
-/// A static, widget-safe score ring: full-circle track + solid arc + centre number + caption.
-/// Deliberately avoids `GlowRing`'s draw-in `@State` animation — WidgetKit timelines don't reliably
-/// fire `onAppear`, so an animated ring can freeze empty (0 fill) until the next timeline rebuild.
+/// A static, widget-safe score ring: the app's own `TelosRing` (thin track in the metric hue, luminous
+/// arc, halo stroke, tip dot; dashed bare track when absent; extra laps above one scale — never clipped)
+/// with its centre replaced by the widget's pre-formatted figure.
+///
+/// `animatesChanges: false`, and `TelosRing` draws the settled value on its first render without
+/// waiting for `onAppear` — so the old worry (WidgetKit not reliably firing `onAppear`, freezing an
+/// animated ring empty) does not apply. The centre is the widget's own because the stored Effort text is
+/// on the wearer's scale (0–21 or 0–100) while the arc is always the 0–100 axis.
+///
+/// Cost: `TelosRing`'s own budget — shapes only (track, one halo stroke, arc, tip), no blur, no Canvas.
 private struct WidgetScoreRing: View {
     /// Centre read-out already formatted (whole number, or one-decimal WHOOP Effort).
     let text: String?
-    /// Arc fill 0…1; nil draws the empty track only (unscored).
-    let fraction: Double?
+    /// The value on the 0–100 axis; nil draws the dashed bare track (unscored).
+    let value: Double?
     let label: String
+    let symbol: String
     let color: Color
     let diameter: CGFloat
-    let lineWidth: CGFloat
-    let labelFont: Font
+    /// true = the tracked word under the ring; false = the metric's glyph (narrow tiles).
+    let showsLabel: Bool
     let accessibilityOutOf: Int
 
-    private var clampedFraction: CGFloat {
-        guard let fraction else { return 0 }
-        return CGFloat(min(max(fraction, 0), 1))
-    }
+    /// Never below the 11 pt floor; light only where the figure is large enough to stay legible.
+    private var numeralSize: CGFloat { max(TelosType.minimumSize, diameter * 0.3) }
 
     var body: some View {
         VStack(spacing: 4) {
             ZStack {
-                Circle()
-                    .stroke(StrandPalette.textPrimary.opacity(0.10),
-                            style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                if fraction != nil {
-                    Circle()
-                        // A genuine zero still draws a round-cap bead so scored-0 reads as data, not absence.
-                        .trim(from: 0, to: max(0.0001, clampedFraction))
-                        .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round))
-                        .rotationEffect(.degrees(-90))
-                }
-                Text(text ?? "–")
-                    .font(StrandFont.rounded(diameter * 0.34, weight: .bold))
-                    .foregroundStyle(text == nil ? StrandPalette.textTertiary : StrandPalette.textPrimary)
-                    .monospacedDigit()
+                TelosRing(value: value, scale: 100, color: color, diameter: diameter,
+                          showsValue: false, animatesChanges: false)
+                Text(text ?? TelosType.absent)
+                    .font(TelosType.numeralFont(size: numeralSize,
+                                                weight: numeralSize >= 20 ? .light : .regular))
+                    .foregroundStyle(text == nil ? TelosColor.textTertiary : TelosColor.textPrimary)
                     .lineLimit(1)
-                    .minimumScaleFactor(0.5)
-                    .padding(.horizontal, lineWidth + 2)
+                    .minimumScaleFactor(TelosType.minimumSize / numeralSize)
+                    .padding(.horizontal, TelosRingMath.defaultLineWidth(diameter: diameter) * 2.2)
             }
             .frame(width: diameter, height: diameter)
-            Text(label)
-                .font(labelFont)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
+            if showsLabel {
+                Text(label)
+                    .font(TelosType.scale)
+                    .tracking(TelosType.Tracking.scale)
+                    .textCase(.uppercase)
+                    .foregroundStyle(TelosColor.textSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.92)
+            } else {
+                // The glyph names the metric (the hue alone would not).
+                Image(systemName: symbol)
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(color)
+            }
         }
         .frame(maxWidth: .infinity)
         .accessibilityElement(children: .ignore)
@@ -422,12 +524,14 @@ struct NOOPWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: kind, provider: NOOPProvider()) { entry in
             if #available(iOS 17.0, *) {
+                // The system strips this for the accessory families on the Lock Screen, so the ground
+                // only ever reaches the Home-Screen tiles.
                 NOOPWidgetView(entry: entry)
-                    .containerBackground(StrandPalette.surfaceBase, for: .widget)
+                    .containerBackground(for: .widget) { TelosWidgetGround() }
             } else {
                 NOOPWidgetView(entry: entry)
                     .padding()
-                    .background(StrandPalette.surfaceBase)
+                    .background(TelosColor.canvas)
             }
         }
         .configurationDisplayName("NOOP")

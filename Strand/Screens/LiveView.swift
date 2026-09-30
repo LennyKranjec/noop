@@ -55,10 +55,8 @@ struct LiveView: View {
     @AppStorage("selectedWhoopModel") private var selectedModelRaw = WhoopModel.whoop4.rawValue
     private var selectedModel: WhoopModel { WhoopModel(rawValue: selectedModelRaw) ?? .whoop4 }
 
-    /// "Card transparency" (0–100, default 100): fades the live console cards in lockstep with the frosted
-    /// cards; content stays readable. Mirrors Kotlin `NoopPrefs.cardOpacityPercent`.
-    @AppStorage(CardAppearancePrefs.opacityKey) private var cardOpacityPercent = CardAppearancePrefs.defaultPercent
-    private var cardOpacity: Double { max(0, min(1, Double(cardOpacityPercent) / 100)) }
+    /// "Card transparency" now reaches every card through the root-injected `\.telosCardOpacity` that
+    /// `FrostedCardSurface` reads — no per-card `@AppStorage` subscription (DESIGN_V2 §2.1 rule 7).
 
     /// Maps the picked strap model to the HRV-reading source so the spot caveat is honest (#537): a
     /// WHOOP 5/MG's R-R is optical PPG (noisier), a WHOOP 4 is electrical R-R. Mirrors the Android
@@ -212,7 +210,7 @@ struct LiveView: View {
         content()
             .padding(16)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(NoopPanelSurface(cornerRadius: 22, surfaceOpacity: cardOpacity))
+            .background(FrostedCardSurface(tint: nil, cornerRadius: TelosRadius.card))
     }
 
     // MARK: - Console header
@@ -461,8 +459,8 @@ struct LiveView: View {
     }
 
     private func workoutSavedRow(_ row: WorkoutRow) -> some View {
-        let mins = Int((row.durationS ?? 0) / 60)
-        let parts = [String(localized: "\(mins) min"), row.avgHr.map { String(localized: "\($0) avg bpm") },
+        // No duration ⇒ the field is omitted (never a stand-in "0 min").
+        let parts = [row.durationS.map { String(localized: "\(Int($0 / 60)) min") }, row.avgHr.map { String(localized: "\($0) avg bpm") },
                      row.strain.map { String(localized: "effort \(UnitFormatter.effortDisplay($0, scale: effortScale))") }].compactMap { $0 }
         return HStack(spacing: 8) {
             Image(systemName: "checkmark.circle.fill").foregroundStyle(StrandPalette.accent)
@@ -488,7 +486,7 @@ struct LiveView: View {
             Spacer(minLength: 0)
         }
         .padding(NoopMetrics.space3)
-        .background(NoopPanelSurface(cornerRadius: 18))
+        .background(FrostedCardSurface(tint: nil, cornerRadius: TelosRadius.tile))
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
             .strokeBorder(StrandPalette.statusWarning.opacity(0.5), lineWidth: 1))
         .accessibilityElement(children: .combine)
@@ -510,7 +508,7 @@ struct LiveView: View {
             Spacer(minLength: 0)
         }
         .padding(NoopMetrics.space3)
-        .background(NoopPanelSurface(cornerRadius: 18))
+        .background(FrostedCardSurface(tint: nil, cornerRadius: TelosRadius.tile))
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
             .strokeBorder(StrandPalette.statusWarning.opacity(0.5), lineWidth: 1))
         .accessibilityElement(children: .combine)
@@ -547,7 +545,7 @@ struct LiveView: View {
             Spacer(minLength: 0)
         }
         .padding(NoopMetrics.space3)
-        .background(NoopPanelSurface(tint: StrandPalette.accent, cornerRadius: 18))
+        .background(FrostedCardSurface(tint: StrandPalette.accent, cornerRadius: TelosRadius.tile))
         .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
             .strokeBorder(StrandPalette.accent.opacity(0.4), lineWidth: 1))
         .accessibilityElement(children: .combine)
@@ -659,7 +657,7 @@ struct LiveView: View {
                     .accessibilityHidden(true)
             }
             .padding(NoopMetrics.space3)
-            .background(NoopPanelSurface(cornerRadius: 18))
+            .background(FrostedCardSurface(tint: nil, cornerRadius: TelosRadius.tile))
             .contentShape(Rectangle())
         }
         .buttonStyle(LiquidPressStyle())
@@ -899,7 +897,6 @@ private struct LiveHeartReadout: View {
                     if displayHR != nil {
                         CountUpNumber(value: shown, font: StrandFont.rounded(88, weight: .semibold))
                             .foregroundStyle(tint)
-                            .shadow(color: .black.opacity(0.4), radius: 6, y: 1)
                     } else {
                         Text("—")
                             .font(StrandFont.rounded(88, weight: .semibold))
@@ -961,8 +958,8 @@ private struct LivePhysiology: View {
     /// Oura ring actively streaming live HR — trusted stream without a WHOOP bond (see LiveView.ringStreaming).
     private var ringStreaming: Bool { live.connected && live.streamingLiveHR }
 
-    /// The liquid heart pink (matches LiquidThread's default + the mockup #ff6b81).
-    private let liquidHeart = Color(.sRGB, red: 1, green: 107 / 255, blue: 129 / 255, opacity: 1)
+    /// The heart identity colour (the token `TelosColor.heart`, #FF6B81 dark — the same pink the literal was).
+    private let liquidHeart = TelosColor.heart
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space4) {
@@ -1045,7 +1042,7 @@ private struct LivePhysiology: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(NoopMetrics.rowSpacing)
-        .background(NoopPanelSurface(cornerRadius: 14))
+        .background(FrostedCardSurface(tint: nil, cornerRadius: TelosRadius.tile))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(label): \(value)")
     }
@@ -1242,8 +1239,6 @@ private struct ActiveWorkoutLive: View {
 /// frosted card style.
 private struct LiveLogCard: View {
     @EnvironmentObject private var live: LiveState
-    @AppStorage(CardAppearancePrefs.opacityKey) private var cardOpacityPercent = CardAppearancePrefs.defaultPercent
-    private var cardOpacity: Double { max(0, min(1, Double(cardOpacityPercent) / 100)) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -1278,7 +1273,7 @@ private struct LiveLogCard: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(NoopPanelSurface(cornerRadius: 22, surfaceOpacity: cardOpacity))
+        .background(FrostedCardSurface(tint: nil, cornerRadius: TelosRadius.card))
     }
 
     // MARK: - Strap-log export (issue #17 — let macOS users share the log for bug reports)
@@ -1347,8 +1342,6 @@ private enum LiveSyncFormat {
 /// and a one-line detail. The whole card is combined into a single accessibility element so VoiceOver
 /// reads "Heart rate: 62 bpm. Streaming now." rather than three disjoint fragments.
 private struct SignalTrustTile: View {
-    @AppStorage(CardAppearancePrefs.opacityKey) private var cardOpacityPercent = CardAppearancePrefs.defaultPercent
-    private var cardOpacity: Double { max(0, min(1, Double(cardOpacityPercent) / 100)) }
 
     struct Model: Identifiable {
         let title: String
@@ -1391,7 +1384,7 @@ private struct SignalTrustTile: View {
         .padding(14)
         .frame(minHeight: 112, alignment: .top)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(NoopPanelSurface(cornerRadius: 20, surfaceOpacity: cardOpacity))
+        .background(FrostedCardSurface(tint: nil, cornerRadius: TelosRadius.card))
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(tile.title): \(tile.value). \(tile.detail)")
     }

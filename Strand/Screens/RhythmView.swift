@@ -365,7 +365,7 @@ struct RhythmView: View {
         if let onClose {
             Button(action: onClose) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 18))
+                    .font(TelosType.glyphControl)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             .buttonStyle(.plain)
@@ -462,7 +462,15 @@ struct RhythmView: View {
                     .font(StrandFont.captionNumber)
                     .foregroundStyle(StrandPalette.textSecondary)
             }
-            LiquidTube(frac: max(0, min(1, frac ?? 0)), tint: tint, height: 8, animated: false)
+            // Honest nil (§2.3 rule 2): no share → a bare track, never a zero fed into the tube.
+            if let frac {
+                LiquidTube(frac: max(0, min(1, frac)), tint: tint, height: 8, animated: false)
+            } else {
+                Capsule(style: .continuous)
+                    .fill(TelosColor.surfaceInset)
+                    .overlay(Capsule(style: .continuous).strokeBorder(TelosColor.line, lineWidth: TelosStroke.hair))
+                    .frame(height: 8)
+            }
         }
         .accessibilityHidden(true)
     }

@@ -80,7 +80,8 @@ struct TelosStripView: View {
         Group {
             if family == .accessoryInline {
                 // Minimal, as the inline slot wants: "8.4k · 9.8 · 1.2".
-                Text("\(stepsText ?? "–") · \(effortText ?? "–") · \(stressText ?? "–")")
+                // An absent figure is "—" (U+2014, `TelosType.absent`), never an en dash, 0 or blank.
+                Text("\(stepsText ?? TelosType.absent) · \(effortText ?? TelosType.absent) · \(stressText ?? TelosType.absent)")
                     .monospacedDigit()
             } else {
                 rectangular
@@ -129,22 +130,25 @@ struct TelosStripView: View {
         VStack(spacing: 3) {
             content()
                 .frame(height: Self.instrument)
+            // The Telos label voice at the 11 pt floor (was 8 pt mono). Tracking trimmed from the voice's
+            // +1.6 to +1.0 so "STRESS" fits a third of the rectangle without scaling below 11 pt.
             Text(caption)
-                .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                .tracking(1.2)
+                .font(TelosType.scaleFixed)
+                .tracking(1.0)
                 .lineLimit(1)
-                .minimumScaleFactor(0.7)
+                .minimumScaleFactor(0.92)
                 .foregroundStyle(.secondary)
         }
         .frame(maxWidth: .infinity)
     }
 
     private func number(_ text: String?) -> some View {
-        Text(text ?? "–")
-            .font(.system(size: 18, weight: .bold, design: .rounded))
-            .monospacedDigit()
+        // Telos numeral face (SF Pro, tabular). Medium rather than the app's light: vibrant lock-screen
+        // rendering thins strokes. 18 × 0.62 = 11.2 — never below the 11 pt floor.
+        Text(text ?? TelosType.absent)
+            .font(TelosType.numeralFont(size: 18, weight: .medium))
             .lineLimit(1)
-            .minimumScaleFactor(0.6)
+            .minimumScaleFactor(0.62)
             .foregroundStyle(text == nil ? HierarchicalShapeStyle.secondary : HierarchicalShapeStyle.primary)
     }
 
@@ -220,11 +224,11 @@ private struct EffortTicks: View {
                 }
             }
             .widgetAccentable()
-            Text(text ?? "–")
-                .font(.system(size: 14, weight: .bold, design: .rounded))
-                .monospacedDigit()
+            // 14 × 0.79 = 11.06 — never below the 11 pt floor.
+            Text(text ?? TelosType.absent)
+                .font(TelosType.numeralFont(size: 14, weight: .medium))
                 .lineLimit(1)
-                .minimumScaleFactor(0.5)
+                .minimumScaleFactor(0.79)
                 .foregroundStyle(text == nil ? HierarchicalShapeStyle.secondary : HierarchicalShapeStyle.primary)
                 .frame(width: 28)
         }

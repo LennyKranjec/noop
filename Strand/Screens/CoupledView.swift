@@ -448,7 +448,7 @@ struct CoupledView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
 
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(TelosType.glyphChevron)
                             .foregroundStyle(StrandPalette.textTertiary)
                     }
                 }
@@ -578,7 +578,7 @@ struct CoupledView: View {
                     } label: {
                         HStack(spacing: 10) {
                             Image(systemName: "function")
-                                .font(.system(size: 14, weight: .semibold))
+                                .font(TelosType.glyphRow)
                                 .foregroundStyle(StrandPalette.chargeColor)
                             VStack(alignment: .leading, spacing: 1) {
                                 Text("How Charge is calculated")
@@ -588,7 +588,7 @@ struct CoupledView: View {
                             }
                             Spacer(minLength: 8)
                             Image(systemName: "chevron.right")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(TelosType.glyphChevron)
                                 .foregroundStyle(StrandPalette.textTertiary)
                         }
                         .padding(14)
@@ -636,7 +636,7 @@ struct CoupledView: View {
         return NoopCard(padding: 14, tint: StrandPalette.chargeColor) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "gauge.with.dots.needle.bottom.50percent")
-                    .font(.system(size: 16, weight: .semibold))
+                    .font(TelosType.glyphField)
                     .foregroundStyle(StrandPalette.chargeColor)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {

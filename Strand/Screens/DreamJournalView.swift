@@ -13,7 +13,7 @@ struct DreamJournalView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: TelosSpace.m) {
                 Text("Your dream and a few answers about the night, every morning. The answers join the journal, so Insights can set them against your sleep and recovery.")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
@@ -29,22 +29,30 @@ struct DreamJournalView: View {
                           systemImage: "square.and.pencil")
                         .font(StrandFont.subhead)
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.noopPrimary)
 
                 if store.entries.isEmpty {
-                    Text("No entries yet. Tomorrow's first open asks for the night's dream.")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .padding(.top, 8)
+                    // §5.13 empty state: symbol, one line — the action is the button above.
+                    HStack(alignment: .firstTextBaseline, spacing: TelosSpace.s) {
+                        Image(systemName: "moon.stars")
+                            .font(TelosType.glyphEmpty)
+                            .foregroundStyle(TelosColor.violetInk)
+                            .accessibilityHidden(true)
+                        Text("No entries yet. Tomorrow's first open asks for the night's dream.")
+                            .font(TelosType.subhead)
+                            .foregroundStyle(TelosColor.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .padding(.top, TelosSpace.s)
                 }
                 ForEach(store.entries) { entry in
                     Button { editing = entry } label: { row(entry) }
                         .buttonStyle(.plain)
                 }
             }
-            .padding(16)
+            .padding(TelosSpace.pageGutter)
         }
-        .background(StrandPalette.surfaceBase)
+        .background(TelosColor.canvas)
         .navigationTitle("Dream Journal")
         .sheet(item: $editing) { entry in
             DreamEntryEditor(entry: entry)
@@ -52,12 +60,11 @@ struct DreamJournalView: View {
     }
 
     private func row(_ entry: DreamEntry) -> some View {
-        StrandCard {
-            VStack(alignment: .leading, spacing: 8) {
+        StrandCard(tint: TelosColor.violet) {
+            VStack(alignment: .leading, spacing: TelosSpace.s) {
                 Text(Self.dateText(entry.day))
-                    .font(StrandFont.overline)
-                    .tracking(1.2)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .telosScale()
+                    .foregroundStyle(TelosColor.violetInk)
                 let text = entry.text.trimmingCharacters(in: .whitespacesAndNewlines)
                 Text(text.isEmpty ? "No dream written down." : text)
                     .font(StrandFont.body)
@@ -70,8 +77,8 @@ struct DreamJournalView: View {
                 }
                 if !answers.isEmpty {
                     Text(answers.joined(separator: " · "))
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
+                        .font(TelosType.scaleNumber)
+                        .foregroundStyle(TelosColor.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

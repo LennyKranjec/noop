@@ -10,6 +10,10 @@ import MapKit
 
 // MARK: - Workout detail (#410)
 //
+// TELOS 2.0 (DESIGN_V2 §6.6 "detail sheet — unchanged flows, V2 sheets"): same sections and data, in the
+// Training Coach register — the sport on a faux-glass plate, compact glass stat tiles, absent values as the
+// em dash (`TelosType.absent`), no material, no per-card shadow.
+//
 // A READ-ONLY drill-down for one tapped session, built ONLY from the locked Noop component system
 // (NoopCard / ChartCard / SectionHeader / StatTile / SegmentBar idiom) so it sits in the same
 // instrument-grade, Effort-amber colour world as the Workouts list it opens from.
@@ -143,7 +147,7 @@ struct WorkoutDetailView: View {
         // "fills in after sync": prefer the strap's own counter (MG/5.0) once it has offloaded the window,
         // else the phone pedometer (any strap, incl. WHOOP 4.0 / CSV-import). Never shown for non-foot
         // sports (cycling/rowing/… have no footfalls). Both sources return nil for "no data", so an empty
-        // window stays "–" rather than a fabricated 0.
+        // window stays "—" rather than a fabricated 0.
         var stepReadout: StepReadout? = nil
         if WorkoutCatalog.isOnFoot(row.sport) {
             if let ticks = await repo.strapStepTicks(from: row.startTs, to: row.endTs) {
@@ -196,7 +200,7 @@ struct WorkoutDetailView: View {
     private func recoveryStat(_ label: String, value: Int?) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label).strandOverline()
-            Text(value.map { "\($0)" } ?? "–")
+            Text(value.map { "\($0)" } ?? TelosType.absent)
                 .font(StrandFont.number(24))
                 .foregroundStyle(value.map { $0 >= 0 ? StrandPalette.statusPositive
                                                      : StrandPalette.statusWarning }
@@ -217,11 +221,13 @@ struct WorkoutDetailView: View {
         NoopCard(tint: StrandPalette.effortColor) {
             HStack(alignment: .center, spacing: 14) {
                 Image(systemName: sportSymbol(row.sport))
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(StrandPalette.effortColor)
+                    .font(TelosType.glyphEmpty)
+                    .foregroundStyle(TelosColor.effortInk)
                     .frame(width: 44, height: 44)
-                    .background(StrandPalette.effortColor.opacity(0.14),
-                                in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .background(TelosColor.glassFill,
+                                in: RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
+                        .strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line))
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(WorkoutSource.displaySport(row.sport))
@@ -248,15 +254,15 @@ struct WorkoutDetailView: View {
                      caption: String(localized: "active"),
                      accent: StrandPalette.effortColor)
             StatTile(label: "Avg HR",
-                     value: row.avgHr.map { "\($0)" } ?? "–",
+                     value: row.avgHr.map { "\($0)" } ?? TelosType.absent,
                      caption: row.avgHr != nil ? "bpm" : nil,
                      accent: row.avgHr != nil ? StrandPalette.metricRose : StrandPalette.textTertiary)
             StatTile(label: "Max HR",
-                     value: row.maxHr.map { "\($0)" } ?? "–",
+                     value: row.maxHr.map { "\($0)" } ?? TelosType.absent,
                      caption: row.maxHr != nil ? "bpm" : nil,
                      accent: row.maxHr != nil ? StrandPalette.metricRose : StrandPalette.textTertiary)
             StatTile(label: "Calories",
-                     value: row.energyKcal.map { grouped($0) } ?? "–",
+                     value: row.energyKcal.map { grouped($0) } ?? TelosType.absent,
                      caption: row.energyKcal != nil ? "kcal" : nil,
                      accent: row.energyKcal != nil ? StrandPalette.metricAmber : StrandPalette.textTertiary)
             if row.distanceM != nil {
@@ -266,10 +272,10 @@ struct WorkoutDetailView: View {
                          accent: StrandPalette.metricCyan)
             }
             // Steps for an on-foot sport (#398). Shown for the on-foot set even before the value lands, so
-            // the tile doesn't pop in; "–" until a source has data. Caption is honest about the source.
+            // the tile doesn't pop in; "—" until a source has data. Caption is honest about the source.
             if WorkoutCatalog.isOnFoot(row.sport) {
                 StatTile(label: "Steps",
-                         value: steps.map { grouped(Double($0.count)) } ?? "–",
+                         value: steps.map { grouped(Double($0.count)) } ?? TelosType.absent,
                          caption: steps.map { $0.fromStrap ? String(localized: "strap")
                                                           : String(localized: "phone") },
                          accent: steps != nil ? StrandPalette.metricCyan : StrandPalette.textTertiary)
@@ -360,11 +366,11 @@ struct WorkoutDetailView: View {
     }
 
     /// Avg pace from the row's GPS distance + duration, in the user's unit system: "m:ss /km" (metric) or
-    /// "m:ss /mi" (imperial). "–" when distance or duration is missing/zero (pace undefined — honest).
+    /// "m:ss /mi" (imperial). "—" when distance or duration is missing/zero (pace undefined — honest).
     private var paceLabel: String {
-        guard let m = row.distanceM, m > 0 else { return "–" }
+        guard let m = row.distanceM, m > 0 else { return TelosType.absent }
         let secs = row.durationS ?? Double(row.endTs - row.startTs)
-        guard secs > 0 else { return "–" }
+        guard secs > 0 else { return TelosType.absent }
         let km = m / 1000.0
         return UnitFormatter.paceFromSecPerKm(secs / km, system: distanceUnitSystem)
     }
@@ -427,9 +433,10 @@ struct WorkoutDetailView: View {
                     )
                 } footer: {
                     ChartFooter([
-                        ("Avg", row.avgHr.map { String(localized: "\($0) bpm") } ?? "–"),
-                        ("Peak", row.maxHr.map { String(localized: "\($0) bpm") } ?? String(localized: "\(Int((values.max() ?? 0).rounded())) bpm")),
-                        ("Low", String(localized: "\(Int((values.min() ?? 0).rounded())) bpm")),
+                        ("Avg", row.avgHr.map { String(localized: "\($0) bpm") } ?? TelosType.absent),
+                        ("Peak", row.maxHr.map { String(localized: "\($0) bpm") }
+                            ?? values.max().map { String(localized: "\(Int($0.rounded())) bpm") } ?? TelosType.absent),
+                        ("Low", values.min().map { String(localized: "\(Int($0.rounded())) bpm") } ?? TelosType.absent),
                     ])
                 }
                 // #18: the row's Avg HR can be EDITED on the manual sheet while the graph, zones and Effort
@@ -550,7 +557,6 @@ struct WorkoutDetailView: View {
                                         format: { String(format: "%.1f", $0) },
                                         font: StrandFont.rounded(28),
                                         color: StrandPalette.textPrimary)
-                                .shadow(color: .black.opacity(0.5), radius: 5, y: 1)
                             Text(effortScale == .whoop ? "of 21" : "of 100")
                                 .font(StrandFont.caption)
                                 .foregroundStyle(StrandPalette.textSecondary)
@@ -618,14 +624,14 @@ struct WorkoutDetailView: View {
         end > start ? "\(timeLabel(start))-\(timeLabel(end))" : timeLabel(start)
     }
     private func durationLabel(_ s: Double?) -> String {
-        guard let s, s > 0 else { return "–" }
+        guard let s, s > 0 else { return TelosType.absent }
         let total = Int(s.rounded())
         let h = total / 3600, m = (total % 3600) / 60
         if h > 0 { return String(localized: "\(h)h \(m)m") }
         return String(localized: "\(m)m")
     }
     private func distanceLabel(_ m: Double?) -> String {
-        guard let m, m > 0 else { return "–" }
+        guard let m, m > 0 else { return TelosType.absent }
         return UnitFormatter.distanceFromMeters(m, system: distanceUnitSystem)
     }
     private func grouped(_ v: Double) -> String {

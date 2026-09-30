@@ -446,10 +446,15 @@ private struct iOSRootView: View {
                         .background(StrandPalette.surfaceBase.ignoresSafeArea())
                         .navigationBarTitleDisplayMode(.inline)
                 }
+                .telosCardOpacityFromPreferences()
             )
         }
         #endif
-        return AnyView(shell)
+        // Telos 2.0 (§2.1 rule 7): the card-transparency preference is read ONCE, here at the root of the
+        // window's content, and handed to every card surface through `\.telosCardOpacity` — no card
+        // subscribes to UserDefaults. (Here rather than on the WindowGroup's long modifier chain, which has
+        // already hit the type-checker's budget once.)
+        return AnyView(shell.telosCardOpacityFromPreferences())
     }
 
     private var shell: some View {

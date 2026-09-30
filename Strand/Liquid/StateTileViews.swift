@@ -196,6 +196,82 @@ struct StateMissionNote: View {
     }
 }
 
+/// TODAY'S MISSION as the Telos hero's glass card (the `.dailyMission` section): a glyph, the caps
+/// overline, the mission's first sentence as the title, the rest as the subtitle, and a round chevron
+/// button. Same routing and the same context menu as `StateMissionNote` — one mission, one action.
+struct StateMissionCard: View {
+    let mission: String
+    let navigate: (TabRoute) -> Void
+    @EnvironmentObject private var router: NavRouter
+    // NOT observed — see `StateMissionNote`.
+    @Environment(\.coachEngine) private var coachRef
+    private var coach: AICoachEngine { requireCoach(coachRef) }
+
+    private var recommendation: StateRecommendation {
+        let stored = DailyMissionStore.today()
+        let goal = stored?.text == mission ? stored?.goal : nil
+        return StateActionMapper.recommendation(forMission: mission, goal: goal)
+    }
+
+    var body: some View {
+        let rec = recommendation
+        let parts = HomeHeroMapping.missionParts(mission)
+        Button {
+            TelosHaptics.play(.select)
+            StateActionPerformer.perform(rec, router: router, navigate: navigate)
+        } label: {
+            HStack(alignment: .center, spacing: TelosSpace.m) {
+                Image(systemName: "sparkles")
+                    .font(TelosType.glyphField)
+                    .foregroundStyle(TelosColor.mint)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: TelosSpace.xs) {
+                    Text("Today's mission")
+                        .telosScale()
+                        .textCase(.uppercase)
+                        .foregroundStyle(TelosColor.textSecondary)
+                    Text(verbatim: parts.title)
+                        .font(TelosType.headline)
+                        .foregroundStyle(TelosColor.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                    if let subtitle = parts.subtitle {
+                        Text(verbatim: subtitle)
+                            .font(TelosType.subhead)
+                            .foregroundStyle(TelosColor.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.leading)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                // The round chevron button of the reference — part of the one tap target.
+                Image(systemName: "chevron.right")
+                    .font(TelosType.glyphChevron)
+                    .foregroundStyle(TelosColor.textPrimary)
+                    .frame(width: 40, height: 40)
+                    .background(Circle().fill(TelosColor.glassRaised))
+                    .overlay(Circle().strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line))
+                    .accessibilityHidden(true)
+            }
+            .padding(TelosSpace.l)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(NoopPanelSurface(cornerRadius: TelosRadius.card))
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(Text("Today's mission: \(mission)"))
+        .contextMenu {
+            Button {
+                StateCoachController.shared.presented = .detail(rec)
+            } label: { Label("Why?", systemImage: "info.circle") }
+            Button {
+                StateActionPerformer.askCoach(rec.askCoachPrompt, coach: coach, router: router)
+            } label: { Label("Ask coach", systemImage: "sparkles") }
+        }
+    }
+}
+
 // MARK: - WORKOUTS TODAY
 
 /// The tile's second section: 1–3 further workouts for today. A tap starts the workout (sport preselected,

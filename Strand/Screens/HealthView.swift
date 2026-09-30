@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import Charts
 import StrandDesign
 import StrandAnalytics
@@ -79,6 +80,9 @@ private struct HealthSectionsStack: View {
             // The static vitals grid is its own view depending only on `repo`,
             // so it is unaffected by live HR ticks.
             VitalsSection()
+            // Honest breathing (HEALTH_V2 S4 / DESIGN_V2 §6.14): the weekly pre-session RMSSD trend.
+            // Self-hides until a breathing session is stored.
+            BreathPreRmssdTrendCard()
             // v5 skin-temperature suite: the illness "heads-up", body clock, and (opt-in) cycle
             // awareness, each driven by a pure StrandAnalytics engine result the analytics pass
             // computed and AppModel publishes. Its own view depending on `model` + `repo`.
@@ -94,14 +98,16 @@ private struct HealthSectionsStack: View {
 /// state and the full live stack ticks here, in isolation, instead of re-rendering HealthView. Renders
 /// byte-for-byte what the parent's inline `repo.days.isEmpty && !hasLiveHR` branch did.
 private struct HealthFirstRunContent: View {
-    @EnvironmentObject var repo: Repository
     @EnvironmentObject var live: LiveState
-    @EnvironmentObject var model: AppModel
+    /// NOT observed (§2.1 rule 5): `AppModel` publishes 1–3×/s while a strap streams. The one field this
+    /// leaf needs — the spike-filtered `bpm` — arrives through `ModelBpm`'s de-duplicated subscription.
+    @Environment(\.appModelRef) private var modelRef
+    @State private var bpm: Int?
 
     /// HR to display: the spike-filtered median (model.bpm, #39) when available, else the reported
     /// value, else R-R-derived (the strap streams R-R even when its HR field reads 0).
     private var displayHR: Int? {
-        if let hr = model.bpm, hr > 0 { return hr }
+        if let hr = bpm ?? resolvedAppModel(modelRef)?.bpm, hr > 0 { return hr }
         if let hr = live.heartRate, hr > 0 { return hr }
         if let last = live.rr.last, last > 0 { return Int((60_000.0 / Double(last)).rounded()) }
         return nil
@@ -109,15 +115,37 @@ private struct HealthFirstRunContent: View {
     private var hasLiveHR: Bool { displayHR != nil }
 
     var body: some View {
-        if !hasLiveHR {
-            VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
-                // Even with no history yet, a freshly-connected strap can be told to sync now (#364) —
-                // so the control is reachable before the screen has any data to show.
-                SyncStatusSection()
-                ComingSoon(what: "No biometrics yet. Import your WHOOP export (and Apple Health if you have it) in Data Sources to fill this in.")
+        Group {
+            if !hasLiveHR {
+                VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                    // Even with no history yet, a freshly-connected strap can be told to sync now (#364) —
+                    // so the control is reachable before the screen has any data to show.
+                    SyncStatusSection()
+                    ComingSoon(what: "No biometrics yet. Import your WHOOP export (and Apple Health if you have it) in Data Sources to fill this in.")
+                }
+            } else {
+                HealthSectionsStack()
+            }
+        }
+        .modifier(ModelBpm(model: resolvedAppModel(modelRef), bpm: $bpm))
+    }
+}
+
+/// `AppModel.bpm` — the spike-filtered median every screen should show — WITHOUT observing the model
+/// (§2.1 rule 5). One de-duplicated subscription; the `!=` guard is load-bearing: the publisher is rebuilt
+/// on every body pass and a fresh `removeDuplicates()` replays the current value (same shape as
+/// `LiveView`'s snapshot), so writing `@State` unguarded would be a render loop.
+private struct ModelBpm: ViewModifier {
+    let model: AppModel?
+    @Binding var bpm: Int?
+
+    @ViewBuilder func body(content: Content) -> some View {
+        if let model {
+            content.onReceive(model.$bpm.removeDuplicates()) { next in
+                if bpm != next { bpm = next }
             }
         } else {
-            HealthSectionsStack()
+            content
         }
     }
 }
@@ -132,7 +160,8 @@ private struct HealthFirstRunContent: View {
 /// otherwise it shows when history last synced.
 private struct SyncStatusSection: View {
     @EnvironmentObject var live: LiveState
-    @EnvironmentObject var model: AppModel
+    /// Only CALLED (Sync now), never observed.
+    @Environment(\.appModelRef) private var modelRef
 
     /// The strap link is usable for a manual offload kick (matches BLEManager.syncNow's own gate).
     ///
@@ -157,7 +186,7 @@ private struct SyncStatusSection: View {
                     NoopButton(live.backfilling ? "Syncing…" : "Sync now",
                                systemImage: "arrow.triangle.2.circlepath",
                                kind: .secondary, fullWidth: true) {
-                        model.ble.syncNow()
+                        resolvedAppModel(modelRef)?.ble.syncNow()
                     }
                     .disabled(!canSync)
                     .accessibilityLabel("Sync now")
@@ -222,7 +251,9 @@ private struct SyncStatusSection: View {
 private struct HeartRateSection: View {
     @EnvironmentObject var live: LiveState
     @EnvironmentObject var profile: ProfileStore
-    @EnvironmentObject var model: AppModel
+    /// NOT observed: the spike-filtered `bpm` arrives through `ModelBpm` (one de-duplicated field).
+    @Environment(\.appModelRef) private var modelRef
+    @State private var bpm: Int?
 
     /// Rolling buffer of recently-streamed live HR (newest last), so the hero graph builds a real
     /// continuous time-series instead of collapsing to a 2-point flat line when the strap streams HR
@@ -246,19 +277,23 @@ private struct HeartRateSection: View {
     /// carries PPG harmonic spikes (real ~92 read as 170+); AppModel.bpm's doc mandates "every screen
     /// should show THIS". Falls back to the reported value, then R-R-derived, only until the median has a sample.
     private var displayHR: Int? {
-        if let hr = model.bpm, hr > 0 { return hr }
+        if let hr = bpm ?? resolvedAppModel(modelRef)?.bpm, hr > 0 { return hr }
         if let hr = live.heartRate, hr > 0 { return hr }
         if let last = live.rr.last, last > 0 { return Int((60_000.0 / Double(last)).rounded()) }
         return nil
     }
-    private var hrIsDerived: Bool { (live.heartRate ?? 0) <= 0 && !live.rr.isEmpty }
+    private var hrIsDerived: Bool {
+        let reported = live.heartRate.map { $0 > 0 } ?? false
+        return !reported && !live.rr.isEmpty
+    }
 
-    /// HR as a fraction of HR-max (0…1).
-    private func hrFraction(_ hr: Int?) -> Double {
+    /// HR as a fraction of HR-max (0…1), or nil — no HR, or no HRmax to measure against. A nil fraction
+    /// shows "—" for zone and % max (it used to read "0%" and "Z1": a measured-looking floor).
+    private func hrFraction(_ hr: Int?) -> Double? {
         // `effortHRmax`, not `hrMax`: with no override and no answered date of birth the age formula still
         // evaluates (208 bpm at age 0), so the old guard could never fire and the % Max read-out was a
         // fraction of a number nobody supplied. nil = no HRmax to measure against.
-        guard let hr = hr, let maxHR = profile.effortHRmax, maxHR > 0 else { return 0 }
+        guard let hr = hr, let maxHR = profile.effortHRmax, maxHR > 0 else { return nil }
         return min(max(Double(hr) / maxHR, 0), 1)
     }
 
@@ -304,8 +339,8 @@ private struct HeartRateSection: View {
         // subviews, instead of re-evaluating heavy computed properties multiple times.
         let displayHR = self.displayHR
         let hasLiveHR = displayHR != nil
-        let fraction = hrFraction(displayHR)
-        let zone = hrZone(fraction)
+        let fraction: Double? = hrFraction(displayHR)
+        let zone: Int? = fraction.map { hrZone($0) }
         let series = hrSeries(displayHR)
 
         return VStack(alignment: .leading, spacing: NoopMetrics.gap) {
@@ -317,21 +352,23 @@ private struct HeartRateSection: View {
                 title: "Heart Rate",
                 subtitle: hrIsDerived ? String(localized: "Estimated from R-R interval")
                     : (hasLiveHR ? String(localized: "Streaming live") : String(localized: "Awaiting strap")),
-                trailing: hasLiveHR ? "\(displayHR!) bpm" : "—",
+                trailing: displayHR.map { "\($0) bpm" } ?? TelosType.absent,
                 tint: StrandPalette.metricRose
             ) {
                 heroChart(displayHR: displayHR, hasLiveHR: hasLiveHR,
                           fraction: fraction, zone: zone, series: series)
             } footer: {
                 ChartFooter([
-                    ("Zone", hasLiveHR ? "Z\(zone)" : "—"),
-                    ("% Max", hasLiveHR ? "\(Int((fraction * 100).rounded()))%" : "—"),
+                    ("Zone", hasLiveHR ? (zone.map { "Z\($0)" } ?? TelosType.absent) : TelosType.absent),
+                    ("% Max", hasLiveHR ? (fraction.map { "\(Int(($0 * 100).rounded()))%" } ?? TelosType.absent)
+                                        : TelosType.absent),
                     // "—" rather than the age-0 formula value when no age or override has been given.
                     ("Max HR", profile.effortHRmax.map { "\(Int($0.rounded()))" } ?? "—"),
                     ("State", hasLiveHR ? String(localized: "STREAMING") : String(localized: "IDLE")),
                 ])
             }
         }
+        .modifier(ModelBpm(model: resolvedAppModel(modelRef), bpm: $bpm))
         .onReceive(sampleTimer) { now in
             // Bank the CURRENT spike-filtered HR once a second, stamped with the tick's real wall-clock
             // time: this feeds the time x-axis (#198) and the #105 trace without the phantom ramp that
@@ -347,19 +384,19 @@ private struct HeartRateSection: View {
     /// The hero chart body: a tall, time-aware HR line tinted to the current zone, with a
     /// status pill floated top-trailing. Fixed to NoopMetrics.chartHeight via ChartCard.
     private func heroChart(displayHR: Int?, hasLiveHR: Bool,
-                           fraction: Double, zone: Int, series: [LiveHRSample]) -> some View {
-        ZStack(alignment: .topTrailing) {
+                           fraction: Double?, zone: Int?, series: [LiveHRSample]) -> some View {
+        // Without an HRmax there is no zone: the line keeps the heart-rate identity colour instead.
+        let lineGradient: Gradient = zone.map {
+            Gradient(colors: [StrandPalette.hrZoneColor(max(1, $0 - 1)), StrandPalette.hrZoneColor($0)])
+        } ?? Gradient(colors: [TelosColor.heart.opacity(0.6), TelosColor.heart])
+        return ZStack(alignment: .topTrailing) {
             if series.count > 1 {
-                LiveTimeChart(
-                    samples: series,
-                    gradient: Gradient(colors: [
-                        StrandPalette.hrZoneColor(max(1, zone - 1)),
-                        StrandPalette.hrZoneColor(zone),
-                    ])
-                )
+                LiveTimeChart(samples: series, gradient: lineGradient)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .accessibilityLabel("Live heart rate over time")
-                .accessibilityValue(hasLiveHR ? "\(displayHR ?? 0) beats per minute, zone \(zone)" : "no data")
+                .accessibilityValue(displayHR.map { hr in
+                    zone.map { "\(hr) beats per minute, zone \($0)" } ?? "\(hr) beats per minute"
+                } ?? "no data")
             } else {
                 VStack(spacing: NoopMetrics.space2) {
                     // The big fallback numeral ticks up to the live value (the hero number) — under
@@ -368,10 +405,10 @@ private struct HeartRateSection: View {
                         CountUpText(value: Double(hr),
                                     format: { "\(Int($0.rounded()))" },
                                     font: StrandFont.display(72),
-                                    color: hasLiveHR ? StrandPalette.hrZoneColor(zone) : StrandPalette.textTertiary)
+                                    color: zone.map { StrandPalette.hrZoneColor($0) } ?? TelosColor.heart)
                             .tracking(StrandFont.displayTracking(72))
                     } else {
-                        Text("—")
+                        Text(verbatim: TelosType.absent)
                             .font(StrandFont.display(72))
                             .foregroundStyle(StrandPalette.textTertiary)
                     }
@@ -387,8 +424,9 @@ private struct HeartRateSection: View {
         }
     }
 
-    private func zoneLabel(hasLiveHR: Bool, zone: Int, fraction: Double) -> String {
+    private func zoneLabel(hasLiveHR: Bool, zone: Int?, fraction: Double?) -> String {
         guard hasLiveHR else { return String(localized: "Idle") }
+        guard let zone, let fraction else { return String(localized: "Streaming live") }
         return String(localized: "Zone \(zone) · \(Int((fraction * 100).rounded()))%")
     }
 }
@@ -634,8 +672,15 @@ private struct ContributorBar: View {
             }
             // The signature liquid tube: fills to the 0…1 strength, tinted to the contributor's world.
             // Static (posed) — a row of small bars shouldn't each run a live 30fps Canvas. Calibrating
-            // (nil) reads as an empty 0 tube.
-            LiquidTube(frac: (strength ?? 0) / 100, tint: tint, height: 10, animated: false)
+            // (nil) is a BARE dashed track — no tube, no fill, no tip (§2.3: never `?? 0` into a tube).
+            if let strength {
+                LiquidTube(frac: strength / 100, tint: tint, height: 10, animated: false)
+            } else {
+                Capsule(style: .continuous)
+                    .strokeBorder(TelosColor.lineStrong,
+                                  style: StrokeStyle(lineWidth: TelosStroke.line, dash: [2, 3]))
+                    .frame(height: 10)
+            }
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(detail), \(word)")
@@ -818,14 +863,14 @@ private struct FitnessAgeSection: View {
         Button { fitnessSheet = .settings } label: {
             HStack(spacing: 8) {
                 Image(systemName: "lungs.fill")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(TelosType.glyphChevron)
                     .foregroundStyle(StrandPalette.metricCyan)
                 Text("Add your waist for a more accurate VO₂max")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textSecondary)
                 Spacer(minLength: 0)
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 12, weight: .semibold))
+                    .font(TelosType.glyphChevron)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             .contentShape(Rectangle())
@@ -867,10 +912,12 @@ private struct FitnessAgeSection: View {
                     if let vo2 = vo2max {
                         VStack(alignment: .trailing, spacing: 2) {
                             Text("VO₂max").strandOverline()
+                            // H15: an integer with its ±5 band and its method (next line) — never a
+                            // decimal that claims more than the estimate knows.
                             Text(String(format: "%.0f", vo2))
                                 .font(StrandFont.number(30))
                                 .foregroundStyle(StrandPalette.metricCyan)
-                            Text("ml/kg/min")
+                            Text(verbatim: "± 5 ml/kg/min")
                                 .font(StrandFont.footnote)
                                 .foregroundStyle(StrandPalette.textTertiary)
                             Text("\(String(localized: "On-device")) · \(vo2MaxEstimatorDisplayName(vo2maxEstimator))")
@@ -879,7 +926,7 @@ private struct FitnessAgeSection: View {
                         }
                     }
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(TelosType.glyphChevron)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .accessibilityHidden(true)
                 }
@@ -925,7 +972,7 @@ private struct FitnessAgeSection: View {
                         .foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
                     Image(systemName: showReadiness ? "chevron.up" : "chevron.down")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(TelosType.glyphChevron)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .accessibilityHidden(true)
                 }
@@ -1074,7 +1121,7 @@ private struct ReadinessChecklistCard: View {
             && (item.key == "age" || item.key == "sex" || item.key == "bodyMetrics" || item.key == "waist")
         let row = HStack(alignment: .firstTextBaseline, spacing: 12) {
             Image(systemName: statusIcon(item.status))
-                .font(.system(size: 14, weight: .semibold))
+                .font(TelosType.glyphRow)
                 .foregroundStyle(statusColor(item.status))
                 .frame(width: 18)
                 .accessibilityHidden(true)
@@ -1169,7 +1216,7 @@ private struct VitalitySection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             SectionHeader("Vitality", overline: "Weekly",
-                          trailing: bodyAge != nil ? String(localized: "Body Age \(Int((bodyAge ?? 0).rounded()))") : nil)
+                          trailing: bodyAge.map { String(localized: "Body Age \(Int($0.rounded()))") })
             if let v = vitality, let ba = bodyAge {
                 hero(vitality: v, bodyAge: ba)
             } else if loaded {
@@ -1221,7 +1268,7 @@ private struct VitalitySection: View {
                         .foregroundStyle(younger ? StrandPalette.statusPositive : StrandPalette.statusWarning)
                 }
             }
-            if (best?.lnHazard ?? 0) < 0 || (worst?.lnHazard ?? 0) > 0 {
+            if (best.map { $0.lnHazard < 0 } ?? false) || (worst.map { $0.lnHazard > 0 } ?? false) {
                 Divider().overlay(StrandPalette.hairline)
                 if let best, best.lnHazard < 0 {
                     Text("Helping most: \(best.label)")
@@ -1356,10 +1403,16 @@ private struct LiquidVitalTile: View {
                 Text("\(reading.label)").strandOverline()
                 Spacer(minLength: 8)
                 HStack(alignment: .center, spacing: 10) {
-                    // The signature liquid gauge — static (posed) so a grid of them doesn't each run a live
-                    // 30fps Canvas. nil fraction (no value) reads as an empty vessel, no fabricated fill.
-                    LiquidVessel(value: vesselFraction, tint: reading.metricColor, animated: false)
-                        .frame(width: 34, height: 34)
+                    // The 44 pt luminous ring (§6.4 vital signs grid) — static, no count-up on the arc. The
+                    // fraction is the vital across its physiological span; nil (no value) is the dashed
+                    // bare track, no fabricated fill.
+                    TelosRing(value: vesselFraction.map { $0 * 100 },
+                              scale: 100,
+                              color: reading.metricColor,
+                              diameter: 44,
+                              showsValue: false,
+                              animatesChanges: false)
+                        .accessibilityHidden(true)
                     if let value = reading.value {
                         // The value counts up on appear (snaps under Reduce Motion), formatted exactly as
                         // the classic tile did (the reading's own formatter + unit), so it's byte-identical.
@@ -1370,7 +1423,8 @@ private struct LiquidVitalTile: View {
                             .lineLimit(1)
                             .minimumScaleFactor(0.6)
                     } else {
-                        Text("—").font(StrandFont.number(24)).foregroundStyle(reading.accent)
+                        Text(verbatim: TelosType.absent).font(StrandFont.number(24))
+                            .foregroundStyle(TelosColor.textTertiary)
                     }
                     Spacer(minLength: 0)
                 }
@@ -1421,8 +1475,17 @@ private struct LiquidVitalTile: View {
 /// shows when the engine returns a non-quiet level; cycle awareness shows the opt-in card until the user
 /// turns it on (default OFF); the body clock shows nil-state copy until it can read a rhythm.
 private struct SkinTempSection: View {
-    @EnvironmentObject var model: AppModel
+    /// NOT observed (§2.1 rule 5): `AppModel` publishes 1–3×/s while a strap streams, and this section
+    /// used to re-render on every one of those ticks for five fields the analytics pass writes a few
+    /// times a day. They now arrive as one de-duplicated `SkinTempSnapshot`.
+    @Environment(\.appModelRef) private var modelRef
+    private var model: AppModel { requireAppModel(modelRef) }
     @EnvironmentObject var repo: Repository
+    @EnvironmentObject var profile: ProfileStore
+    @State private var snapState: SkinTempSnapshot?
+    /// The published snapshot once it landed, else read straight off the model (first pass; observes
+    /// nothing).
+    private var snap: SkinTempSnapshot { snapState ?? SkinTempSnapshot.current(model) }
 
     /// The cycle-awareness opt-in (default OFF). The same key AppModel reads, so a flip is consistent.
     @AppStorage(AppModel.cycleAwarenessKey) private var cycleEnabled = false
@@ -1434,19 +1497,19 @@ private struct SkinTempSection: View {
     /// Whether the cycle-awareness opt-in is offered for this profile (#801). Delegates to the shared
     /// ``ProfileStore/cycleAwarenessApplies`` gate so Health + Automations stay in lockstep: cycle phase
     /// is read from the menstrual skin-temperature shift, so the opt-in is NOT shown for male profiles.
-    private var cycleOptInApplies: Bool { model.profile.cycleAwarenessApplies && !cycleHidden }
+    private var cycleOptInApplies: Bool { profile.cycleAwarenessApplies && !cycleHidden }
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             SectionHeader("Skin temperature", overline: "From your nightly sensor")
 
             // 1. Illness heads-up — only when the engine returned something worth surfacing.
-            if let illness = model.illnessSignal, illness.level != .quiet {
-                HeadsUpCard(result: illness, distance: model.illnessDistance)
+            if let illness = snap.illness, illness.level != .quiet {
+                HeadsUpCard(result: illness, distance: snap.distance)
             }
 
             // 2. Body clock — shows nil-state copy via the engine's own confidence handling.
-            if let phase = model.circadianPhase {
+            if let phase = snap.circadian {
                 BodyClockCard(estimate: phase)
             }
 
@@ -1455,8 +1518,8 @@ private struct SkinTempSection: View {
             // apply to (female / nonbinary); it is NOT rendered for male profiles. If a profile that
             // previously enabled it later switches to male, we still honour the existing awareness card
             // rather than silently hiding their data; only the OPT-IN invitation is gated.
-            if cycleEnabled, let cycle = model.cyclePhase {
-                CycleAwarenessCard(result: cycle, curve: model.cycleCurve,
+            if cycleEnabled, let cycle = snap.cycle {
+                CycleAwarenessCard(result: cycle, curve: snap.curve,
                                    onLogPeriod: {
                                        Task {
                                            await repo.logPeriodStart(day: Repository.localDayKey(Date()))
@@ -1484,18 +1547,49 @@ private struct SkinTempSection: View {
             // section can also be blank when the opt-in doesn't apply AND nothing else has data. Show
             // the empty state in either case (cycle ON but thin, OR opt-in hidden with no other signal).
             if (cycleEnabled || !cycleOptInApplies)
-                && model.illnessSignal == nil && model.circadianPhase == nil && model.cyclePhase == nil {
+                && snap.illness == nil && snap.circadian == nil && snap.cycle == nil {
                 ComingSoon(what: "Wear the strap overnight and these read from your nightly skin temperature.",
                            symbol: "thermometer.medium")
             }
         }
+        .onReceive(SkinTempSnapshot.publisher(model)) { next in
+            if snapState != next { snapState = next }
+        }
         .sheet(isPresented: $cycleTrackerPresented) {
-            if let cycle = model.cyclePhase {
-                CycleTrackerView(result: cycle, curve: model.cycleCurve)
+            if let cycle = snap.cycle {
+                CycleTrackerView(result: cycle, curve: snap.curve)
                     .environmentObject(repo)
                     .environmentObject(model)
             }
         }
+    }
+}
+
+/// The five skin-temperature fields `SkinTempSection` renders, as one equatable value with one
+/// de-duplicated publisher — so the section re-renders when the analytics pass writes one of them, never
+/// on the model's 1–3 Hz live ticks.
+private struct SkinTempSnapshot: Equatable {
+    var illness: IllnessSignalEngine.Result?
+    var distance: IllnessDistance.Result?
+    var circadian: CircadianEngine.PhaseEstimate?
+    var cycle: CyclePhaseEngine.Result?
+    var curve: [Double]
+
+    @MainActor static func current(_ m: AppModel) -> SkinTempSnapshot {
+        SkinTempSnapshot(illness: m.illnessSignal, distance: m.illnessDistance,
+                         circadian: m.circadianPhase, cycle: m.cyclePhase, curve: m.cycleCurve)
+    }
+
+    @MainActor static func publisher(_ m: AppModel) -> AnyPublisher<SkinTempSnapshot, Never> {
+        Publishers.CombineLatest(
+            Publishers.CombineLatest4(m.$illnessSignal, m.$illnessDistance, m.$circadianPhase, m.$cyclePhase),
+            m.$cycleCurve
+        )
+        .map { four, curve in
+            SkinTempSnapshot(illness: four.0, distance: four.1, circadian: four.2, cycle: four.3, curve: curve)
+        }
+        .removeDuplicates()
+        .eraseToAnyPublisher()
     }
 }
 
@@ -1525,7 +1619,7 @@ private struct HealthHubLinksSection: View {
             NoopCard {
                 HStack(spacing: 12) {
                     Image(systemName: symbol)
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(TelosType.glyphField)
                         .foregroundStyle(tint)
                         .frame(width: 30, height: 30)
                         .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
@@ -1538,7 +1632,7 @@ private struct HealthHubLinksSection: View {
                     }
                     Spacer(minLength: 8)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(TelosType.glyphChevron)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .accessibilityHidden(true)
                 }

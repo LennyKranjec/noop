@@ -30,6 +30,7 @@ struct LiftLoggerView: View {
     @State private var expandedWarmups: Set<String> = []
     @State private var picker: LiftValuePicker.Target?
     @State private var showHelp = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         VStack(alignment: .leading, spacing: TelosSpace.m) {
@@ -60,12 +61,14 @@ struct LiftLoggerView: View {
         }
         .sheet(isPresented: $showProgramEditor) {
             LiftProgramEditorView(programs: programs)
+                .presentationBackground(TelosColor.canvas)
         }
         .sheet(isPresented: $showAddExercise) {
             LiftAddExerciseSheet(canSaveToPlan: recorder.session?.templateId != nil) { name, equipment, reps, save in
                 recorder.addExercise(name: name, equipment: equipment, targetReps: reps, saveToPlan: save)
             }
             .presentationDetents([.medium])
+            .presentationBackground(TelosColor.canvas)
         }
         .sheet(item: Binding(get: { editingExerciseId.map(IdentifiedString.init) },
                              set: { editingExerciseId = $0?.id })) { target in
@@ -76,11 +79,13 @@ struct LiftLoggerView: View {
                                             restSeconds: rest, saveToPlan: save)
                 }
                 .presentationDetents([.medium, .large])
+                .presentationBackground(TelosColor.canvas)
             }
         }
         .sheet(item: $picker) { target in
             LiftValuePicker(target: target, recorder: recorder)
                 .presentationDetents([.height(340)])
+                .presentationBackground(TelosColor.canvas)
         }
         .alert("Finish early?", isPresented: $showEarlyFinishConfirm) {
             Button("Keep going", role: .cancel) { }
@@ -153,7 +158,10 @@ struct LiftLoggerView: View {
         Button {
             if session.pendingCount > 0 { showEarlyFinishConfirm = true } else { onFinish() }
         } label: {
-            Text("Finish")
+            HStack(spacing: TelosSpace.xs) {
+                if prominent { Image(systemName: "flag.checkered").accessibilityHidden(true) }
+                Text("Finish")
+            }
                 .font(TelosType.headline)
                 .foregroundStyle(prominent ? TelosColor.onAccent : TelosColor.mint)
                 .padding(.horizontal, TelosSpace.m)
@@ -168,7 +176,7 @@ struct LiftLoggerView: View {
                 .shadow(color: prominent ? TelosColor.glow.opacity(0.5) : .clear, radius: 8)
         }
         .buttonStyle(TelosPressButtonStyle())
-        .animation(TelosMotion.settle, value: prominent)
+        .animation(TelosMotion.gated(TelosMotion.settle, reduced: reduceMotion), value: prominent)
     }
 
     // MARK: - Exercise strip
@@ -214,11 +222,15 @@ struct LiftLoggerView: View {
         let done = ex.sets.filter { $0.status != .pending }.count
         return ZStack {
             Circle().stroke(TelosColor.line, lineWidth: TelosStroke.strong)
+            // The exercise's progress ring settles to each new check (≈0.45 s, then rest; instant under
+            // Reduce Motion). A completed exercise lights with one halo stroke — no blur, no shadow.
             Circle()
                 .trim(from: 0, to: CGFloat(done) / CGFloat(total))
-                .stroke(ex.isComplete ? TelosColor.mint : TelosColor.teal,
-                        style: StrokeStyle(lineWidth: TelosStroke.strong, lineCap: .round))
-                .rotationEffect(.degrees(-90))
+                .rotation(.degrees(-90))
+                .telosLuminousStroke(ex.isComplete ? TelosColor.mint : TelosColor.teal,
+                                     lineWidth: TelosStroke.strong,
+                                     haloOpacity: ex.isComplete ? 0.3 : 0)
+                .animation(TelosMotion.gated(TelosMotion.settle, reduced: reduceMotion), value: done)
             Image(systemName: LiftCopy.glyph(for: ex.name))
                 .font(TelosType.glyphRow)
                 .foregroundStyle(selected ? TelosColor.mint : TelosColor.textSecondary)
@@ -336,8 +348,17 @@ struct LiftLoggerView: View {
                 .font(TelosType.caption)
                 .foregroundStyle(TelosColor.textTertiary)
         }
-        .padding(TelosSpace.s)
-        .background(RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous).fill(TelosColor.mintMuted))
+        .padding(TelosSpace.m)
+        .background {
+            RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
+                .fill(TelosColor.mintMuted)
+                .overlay {
+                    RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous)
+                        .strokeBorder(LinearGradient(colors: [TelosColor.mint.opacity(0.7), TelosColor.mint.opacity(0.1)],
+                                                     startPoint: .topLeading, endPoint: .bottomTrailing),
+                                      lineWidth: TelosStroke.line)
+                }
+        }
     }
 
     private func proposalTitle(_ kind: LiftProposal.Kind) -> Text {
@@ -474,26 +495,13 @@ struct LiftLoggerView: View {
     private func checkButton(_ ex: LiftLoggedExercise, set: LiftLoggedSet, active: Bool) -> some View {
         let done = set.status == .done
         return Button {
+            // The phone haptic (`commit`) is played ONCE by the recorder's `check` — never a second pattern here.
             if done { recorder.uncheck(exerciseId: ex.id, setId: set.id) }
             else if set.status == .pending { recorder.check(exerciseId: ex.id, setId: set.id) }
         } label: {
-            ZStack {
-                if done {
-                    Circle().fill(TelosColor.surfaceRaised)
-                    Image(systemName: "checkmark").font(TelosType.glyphRow).foregroundStyle(TelosColor.textSecondary)
-                } else if active {
-                    Circle().fill(TelosColor.mint)
-                        .shadow(color: TelosColor.glow.opacity(0.55), radius: 8)
-                    Image(systemName: "checkmark").font(TelosType.glyphControl).foregroundStyle(TelosColor.onAccent)
-                } else if set.status == .notDone {
-                    Image(systemName: "minus").font(TelosType.glyphRow).foregroundStyle(TelosColor.textTertiary)
-                } else {
-                    Circle().strokeBorder(TelosColor.lineStrong, lineWidth: TelosStroke.strong)
-                }
-            }
-            .frame(width: active ? 40 : 30, height: active ? 40 : 30)
-            .frame(width: TelosSpace.hitTarget, height: TelosSpace.hitTarget)
-            .contentShape(Rectangle())
+            LiftCheckMark(status: set.status, active: active)
+                .frame(width: TelosSpace.hitTarget, height: TelosSpace.hitTarget)
+                .contentShape(Rectangle())
         }
         .buttonStyle(TelosPressButtonStyle())
         .disabled(set.status == .notDone)
@@ -520,7 +528,7 @@ struct LiftLoggerView: View {
             }
         }
         .padding(TelosSpace.s)
-        .background(RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous).fill(TelosColor.surfaceInset.opacity(0.6)))
+        .background(RoundedRectangle(cornerRadius: TelosRadius.control, style: .continuous).fill(TelosColor.glassFill))
     }
 
     private func lastTimeHeading(_ ctx: LiftSessionRecorder.ExerciseContext) -> String {
@@ -591,6 +599,74 @@ struct LiftLoggerView: View {
                     .foregroundStyle(TelosColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+}
+
+// MARK: - Check mark (the logger's reward micro-moment)
+
+/// The set's check — the logger's most-pressed control, made to feel like a commit. On pending → done it
+/// POPS (scale 1 → 1.22 → 1, a short spring: the wearer's own press, so the gentle overshoot is allowed)
+/// and throws ONE luminous ripple ring outward that fades (≈0.5 s), then rests. The phone haptic is the
+/// recorder's single `commit` for the same tap — nothing is added here.
+///
+/// Cost (§2.1 rule 8): two transforms on a ≤ 40 pt element, only on the change; nothing runs between
+/// checks, nothing loops. Reduce Motion / Low Power / "Reduce motion in NOOP" (`NoopMotionState.poseStill`):
+/// no pop and no ripple — the fill change alone.
+private struct LiftCheckMark: View {
+    let status: LiftSetStatus
+    let active: Bool
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @ObservedObject private var motion = NoopMotionState.shared
+    /// Bumped once per pending → done change; drives the two one-shot phase animations.
+    @State private var celebrate = 0
+
+    private enum Ripple: CaseIterable { case idle, lit, out }
+
+    var body: some View {
+        let done = status == .done
+        let size: CGFloat = (active || done) ? 40 : 30
+        ZStack {
+            if done {
+                Circle().fill(TelosColor.mintMuted)
+                Circle().strokeBorder(TelosColor.mint.opacity(TelosOpacity.secondary), lineWidth: TelosStroke.line)
+                Image(systemName: "checkmark")
+                    .font(TelosType.glyphRow.weight(.bold))
+                    .foregroundStyle(TelosColor.mint)
+            } else if active {
+                // The next set to do glows: ONE static radial gradient (no shadow on a table row).
+                TelosRadialGlow(color: TelosColor.glow, intensity: 0.45, radius: 30)
+                    .frame(width: 64, height: 64)
+                Circle().fill(TelosColor.mint)
+                Image(systemName: "checkmark")
+                    .font(TelosType.glyphControl)
+                    .foregroundStyle(TelosColor.onAccent)
+            } else if status == .notDone {
+                Image(systemName: "minus").font(TelosType.glyphRow).foregroundStyle(TelosColor.textTertiary)
+            } else {
+                Circle().strokeBorder(TelosColor.lineStrong, lineWidth: TelosStroke.strong)
+            }
+        }
+        .frame(width: size, height: size)
+        .background {
+            Circle()
+                .stroke(TelosColor.mint, lineWidth: TelosStroke.data)
+                .phaseAnimator(Ripple.allCases, trigger: celebrate) { ring, phase in
+                    ring
+                        .scaleEffect(phase == .out ? 1.9 : 1)
+                        .opacity(phase == .lit ? 0.9 : 0)
+                } animation: { phase in
+                    phase == .out ? Animation.easeOut(duration: 0.5) : Animation.linear(duration: 0.01)
+                }
+        }
+        .phaseAnimator([CGFloat(1), CGFloat(1.22)], trigger: celebrate) { mark, scale in
+            mark.scaleEffect(scale)
+        } animation: { scale in
+            scale > 1 ? Animation.spring(response: 0.16, dampingFraction: 0.6) : TelosMotion.release
+        }
+        .onChangeCompat(of: done) { nowDone in
+            if nowDone && !motion.poseStill(reduceMotion) { celebrate &+= 1 }
         }
     }
 }
@@ -758,6 +834,7 @@ struct LiftSessionExerciseSheet: View {
                 }
             }
             .navigationTitle(Text(verbatim: exercise.name))
+            .liftFormChrome()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
@@ -805,6 +882,7 @@ struct LiftAddExerciseSheet: View {
                 }
             }
             .navigationTitle(Text("Add exercise"))
+            .liftFormChrome()
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }

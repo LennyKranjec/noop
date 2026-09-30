@@ -39,6 +39,16 @@ extension View {
         modifier(LiftGlass(radius: radius, raised: raised))
     }
 
+    /// The plan editor / exercise sheets in the Telos register: the system Form / List keeps its native editing
+    /// behaviour (swipe-to-delete, reorder, steppers), drawn on the canvas ground with the glass-row look and
+    /// the bioluminescent tint. Static — no material, no blur.
+    func liftFormChrome() -> some View {
+        self
+            .scrollContentBackground(.hidden)
+            .background(TelosColor.canvas.ignoresSafeArea())
+            .tint(TelosColor.mint)
+    }
+
     /// The small-caps label style (`scale`, wide tracking, tertiary ink) used for column heads and overlines.
     func liftOverline() -> some View {
         self.font(TelosType.scale)

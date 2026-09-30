@@ -19,19 +19,20 @@ struct LiftRestTimerPill: View {
                 HStack(spacing: TelosSpace.s) {
                     adjustButton(delta: -LiftRestTimer.adjustStepSeconds, symbol: "minus")
                     HStack(spacing: TelosSpace.s) {
+                        // The draining ring: a crisp core over ONE faint halo stroke (no blur, no shadow — it is
+                        // redrawn once a second, so the glow must cost nothing).
                         ZStack {
                             Circle().stroke(TelosColor.mintMuted, lineWidth: TelosStroke.data)
                             Circle()
                                 .trim(from: 0, to: max(0.001, 1 - fraction))
-                                .stroke(TelosColor.mint, style: StrokeStyle(lineWidth: TelosStroke.data, lineCap: .round))
-                                .rotationEffect(.degrees(-90))
+                                .rotation(.degrees(-90))
+                                .telosLuminousStroke(TelosColor.mint, lineWidth: TelosStroke.data, haloOpacity: 0.3)
                         }
-                        .frame(width: 26, height: 26)
-                        .shadow(color: TelosColor.glow.opacity(0.6), radius: 6)
+                        .frame(width: 30, height: 30)
                         VStack(alignment: .leading, spacing: 0) {
                             Text("Rest").liftOverline()
                             Text(verbatim: LiftRestTimer.clock(remaining))
-                                .font(TelosType.numeralFont(size: 26))
+                                .telosNumeral(.geometryBound(size: 28, cap: 1.3))
                                 .monospacedDigit()
                                 .foregroundStyle(TelosColor.textPrimary)
                                 .contentTransition(.numericText())

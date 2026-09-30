@@ -69,27 +69,32 @@ struct CoachBriefWidgetView: View {
 
     // MARK: - Lock Screen: accessoryRectangular
 
+    /// Lock-screen colour is not colour: this family renders vibrant, so hierarchy is `.primary` /
+    /// `.secondary` and the sparkle is the accentable mark (it takes the tint in `.accented`).
     private var rectangular: some View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(spacing: 4) {
                 Image(systemName: "sparkles")
-                    .font(.system(size: 10, weight: .bold))
-                    .foregroundStyle(StrandPalette.accent)
-                Text("Coach")
                     .font(.system(size: 11, weight: .bold))
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .widgetAccentable()
+                Text("Coach")
+                    .font(TelosType.scaleFixed)
+                    .tracking(TelosType.Tracking.scale)
+                    .textCase(.uppercase)
+                    .foregroundStyle(HierarchicalShapeStyle.secondary)
                 Spacer(minLength: 0)
                 if let date = entry.briefDate {
                     Text(date, style: .time)
-                        .font(.caption2)
-                        .foregroundStyle(StrandPalette.textTertiary)
+                        .font(TelosType.scaleNumber)
+                        .foregroundStyle(HierarchicalShapeStyle.secondary)
                 }
             }
             Text(briefDisplay)
-                .font(.system(size: 11))
-                .foregroundStyle(StrandPalette.textPrimary)
+                .font(TelosType.footnote)
+                .foregroundStyle(HierarchicalShapeStyle.primary)
                 .lineLimit(3)
-                .minimumScaleFactor(0.8)
+                // 13 pt × 0.85 = 11.05: never below the 11 pt floor.
+                .minimumScaleFactor(0.85)
         }
     }
 
@@ -101,42 +106,48 @@ struct CoachBriefWidgetView: View {
 
     // MARK: - Home Screen: systemSmall
 
+    /// Telos (§6.13): the label voice for the title, the brief in `footnote`, its time in `scaleNumber`.
+    /// No extra padding: on iOS 17 `containerBackground` already applies the system content margins.
     private var small: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 6) {
                 Image(systemName: "sparkles")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(StrandPalette.accent)
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(TelosColor.mint)
                 Text("Coach Brief")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(StrandPalette.textSecondary)
-                Spacer()
+                    .font(TelosType.scale)
+                    .tracking(TelosType.Tracking.scale)
+                    .textCase(.uppercase)
+                    .foregroundStyle(TelosColor.textSecondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.92)
+                Spacer(minLength: 0)
             }
             if entry.briefText == nil {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("No brief yet")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundStyle(StrandPalette.textTertiary)
+                        .font(TelosType.subhead)
+                        .foregroundStyle(TelosColor.textSecondary)
                     Text("Enable Morning Brief in Coach settings to see today's readiness here.")
-                        .font(.system(size: 11))
-                        .foregroundStyle(StrandPalette.textTertiary)
+                        .font(TelosType.caption)
+                        .foregroundStyle(TelosColor.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             } else {
                 Text(briefDisplay)
-                    .font(.system(size: 12))
-                    .foregroundStyle(StrandPalette.textPrimary)
-                    .lineLimit(5)
-                    .minimumScaleFactor(0.8)
+                    .font(TelosType.footnote)
+                    .foregroundStyle(TelosColor.textPrimary)
+                    .lineLimit(4)
+                    // 13 pt × 0.85 = 11.05: never below the 11 pt floor.
+                    .minimumScaleFactor(0.85)
             }
             Spacer(minLength: 0)
             if let date = entry.briefDate {
                 Text(date, format: .dateTime.hour().minute())
-                    .font(.caption2)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(TelosColor.textTertiary)
             }
         }
-        .padding(12)
     }
 
     // MARK: - Text helpers
@@ -164,12 +175,13 @@ struct CoachBriefWidget: Widget {
     var body: some WidgetConfiguration {
         StaticConfiguration(kind: Self.kind, provider: CoachBriefProvider()) { entry in
             if #available(iOS 17.0, *) {
+                // The system strips this for the accessory families on the Lock Screen.
                 CoachBriefWidgetView(entry: entry)
-                    .containerBackground(StrandPalette.surfaceBase, for: .widget)
+                    .containerBackground(for: .widget) { TelosWidgetGround() }
             } else {
                 CoachBriefWidgetView(entry: entry)
                     .padding()
-                    .background(StrandPalette.surfaceBase)
+                    .background(TelosColor.canvas)
             }
         }
         .configurationDisplayName("Coach Brief")

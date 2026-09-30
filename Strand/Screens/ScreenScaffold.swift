@@ -48,11 +48,12 @@ struct ScreenScaffold<Content: View, Trailing: View>: View {
             #if os(iOS)
             // Unified side margins matching the floating navigation bar so every page's cards + header line up
             // to the same edges (2026-07-02); macOS keeps the classic 28 in the #else branch.
-            .padding(.horizontal, NoopMetrics.screenHPadding)
-            .padding(.top, 24)
-            // The tab bar floats over the scroll content, so the last card sat hidden behind it.
-            // Reserve extra bottom scroll room so every screen's final card clears the floating bar.
-            .padding(.bottom, NoopMetrics.tabBarClearance)
+            .padding(.horizontal, TelosSpace.pageGutter)
+            .padding(.top, TelosSpace.xl)
+            // Telos 2.0: the floating tab bar reserves its own room (the shell insets every tab's bottom
+            // safe area by the bar's height), so the scroll content only needs a normal end margin here —
+            // the same in a sheet, which has no bar at all.
+            .padding(.bottom, TelosSpace.xl)
             // iPad: cap the readable column, then centre it in the full-width scroll viewport.
             // iPhone (.compact): the inner frame is .infinity/.leading, identical to before.
             .frame(maxWidth: hSizeClass == .regular ? 700 : .infinity,
@@ -75,7 +76,7 @@ struct ScreenScaffold<Content: View, Trailing: View>: View {
         // on the opaque canvas and stay fully legible (2026-06-23: cards were "losing the data").
         .background(alignment: .top) {
             ZStack(alignment: .top) {
-                StrandPalette.surfaceBase
+                TelosColor.canvas
                 topBackground
             }
             .ignoresSafeArea()
@@ -114,16 +115,23 @@ struct ScreenScaffold<Content: View, Trailing: View>: View {
         }
     }
 
+    /// §6.1: title `TelosType.title` (SF Pro bold 28), subtitle `subhead` secondary. Both wrap rather than
+    /// truncate at large text sizes; the title is the screen's header for VoiceOver.
     private var header: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
+        HStack(alignment: .center, spacing: TelosSpace.m) {
+            VStack(alignment: .leading, spacing: TelosSpace.xxs) {
                 if let title {
-                    // Match the liquid home's title face (SF Rounded 28) so every page's header reads
-                    // identically (2026-07-02 cohesion pass).
-                    Text(title).font(StrandFont.rounded(28)).foregroundStyle(StrandPalette.textPrimary)
+                    Text(title)
+                        .font(TelosType.title)
+                        .foregroundStyle(TelosColor.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityAddTraits(.isHeader)
                 }
                 if let subtitle {
-                    Text(subtitle).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
+                    Text(subtitle)
+                        .font(TelosType.subhead)
+                        .foregroundStyle(TelosColor.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
             Spacer(minLength: 0)
@@ -163,20 +171,21 @@ struct ComingSoon: View {
     let what: LocalizedStringKey
     var symbol: String = "sparkles"
     var body: some View {
-        HStack(alignment: .top, spacing: 12) {
+        // §5.13: sized to its content — symbol, headline, one line; the glass card surface.
+        HStack(alignment: .top, spacing: TelosSpace.m) {
             Image(systemName: symbol)
-                .font(StrandFont.headline)
-                .foregroundStyle(StrandPalette.accent)
+                .font(TelosType.glyphEmpty)
+                .foregroundStyle(TelosColor.textTertiary)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: TelosSpace.xs) {
                 Text("Coming together")
-                    .font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
+                    .font(TelosType.headline).foregroundStyle(TelosColor.textPrimary)
                 Text(what)
-                    .font(StrandFont.body).foregroundStyle(StrandPalette.textSecondary)
+                    .font(TelosType.subhead).foregroundStyle(TelosColor.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(20).frame(maxWidth: .infinity, alignment: .leading)
+        .padding(TelosSpace.l).frame(maxWidth: .infinity, alignment: .leading)
         .frostedCardSurface()
     }
 }
@@ -196,8 +205,8 @@ struct SyncingHistoryNote: View {
             StatePill("Syncing strap history…", tone: .accent, pulsing: true)
             if chunks > 0 {
                 Text("\(chunks) chunks pulled")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(TelosColor.textSecondary)
             }
         }
     }
@@ -224,20 +233,21 @@ struct DataPendingNote: View {
     var symbol: String = "sparkles"
 
     var body: some View {
-        StrandCard(padding: 20) {
-            HStack(alignment: .top, spacing: 12) {
+        // §5.13: sized to its content; the symbol in the empty-state voice (tertiary), not the accent.
+        StrandCard(padding: TelosSpace.l) {
+            HStack(alignment: .top, spacing: TelosSpace.m) {
                 Image(systemName: symbol)
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.accent)
+                    .font(TelosType.glyphEmpty)
+                    .foregroundStyle(TelosColor.textTertiary)
                     .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 6) {
+                VStack(alignment: .leading, spacing: TelosSpace.xs) {
                     Text(title)
-                        .font(StrandFont.headline)
-                        .foregroundStyle(StrandPalette.textPrimary)
+                        .font(TelosType.headline)
+                        .foregroundStyle(TelosColor.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
                     Text(message)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
+                        .font(TelosType.subhead)
+                        .foregroundStyle(TelosColor.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }

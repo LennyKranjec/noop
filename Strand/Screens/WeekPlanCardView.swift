@@ -11,21 +11,27 @@ import StrandDesign
 // partly from imported zones carry "≈"; sessions without heart rate are named, not scored.
 //
 // COST: static. No animation, no timer; it re-renders only when `WeekPlanSource` publishes.
+//
+// TELOS (BODY): a glass card; aerobic minutes on a thin linear scale with the WHO range hatched and the
+// week's target as a caret; strength sessions as pips; the step target as a caret over the measured daily
+// mean; the day's guidance line as the card's closing word. The scales GROW to hold the value (a week past
+// its target shows past the caret, never clipped at the end of the track).
 
 struct WeekPlanCardView: View {
     @ObservedObject var source: WeekPlanSource
     @State private var showDetail = false
 
     var body: some View {
-        StrandCard(padding: 16) {
+        StrandCard(tint: TelosColor.mint) {
             if let plan = source.currentPlan {
                 content(plan)
             } else {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(String(localized: "This week")).strandOverline()
-                    Text("\u{2014} " + String(localized: "Not enough data yet"))
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textSecondary)
+                VStack(alignment: .leading, spacing: TelosSpace.xs) {
+                    Text(String(localized: "This week"))
+                        .telosScale()
+                        .textCase(.uppercase)
+                        .foregroundStyle(TelosColor.textTertiary)
+                    AbsentValue(reasonText: Text(String(localized: "Not enough data yet")), arrangement: .inline)
                 }
             }
         }
@@ -34,7 +40,7 @@ struct WeekPlanCardView: View {
     // MARK: - Content
 
     @ViewBuilder private func content(_ plan: WeekPlan) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: TelosSpace.m) {
             header(plan)
             if plan.easyOffer == .offered { offer(plan) }
             aerobicRow(plan)
@@ -70,13 +76,12 @@ struct WeekPlanCardView: View {
     private func header(_ plan: WeekPlan) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(WeekPlanEngine.header(plan))
-                .font(StrandFont.overline)
-                .tracking(StrandFont.overlineTracking)
-                .foregroundStyle(plan.type == .build ? StrandPalette.textSecondary : StrandPalette.statusWarning)
+                .telosScale()
+                .foregroundStyle(plan.type == .build ? TelosColor.mint : TelosColor.warning)
                 .fixedSize(horizontal: false, vertical: true)
             Text(Self.range(plan))
-                .font(StrandFont.mono(12))
-                .foregroundStyle(StrandPalette.textTertiary)
+                .font(TelosType.scaleNumber)
+                .foregroundStyle(TelosColor.textTertiary)
         }
     }
 
@@ -101,23 +106,26 @@ struct WeekPlanCardView: View {
         let done = p.map { approx + Self.whole($0.aerobicDone) } ?? "\u{2014}"
         let value: String
         let caption: String
-        let scaleTop: Double
         if let target = plan.aerobicTarget {
             value = "\(done) / \(Self.whole(target)) min"
             caption = String(localized: "vigorous counts double")
-            scaleTop = max(target, 1)
         } else {
             value = "\(done) min"
             caption = String(localized: "Calibrating (\(plan.validBaselineWeeks) of \(WeekPlanEngine.minValidWeeks) weeks) · WHO range 150–300 min")
-            scaleTop = WeekPlanEngine.whoLow
         }
         return VStack(alignment: .leading, spacing: 4) {
             line(String(localized: "Aerobic"), value, caption: caption)
-            if let p { bar(fraction: p.aerobicDone / scaleTop) }
+            // Measured minutes against the WHO range (hatched) and the week's target (caret). Drawn only
+            // from a measured figure; with no progress read yet the row stays text + "—".
+            if let p {
+                PlanScale(value: p.aerobicDone, target: plan.aerobicTarget,
+                          band: WeekPlanEngine.whoLow...WeekPlanEngine.whoHigh, tint: TelosColor.mint)
+                    .padding(.leading, 74)
+            }
             if let p, p.unmeasuredSessions > 0 {
                 Text(String(localized: "\(p.unmeasuredSessions) session(s) without heart rate — counted, no minutes"))
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .font(TelosType.caption)
+                    .foregroundStyle(TelosColor.textTertiary)
             }
         }
     }
@@ -142,8 +150,19 @@ struct WeekPlanCardView: View {
         } else if let s = source.strengthLine {
             parts.append(s)
         }
-        return line(String(localized: "Strength"), "\(done) / \(target) sessions",
-                    caption: parts.isEmpty ? nil : parts.joined(separator: "; "))
+        return VStack(alignment: .leading, spacing: 4) {
+            line(String(localized: "Strength"), "\(done) / \(target) sessions",
+                 caption: parts.isEmpty ? nil : parts.joined(separator: "; "))
+            // Sessions as pips (one cell per planned session); only with a measured count.
+            if let p = source.progress, plan.strength.maxSessions > 0 {
+                TelosSegmentedBar(value: Double(p.strengthDone),
+                                  scale: Double(plan.strength.maxSessions),
+                                  segments: plan.strength.maxSessions,
+                                  color: TelosColor.muscle)
+                    .frame(maxWidth: 120, alignment: .leading)
+                    .padding(.leading, 74)
+            }
+        }
     }
 
     private func stepsRow(_ plan: WeekPlan) -> some View {
@@ -157,19 +176,38 @@ struct WeekPlanCardView: View {
             caption += (caption.isEmpty ? "" : " · ")
                 + String(localized: "\(Int(plan.stepsPlateau).formatted()) — the lower end of where benefits level off")
         }
-        return line(String(localized: "Steps"), "\(mean) / day target \(Int(target).formatted())",
-                    caption: caption.isEmpty ? nil : caption)
+        return VStack(alignment: .leading, spacing: 4) {
+            line(String(localized: "Steps"), "\(mean) / day target \(Int(target).formatted())",
+                 caption: caption.isEmpty ? nil : caption)
+            // The day target as a caret over the reliable daily mean (drawn only when that mean exists).
+            if let reliable = source.progress?.stepsMeanReliable {
+                PlanScale(value: reliable, target: target, band: nil, tint: TelosColor.teal)
+                    .padding(.leading, 74)
+            }
+        }
     }
 
     private func todayRow(_ g: DayGuidance) -> some View {
         VStack(alignment: .leading, spacing: 2) {
-            line(String(localized: "Today"), g.line, caption: nil)
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(String(localized: "Today"))
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(TelosColor.textSecondary)
+                    .frame(width: 64, alignment: .leading)
+                Text(g.line)
+                    .font(TelosType.headline)
+                    .foregroundStyle(TelosColor.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             ForEach(g.qualifiers, id: \.self) { q in
                 Text(q)
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .font(TelosType.caption)
+                    .foregroundStyle(TelosColor.textTertiary)
+                    .padding(.leading, 74)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .accessibilityElement(children: .combine)
     }
 
     private func detail(_ plan: WeekPlan) -> some View {
@@ -191,36 +229,23 @@ struct WeekPlanCardView: View {
         VStack(alignment: .leading, spacing: 2) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(label)
-                    .font(StrandFont.mono(12))
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(TelosColor.textSecondary)
                     .frame(width: 64, alignment: .leading)
                 Text(value)
-                    .font(StrandFont.bodyNumber)
-                    .foregroundStyle(StrandPalette.textPrimary)
+                    .font(TelosType.numeralS)
+                    .foregroundStyle(TelosColor.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
             }
             if let caption {
                 Text(caption)
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .font(TelosType.caption)
+                    .foregroundStyle(TelosColor.textTertiary)
                     .padding(.leading, 74)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-    }
-
-    /// A plain track with a measured fill (clamped to the track). Only called with a real figure.
-    private func bar(fraction: Double) -> some View {
-        GeometryReader { geo in
-            ZStack(alignment: .leading) {
-                Capsule().fill(StrandPalette.hairline)
-                Capsule().fill(StrandPalette.accent)
-                    .frame(width: geo.size.width * CGFloat(min(max(fraction, 0), 1)))
-            }
-        }
-        .frame(height: 6)
-        .padding(.leading, 74)
-        .accessibilityHidden(true)
+        .accessibilityElement(children: .combine)
     }
 
     // MARK: - Formatting
@@ -239,4 +264,56 @@ struct WeekPlanCardView: View {
     }
 
     static func isMonday(_ d: Date) -> Bool { Calendar.current.component(.weekday, from: d) == 2 }
+}
+
+// MARK: - Plan scale
+
+/// A thin linear scale (§6.14): the track, an optional HATCHED range (the WHO band), the measured fill and
+/// an optional hollow-topped caret at the target. The top of the scale grows to hold the value and the
+/// target, so overflow is visible rather than clipped. Only built from a measured figure. Static.
+private struct PlanScale: View {
+    let value: Double
+    let target: Double?
+    let band: ClosedRange<Double>?
+    let tint: Color
+
+    private let track: CGFloat = 6
+    private let caretHeight: CGFloat = 14
+
+    var body: some View {
+        let candidates: [Double] = [value, target, band?.upperBound].compactMap { $0 }.filter { $0.isFinite }
+        let top: Double = max((candidates.max() ?? 1) * 1.08, 1)
+        GeometryReader { geo in
+            let w = geo.size.width
+            let x: (Double) -> CGFloat = { v in CGFloat(min(max(v / top, 0), 1)) * w }
+            ZStack(alignment: .leading) {
+                Capsule(style: .continuous)
+                    .fill(TelosColor.surfaceInset)
+                    .frame(height: track)
+                if let band {
+                    let bx = x(band.lowerBound)
+                    let bw = max(0, x(band.upperBound) - bx)
+                    DiagonalHatch(spacing: 4)
+                        .stroke(TelosColor.lineStrong, lineWidth: TelosStroke.hair)
+                        .frame(width: bw, height: track)
+                        .clipShape(Rectangle())
+                        .offset(x: bx)
+                }
+                if value > 0 {
+                    Capsule(style: .continuous)
+                        .fill(tint)
+                        .frame(width: max(track, x(value)), height: track)
+                }
+                if let target, target.isFinite {
+                    RoundedRectangle(cornerRadius: 1, style: .continuous)
+                        .strokeBorder(TelosColor.textPrimary, lineWidth: 1)
+                        .frame(width: 3, height: caretHeight)
+                        .offset(x: min(max(0, x(target) - 1.5), max(0, w - 3)))
+                }
+            }
+            .frame(width: w, height: caretHeight)
+        }
+        .frame(height: caretHeight)
+        .accessibilityHidden(true)
+    }
 }

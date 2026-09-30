@@ -7,10 +7,12 @@ import StrandDesign
 // The journal table has no write timestamp, so an evening entry logged under "Today" attaches to the wrong
 // night. This sheet writes under the key of the night about to start (tomorrow's wake day; before 04:00,
 // the night already under way). "Not now" leaves the question unanswered — never a "no".
-// Logic only; the PROGRESS package restyles it.
+// Telos 2.0 (SLEEP): the answers are Yes / No `TelosChip`s on the canvas; the model is held WITHOUT
+// observing it (§2.1 rule 5) — the sheet only calls its repository.
 
 struct TonightLogSheet: View {
-    @EnvironmentObject var model: AppModel
+    @Environment(\.appModelRef) private var appModelRef
+    private var model: AppModel { requireAppModel(appModelRef) }
     @Environment(\.dismiss) private var dismiss
     @State private var answers: [String: Bool] = [:]
     var now: Date = Date()
@@ -33,18 +35,26 @@ struct TonightLogSheet: View {
                 if let key = nightKey {
                     Section(header: Text("Tonight (night of \(key))")) {
                         ForEach(Self.questions, id: \.self) { q in
-                            HStack {
-                                Text(q).font(StrandFont.body).foregroundStyle(StrandPalette.textPrimary)
-                                Spacer()
+                            HStack(spacing: TelosSpace.s) {
+                                Text(q)
+                                    .font(TelosType.body)
+                                    .foregroundStyle(TelosColor.textPrimary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                                Spacer(minLength: TelosSpace.s)
                                 answerButton(q, key: key, yes: true)
                                 answerButton(q, key: key, yes: false)
                             }
+                            .listRowBackground(TelosColor.glassFill)
                         }
                     }
                 } else {
                     Text(HealthAbsence.dash)
                 }
             }
+            #if os(iOS)
+            .scrollContentBackground(.hidden)
+            #endif
+            .background(TelosColor.canvas)
             .navigationTitle("Tonight")
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
@@ -53,9 +63,10 @@ struct TonightLogSheet: View {
         }
     }
 
+    /// One answer chip. Tapping the selected chip again clears the answer (unanswered, never a "no").
     private func answerButton(_ q: String, key: String, yes: Bool) -> some View {
         let selected = answers[q] == yes
-        return Button(yes ? "Yes" : "No") {
+        return TelosChip(yes ? "Yes" : "No", isOn: selected) {
             Task {
                 if selected {
                     await model.repo.clearJournalAnswer(day: key, question: q)
@@ -66,8 +77,6 @@ struct TonightLogSheet: View {
                 }
             }
         }
-        .buttonStyle(.noopSecondary)
-        .opacity(selected ? 1 : 0.55)
     }
 
     private func load() async {

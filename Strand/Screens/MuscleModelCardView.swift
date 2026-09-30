@@ -75,7 +75,10 @@ private struct MuscleLoads: Equatable {
 
 struct MuscleModelCardView: View {
     @EnvironmentObject var repo: Repository
-    @EnvironmentObject var coach: AICoachEngine
+    /// Only CALLED (the note is generated in a task), never observed: the coach publishes on every
+    /// streamed chunk, and observing it re-rendered this card through every other screen's chat
+    /// (§2.1 rule 5).
+    @Environment(\.coachEngine) private var coachRef
 
     @State private var side: BodySide = .front
     @State private var loaded: MuscleLoads?
@@ -87,7 +90,8 @@ struct MuscleModelCardView: View {
     private var data: [MuscleGroup: Double] { loaded?.thisWeek ?? [:] }
 
     private var scale: LoadScale {
-        LoadScale(baselines: loaded?.baselines ?? [:], peak: data.values.max() ?? 0)
+        // The colour scale's top only (an empty week has no fills to scale), not a displayed figure.
+        LoadScale(baselines: loaded?.baselines ?? [:], peak: data.values.max() ?? .zero)
     }
 
     var body: some View {
@@ -256,9 +260,10 @@ struct MuscleModelCardView: View {
         // WHY THE PANEL WAS EMPTY. The note is written by the coach, and the coach needs a provider and
         // the data consent. With neither set the generation returns nil and the panel simply did not
         // appear — which reads as a broken feature rather than as an un-set-up one. Say which it is.
-        guard coach.isConfigured, coach.dataConsent else {
+        let coach = resolvedCoach(coachRef)
+        guard let coach, coach.isConfigured, coach.dataConsent else {
             note = nil
-            unavailableReason = coach.isConfigured
+            unavailableReason = (coach?.isConfigured == true)
                 ? "Turn on data access in System to have the coach read this chart."
                 : "Connect a model in System to have the coach read this chart."
             return
@@ -302,7 +307,7 @@ private struct SystemNotePanel: View {
         if let unavailable, text == nil {
             HStack(alignment: .top, spacing: 6) {
                 Image(systemName: "sparkles")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(TelosType.glyphDelta)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .padding(.top, 1)
                 Text(unavailable)
@@ -317,7 +322,7 @@ private struct SystemNotePanel: View {
         } else if let text, !text.isEmpty {
             HStack(alignment: .top, spacing: 6) {
                 Image(systemName: "sparkles")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(TelosType.glyphDelta)
                     .foregroundStyle(StrandPalette.accent)
                     .padding(.top, 1)
                 // MARKDOWN, like every other line the model writes in this app. It is told not to use
@@ -359,7 +364,7 @@ private struct MuscleLegendRow: View {
                 .foregroundStyle(StrandPalette.textSecondary)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            Text(kg.map { "\(Int($0.rounded())) kg" } ?? "–")
+            Text(kg.map { "\(Int($0.rounded())) kg" } ?? TelosType.absent)
                 .font(StrandFont.captionNumber)
                 .foregroundStyle(kg == nil ? StrandPalette.textTertiary : StrandPalette.textPrimary)
         }

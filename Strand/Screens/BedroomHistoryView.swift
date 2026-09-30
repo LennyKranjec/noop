@@ -57,14 +57,14 @@ struct BedroomClimateChip: View {
                 // Judged for the window the day is in: focus by day, sleep from the wind-down on.
                 let good = RoomClimatePlan.context(for: r, now: now).isGood
                 Image(systemName: "thermometer.medium")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(TelosType.scaleFixed)
                     .foregroundStyle(good ? StrandPalette.restColor : StrandPalette.statusWarning)
                 Text(String(format: "%.1f°", r.temperatureC))
                     .font(StrandFont.caption.weight(.semibold))
                     .monospacedDigit()
                     .foregroundStyle(StrandPalette.textPrimary)
                 Image(systemName: "humidity.fill")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(TelosType.scaleFixed)
                     .foregroundStyle(good ? StrandPalette.metricCyan : StrandPalette.statusWarning)
                 Text(String(format: "%.0f%%", r.humidityPct))
                     .font(StrandFont.caption.weight(.semibold))
@@ -75,7 +75,7 @@ struct BedroomClimateChip: View {
                 // chip with the news that there is no news. The screen behind the tap says why.
                 if let phrase = advice.chipPhrase(now: now) {
                     Image(systemName: "wind")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(TelosType.scaleFixed)
                         .foregroundStyle(StrandPalette.accent)
                     Text(phrase)
                         .font(StrandFont.caption.weight(.semibold))
@@ -84,20 +84,20 @@ struct BedroomClimateChip: View {
                 }
             } else {
                 Image(systemName: "thermometer.medium")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(TelosType.scaleFixed)
                     .foregroundStyle(StrandPalette.textTertiary)
                 Text("Room: no reading yet")
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             Image(systemName: "chevron.right")
-                .font(.system(size: 9, weight: .bold))
+                .font(TelosType.glyphDelta)
                 .foregroundStyle(StrandPalette.textTertiary)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
-        .background(Capsule().fill(StrandPalette.surfaceRaised.opacity(0.85)))
-        .overlay(Capsule().strokeBorder(StrandPalette.hairline, lineWidth: 1))
+        .background(Capsule(style: .continuous).fill(TelosColor.glassFill))
+        .overlay(Capsule(style: .continuous).strokeBorder(TelosColor.glassEdge, lineWidth: TelosStroke.line))
         // The hit area, not the capsule: the pill keeps its size and the target grows around it.
         .frame(minHeight: NoopButtonMetrics.minHitTarget)
         .contentShape(Rectangle())
@@ -159,7 +159,7 @@ struct BedroomHistoryView: View {
                 }
                 .padding(16)
             }
-            .background(StrandPalette.surfaceBase)
+            .background(TelosColor.canvas)
             .navigationTitle("Bedroom")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
@@ -222,8 +222,8 @@ struct BedroomHistoryView: View {
     private func figure(_ value: String, _ name: LocalizedStringKey, target: String, ok: Bool) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             Text(value)
-                .font(StrandFont.number(28))
-                .foregroundStyle(StrandPalette.textPrimary)
+                .telosNumeral(.numeralL)
+                .foregroundStyle(TelosColor.textPrimary)
             Text(name).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
             Text(target)
                 .font(StrandFont.caption)
@@ -243,18 +243,18 @@ struct BedroomHistoryView: View {
             VStack(alignment: .leading, spacing: 8) {
                 HStack(spacing: 8) {
                     Image(systemName: "wind")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(TelosType.glyphChevron)
                         .foregroundStyle(tint)
                     Text("WINDOWS")
-                        .font(StrandFont.overline).tracking(1.2)
-                        .foregroundStyle(StrandPalette.textSecondary)
+                        .telosScale()
+                        .foregroundStyle(TelosColor.textSecondary)
                     Spacer(minLength: 0)
                     // Only for an actual abstention. A settled room HAS a recommendation — "keep them
                     // shut" — and badging that as "no recommendation" would read as a failure.
                     if advice.isAbstention {
                         Text("NO RECOMMENDATION")
-                            .font(StrandFont.overline).tracking(1.0)
-                            .foregroundStyle(StrandPalette.textTertiary)
+                            .telosScale()
+                            .foregroundStyle(TelosColor.textTertiary)
                     }
                 }
                 Text(advice.actionLine(now: now))
@@ -291,8 +291,8 @@ struct BedroomHistoryView: View {
         return StrandCard {
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text(title).font(StrandFont.overline).tracking(1.2)
-                        .foregroundStyle(StrandPalette.textSecondary)
+                    Text(title).telosScale()
+                        .foregroundStyle(TelosColor.textSecondary)
                     Spacer()
                     if let mn = ys.min(), let mx = ys.max() {
                         Text(String(format: "%.1f – %.1f ", mn, mx) + unit)
@@ -309,6 +309,7 @@ struct BedroomHistoryView: View {
                         LineMark(x: .value("time", v.0), y: .value(title, v.1))
                             .interpolationMethod(.monotone)
                             .foregroundStyle(tint)
+                            .lineStyle(StrokeStyle(lineWidth: TelosStroke.data, lineCap: .round, lineJoin: .round))
                     }
                 }
                 .chartYScale(domain: lo...hi)

@@ -131,11 +131,12 @@ struct StressWidgetView: View {
     private var stats: StressTrace.Stats? { StressTrace.stats(series) }
     private var latest: Double? { series.last(where: { $0.level != nil })?.level }
 
-    // The ramp's band anchors, taken from the palette tokens the Stress screen's own ramp is built from,
-    // rather than the local hexes the Glance twin has to carry. Blue calm, green steady, amber tense.
-    private var calm: Color { StrandPalette.accent }
-    private var steady: Color { StrandPalette.statusPositive }
-    private var tense: Color { StrandPalette.statusWarning }
+    // The ramp's band anchors, from the Telos luminous hues rather than the local hexes the Glance twin
+    // has to carry: teal calm, bioluminescent green steady, the `stress` amber tense. Tokens, so light
+    // mode gets their deepened pair without a branch here.
+    private var calm: Color { TelosColor.teal }
+    private var steady: Color { TelosColor.mint }
+    private var tense: Color { TelosColor.stress }
 
     /// Vertical, because `StressTrace.segments` maps the score onto Y off a FIXED domain: height already
     /// encodes level, so one top-to-bottom gradient paints every run the colour its own score deserves.
@@ -146,19 +147,49 @@ struct StressWidgetView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Stress")
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(StrandPalette.textPrimary)
+            // Title in the label voice; the average and the publish time ride on the same row (they used
+            // to take a row of their own at the bottom, which the medium tile could not spare).
+            HStack(spacing: 6) {
+                Text("Stress")
+                    .font(TelosType.scale)
+                    .tracking(TelosType.Tracking.scale)
+                    .textCase(.uppercase)
+                    .foregroundStyle(TelosColor.textSecondary)
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                if let updated = entry.snap?.updated, updated != .distantPast {
+                    // Both halves are catalog keys the app already carries, `avg %@` and `Updated %@`,
+                    // joined by a separator with nothing in it to translate. One composite key would have
+                    // needed a new entry in ten locales to say what these two already say.
+                    Group {
+                        if let stats {
+                            HStack(spacing: 0) {
+                                Text("avg \(String(format: "%.1f", stats.mean))")
+                                Text(verbatim: " · ")
+                                Text("Updated \(updated, format: .dateTime.hour().minute())")
+                            }
+                        } else {
+                            Text("Updated \(updated, format: .dateTime.hour().minute())")
+                        }
+                    }
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(TelosColor.textTertiary)
+                    .lineLimit(1)
+                }
+            }
 
             HStack(alignment: .lastTextBaseline, spacing: 4) {
-                Text(latest.map { String(format: "%.1f", $0) } ?? "—")
-                    .font(.system(size: 30, weight: .bold, design: .rounded))
-                    .foregroundStyle(StrandPalette.textPrimary)
+                // numeralL's 34 pt, fixed: the medium tile's height is fixed and the curve needs the rest.
+                Text(latest.map { String(format: "%.1f", $0) } ?? TelosType.absent)
+                    .font(TelosType.numeralFont(size: 34, weight: .light))
+                    .tracking(TelosType.Tracking.numeralL)
+                    .foregroundStyle(latest == nil ? TelosColor.textTertiary : TelosColor.stressInk)
                 if latest != nil {
                     Text("of 3")
-                        .font(.system(size: 12))
-                        .foregroundStyle(StrandPalette.textSecondary)
+                        .font(TelosType.scaleNumber)
+                        .foregroundStyle(TelosColor.textSecondary)
                 }
+                Spacer(minLength: 0)
                 if let stats, let peak = stats.peak.level {
                     // "Peak" is a catalog key the app already carries in every locale; the value and the
                     // time are DATA, so they are formatted into a plain String and shown verbatim. That
@@ -166,16 +197,17 @@ struct StressWidgetView: View {
                     // string that is otherwise punctuation.
                     let peakTime = Date(timeIntervalSince1970: TimeInterval(stats.peak.ts))
                         .formatted(date: .omitted, time: .shortened)
+                    // A faux-glass pill: the `stress` hue at 16 %. Cost: one capsule fill.
                     HStack(spacing: 4) {
                         Text("Peak")
                         Text(verbatim: String(format: "%.1f", peak) + " · " + peakTime)
                     }
-                    .font(.system(size: 11))
-                    .foregroundStyle(StrandPalette.textPrimary)
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(TelosColor.textPrimary)
+                    .lineLimit(1)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
-                    .background(tense.opacity(0.18), in: Capsule())
-                    .padding(.leading, 6)
+                    .background(tense.opacity(TelosOpacity.fill), in: Capsule())
                 }
             }
 
@@ -189,8 +221,8 @@ struct StressWidgetView: View {
                     VStack(alignment: .trailing) {
                         ForEach(Array(ticks.enumerated()), id: \.offset) { index, tick in
                             Text("\(tick)")
-                                .font(.system(size: 10))
-                                .foregroundStyle(StrandPalette.textSecondary)
+                                .font(TelosType.scaleNumber)
+                                .foregroundStyle(TelosColor.textSecondary)
                             if index < ticks.count - 1 { Spacer(minLength: 0) }
                         }
                     }
@@ -201,28 +233,6 @@ struct StressWidgetView: View {
             }
 
             Spacer(minLength: 0)
-            if let updated = entry.snap?.updated, updated != .distantPast {
-                HStack {
-                    Spacer()
-                    // Both halves are catalog keys the app already carries, `avg %@` and `Updated %@`,
-                    // joined by a separator with nothing in it to translate. One composite key would have
-                    // needed a new entry in ten locales to say what these two already say.
-                    if let stats {
-                        HStack(spacing: 0) {
-                            Text("avg \(String(format: "%.1f", stats.mean))")
-                            Text(verbatim: " · ")
-                            Text("Updated \(updated, format: .dateTime.hour().minute())")
-                        }
-                        .font(.system(size: 10))
-                        .foregroundStyle(StrandPalette.textSecondary)
-                    } else {
-                        Text("Updated \(updated, format: .dateTime.hour().minute())")
-                            .font(.system(size: 10))
-                            .foregroundStyle(StrandPalette.textSecondary)
-                    }
-                    Spacer()
-                }
-            }
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel(accessibilityText)
@@ -273,7 +283,7 @@ private struct StressCurveChart: View {
             }
             if hasMarks {
                 StressMovingMarksShape(series: series)
-                    .fill(StrandPalette.textSecondary.opacity(0.45))
+                    .fill(TelosColor.textSecondary.opacity(0.45))
                     .frame(height: 3)
             }
         }
@@ -293,8 +303,8 @@ private struct StressTimeAxis: View {
                 ForEach(Array(ticks.enumerated()), id: \.offset) { i, ts in
                     Text(Date(timeIntervalSince1970: TimeInterval(ts)),
                          format: .dateTime.hour().minute())
-                        .font(.system(size: 9))
-                        .foregroundStyle(StrandPalette.textSecondary)
+                        .font(TelosType.scaleNumber)
+                        .foregroundStyle(TelosColor.textSecondary)
                     if i < ticks.count - 1 { Spacer(minLength: 0) }
                 }
             }
@@ -309,11 +319,11 @@ struct StressWidget: Widget {
         StaticConfiguration(kind: Self.kind, provider: StressProvider()) { entry in
             if #available(iOS 17.0, *) {
                 StressWidgetView(entry: entry)
-                    .containerBackground(StrandPalette.surfaceBase, for: .widget)
+                    .containerBackground(for: .widget) { TelosWidgetGround() }
             } else {
                 StressWidgetView(entry: entry)
                     .padding()
-                    .background(StrandPalette.surfaceBase)
+                    .background(TelosColor.canvas)
             }
         }
         .configurationDisplayName("Stress")

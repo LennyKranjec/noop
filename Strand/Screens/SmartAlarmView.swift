@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import StrandDesign
 #if os(iOS)
 import UIKit
@@ -19,7 +20,11 @@ struct SmartAlarmView: View {
     // separate card over in Automations, which let users conflate it with the wind-down reminder; it's
     // moved here so every wake/wind-down control sits together. Needs the model (to arm/disarm the strap
     // alarm over BLE) and the behavior store (the alarm's persisted on/time/weekdays).
-    @EnvironmentObject private var model: AppModel
+    // Telos 2.0 (§2.1 rule 5): the model is held WITHOUT observing it. This screen only CALLS it (arm /
+    // disarm, read back) and reads `whoop5Detected`, a strap-model fact that does not change while the
+    // screen is open; observing AppModel re-rendered this settings screen 1–3×/s while a strap streams.
+    @Environment(\.appModelRef) private var appModelRef
+    private var model: AppModel { requireAppModel(appModelRef) }
     @EnvironmentObject private var behavior: BehaviorStore
 
     @State private var windDownOn = WindDownNudge.isEnabled
@@ -89,9 +94,9 @@ struct SmartAlarmView: View {
     // over a scenic Rest backdrop, so a glance gives the night's shape. It's about winding down to
     // sleep, so it reads in the Rest world (indigo) rather than the brand-green chrome below.
     private var windowHero: some View {
-        ZStack {
-            ScenicHeroBackground(domain: .rest)
-                .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
+        // Telos 2.0: faux glass with the night's violet glow (one static radial gradient, clipped) in
+        // place of the retired scenic backdrop. No blur, no material, no loop.
+        VStack(alignment: .leading, spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
                 Text("Tonight").strandOverline()
                 HStack(alignment: .firstTextBaseline, spacing: 14) {
@@ -99,7 +104,7 @@ struct SmartAlarmView: View {
                              time: windDownOn ? timeLabel(WindDownNudge.nudgeMinuteOfDay()) : "—",
                              tint: StrandPalette.restColor)
                     Image(systemName: "arrow.right")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(TelosType.glyphChevron)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .accessibilityHidden(true)
                     heroTime(label: "Wake",
@@ -116,6 +121,14 @@ struct SmartAlarmView: View {
             }
             .padding(20)
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(alignment: .topLeading) {
+            TelosRadialGlow(color: TelosColor.violet, intensity: 0.28, radius: 180)
+                .frame(width: 360, height: 360)
+                .offset(x: -140, y: -160)
+        }
+        .background(FrostedCardSurface(tint: TelosColor.violet, cornerRadius: TelosRadius.card))
+        .clipShape(RoundedRectangle(cornerRadius: TelosRadius.card, style: .continuous))
         .accessibilityElement(children: .combine)
     }
 
@@ -123,7 +136,7 @@ struct SmartAlarmView: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(label).strandOverline()
             Text(time)
-                .font(StrandFont.number(28))
+                .telosNumeral(.numeralL)
                 .foregroundStyle(tint)
         }
     }
@@ -419,9 +432,9 @@ struct SmartAlarmView: View {
                     model.applySmartAlarm()
                 } label: {
                     Image(systemName: "arrow.uturn.backward")
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(TelosType.glyphChevron)
                         .foregroundStyle(StrandPalette.textTertiary)
-                        .padding(6)
+                        .frame(minWidth: TelosSpace.hitTarget, minHeight: TelosSpace.hitTarget)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -614,13 +627,27 @@ private enum StrapArmState { case notSentYet, queued, armed }
 /// wasn't connected when NOOP last sent this … NOOP re-sends automatically the next time your strap
 /// connects" — a promise of self-healing for the one state that never heals on its own.
 private struct StrapArmStateNote: View {
-    @EnvironmentObject private var live: LiveState
+    /// NOT observed (Telos 2.0, §2.1 rule 5): the one flag this leaf needs arrives through a de-duplicated
+    /// publisher, so the 1–3 Hz LiveState stream never re-renders it.
+    @Environment(\.appModelRef) private var appModelRef
+    @State private var strapWritesRefused = false
     let state: StrapArmState
 
     var body: some View {
+        content
+            .onReceive(refusedPublisher) { strapWritesRefused = $0 }
+    }
+
+    private var refusedPublisher: AnyPublisher<Bool, Never> {
+        guard let model = resolvedAppModel(appModelRef) else { return Empty().eraseToAnyPublisher() }
+        return model.live.$strapWritesRefused.removeDuplicates().eraseToAnyPublisher()
+    }
+
+    @ViewBuilder
+    private var content: some View {
         // Refusal outranks the recorded arm state: it is the CAUSE of that state, and it is the only one of
         // the four the user has to do something about.
-        if live.strapWritesRefused {
+        if strapWritesRefused {
             note("exclamationmark.triangle", StrandPalette.statusWarning,
                  Text("NOT on your strap. It's connected but refusing everything NOOP sends, because the pairing is gone from this phone. Close the official WHOOP app, tap the band until the LEDs flash blue, forget the strap under iPhone Settings → Bluetooth if it's listed, then tap Connect in NOOP."))
         } else {

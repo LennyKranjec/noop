@@ -22,9 +22,10 @@ struct BodyClockDialCard: View {
     let actualBedHour: Double
     let actualWakeHour: Double
 
-    // One hue for both arcs, told apart by dash and weight rather than by a second colour. Two blues
-    // competed with the background image; a single legible one plus a dashed, lighter reference does not.
-    private var hue: Color { StrandPalette.restLine }
+    // One hue for both arcs, told apart by dash and weight rather than by a second colour. Telos 2.0: the
+    // violet of the night (the Sleep screen's accent), the luminous ink variant so the arcs pass 3:1 on
+    // the dark glass.
+    private var hue: Color { TelosColor.violetInk }
 
     /// The night's length, taken the long way round the clock when it crosses midnight.
     private var durationHours: Double {
@@ -47,7 +48,7 @@ struct BodyClockDialCard: View {
         // circle with no ideal arc beside it would state something false about the night, so the card
         // stands down instead. Twin of the Kotlin guard.
         if ideal != nil {
-            NoopCard(tint: hue) {
+            NoopCard(tint: TelosColor.violet) {
                 VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                     header
                     dial
@@ -58,13 +59,13 @@ struct BodyClockDialCard: View {
                         .accessibilityLabel(Text("Body clock dial"))
                     legend
                     Text(alignmentText)
-                        .font(StrandFont.title2)
-                        .foregroundStyle(StrandPalette.textPrimary)
+                        .font(TelosType.title2)
+                        .foregroundStyle(TelosColor.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
                     if let chronotype = CircadianEngine.chronotype(estimate) {
                         Text(chronotypeText(chronotype))
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
+                            .font(TelosType.footnote)
+                            .foregroundStyle(TelosColor.textTertiary)
                     }
                 }
             }
@@ -75,10 +76,13 @@ struct BodyClockDialCard: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Body clock").strandOverline()
+                Text("Body clock")
+                    .telosScale()
+                    .textCase(.uppercase)
+                    .foregroundStyle(TelosColor.textSecondary)
                 Text("Last night against your clock")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .font(TelosType.footnote)
+                    .foregroundStyle(TelosColor.textTertiary)
             }
             Spacer()
         }
@@ -106,18 +110,27 @@ struct BodyClockDialCard: View {
         init(size: CGSize) {
             let side: CGFloat = min(size.width, size.height)
             centre = CGPoint(x: size.width / 2, y: size.height / 2)
-            outer = side / 2 - 10
-            inner = (side / 2 - 10) - 16
+            // 16 pt inside the frame edge: the `TelosBezel` ticks (6 pt majors) own the outer ring.
+            outer = side / 2 - 16
+            inner = (side / 2 - 16) - 16
         }
     }
 
+    /// The dial on the house radial scale: a 24 h `TelosBezel` (four 6-hour majors, hourly minors) with its
+    /// caret at the night's WAKE, and the two arcs + onset glyph drawn inside it.
+    ///
+    /// Cost (§2.1 rule 8): two Canvases drawn once (no clock); they redraw only when an input changes.
     private var dial: some View {
-        Canvas { ctx, size in
-            let g = DialGeometry(size: size)
-            drawTrack(ctx, g)
-            drawTicks(ctx, g)
-            drawArcs(ctx, g)
-            drawOnset(ctx, g)
+        ZStack {
+            TelosBezel(value: actualWakeHour, range: 0...24, color: hue,
+                       majorCount: 4, minorPerMajor: 6)
+            Canvas { ctx, size in
+                let g = DialGeometry(size: size)
+                drawTrack(ctx, g)
+                drawTicks(ctx, g)
+                drawArcs(ctx, g)
+                drawOnset(ctx, g)
+            }
         }
         .frame(height: 170)
     }
@@ -130,11 +143,11 @@ struct BodyClockDialCard: View {
     private func drawTrack(_ ctx: GraphicsContext, _ g: DialGeometry) {
         let trackRect = CGRect(x: g.centre.x - g.inner, y: g.centre.y - g.inner,
                                width: g.inner * 2, height: g.inner * 2)
-        ctx.stroke(Path(ellipseIn: trackRect), with: .color(StrandPalette.surfaceInset),
+        ctx.stroke(Path(ellipseIn: trackRect), with: .color(TelosColor.violet.opacity(TelosOpacity.wash)),
                    style: StrokeStyle(lineWidth: 9, lineCap: .round))
         let rimRect = CGRect(x: g.centre.x - g.outer, y: g.centre.y - g.outer,
                              width: g.outer * 2, height: g.outer * 2)
-        ctx.stroke(Path(ellipseIn: rimRect), with: .color(StrandPalette.hairline), lineWidth: 1)
+        ctx.stroke(Path(ellipseIn: rimRect), with: .color(TelosColor.lineSoft), lineWidth: TelosStroke.hair)
     }
 
     /// Six-hourly ticks, with MIDNIGHT drawn longer and brighter. Four identical marks at 90 degrees
@@ -142,7 +155,8 @@ struct BodyClockDialCard: View {
     /// cannot tell midnight from noon and the arcs become unplaceable. One distinguished mark anchors the
     /// whole dial, and does it without text, keeping the card clear of a 12-versus-24-hour format question.
     private func drawTicks(_ ctx: GraphicsContext, _ g: DialGeometry) {
-        for tick in stride(from: 0.0, to: 24.0, by: 6.0) {
+        // The bezel draws the 6-hourly majors; this keeps only the distinguished MIDNIGHT mark, inside it.
+        for tick in stride(from: 0.0, to: 1.0, by: 6.0) {
             let isMidnight: Bool = tick == 0
             let a: Double = angle(tick).radians
             let len: CGFloat = isMidnight ? 9 : 4
@@ -152,8 +166,8 @@ struct BodyClockDialCard: View {
             p.move(to: CGPoint(x: g.centre.x + cosA * (g.outer - len),
                                y: g.centre.y + sinA * (g.outer - len)))
             p.addLine(to: CGPoint(x: g.centre.x + cosA * g.outer, y: g.centre.y + sinA * g.outer))
-            let tint: Color = isMidnight ? StrandPalette.textSecondary
-                                         : StrandPalette.textTertiary.opacity(0.5)
+            let tint: Color = isMidnight ? TelosColor.textSecondary
+                                         : TelosColor.textTertiary.opacity(0.5)
             ctx.stroke(p, with: .color(tint), lineWidth: isMidnight ? 1.5 : 1)
         }
     }
@@ -169,6 +183,9 @@ struct BodyClockDialCard: View {
             strokeArc(ctx, g, radius: g.outer, from: ideal.bedHour, to: ideal.wakeHour,
                       colour: hue.opacity(0.55), width: 7, dashed: true)
         }
+        // Halo: ONE wider faint stroke of the same arc — the luminous look without a blur.
+        strokeArc(ctx, g, radius: g.inner, from: actualBedHour, to: actualWakeHour,
+                  colour: hue.opacity(0.22), width: 18, dashed: false)
         strokeArc(ctx, g, radius: g.inner, from: actualBedHour, to: actualWakeHour,
                   colour: hue, width: 9, dashed: false)
     }
@@ -225,8 +242,8 @@ struct BodyClockDialCard: View {
             }
             .frame(width: 18, height: 4)
             Text(label)
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
+                .font(TelosType.footnote)
+                .foregroundStyle(TelosColor.textTertiary)
         }
     }
 

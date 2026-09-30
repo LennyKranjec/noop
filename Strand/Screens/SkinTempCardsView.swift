@@ -42,7 +42,7 @@ private struct PrivacyNote: View {
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "lock.fill")
-                .font(.system(size: 9, weight: .semibold))
+                .font(TelosType.glyphDelta)
                 .foregroundStyle(StrandPalette.textTertiary)
                 .accessibilityHidden(true)
             Text(text)
@@ -163,7 +163,7 @@ struct CycleAwarenessCard: View {
         // A probabilistic WINDOW, never a single confident date — the copy reflects that.
         HStack(alignment: .top, spacing: 8) {
             Image(systemName: "calendar")
-                .font(.system(size: 12, weight: .semibold))
+                .font(TelosType.glyphChevron)
                 .foregroundStyle(hue)
                 .accessibilityHidden(true)
             Text("A period is likely between \(prettyDay(window.earliestDay)) and \(prettyDay(window.latestDay)) (a window, not a fixed date).")
@@ -250,7 +250,7 @@ struct CycleAwarenessOptInCard: View {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                 HStack(spacing: 8) {
                     Image(systemName: "drop.degreesign")
-                        .font(.system(size: 16, weight: .semibold))
+                        .font(TelosType.glyphField)
                         .foregroundStyle(StrandPalette.restColor)
                         .accessibilityHidden(true)
                     Text("Cycle awareness")
@@ -307,7 +307,7 @@ struct MenstrualCycleHomeCard: View {
                     VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                         HStack(spacing: NoopMetrics.space2) {
                             Image(systemName: "drop.degreesign")
-                                .font(.system(size: 16, weight: .semibold))
+                                .font(TelosType.glyphField)
                                 .foregroundStyle(StrandPalette.restColor)
                                 .accessibilityHidden(true)
                             VStack(alignment: .leading, spacing: 2) {
@@ -451,7 +451,9 @@ struct MenstrualCycleHomeCard: View {
 /// and re-log path, and every sensitive surface repeats the privacy + wellness-only contract.
 struct CycleTrackerView: View {
     @EnvironmentObject private var repo: Repository
-    @EnvironmentObject private var model: AppModel
+    /// Only CALLED (re-derive the cycle signals after an edit), never observed (§2.1 rule 5).
+    @Environment(\.appModelRef) private var modelRef
+    private var model: AppModel { requireAppModel(modelRef) }
     @Environment(\.dismiss) private var dismiss
 
     let result: CyclePhaseEngine.Result
@@ -660,7 +662,7 @@ struct BodyClockCard: View {
                 // The estimated temperature-minimum clock time — the canonical phase marker.
                 HStack(spacing: 6) {
                     Image(systemName: "moon.stars")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(TelosType.glyphChevron)
                         .foregroundStyle(hue)
                         .accessibilityHidden(true)
                     Text("Estimated body-clock low around \(clockString(estimate.tempMinHour))")
@@ -795,7 +797,7 @@ struct HeadsUpCard: View {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                 HStack(alignment: .top, spacing: 12) {
                     Image(systemName: glyph)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(TelosType.glyphRow)
                         .foregroundStyle(hue)
                         .frame(width: 30, height: 30)
                         .background(hue.opacity(0.16), in: Circle())

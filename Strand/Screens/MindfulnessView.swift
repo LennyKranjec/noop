@@ -1,4 +1,5 @@
 import SwiftUI
+import StrandDesign
 
 // MindfulnessView.swift — Focus.
 //
@@ -20,7 +21,13 @@ struct MindfulnessView: View {
             title: "Focus",
             subtitle: "Sit, and what the sitting does to the rest of it"
         ) {
-            MeditationCardView()
+            // The meditation card (PROGRESS) and, under it, the practice view (decision 12): the era's
+            // heat-map calendar, streaks, weekly minutes, the misses with what they cost the Level, and
+            // the sessions with their before/after reading where one was recorded.
+            VStack(alignment: .leading, spacing: TelosSpace.cardGap) {
+                MeditationCardView()
+                MeditationPracticeView()
+            }
         }
     }
 }
