@@ -11,6 +11,9 @@ import StrandAnalytics
 // now, drawn STILL from the Level ledger's stored breakdowns (`LevelLedger`, the same store the Level
 // timeline reads). Honest history: only stored days are drawn; a gap is a gap, a missing snapshot says so.
 //
+// Last, "How your orb looks at other levels": a still what-if orb at any Level (slider in 10s, a field and
+// stepper for any value), with today's part shares kept, and still thumbnails at 0, 20 … 200.
+//
 // Clinical, data-first (decision 19): faux-glass cards on the canvas, a plain line chart, no glow.
 //
 // COST: one ledger read on open (a dictionary filter, ≤ ~100 entries); the header orb runs its 8 s burst
@@ -30,6 +33,9 @@ struct OrbExplainerSheet: View {
     @State private var history: [HomeHeroMapping.OrbHistoryDay] = []
     /// The day the history ends on: the day whose Level the headline shows.
     @State private var endDay: String?
+    /// The what-if Level the preview orb is drawn at (seeded from today's Level on open).
+    @State private var previewLevel: Double = 50
+    @State private var previewSeeded = false
 
     /// How far a snapshot may sit from its target day and still stand for it.
     private static let snapshotTolerance = 7
@@ -42,6 +48,7 @@ struct OrbExplainerSheet: View {
                     legendCard
                     developmentCard
                     timelineLink
+                    otherLevelsCard
                 }
                 .padding(TelosSpace.pageGutter)
             }
@@ -65,6 +72,7 @@ struct OrbExplainerSheet: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: TelosSpace.s) {
             TelosOrb(inputs: inputs, tint: .green, style: .hero, clock: .burst(seconds: 8))
+                .equatable()
                 .frame(height: 180)
                 .frame(maxWidth: .infinity)
             Text("What shapes your orb")
@@ -185,6 +193,116 @@ struct OrbExplainerSheet: View {
         .buttonStyle(.plain)
     }
 
+    // MARK: - Other levels
+
+    /// "How your orb looks at other levels": a STILL orb at a chosen Level (slider in 10s over 0–200, a
+    /// field and a stepper for any Level, above 200 too), today's part shares kept so only the Level
+    /// changes, and a strip of still thumbnails at 0, 20 … 200. No clocks: every orb here is `.still`.
+    private var otherLevelsCard: some View {
+        let level = HomeHeroMapping.sanitizedPreviewLevel(previewLevel)
+        let summary = HomeHeroMapping.orbPreviewSummary(level: level)
+        let shares = inputs.partShares
+        let levelText = TelosFormat.integer(level)
+        let slider = Binding<Double>(get: { min(level, 200) },
+                                     set: { previewLevel = HomeHeroMapping.sanitizedPreviewLevel($0) })
+        return VStack(alignment: .leading, spacing: TelosSpace.m) {
+            Text("How your orb looks at other levels")
+                .telosScale()
+                .textCase(.uppercase)
+                .foregroundStyle(TelosColor.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TelosOrb(inputs: TelosOrbInputs(level: level, partShares: shares), tint: .green, style: .hero,
+                     clock: .still)
+                .frame(height: 180)
+                .frame(maxWidth: .infinity)
+
+            HStack(alignment: .firstTextBaseline) {
+                Text(verbatim: String(localized: "Level \(levelText)"))
+                    .font(TelosType.numeralS)
+                    .foregroundStyle(TelosColor.textPrimary)
+                Spacer(minLength: TelosSpace.s)
+                Text(verbatim: String(localized: "\(summary.dots) orbit dots · size \(summary.sizePercent) % of Level 100"))
+                    .font(TelosType.caption)
+                    .foregroundStyle(TelosColor.textSecondary)
+                    .multilineTextAlignment(.trailing)
+            }
+            .accessibilityElement(children: .combine)
+
+            Slider(value: slider, in: 0...200, step: 10)
+                .tint(TelosColor.mint)
+                .accessibilityLabel(Text("Preview level"))
+                .accessibilityValue(Text(verbatim: levelText))
+
+            HStack(spacing: TelosSpace.s) {
+                Text("Any level")
+                    .font(TelosType.footnote)
+                    .foregroundStyle(TelosColor.textSecondary)
+                Spacer(minLength: TelosSpace.s)
+                previewField
+                Stepper("Preview level", value: $previewLevel, in: 0...1_000_000, step: 10)
+                    .labelsHidden()
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: TelosSpace.xs) {
+                    ForEach(HomeHeroMapping.orbPreviewLevels, id: \.self) { stop in
+                        previewThumbnail(stop, shares: shares, selected: abs(stop - level) < 0.5)
+                    }
+                }
+            }
+
+            Text(verbatim: shares.isEmpty
+                 ? String(localized: "No part shares today, so the lobes keep the plain shape. Only the Level changes here.")
+                 : String(localized: "The lobes keep today's part shares, so only the Level changes here. Stress, pulse, Charge and effort stay at rest."))
+                .font(TelosType.caption)
+                .foregroundStyle(TelosColor.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(TelosSpace.l)
+        .background(NoopPanelSurface(cornerRadius: TelosRadius.card))
+        .onChangeCompat(of: previewLevel) { value in
+            let clean = HomeHeroMapping.sanitizedPreviewLevel(value)
+            if clean != value { previewLevel = clean }
+        }
+    }
+
+    /// Type any Level, above 200 too.
+    private var previewField: some View {
+        TextField("Level", value: $previewLevel, format: .number.precision(.fractionLength(0)))
+            .textFieldStyle(.roundedBorder)
+            .multilineTextAlignment(.trailing)
+            .frame(width: 84)
+            #if os(iOS)
+            .keyboardType(.numberPad)
+            #endif
+            .accessibilityLabel(Text("Preview level"))
+    }
+
+    private func previewThumbnail(_ stop: Double, shares: [TelosOrbPart: Double], selected: Bool) -> some View {
+        Button {
+            previewLevel = stop
+        } label: {
+            VStack(spacing: 2) {
+                TelosOrb(inputs: TelosOrbInputs(level: stop, partShares: shares), tint: .green, style: .compact,
+                         clock: .still)
+                    .frame(width: 52, height: 52)
+                Text(verbatim: TelosFormat.integer(stop))
+                    .font(TelosType.scaleNumber)
+                    .foregroundStyle(selected ? TelosColor.textPrimary : TelosColor.textTertiary)
+            }
+            .padding(TelosSpace.xs)
+            .overlay(
+                RoundedRectangle(cornerRadius: TelosRadius.plate, style: .continuous)
+                    .stroke(selected ? TelosColor.textSecondary : Color.clear, lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(verbatim: String(localized: "Level \(TelosFormat.integer(stop))")))
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
     // MARK: - Load
 
     /// One read of the Level ledger: every stored day over the longest range plus the snapshot tolerance,
@@ -202,6 +320,10 @@ struct OrbExplainerSheet: View {
                                           provisional: entry.partial || entry.coverage < 0.999)
         }
         endDay = end
+        if !previewSeeded {
+            previewLevel = HomeHeroMapping.orbPreviewStart(level: inputs.level)
+            previewSeeded = true
+        }
     }
 }
 

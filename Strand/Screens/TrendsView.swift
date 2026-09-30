@@ -350,7 +350,9 @@ struct TrendsView: View {
         // Rest score uses (not raw efficiency). Mirrors TodayView's restScore read. Keyed on the day
         // count so a newly-banked/-scored night refreshes Rest reactively, like the other metrics that
         // read `repo.days` directly (and like the Android LaunchedEffect(days) twin).
-        .task(id: repo.days.count) {
+        // `reloadTask`, not `.task`: the read and the dictionary write re-rendered the whole Biometrics screen
+        // on every switch back to the tab, with the same rows.
+        .reloadTask(id: repo.days.count) {
             let s = await repo.exploreSeries(key: "sleep_performance", source: "my-whoop")
             sleepPerfByDay = Dictionary(s.map { ($0.day, $0.value) }, uniquingKeysWith: { _, last in last })
         }

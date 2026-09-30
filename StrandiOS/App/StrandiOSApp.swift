@@ -167,6 +167,8 @@ struct StrandiOSApp: App {
                 .environment(\.appModelRef, model)
                 .environment(\.coachEngine, model.coach)
                 .environmentObject(health)
+                // The same bridge without the subscription, for the tab shell (RootTabView).
+                .environment(\.healthBridgeRef, health)
                 .environmentObject(router)
                 .environmentObject(UpdateStore.shared)
                 // v5 L3: the shared stress check-in nudge surface, so the Breathe screen's passive

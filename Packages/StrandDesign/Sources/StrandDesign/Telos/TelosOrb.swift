@@ -21,6 +21,10 @@ import SwiftUI
 //                                            then +0.06 per growth unit   (never clamped);
 //                                     density 55 % → 100 % of the dots    past the reference range each
 //                                     outerShells = growth − 1            growth unit adds a dotted shell.
+//                                     orbitDots = ⌊level / 10⌋            one orbiting dot per 10 Level
+//                                                                         points, NO cap: 2 orbits, a 3rd
+//                                                                         past 12 dots; past 30 they pack
+//                                                                         smaller instead of stopping.
 //   partShares (sleep/heart/lungs/    the LOBES: one organ per part,      shares normalised; lobe AREA ∝
 //   muscle/focus → share of level)    in its levelPartTint hue            share; an absent part has no lobe.
 //   stress (0–3)                      turbulence 0.12 → 1.0               calm = smooth membrane, stressed
@@ -37,38 +41,43 @@ import SwiftUI
 //
 //   ABSENT INPUTS NEVER INVENT A VALUE: a missing channel rests at its calm neutral (size 0.92, density
 //   0.8, turbulence 0.12, an 8 s breath, brightness 0.55, orbit speed 0.6, the tint's own unlabelled
-//   lobes instead of part lobes). With EVERY input missing the orb is the neutral dim still orb:
-//   desaturated grey, brightness 0.42, and NO clock at all. The exact numbers are always printed beside
+//   lobes instead of part lobes, and NO orbiting dots without a Level). With EVERY input missing the
+//   orb is the neutral dim still orb: desaturated grey, brightness 0.42, and NO motion at all. The exact numbers are always printed beside
 //   the orb, so it is hidden from VoiceOver (it never replaces a numeral).
 //
 // THE PICTURE (unit space, blob radius ≈ 1 = `baseRadius` × the frame × size)
 //   A core disc plus one disc per part at a fixed angle (sleep upper-left, focus upper-right, heart right,
-//   muscle below, lungs left). Each part lobe large enough carries the part's SF Symbol
-//   (`TelosOrbPart.symbolName`, ≥ 10 pt, flat light neutral on a matte plate) so the organs are
-//   recognisable; smaller lobes and thumbnails keep a plain nucleus. The membrane is the union's outline sampled in polar form, box-smoothed
-//   so the creases between lobes round off, then rippled by stress. Lobes are soft radial fills clipped
-//   to the membrane with a faint inner rim; ≤ 150 dots (a membrane row + interior stipple) coloured by
-//   the lobe they sit in; veins + nuclei on their own layer.
+//   muscle below, lungs left). The membrane is their SMOOTH union in polar form (a metaball-like smooth
+//   maximum per direction, so core and lobes flow into each other), box-smoothed, with the cell's own
+//   seeded low-frequency, asymmetric irregularity, then rippled by stress. Lobe tints fade to nothing at
+//   their rims (no circle seams); ≤ 150 dots (an unevenly spaced, uneven-sized membrane skin + interior
+//   stipple) coloured by the lobe they sit in; veins + nuclei on their own layer. Each part lobe large
+//   enough carries the part's SF Symbol (`TelosOrbPart.symbolName`, ≥ 10 pt, flat light neutral on a
+//   matte plate) so the organs are recognisable; smaller lobes and thumbnails keep a plain nucleus.
 //
-// MOTION — PER FRAME ONLY TRANSFORMS (owner: the app lags)
-//   • All geometry is built ONCE per data change (`TelosOrbForm.make`) and rasterised ONCE into two
-//     `Equatable` canvases (body, nuclei) plus a static backdrop (orbit lines, growth shells). A frame
-//     changes only view TRANSFORMS: an anisotropic breathing scale (the heart pulse, squash-and-stretch),
-//     a slight sway (more under stress), the nuclei's own out-of-phase pulse, and the two orbit dots'
-//     offsets. No canvas redraws per frame.
+// MOTION — NO FRAME CLOCK, ONLY ANIMATED TRANSFORMS (owner: "a bit laggy")
+//   • All geometry is built ONCE per data change (`TelosOrbForm.make`) and rasterised ONCE into four
+//     `Equatable` canvases: backdrop (orbit lines, growth shells), core (tissue, dotted skin, membrane),
+//     lobes (soft organ tints, stipple) and nuclei (veins, nuclei, part icons).
+//   • Motion is ONE `@State` time value animated over a run (ease-in-out for a burst). Every
+//     moving part reads it through a `GeometryEffect` — the body's anisotropic breath (the heart pulse,
+//     squash-and-stretch) and sway; the lobes' drift and swell against the core (masked by the
+//     membrane, so they stay inside it); each orbiting dot's travel along its ellipse (a translation of
+//     a tiny pre-rendered dot; a static half-plane mask per orbit decides front / behind). SwiftUI's
+//     animation engine interpolates at the display's own rate and calls those effects — a few sines —
+//     with NO view body re-evaluated and NO canvas redrawn. There is no TimelineView.
+//   • A `.burst(seconds:)` run starts on appear and on each data change (a change mid-run extends it,
+//     no jump), eases in and eases back to the rest pose at its end (`TelosOrbPose.envelope`) — the
+//     dots slow and hold where they are. It stops at once (rest pose) when the orb leaves the screen,
+//     scrolls away, is covered, or Reduce Motion / Low Power / "Reduce motion in NOOP" apply. The
+//     neutral orb and `.still` never move. `.whileVisible` chains open-ended runs while allowed.
 //   • Value changes (size, brightness, turbulence, density) flow with `TelosMotion.flow` through an
 //     `Animatable` layer — only while the value changes; instant under Reduce Motion.
-//   • The ambient clock runs at ≤ 20 fps (`TelosOrb.frameInterval`) ONLY while `TelosFrameGate` says
-//     live: on screen, not scrolled away (`telosOffscreen`), not under a sheet (`noopBackgroundCovered`),
-//     not posed still (`NoopMotionState.poseStill` = Reduce Motion ‖ Low Power ‖ "Reduce motion in NOOP"),
-//     and not the neutral orb. A `.burst` clock eases its motion in and back out to the rest pose inside
-//     its window (`TelosOrbPose.envelope`), so the still frame after it never snaps.
-//   • `clock: .burst(seconds:)` confines the clock to a window after appear / after a data change (for
-//     screens held to the §2.1 "idle = 0 clocks" budget — Today uses 8 s); `.still` never runs one.
+//   • `TelosOrb` is `Equatable`: at `.equatable()` call sites a parent's unrelated state change skips it.
 //
-// COST (§2.1 rule 8): three canvases rendered asynchronously, each drawn once per data change; ≤ 150
-// dots batched by colour × 3 opacity tiers (≤ 18 fills); no blur, no shadow, no glow, no material, no
-// drawingGroup.
+// COST (§2.1 rule 8): four canvases rendered asynchronously, each drawn once per data change; ≤ 150
+// dots batched by colour × 3 opacity tiers; per display frame only transforms (≤ 120 moving dots); no
+// blur, no shadow, no glow, no material, no drawingGroup.
 
 // MARK: - Inputs
 
@@ -158,6 +167,8 @@ public struct TelosOrbAppearance: Equatable, Sendable {
     public let brightness: Double
     /// Orbit-dot angular speed multiplier.
     public let orbitSpeed: Double
+    /// How many dots orbit the blob: one per 10 Level points (⌊level / 10⌋), unbounded; 0 without a Level.
+    public let orbitDots: Int
     /// 1 = assembled (solid). < 1 = provisional: sparser, dimmer, dots still drifting in.
     public let assembly: Double
     /// Which channels carry a real measurement.
@@ -191,6 +202,15 @@ public struct TelosOrbAppearance: Equatable, Sendable {
     /// The all-absent orb is dimmer still.
     public static let emptyBrightness: Double = 0.42
     public static let neutralOrbitSpeed: Double = 0.6
+    /// Level points per orbiting dot.
+    public static let levelPerOrbitDot: Double = 10
+
+    /// ⌊level / 10⌋ orbiting dots — no maximum (only an overflow guard for absurd values); 0 for a
+    /// negative or non-finite Level.
+    public static func orbitDots(level: Double) -> Int {
+        guard level.isFinite, level > 0 else { return 0 }
+        return Int(min((level / levelPerOrbitDot).rounded(.down), Double(Int.max / 4)))
+    }
 
     /// The Level growth curve: log2(1 + level/100). 0 → 0, 100 → 1, 300 → 2, 700 → 3 … no maximum.
     public static func growth(level: Double) -> Double {
@@ -279,7 +299,9 @@ public struct TelosOrbAppearance: Equatable, Sendable {
         return TelosOrbAppearance(growth: growthValue, size: size, outerShells: shells,
                                   density: min(max(density, 0), 1), partWeights: weights,
                                   turbulence: turbulence, pulsePeriod: pulse, brightness: brightness,
-                                  orbitSpeed: orbit, assembly: assemblyFactor,
+                                  orbitSpeed: orbit,
+                                  orbitDots: growthValue == nil ? 0 : orbitDots(level: inputs.level ?? 0),
+                                  assembly: assemblyFactor,
                                   hasLevel: growthValue != nil, hasStress: stress != nil, hasHeartRate: hasHR,
                                   hasCharge: charge != nil, hasEffort: effort != nil)
     }
@@ -374,8 +396,12 @@ struct TelosOrbForm: Equatable {
     let membrane: Path
     /// The largest outline radius.
     let extent: Double
-    /// ≤ `TelosOrbGeometry.maxDots` dots, batched by colour × tier.
-    let dots: [TelosOrbDotBatch]
+    /// The membrane's dotted skin (drawn with the membrane), batched by colour × tier.
+    let skinDots: [TelosOrbDotBatch]
+    /// The interior stipple (drawn with the lobes, so it drifts with them), batched by colour × tier.
+    let interiorDots: [TelosOrbDotBatch]
+    /// Every dot batch (≤ `TelosOrbGeometry.maxDots` dots in all).
+    var dots: [TelosOrbDotBatch] { skinDots + interiorDots }
     /// How many dots the batches hold.
     let dotCount: Int
     /// Veins from the core to each lobe's nucleus.
@@ -471,9 +497,23 @@ enum TelosOrbGeometry {
         return t > 0 ? t : nil
     }
 
-    /// The membrane: the union of the lobes in polar form, box-smoothed twice (±4 samples) so the creases
-    /// between lobes round off like a soft cell, then rippled by stress (`turbulence` 0…1). `owner` names
-    /// the lobe that reaches furthest in each direction (the membrane dot there takes its colour).
+    /// Smooth maximum (polynomial smooth-union): equal to `max(a, b)` when they differ by more than `k`,
+    /// and a rounded blend in between — the metaball-like joint between two lobes, with no crease.
+    static func smoothMax(_ a: Double, _ b: Double, k: Double) -> Double {
+        let h = max(k - abs(a - b), 0) / k
+        return max(a, b) + h * h * k * 0.25
+    }
+
+    /// The membrane's own irregularity (seeded, low-frequency, asymmetric): the same slightly lopsided
+    /// cell on every launch, present even when calm — a living shape, not a geometric one.
+    static func irregularity(angle a: Double) -> Double {
+        0.034 * sin(2 * a + 0.9) + 0.024 * sin(3 * a + 4.1) + 0.014 * sin(5 * a + 2.2)
+    }
+
+    /// The membrane: the lobes' SMOOTH union in polar form (`smoothMax`, so core and lobes flow into each
+    /// other like metaballs), box-smoothed, given the cell's own low-frequency irregularity, then rippled
+    /// by stress (`turbulence` 0…1). `owner` names the lobe that reaches furthest in each direction (the
+    /// membrane dot there takes its colour).
     static func outline(lobes: [TelosOrbLobe], turbulence: Double,
                         samples n: Int = outlineSamples) -> (radii: [Double], owner: [Int]) {
         guard n > 0, !lobes.isEmpty else { return ([], []) }
@@ -482,14 +522,17 @@ enum TelosOrbGeometry {
         for k in 0..<n {
             let a = angle(k, n)
             var best = 0.0
+            var blended = 0.0
             var who = 0
             for (i, lobe) in lobes.enumerated() {
-                if let t = hit(angle: a, lobe: lobe), t > best {
+                guard let t = hit(angle: a, lobe: lobe) else { continue }
+                blended = blended > 0 ? smoothMax(blended, t, k: 0.22) : t
+                if t > best {
                     best = t
                     who = i
                 }
             }
-            raw[k] = best
+            raw[k] = blended
             owner[k] = who
         }
         var radii = raw
@@ -497,15 +540,16 @@ enum TelosOrbGeometry {
             var next = radii
             for k in 0..<n {
                 var sum = 0.0
-                for j in -4...4 { sum += radii[((k + j) % n + n) % n] }
-                next[k] = sum / 9
+                for j in -3...3 { sum += radii[((k + j) % n + n) % n] }
+                next[k] = sum / 7
             }
             radii = next
         }
         let ripple = min(max(turbulence.isFinite ? turbulence : 0, 0), 1)
         for k in 0..<n {
             let a = angle(k, n)
-            radii[k] *= 1 + ripple * (0.05 * sin(6 * a + 0.7) + 0.028 * sin(11 * a + 2.3))
+            radii[k] *= 1 + irregularity(angle: a)
+                + ripple * (0.05 * sin(6 * a + 0.7) + 0.028 * sin(11 * a + 2.3))
         }
         return (radii, owner)
     }
@@ -548,13 +592,18 @@ enum TelosOrbGeometry {
         let keep = density.isFinite ? density : 0
         let dotR = dotRadius(style)
 
-        var batches: [Int: Path] = [:]
+        var skinBatches: [Int: Path] = [:]
+        var innerBatches: [Int: Path] = [:]
         var count = 0
-        func add(_ x: Double, _ y: Double, radius: Double, colorIndex: Int, tier: Int) {
+        func add(_ x: Double, _ y: Double, radius: Double, colorIndex: Int, tier: Int, interior: Bool) {
             guard count < maxDots else { return }
             let key = colorIndex * tiers + min(max(tier, 0), tiers - 1)
-            batches[key, default: Path()].addEllipse(in: CGRect(x: x - radius, y: y - radius,
-                                                                width: radius * 2, height: radius * 2))
+            let rect = CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)
+            if interior {
+                innerBatches[key, default: Path()].addEllipse(in: rect)
+            } else {
+                skinBatches[key, default: Path()].addEllipse(in: rect)
+            }
             count += 1
         }
 
@@ -565,12 +614,13 @@ enum TelosOrbGeometry {
             let jitter = skin.unit(), inset = skin.unit(), sizeU = skin.unit()
             let tierU = skin.unit(), rank = skin.unit(), scatter = skin.unit()
             guard n > 0, rank < keep else { continue }
-            let ang = 2 * Double.pi * (Double(k) + 0.2 + 0.6 * jitter) / Double(m)
+            // Uneven spacing, depth and size: a living skin, not a bead chain.
+            let ang = 2 * Double.pi * (Double(k) + 0.1 + 0.8 * jitter) / Double(m)
             let idx = ((Int((ang / (2 * Double.pi) * Double(n)).rounded()) % n) + n) % n
-            let rho = radii[idx] * (0.985 - 0.045 * inset) * (1 + unassembled * 0.5 * scatter)
+            let rho = radii[idx] * (0.99 - 0.06 * inset) * (1 + unassembled * 0.5 * scatter)
             let tier = tierU < 0.25 ? 0 : (tierU < 0.65 ? 1 : 2)
-            add(rho * cos(ang), rho * sin(ang), radius: dotR * (0.75 + 0.55 * sizeU),
-                colorIndex: lobes[owner[idx]].colorIndex, tier: tier)
+            add(rho * cos(ang), rho * sin(ang), radius: dotR * (0.6 + 0.85 * sizeU * sizeU),
+                colorIndex: lobes[owner[idx]].colorIndex, tier: tier, interior: false)
         }
 
         // 2. Interior stipple, spread over the lobes by area; dimmer tiers.
@@ -592,7 +642,8 @@ enum TelosOrbGeometry {
             let rad = radU.squareRoot() * lobe.r * 0.82
             let push = 1 + unassembled * 0.4 * scatter
             add((lobe.x + rad * cos(ang)) * push, (lobe.y + rad * sin(ang)) * push,
-                radius: dotR * (0.6 + 0.5 * sizeU), colorIndex: lobe.colorIndex, tier: tierU < 0.55 ? 0 : 1)
+                radius: dotR * (0.6 + 0.5 * sizeU), colorIndex: lobe.colorIndex, tier: tierU < 0.55 ? 0 : 1,
+                interior: true)
         }
 
         // 3. Veins: a bent line from near the core's centre to each lobe's nucleus, with one short branch.
@@ -616,12 +667,15 @@ enum TelosOrbGeometry {
             veinPaths[lobe.colorIndex] = path
         }
 
-        let dots = batches.keys.sorted().map { key in
-            TelosOrbDotBatch(colorIndex: key / tiers, tier: key % tiers, path: batches[key] ?? Path())
+        func batched(_ dict: [Int: Path]) -> [TelosOrbDotBatch] {
+            dict.keys.sorted().map { key in
+                TelosOrbDotBatch(colorIndex: key / tiers, tier: key % tiers, path: dict[key] ?? Path())
+            }
         }
         let veins = veinPaths.keys.sorted().map { TelosOrbVeinBatch(colorIndex: $0, path: veinPaths[$0] ?? Path()) }
         return TelosOrbForm(lobes: lobes, outline: radii, membrane: membranePath(radii: radii),
-                            extent: radii.max() ?? coreRadius, dots: dots, dotCount: count, veins: veins,
+                            extent: radii.max() ?? coreRadius, skinDots: batched(skinBatches),
+                            interiorDots: batched(innerBatches), dotCount: count, veins: veins,
                             assembly: assembly)
     }
 }
@@ -634,8 +688,12 @@ struct TelosOrbPose: Equatable {
     var scaleY: Double = 1
     /// Radians.
     var rotation: Double = 0
-    /// The nuclei layer's own extra pulse.
+    /// The lobes' own extra pulse (organs swelling slightly out of phase with the membrane).
     var nucleus: Double = 1
+    /// The lobes' slow drift relative to the core, as a fraction of the orb's frame, and a slight turn.
+    var driftX: Double = 0
+    var driftY: Double = 0
+    var driftRotation: Double = 0
 
     /// The rest pose: what every still frame draws.
     static let rest = TelosOrbPose()
@@ -658,7 +716,8 @@ struct TelosOrbPose: Equatable {
     }
 
     /// The pose at `elapsed` s: an anisotropic breath at the heart-pulse period (squash-and-stretch, not
-    /// a uniform zoom), a slow sway that grows with stress, and the nuclei pulsing out of phase.
+    /// a uniform zoom), a slow sway that grows with stress, the lobes pulsing out of phase and drifting
+    /// slowly against the core (inside the membrane, which masks them).
     static func at(elapsed t: Double, burst: Double?, pulsePeriod: Double, turbulence: Double) -> TelosOrbPose {
         let env = envelope(elapsed: t, burst: burst)
         guard env > 0 else { return .rest }
@@ -670,7 +729,10 @@ struct TelosOrbPose: Equatable {
             scaleX: 1 + env * (0.024 * sin(phase) + 0.010 * turb * sin(1.7 * t + 0.4)),
             scaleY: 1 + env * (0.024 * sin(phase + 0.9) + 0.010 * turb * sin(1.3 * t + 2.1)),
             rotation: env * (0.03 + 0.05 * turb) * sin(swayRate * t),
-            nucleus: 1 + env * 0.04 * sin(phase + 1.8))
+            nucleus: 1 + env * 0.03 * sin(phase + 1.8),
+            driftX: env * 0.010 * sin(0.21 * t + 1.1),
+            driftY: env * 0.008 * sin(0.17 * t + 2.4),
+            driftRotation: env * 0.03 * sin(0.13 * t + 0.5))
     }
 }
 
@@ -700,27 +762,31 @@ struct TelosOrbPalette: Equatable {
 
 // MARK: - The view
 
-public struct TelosOrb: View {
+public struct TelosOrb: View, Equatable {
     public enum Style: Sendable {
-        /// The Home centrepiece: two orbits with two travelling dots.
+        /// The Home centrepiece: two orbits (a third past 12 orbiting dots).
         case hero
-        /// The other tabs' orb: one orbit, one dot, relatively larger dots.
+        /// The other tabs' orb: one orbit (a second past 6 orbiting dots), relatively larger dots.
         case compact
     }
 
-    /// When the ambient frame clock may run (always further gated by `TelosFrameGate`).
+    /// When the orb may move (always further gated by `TelosFrameGate`).
     public enum Clock: Equatable, Sendable {
         /// Breathing + orbit dots while visible.
         case whileVisible
-        /// Run for `seconds` after appearing and after each data change, then rest on a still frame.
+        /// Move for `seconds` after appearing and after each data change, then settle to the rest pose.
         case burst(seconds: Double)
-        /// Never run (widgets, snapshots, lists, history thumbnails).
+        /// Never move (widgets, snapshots, lists, history thumbnails).
         case still
     }
 
-    /// The orb's frame-clock cap: 20 fps. The motion is slow (a breath is seconds long), and every frame
-    /// only moves transforms, so 20 fps reads as smooth.
+    /// Kept for callers that quote it: the old frame-clock cap. The orb no longer runs a frame clock —
+    /// its motion is ONE animated time value interpolated by SwiftUI's animation engine at the display's
+    /// own rate, which only moves transforms (see the file header).
     public static let frameInterval: Double = TelosFrameGate.clampedInterval(1.0 / 20.0)
+
+    /// The length of one `.whileVisible` run (restarted when it ends while still allowed).
+    static let openRunSeconds: Double = 600
 
     private let appearance: TelosOrbAppearance
     private let tint: TelosOrbTint
@@ -732,14 +798,20 @@ public struct TelosOrb: View {
     @ObservedObject private var motion = NoopMotionState.shared
     @State private var visible = false
     @State private var offscreen = false
-    @State private var burstOpen = false
     @State private var appearCount = 0
     /// The animated values actually drawn (nil until first appear — then posed without animation).
     @State private var shown: TelosOrbAnimatedValues? = nil
-    /// Live time counts from here, so a clock that resumes starts from the pose it rested in.
-    @State private var liveEpoch = Date()
-    /// Orbit-dot time banked by earlier live runs, so the dots resume where they stopped (no jump back).
-    @State private var restTime: Double = 0
+    /// THE MOTION: one time value (seconds), animated linearly over a run. Every moving part reads it
+    /// through a `GeometryEffect`, so a frame re-evaluates no view body and redraws no canvas.
+    @State private var clockValue: Double = 0
+    /// The clock value where the current motion began (the pose eases in from here).
+    @State private var motionStart: Double = 0
+    /// The current run: from → to, started at `runStartedAt`.
+    @State private var runFrom: Double = 0
+    @State private var runTo: Double = 0
+    @State private var runStartedAt = Date.distantPast
+    /// Bumped per run, so a stale end-of-run callback never touches a newer run.
+    @State private var runToken = 0
 
     public init(appearance: TelosOrbAppearance, tint: TelosOrbTint = .green, style: Style = .hero,
                 clock: Clock = .whileVisible) {
@@ -754,53 +826,59 @@ public struct TelosOrb: View {
         self.init(appearance: TelosOrbAppearance.from(inputs), tint: tint, style: style, clock: clock)
     }
 
-    private var mode: TelosFrameGate.Mode {
+    /// Equal inputs → SwiftUI skips this view entirely (`.equatable()` at the call site), so a parent's
+    /// unrelated state change never re-renders the orb.
+    public static func == (lhs: TelosOrb, rhs: TelosOrb) -> Bool {
+        lhs.appearance == rhs.appearance && lhs.tint == rhs.tint && lhs.style == rhs.style && lhs.clock == rhs.clock
+    }
+
+    /// Whether motion is allowed right now: requested, on screen, not scrolled away, not covered, not
+    /// posed still (Reduce Motion ‖ Low Power ‖ "Reduce motion in NOOP"), and not the neutral orb.
+    private var allowed: Bool {
         let requested: Bool
-        let window: Bool
         switch clock {
-        case .whileVisible:
-            requested = true
-            window = true
-        case .burst:
-            requested = true
-            window = burstOpen
-        case .still:
-            requested = false
-            window = false
+        case .whileVisible, .burst: requested = true
+        case .still: requested = false
         }
-        // The neutral orb (nothing measured) is a still orb: no motion without data (§7.1).
         return TelosFrameGate.mode(requested: requested && !appearance.isNeutral, visible: visible,
                                    offscreen: offscreen, covered: covered,
-                                   poseStill: motion.poseStill(reduceMotion), withinActiveWindow: window)
+                                   poseStill: motion.poseStill(reduceMotion)) == .live
     }
 
-    private var burstSeconds: Double {
-        if case .burst(let seconds) = clock { return max(0, seconds) }
-        return 0
+    private var runSeconds: Double {
+        switch clock {
+        case .burst(let seconds): return max(0, seconds)
+        case .whileVisible: return Self.openRunSeconds
+        case .still: return 0
+        }
     }
 
-    /// The burst length the motion eases out within, or nil for an open-ended clock.
-    private var burstEnvelope: Double? {
-        if case .burst(let seconds) = clock { return max(0, seconds) }
+    /// The envelope's burst length (from `motionStart`), or nil for an open-ended clock.
+    private var envelopeLength: Double? {
+        if case .burst = clock { return max(0, runTo - motionStart) }
         return nil
     }
 
     private var target: TelosOrbAnimatedValues { TelosOrbAnimatedValues(appearance) }
 
     public var body: some View {
-        let live = mode == .live
         let values = shown ?? target
         TelosOrbLayer(size: values.size, brightness: values.brightness, turbulence: values.turbulence,
                       density: values.density, appearance: appearance,
                       palette: TelosOrbPalette.make(appearance: appearance, tint: tint),
-                      style: style, live: live, epoch: liveEpoch, restTime: restTime, burst: burstEnvelope)
+                      style: style, clock: clockValue,
+                      motion: TelosOrbMotion(start: motionStart, burst: envelopeLength,
+                                             pulsePeriod: appearance.pulsePeriod))
         .aspectRatio(1, contentMode: .fit)
         .onAppear {
             visible = true
             appearCount &+= 1
             if shown == nil { shown = target }
         }
-        .onDisappear { visible = false }
+        .onDisappear {
+            visible = false
+            stopRun()
+        }
         .telosOffscreen { offscreen = $0 }
         .onChangeCompat(of: target) { next in
             // A data change: the form flows to its new value (never on appear; instant under Reduce
@@ -813,20 +891,77 @@ public struct TelosOrb: View {
                 withAnimation(TelosMotion.flow) { shown = next }
             }
         }
-        .telosSettleWindow(on: BurstKey(appearance: appearance, appear: appearCount), duration: burstSeconds,
-                           active: $burstOpen)
-        .onChangeCompat(of: live) { isLive in
-            if isLive {
-                liveEpoch = Date()
-            } else {
-                restTime += max(0, Date().timeIntervalSince(liveEpoch))
+        // A burst (re)starts on each appear and each data change; an open clock whenever it may run.
+        .onChangeCompat(of: BurstKey(appearance: appearance, appear: appearCount)) { _ in
+            startRun()
+        }
+        .onChangeCompat(of: allowed) { isAllowed in
+            if !isAllowed {
+                stopRun()
+            } else if case .whileVisible = clock {
+                startRun()
             }
         }
         .allowsHitTesting(false)
         .accessibilityHidden(true)
     }
 
-    /// A burst reopens on a data change AND on each appear.
+    /// Where the clock is now (the in-flight animation's estimated position).
+    private func clockNow(_ now: Date) -> Double {
+        let span = runTo - runFrom
+        guard span > 0 else { return clockValue }
+        return min(runTo, runFrom + max(0, now.timeIntervalSince(runStartedAt)))
+    }
+
+    private func isRunning(_ now: Date) -> Bool {
+        runTo > runFrom && now.timeIntervalSince(runStartedAt) < runTo - runFrom
+    }
+
+    /// Start a run, or extend the one in flight (a data change mid-burst keeps the pose where it is and
+    /// moves the ease-out to the new end — no jump).
+    private func startRun() {
+        guard allowed else { return }
+        let seconds = runSeconds
+        guard seconds > 0 else { return }
+        let now = Date()
+        let current = clockNow(now)
+        if !isRunning(now) { motionStart = clockValue }
+        runFrom = current
+        runTo = current + seconds
+        runStartedAt = now
+        runToken &+= 1
+        let token = runToken
+        let end = runTo
+        // A burst eases in and out, so the orbit dots accelerate from rest and slow back to rest; an open
+        // run is linear.
+        let curve: Animation
+        if case .burst = clock {
+            curve = .easeInOut(duration: seconds)
+        } else {
+            curve = .linear(duration: seconds)
+        }
+        withAnimation(curve) { clockValue = end }
+        if case .whileVisible = clock {
+            DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+                if runToken == token, allowed { startRun() }
+            }
+        }
+    }
+
+    /// Stop now: the clock jumps to its run's end (the rest pose; the dots hold there).
+    private func stopRun() {
+        guard isRunning(Date()) else { return }
+        runToken &+= 1
+        var tx = Transaction()
+        tx.disablesAnimations = true
+        let end = runTo
+        withTransaction(tx) { clockValue = end + 1e-6 }
+        runFrom = end
+        runTo = end
+        motionStart = end
+    }
+
+    /// A burst restarts on a data change AND on each appear.
     private struct BurstKey: Equatable {
         let appearance: TelosOrbAppearance
         let appear: Int
@@ -848,8 +983,8 @@ struct TelosOrbAnimatedValues: Equatable {
     }
 }
 
-/// What the rasterised layers depend on. Their `Equatable` conformance compares only this, so a frame
-/// tick (which changes nothing here) never redraws them.
+/// What the rasterised layers depend on. Their `Equatable` conformance compares only this, so nothing
+/// but a data change redraws them.
 struct TelosOrbDrawKey: Equatable {
     let size: Double
     let brightness: Double
@@ -858,6 +993,15 @@ struct TelosOrbDrawKey: Equatable {
     let appearance: TelosOrbAppearance
     let style: TelosOrb.Style
     let palette: TelosOrbPalette
+}
+
+/// The motion's fixed parameters for the current run (the moving part is the clock value).
+struct TelosOrbMotion: Equatable {
+    /// The clock value the motion eased in from.
+    let start: Double
+    /// Burst length from `start` (the pose is back at rest there), or nil for an open-ended run.
+    let burst: Double?
+    let pulsePeriod: Double
 }
 
 /// The host. `Animatable`, so a data change interpolates the form for the duration of the `flow` spring
@@ -870,10 +1014,9 @@ struct TelosOrbLayer: View, Animatable {
     let appearance: TelosOrbAppearance
     let palette: TelosOrbPalette
     let style: TelosOrb.Style
-    let live: Bool
-    let epoch: Date
-    let restTime: Double
-    let burst: Double?
+    /// The motion clock's MODEL value; the effects below receive it animated.
+    let clock: Double
+    let motion: TelosOrbMotion
 
     var animatableData: AnimatablePair<AnimatablePair<Double, Double>, AnimatablePair<Double, Double>> {
         get { AnimatablePair(AnimatablePair(size, brightness), AnimatablePair(turbulence, density)) }
@@ -890,69 +1033,159 @@ struct TelosOrbLayer: View, Animatable {
                                          style: style)
         let key = TelosOrbDrawKey(size: size, brightness: brightness, turbulence: turbulence, density: density,
                                   appearance: appearance, style: style, palette: palette)
-        let live = self.live
-        let epoch = self.epoch
-        let restTime = self.restTime
-        let burst = self.burst
-        let pulsePeriod = appearance.pulsePeriod
-        let sway = turbulence
-        let accent = palette.accent
         let hero = style == .hero
-        let orbitSpeed = appearance.orbitSpeed
+        let layout = TelosOrbRenderer.dotLayout(count: appearance.orbitDots, hero: hero)
+        let movingDots = layout.drawn <= TelosOrbRenderer.maxMovingDots
+        let breath = TelosOrbBreathEffect(clock: clock, motion: motion, turbulence: turbulence, layer: .body)
+        let drift = TelosOrbBreathEffect(clock: clock, motion: motion, turbulence: turbulence, layer: .lobes)
         GeometryReader { geo in
             let dim = Double(min(geo.size.width, geo.size.height))
-            let orbits = TelosOrbRenderer.orbitSpecs(hero: hero, dim: dim, speed: orbitSpeed)
-            TimelineView(.animation(minimumInterval: TelosOrb.frameInterval, paused: !live)) { timeline in
-                let elapsed: Double = live ? max(0, timeline.date.timeIntervalSince(epoch)) : 0
-                let pose = TelosOrbPose.at(elapsed: elapsed, burst: burst, pulsePeriod: pulsePeriod,
-                                           turbulence: sway)
-                let dots = orbits.map { $0.dot(center: .zero, time: restTime + elapsed) }
-                ZStack {
-                    TelosOrbBackdropCanvas(key: key).equatable()
-                    TelosOrbDots(dots: dots, front: false, color: accent)
-                    TelosOrbBodyCanvas(key: key, form: form).equatable()
-                        .scaleEffect(x: CGFloat(pose.scaleX), y: CGFloat(pose.scaleY))
-                        .rotationEffect(.radians(pose.rotation))
-                    TelosOrbNucleiCanvas(key: key, form: form).equatable()
-                        .scaleEffect(x: CGFloat(pose.scaleX * pose.nucleus), y: CGFloat(pose.scaleY * pose.nucleus))
-                        .rotationEffect(.radians(pose.rotation * 1.3))
-                    TelosOrbDots(dots: dots, front: true, color: accent)
+            let orbits = TelosOrbRenderer.orbitSpecs(hero: hero, dim: dim, speed: appearance.orbitSpeed,
+                                                     count: layout.orbitCount)
+            ZStack {
+                TelosOrbBackdropCanvas(key: key).equatable()
+                if movingDots {
+                    TelosOrbDotsLayer(orbits: orbits, perOrbit: layout.perOrbit, clock: clock, front: false,
+                                      color: palette.accent, diameter: layout.diameter)
                 }
-                .frame(width: geo.size.width, height: geo.size.height)
+                // The body breathes as one; inside it the lobes (tints, stipple, veins, nuclei, icons)
+                // drift and swell against the core, masked by the membrane so they never leave it.
+                ZStack {
+                    TelosOrbCoreCanvas(key: key, form: form).equatable()
+                    ZStack {
+                        TelosOrbLobesCanvas(key: key, form: form).equatable()
+                        TelosOrbNucleiCanvas(key: key, form: form).equatable()
+                    }
+                    .modifier(drift)
+                    .mask { TelosOrbMembraneShape(membrane: form.membrane, size: size) }
+                }
+                .modifier(breath)
+                if movingDots {
+                    TelosOrbDotsLayer(orbits: orbits, perOrbit: layout.perOrbit, clock: clock, front: true,
+                                      color: palette.accent, diameter: layout.diameter)
+                }
             }
+            .frame(width: geo.size.width, height: geo.size.height)
         }
     }
 }
 
-/// The orbit dots: plain views moved by `offset` — no canvas redraw. Each dot is drawn in both slots
-/// (behind / in front of the blob) and shown in the one its position calls for.
-private struct TelosOrbDots: View {
-    let dots: [(CGPoint, Bool)]
+/// The membrane (unit space) placed in a frame exactly as the canvases draw it — the lobes' mask.
+private struct TelosOrbMembraneShape: Shape {
+    let membrane: Path
+    let size: Double
+
+    func path(in rect: CGRect) -> Path {
+        let r = TelosOrbRenderer.unitScale(dim: Double(min(rect.width, rect.height)), size: size)
+        guard r.isFinite, r > 0 else { return Path() }
+        return membrane.applying(CGAffineTransform(translationX: rect.midX, y: rect.midY)
+            .scaledBy(x: CGFloat(r), y: CGFloat(r)))
+    }
+}
+
+/// Breathing, sway and lobe drift as a transform of an already-rasterised layer. Its only animatable
+/// input is the clock, so SwiftUI's animation engine calls `effectValue` per display frame — a few
+/// sines — and nothing is re-rendered.
+private struct TelosOrbBreathEffect: GeometryEffect {
+    enum Layer { case body, lobes }
+
+    var clock: Double
+    let motion: TelosOrbMotion
+    let turbulence: Double
+    let layer: Layer
+
+    var animatableData: Double {
+        get { clock }
+        set { clock = newValue }
+    }
+
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        let pose = TelosOrbPose.at(elapsed: clock - motion.start, burst: motion.burst,
+                                   pulsePeriod: motion.pulsePeriod, turbulence: turbulence)
+        guard pose != .rest else { return ProjectionTransform() }
+        let cx = size.width / 2, cy = size.height / 2
+        let dim = Double(min(size.width, size.height))
+        let t: CGAffineTransform
+        switch layer {
+        case .body:
+            t = CGAffineTransform(translationX: cx, y: cy)
+                .rotated(by: CGFloat(pose.rotation))
+                .scaledBy(x: CGFloat(pose.scaleX), y: CGFloat(pose.scaleY))
+                .translatedBy(x: -cx, y: -cy)
+        case .lobes:
+            t = CGAffineTransform(translationX: cx + CGFloat(pose.driftX * dim), y: cy + CGFloat(pose.driftY * dim))
+                .rotated(by: CGFloat(pose.driftRotation))
+                .scaledBy(x: CGFloat(pose.nucleus), y: CGFloat(pose.nucleus))
+                .translatedBy(x: -cx, y: -cy)
+        }
+        return ProjectionTransform(t)
+    }
+}
+
+/// One orbiting dot's travel along its ellipse: a translation per display frame from the animated
+/// clock — the dot itself stays a round, pre-rendered view.
+private struct TelosOrbDotEffect: GeometryEffect {
+    var clock: Double
+    let spec: TelosOrbRenderer.OrbitSpec
+    let offset: Double
+
+    var animatableData: Double {
+        get { clock }
+        set { clock = newValue }
+    }
+
+    func effectValue(size: CGSize) -> ProjectionTransform {
+        let (p, _) = spec.dot(center: .zero, time: clock, offset: offset)
+        return ProjectionTransform(CGAffineTransform(translationX: p.x, y: p.y))
+    }
+}
+
+/// The orbiting dots on one side of the blob. Behind: every dot, dim. In front: every dot, masked to the
+/// front half of its (tilted) orbit — a static mask, so which dots show in front changes with no per-frame
+/// logic.
+private struct TelosOrbDotsLayer: View {
+    let orbits: [TelosOrbRenderer.OrbitSpec]
+    let perOrbit: [Int]
+    let clock: Double
     let front: Bool
     let color: Color
+    let diameter: CGFloat
 
     var body: some View {
         ZStack {
-            ForEach(dots.indices, id: \.self) { i in
-                TelosOrbDot(color: color, strength: front ? 1 : 0.4)
-                    .offset(x: dots[i].0.x, y: dots[i].0.y)
-                    .opacity(dots[i].1 == front ? 1 : 0)
+            ForEach(orbits.indices, id: \.self) { o in
+                let n = o < perOrbit.count ? perOrbit[o] : 0
+                ZStack {
+                    ForEach(0..<n, id: \.self) { j in
+                        Circle()
+                            .fill(color.opacity(front ? 0.75 : 0.3))
+                            .frame(width: diameter, height: diameter)
+                            .modifier(TelosOrbDotEffect(clock: clock, spec: orbits[o],
+                                                        offset: 2 * Double.pi * Double(j) / Double(max(n, 1))))
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .mask { TelosOrbFrontHalf(rotation: orbits[o].rotation, whole: !front) }
             }
         }
     }
 }
 
-/// A plain small dot — no halo, no highlight.
-private struct TelosOrbDot: View {
-    let color: Color
-    let strength: Double
+/// The half-plane in front of an orbit (below its tilted major axis), or everything when `whole`.
+private struct TelosOrbFrontHalf: Shape {
+    let rotation: Double
+    let whole: Bool
 
-    var body: some View {
-        Circle().fill(color.opacity(0.75 * strength)).frame(width: 4, height: 4)
+    func path(in rect: CGRect) -> Path {
+        guard !whole else { return Path(rect) }
+        let reach = Double(max(rect.width, rect.height)) * 2
+        return Path(CGRect(x: -reach, y: 0, width: reach * 2, height: reach))
+            .applying(CGAffineTransform(rotationAngle: CGFloat(rotation))
+                .concatenating(CGAffineTransform(translationX: rect.midX, y: rect.midY)))
     }
 }
 
-/// Orbit lines and growth shells — static; redrawn only when the key changes.
+/// Orbit lines, growth shells (and dense resting dots) — static; redrawn only when the key changes.
 private struct TelosOrbBackdropCanvas: View, Equatable {
     let key: TelosOrbDrawKey
 
@@ -966,23 +1199,39 @@ private struct TelosOrbBackdropCanvas: View, Equatable {
     }
 }
 
-/// The body: fills, lobes, dots, membrane — rasterised once per key, then only transformed.
-private struct TelosOrbBodyCanvas: View, Equatable {
+/// The core: tissue fill, dotted skin, membrane — rasterised once per key, then only transformed.
+private struct TelosOrbCoreCanvas: View, Equatable {
     let key: TelosOrbDrawKey
     let form: TelosOrbForm
 
-    static func == (lhs: TelosOrbBodyCanvas, rhs: TelosOrbBodyCanvas) -> Bool { lhs.key == rhs.key }
+    static func == (lhs: TelosOrbCoreCanvas, rhs: TelosOrbCoreCanvas) -> Bool { lhs.key == rhs.key }
 
     var body: some View {
         let key = self.key
         let form = self.form
         Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, size in
-            TelosOrbRenderer.drawBody(context: context, size: size, form: form, key: key)
+            TelosOrbRenderer.drawCore(context: context, size: size, form: form, key: key)
         }
     }
 }
 
-/// The veins and nuclei — their own layer, so they can pulse out of phase with the membrane.
+/// The organs: soft lobe tints and the interior stipple.
+private struct TelosOrbLobesCanvas: View, Equatable {
+    let key: TelosOrbDrawKey
+    let form: TelosOrbForm
+
+    static func == (lhs: TelosOrbLobesCanvas, rhs: TelosOrbLobesCanvas) -> Bool { lhs.key == rhs.key }
+
+    var body: some View {
+        let key = self.key
+        let form = self.form
+        Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: true) { context, size in
+            TelosOrbRenderer.drawLobes(context: context, size: size, form: form, key: key)
+        }
+    }
+}
+
+/// The veins, nuclei and part icons.
 private struct TelosOrbNucleiCanvas: View, Equatable {
     let key: TelosOrbDrawKey
     let form: TelosOrbForm
@@ -1028,7 +1277,8 @@ enum TelosOrbRenderer {
         Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2))
     }
 
-    static func drawBody(context: GraphicsContext, size: CGSize, form: TelosOrbForm, key: TelosOrbDrawKey) {
+    /// The core: a matte tissue fill inside the membrane, the dotted skin, and the membrane hairline.
+    static func drawCore(context: GraphicsContext, size: CGSize, form: TelosOrbForm, key: TelosOrbDrawKey) {
         guard let unit = unitContext(context, size: size, scale: key.size) else { return }
         let ctx = unit.context
         let px = unit.px
@@ -1036,32 +1286,44 @@ enum TelosOrbRenderer {
         let palette = key.palette
         let core = palette.color(0)
 
-        // 1. The body: a matte tissue fill inside the membrane (a gentle falloff, never a glow).
+        // 1. The tissue: a gentle falloff, never a glow.
         ctx.fill(form.membrane, with: .radialGradient(
             Gradient(colors: [core.opacity(0.14 * b), palette.shade.opacity(0.08 * b), palette.shade.opacity(0.06 * b)]),
             center: .zero, startRadius: 0, endRadius: CGFloat(max(form.extent, 0.1))))
 
-        // 2. The organs: muted tints with a faint inner wall, clipped to the membrane.
-        var inner = ctx
-        inner.clip(to: form.membrane)
-        for lobe in form.lobes.dropFirst() {
-            let ink = palette.color(lobe.colorIndex)
-            inner.fill(disc(lobe.x, lobe.y, lobe.r), with: .radialGradient(
-                Gradient(colors: [ink.opacity(0.18 * b), ink.opacity(0.11 * b), ink.opacity(0.05 * b)]),
-                center: CGPoint(x: lobe.x, y: lobe.y), startRadius: 0, endRadius: CGFloat(lobe.r)))
-            inner.stroke(disc(lobe.x, lobe.y, max(lobe.r - 2 * px, 0)),
-                         with: .color(ink.opacity(0.22 * b)), lineWidth: CGFloat(0.7 * px))
-        }
-
-        // 3. The dots: ≤ 18 batched fills.
-        for batch in form.dots {
+        // 2. The dotted skin.
+        for batch in form.skinDots {
             let alpha = tierAlpha[min(max(batch.tier, 0), tierAlpha.count - 1)]
             ctx.fill(batch.path, with: .color(palette.color(batch.colorIndex).opacity(alpha * b)))
         }
 
-        // 4. The membrane: one crisp hairline (no halo); fainter while still assembling.
+        // 3. The membrane: one crisp hairline (no halo); fainter while still assembling.
         let asm = form.assembly
         ctx.stroke(form.membrane, with: .color(palette.accent.opacity(0.42 * b * asm)), lineWidth: CGFloat(0.9 * px))
+    }
+
+    /// The organs: each lobe a soft tint that fades to nothing at its rim (no circle seam — the lobes
+    /// melt into the core like metaballs; the membrane mask trims them), plus the interior stipple.
+    static func drawLobes(context: GraphicsContext, size: CGSize, form: TelosOrbForm, key: TelosOrbDrawKey) {
+        guard let unit = unitContext(context, size: size, scale: key.size) else { return }
+        let ctx = unit.context
+        let b = key.brightness
+        let palette = key.palette
+        for lobe in form.lobes.dropFirst() {
+            let ink = palette.color(lobe.colorIndex)
+            let reach = lobe.r * 1.15
+            ctx.fill(disc(lobe.x, lobe.y, reach), with: .radialGradient(
+                Gradient(stops: [
+                    .init(color: ink.opacity(0.20 * b), location: 0),
+                    .init(color: ink.opacity(0.13 * b), location: 0.55),
+                    .init(color: ink.opacity(0), location: 1),
+                ]),
+                center: CGPoint(x: lobe.x, y: lobe.y), startRadius: 0, endRadius: CGFloat(reach)))
+        }
+        for batch in form.interiorDots {
+            let alpha = tierAlpha[min(max(batch.tier, 0), tierAlpha.count - 1)]
+            ctx.fill(batch.path, with: .color(palette.color(batch.colorIndex).opacity(alpha * b)))
+        }
     }
 
     static func drawNuclei(context: GraphicsContext, size: CGSize, form: TelosOrbForm, key: TelosOrbDrawKey) {
@@ -1122,9 +1384,21 @@ enum TelosOrbRenderer {
         let accent = key.palette.accent
         let hero = key.style == .hero
 
-        // 1. The thin orbit lines: one hairline each, no halo.
-        for o in orbitSpecs(hero: hero, dim: dim, speed: key.appearance.orbitSpeed) {
+        // 1. The thin orbit lines: one hairline each, no halo (a third appears once the dots need it).
+        let layout = dotLayout(count: key.appearance.orbitDots, hero: hero)
+        let orbits = orbitSpecs(hero: hero, dim: dim, speed: key.appearance.orbitSpeed, count: layout.orbitCount)
+        for o in orbits {
             ctx.stroke(o.path(center: c), with: .color(accent.opacity(0.26)), lineWidth: 0.7)
+        }
+        // A very high Level: more dots than are worth moving one by one — they rest here as dotted bands
+        // (evenly spaced, so travel would barely show anyway).
+        if layout.drawn > maxMovingDots {
+            var band = Path()
+            let d = layout.diameter
+            for (p, _) in orbitDotPositions(orbits: orbits, perOrbit: layout.perOrbit, center: c, time: 0) {
+                band.addEllipse(in: CGRect(x: p.x - d / 2, y: p.y - d / 2, width: d, height: d))
+            }
+            ctx.fill(band, with: .color(accent.opacity(0.55)))
         }
 
         // 2. Growth shells: each growth unit past the reference range adds one tilted dotted shell (the
@@ -1169,8 +1443,8 @@ enum TelosOrbRenderer {
 
         /// The travelling dot's position and whether it is in front of the orb (the lower half of the
         /// tilted ellipse faces the viewer).
-        func dot(center c: CGPoint, time t: Double) -> (CGPoint, Bool) {
-            let a = phase + (period > 0 ? t * 2 * Double.pi / period : 0)
+        func dot(center c: CGPoint, time t: Double, offset: Double = 0) -> (CGPoint, Bool) {
+            let a = phase + offset + (period > 0 ? t * 2 * Double.pi / period : 0)
             let ex = rx * cos(a), ey = ry * sin(a)
             let x = ex * cos(rotation) - ey * sin(rotation)
             let y = ex * sin(rotation) + ey * cos(rotation)
@@ -1178,16 +1452,71 @@ enum TelosOrbRenderer {
         }
     }
 
-    /// The orbits; `speed` (the effort ratio mapping) scales the dots' angular speed.
-    static func orbitSpecs(hero: Bool, dim: Double, speed: Double) -> [OrbitSpec] {
+    /// The orbits; `speed` (the effort ratio mapping) scales the dots' angular speed. `count` asks for
+    /// more than the style's base orbits (hero 2 → 3, compact 1 → 2) when the dots need the room.
+    static func orbitSpecs(hero: Bool, dim: Double, speed: Double, count: Int = 0) -> [OrbitSpec] {
         let s = max(speed.isFinite ? speed : TelosOrbAppearance.neutralOrbitSpeed, 0.05)
+        let all: [OrbitSpec]
+        let base: Int
         if hero {
-            return [
+            all = [
                 OrbitSpec(rx: dim * 0.46, ry: dim * 0.14, rotation: -16 * Double.pi / 180, period: 16 / s, phase: 0.6),
                 OrbitSpec(rx: dim * 0.40, ry: dim * 0.21, rotation: 28 * Double.pi / 180, period: 23 / s, phase: 3.1),
+                OrbitSpec(rx: dim * 0.35, ry: dim * 0.27, rotation: -52 * Double.pi / 180, period: 29 / s, phase: 5.0),
             ]
+            base = 2
+        } else {
+            all = [
+                OrbitSpec(rx: dim * 0.44, ry: dim * 0.13, rotation: -14 * Double.pi / 180, period: 18 / s, phase: 0.9),
+                OrbitSpec(rx: dim * 0.38, ry: dim * 0.21, rotation: 32 * Double.pi / 180, period: 25 / s, phase: 2.7),
+            ]
+            base = 1
         }
-        return [OrbitSpec(rx: dim * 0.44, ry: dim * 0.13, rotation: -14 * Double.pi / 180, period: 18 / s, phase: 0.9)]
+        return Array(all.prefix(min(max(base, count), all.count)))
+    }
+
+    /// How the orbiting dots are laid out.
+    struct DotLayout: Equatable {
+        /// Orbits in use (hero 2, or 3 past 12 dots; compact 1, or 2 past 6).
+        let orbitCount: Int
+        /// Dots per orbit, spread as evenly as the count allows.
+        let perOrbit: [Int]
+        /// Dot diameter in points: full size up to 30 dots, then smaller as they pack (never below 1.2).
+        let diameter: CGFloat
+        /// Dots actually drawn.
+        let drawn: Int
+    }
+
+    /// Past this many dots they pack smaller instead of stopping.
+    static let denseDotsAbove = 30
+    /// Up to this many dots travel (each a tiny pre-rendered view moved by a transform); beyond it (a
+    /// Level past 1,200) they rest as dotted bands on the backdrop.
+    static let maxMovingDots = 120
+    /// Past this many (a Level of 6,000) the orbits are solid dotted bands at the smallest dot size —
+    /// the screen's resolution, not the data, is the limit; the explainer prints the exact count.
+    static let maxDrawnDots = 600
+
+    static func dotLayout(count: Int, hero: Bool) -> DotLayout {
+        let n = max(0, count)
+        let orbitCount = hero ? (n > 12 ? 3 : 2) : (n > 6 ? 2 : 1)
+        let drawn = min(n, maxDrawnDots)
+        let perOrbit = (0..<orbitCount).map { o in drawn / orbitCount + (o < drawn % orbitCount ? 1 : 0) }
+        let full: Double = hero ? 4 : 3
+        let diameter = n <= denseDotsAbove ? full : max(1.2, full * (Double(denseDotsAbove) / Double(n)).squareRoot())
+        return DotLayout(orbitCount: orbitCount, perOrbit: perOrbit, diameter: CGFloat(diameter), drawn: drawn)
+    }
+
+    /// Every dot's position at time `t`, evenly spaced around its orbit, and whether it is in front.
+    static func orbitDotPositions(orbits: [OrbitSpec], perOrbit: [Int], center: CGPoint,
+                                  time t: Double) -> [(CGPoint, Bool)] {
+        var out: [(CGPoint, Bool)] = []
+        for (o, spec) in orbits.enumerated() where o < perOrbit.count && perOrbit[o] > 0 {
+            let n = perOrbit[o]
+            for j in 0..<n {
+                out.append(spec.dot(center: center, time: t, offset: 2 * Double.pi * Double(j) / Double(n)))
+            }
+        }
+        return out
     }
 }
 

@@ -276,3 +276,42 @@ extension EnvironmentValues {
         set { self[ScrollToTopSignalKey.self] = newValue }
     }
 }
+
+// MARK: - A data task that does not re-run on every re-appearance
+
+/// `.task(id:)` restarts every time its view comes back on screen — a switch back to the tab, a pop from
+/// a pushed screen, a card scrolling back into a lazy column — even when `id` never moved. For a card
+/// whose task is a batch of store reads followed by state writes, that is a main-actor burst and a
+/// re-render landing exactly while a transition or a scroll is animating.
+///
+/// `reloadTask(id:)` runs `action` whenever `id` CHANGES, exactly like `.task(id:)`, but answers a mere
+/// re-appearance with the same `id` from its last completed run for `freshFor` seconds. A run that was
+/// cancelled half-way (the view left) does not count as completed, so it runs again on return.
+extension View {
+    func reloadTask<ID: Equatable>(id: ID, freshFor: TimeInterval = 60,
+                                   _ action: @escaping @MainActor @Sendable () async -> Void) -> some View {
+        modifier(ReloadTaskModifier(id: id, freshFor: freshFor, action: action))
+    }
+}
+
+private struct ReloadTaskModifier<ID: Equatable>: ViewModifier {
+    let id: ID
+    let freshFor: TimeInterval
+    let action: @MainActor @Sendable () async -> Void
+
+    private struct Stamp {
+        let id: ID
+        let at: Date
+    }
+
+    /// Never read in `body`, so writing it re-renders nothing.
+    @State private var lastRun: Stamp?
+
+    func body(content: Content) -> some View {
+        content.task(id: id) { @MainActor in
+            if let lastRun, lastRun.id == id, Date().timeIntervalSince(lastRun.at) < freshFor { return }
+            await action()
+            if !Task.isCancelled { lastRun = Stamp(id: id, at: Date()) }
+        }
+    }
+}

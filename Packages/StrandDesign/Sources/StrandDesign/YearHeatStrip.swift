@@ -79,7 +79,10 @@ public struct YearHeatStrip: View {
 
     // Group days into week columns. weekday 0 = Monday ... 6 = Sunday.
     private struct Week: Identifiable {
-        let id = UUID()
+        /// The column's position, not a fresh `UUID()`: the strip is rebuilt with every body pass of its
+        /// host (Biometrics re-renders on each range tap), and new ids told `ForEach` every one of the ~53
+        /// columns — ~370 cells — was new, so the whole grid was torn down and rebuilt each time.
+        let id: Int
         var cells: [RecoveryDay?] // length 7, indexed by weekday row
         var monthLabel: String?
     }
@@ -89,7 +92,7 @@ public struct YearHeatStrip: View {
     private static func buildWeeks(from days: [RecoveryDay]) -> [Week] {
         guard let first = days.first?.date else { return [] }
         var weeks: [Week] = []
-        var current = Week(cells: Array(repeating: nil, count: 7), monthLabel: nil)
+        var current = Week(id: 0, cells: Array(repeating: nil, count: 7), monthLabel: nil)
         var lastMonth = -1
         // Pad the first week so the first day lands on its weekday row.
         let firstRow = weekdayRow(first)
@@ -100,7 +103,7 @@ public struct YearHeatStrip: View {
             let row = weekdayRow(day.date)
             if row == 0 && filledThisWeek > 0 {
                 weeks.append(current)
-                current = Week(cells: Array(repeating: nil, count: 7), monthLabel: nil)
+                current = Week(id: weeks.count, cells: Array(repeating: nil, count: 7), monthLabel: nil)
                 filledThisWeek = 0
             }
             current.cells[row] = day

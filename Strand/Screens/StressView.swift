@@ -121,7 +121,8 @@ struct StressView: View {
         }
         .onAppear { rebuildModelIfNeeded() }
         .onChangeCompat(of: repo.days) { _ in rebuildModelIfNeeded() }
-        .task(id: repo.refreshSeq) { await load() }
+        // Not re-run on each return to the Focus tab when nothing changed (`reloadTask`).
+        .reloadTask(id: repo.refreshSeq) { await load() }
     }
 
     private func load() async {
@@ -1419,7 +1420,9 @@ struct StressTotalsBar: View {
     let totals: StressTotals
 
     private struct Band: Identifiable {
-        let id = UUID()
+        /// The band itself, not a fresh `UUID()`: `bands` is rebuilt on every body pass, and a new id each
+        /// time told `ForEach` all three rows were new — tearing down and rebuilding the three tubes.
+        var id: StressBand { band }
         let band: StressBand
         let label: String
         let color: Color

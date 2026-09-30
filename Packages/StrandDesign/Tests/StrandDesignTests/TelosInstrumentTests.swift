@@ -20,6 +20,7 @@ final class TelosOrbMappingTests: XCTestCase {
         XCTAssertEqual(a.orbitSpeed, TelosOrbAppearance.neutralOrbitSpeed)
         XCTAssertEqual(a.brightness, TelosOrbAppearance.emptyBrightness, accuracy: 1e-9, "dim, not a good-day glow")
         XCTAssertTrue(a.partWeights.isEmpty)
+        XCTAssertEqual(a.orbitDots, 0, "no Level, no orbiting dots")
     }
 
     func testNonFiniteInputsCountAsAbsent() {
@@ -180,6 +181,22 @@ final class TelosOrbMappingTests: XCTestCase {
         XCTAssertFalse(f.membrane.isEmpty)
     }
 
+    func testSmoothUnionHasNoCrease() {
+        // Far apart: the plain maximum. Close: a rounded blend above both (the metaball joint).
+        XCTAssertEqual(TelosOrbGeometry.smoothMax(1.0, 0.2, k: 0.22), 1.0, accuracy: 1e-12)
+        XCTAssertGreaterThan(TelosOrbGeometry.smoothMax(0.6, 0.6, k: 0.22), 0.6)
+        XCTAssertEqual(TelosOrbGeometry.smoothMax(0.6, 0.5, k: 0.22), TelosOrbGeometry.smoothMax(0.5, 0.6, k: 0.22))
+    }
+
+    func testTheCellIsIrregularEvenWhenCalm() {
+        let lobes = TelosOrbGeometry.lobes(for: look(TelosOrbInputs(level: 50)))
+        let r = TelosOrbGeometry.outline(lobes: lobes, turbulence: 0).radii
+        let n = r.count
+        // Asymmetric: the outline is not the same in opposite directions.
+        let asymmetry = (0..<(n / 2)).map { abs(r[$0] - r[$0 + n / 2]) }.max() ?? 0
+        XCTAssertGreaterThan(asymmetry, 0.02)
+    }
+
     func testStressRipplesTheMembrane() {
         let lobes = TelosOrbGeometry.lobes(for: look(TelosOrbInputs(partShares: [.sleep: 1, .heart: 1])))
         func roughness(_ turbulence: Double) -> Double {
@@ -194,8 +211,9 @@ final class TelosOrbMappingTests: XCTestCase {
             let full = TelosOrbGeometry.form(appearance: look(TelosOrbInputs(level: 500)), turbulence: 0.12,
                                              density: 1, style: style)
             XCTAssertLessThanOrEqual(full.dotCount, TelosOrbGeometry.maxDots)
-            XCTAssertLessThanOrEqual(full.dots.count, TelosOrbPart.allCases.count * TelosOrbGeometry.tiers + TelosOrbGeometry.tiers,
-                                     "dots are batched: at most colour × tier fills")
+            XCTAssertLessThanOrEqual(full.dots.count, (TelosOrbPart.allCases.count + 1) * TelosOrbGeometry.tiers * 2,
+                                     "dots are batched: at most colour × tier fills per layer (skin, interior)")
+            XCTAssertEqual(full.dots.count, full.skinDots.count + full.interiorDots.count)
             let half = TelosOrbGeometry.form(appearance: look(TelosOrbInputs(level: 500)), turbulence: 0.12,
                                              density: 0.5, style: style)
             XCTAssertLessThan(half.dotCount, full.dotCount)
@@ -207,6 +225,56 @@ final class TelosOrbMappingTests: XCTestCase {
     func testProvisionalLevelHasAFainterMembrane() {
         XCTAssertEqual(form(TelosOrbInputs(level: 80)).assembly, 1)
         XCTAssertLessThan(form(TelosOrbInputs(level: 80, confidence: .calibrating(done: 1, total: 7))).assembly, 1)
+    }
+
+    // MARK: Orbiting dots — one per 10 Level points, no cap
+
+    func testOrbitDotsAreOnePerTenLevelPoints() {
+        XCTAssertEqual(TelosOrbAppearance.from(TelosOrbInputs(level: 64)).orbitDots, 6)
+        XCTAssertEqual(TelosOrbAppearance.from(TelosOrbInputs(level: 9.9)).orbitDots, 0)
+        XCTAssertEqual(TelosOrbAppearance.from(TelosOrbInputs(level: 100)).orbitDots, 10)
+        XCTAssertEqual(TelosOrbAppearance.from(TelosOrbInputs(level: -5)).orbitDots, 0)
+        XCTAssertEqual(TelosOrbAppearance.from(TelosOrbInputs(level: .nan)).orbitDots, 0)
+        XCTAssertEqual(TelosOrbAppearance.from(TelosOrbInputs(charge: 80, effortRatio: 1)).orbitDots, 0,
+                       "effort drives the speed, never the count")
+    }
+
+    func testOrbitDotsAreMonotoneAndUncapped() {
+        let levels: [Double] = [0, 10, 55, 100, 300, 1_000, 10_000, 1_000_000]
+        let counts = levels.map { TelosOrbAppearance.from(TelosOrbInputs(level: $0)).orbitDots }
+        for i in 1..<counts.count { XCTAssertGreaterThan(counts[i], counts[i - 1], "at \(levels[i])") }
+        XCTAssertEqual(counts.last, 100_000)
+    }
+
+    func testDotLayoutSpreadsOverOrbitsAndPacksSmaller() {
+        let none = TelosOrbRenderer.dotLayout(count: 0, hero: true)
+        XCTAssertEqual(none.drawn, 0)
+        XCTAssertEqual(none.perOrbit.reduce(0, +), 0)
+        let six = TelosOrbRenderer.dotLayout(count: 6, hero: true)
+        XCTAssertEqual(six.orbitCount, 2)
+        XCTAssertEqual(six.perOrbit, [3, 3])
+        let many = TelosOrbRenderer.dotLayout(count: 20, hero: true)
+        XCTAssertEqual(many.orbitCount, 3, "a third orbit past 12 dots")
+        XCTAssertEqual(many.perOrbit.reduce(0, +), 20)
+        var last = CGFloat.infinity
+        for n in [1, 10, 30, 31, 60, 200, 1_000] {
+            let d = TelosOrbRenderer.dotLayout(count: n, hero: true).diameter
+            XCTAssertLessThanOrEqual(d, last, "dots never grow as they multiply")
+            XCTAssertGreaterThanOrEqual(d, 1.2)
+            last = d
+        }
+        XCTAssertLessThan(TelosOrbRenderer.dotLayout(count: 60, hero: true).diameter,
+                          TelosOrbRenderer.dotLayout(count: 30, hero: true).diameter, "past 30 they pack smaller")
+        XCTAssertEqual(TelosOrbRenderer.dotLayout(count: 250, hero: true).drawn, 250, "no cap at 30")
+    }
+
+    func testDotPositionsMatchTheLayout() {
+        let layout = TelosOrbRenderer.dotLayout(count: 17, hero: true)
+        let orbits = TelosOrbRenderer.orbitSpecs(hero: true, dim: 200, speed: 1, count: layout.orbitCount)
+        XCTAssertEqual(orbits.count, layout.orbitCount)
+        let dots = TelosOrbRenderer.orbitDotPositions(orbits: orbits, perOrbit: layout.perOrbit,
+                                                      center: CGPoint(x: 100, y: 100), time: 3)
+        XCTAssertEqual(dots.count, 17)
     }
 
     // MARK: Lobe glyphs
@@ -236,6 +304,13 @@ final class TelosOrbMappingTests: XCTestCase {
 
     // MARK: Motion — transforms only, eased bursts, ≤ 20 fps
 
+    func testOrbIsEquatableOnItsInputsOnly() {
+        let a = TelosOrb(inputs: TelosOrbInputs(level: 64, charge: 70), clock: .burst(seconds: 8))
+        XCTAssertTrue(a == TelosOrb(inputs: TelosOrbInputs(level: 64, charge: 70), clock: .burst(seconds: 8)))
+        XCTAssertFalse(a == TelosOrb(inputs: TelosOrbInputs(level: 65, charge: 70), clock: .burst(seconds: 8)))
+        XCTAssertFalse(a == TelosOrb(inputs: TelosOrbInputs(level: 64, charge: 70), clock: .still))
+    }
+
     func testTheOrbClockIsCappedAtTwentyFramesPerSecond() {
         XCTAssertGreaterThanOrEqual(TelosOrb.frameInterval, 1.0 / 20.0 - 1e-12)
     }
@@ -258,6 +333,10 @@ final class TelosOrbMappingTests: XCTestCase {
             XCTAssertEqual(p.scaleX, 1, accuracy: 0.05)
             XCTAssertEqual(p.scaleY, 1, accuracy: 0.05)
             XCTAssertLessThanOrEqual(abs(p.rotation), 0.09)
+            XCTAssertLessThanOrEqual(abs(p.driftX), 0.011)
+            XCTAssertLessThanOrEqual(abs(p.driftY), 0.009)
+            XCTAssertLessThanOrEqual(abs(p.driftRotation), 0.031)
+            XCTAssertEqual(p.nucleus, 1, accuracy: 0.031)
         }
     }
 }

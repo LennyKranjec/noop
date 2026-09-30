@@ -436,7 +436,9 @@ private struct HeartRateSection: View {
 /// One streamed live-HR reading with the wall-clock time it arrived. Carrying the time
 /// (rather than a bare bpm) is what lets the hero render a real time x-axis (#198).
 struct LiveHRSample: Identifiable, Equatable {
-    let id = UUID()
+    /// The reading's own time (one per second), not a fresh `UUID()`: the fallback series is rebuilt on every
+    /// body pass, and new ids made the chart treat every mark as inserted rather than moved.
+    var id: Date { date }
     let date: Date
     let bpm: Double
 }

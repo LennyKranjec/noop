@@ -7,7 +7,7 @@ enum AppChangelog {
 
     /// Bump this when you add a release below. The "What's New" sheet shows automatically when the
     /// stored last-seen version is behind this. (Decoupled from the bundle version on purpose.)
-    static let currentVersion = "12.0.1"
+    static let currentVersion = "12.0.2"
 
     struct Release: Identifiable {
         let version: String
@@ -19,6 +19,19 @@ enum AppChangelog {
 
     /// Newest first.
     static let releases: [Release] = [
+        Release(
+            version: "12.0.2",
+            title: "A coach you can type into, lifting that reaches your Level, and a week plan built from your own program",
+            date: "September 2026",
+            items: [
+                "**The coach's input is never covered.** The tab bar now sits below every screen instead of floating over it, and steps aside for the keyboard.",
+                "**Imported lifting reaches your Level.** A lifting import now re-scores the Level's history once, and this update does it once for logs you imported before.",
+                "**Build this week follows your Lift plan.** Four strength sessions, named by day (Upper A, Lower A, Upper B, Lower B), and a new Zone 4–5 target of 10 minutes a week, counted from measured heart rate only.",
+                "**Sleep and training are labelled on the heart-rate chart again,** on solid labels that stay readable.",
+                "**A more organic orb.** Softer, irregular shape with an icon on each part's lobe, one orbiting dot per 10 Level points, smoother motion, and a preview of how it looks at any Level.",
+                "**Faster.** Big charts are thinned, cards stop reloading on every visit, and the shell no longer redraws on every data change.",
+            ]
+        ),
         Release(
             version: "12.0.1",
             title: "A Level that separates your good days again, a calmer look, and Telos Lift one tap away",

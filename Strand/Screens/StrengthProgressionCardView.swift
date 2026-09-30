@@ -55,7 +55,8 @@ struct StrengthProgressionCardView: View {
                 content
             }
         }
-        .task(id: repo.refreshSeq) { await load() }
+        // Not re-run each time the card scrolls back into the lazy column (`reloadTask`).
+        .reloadTask(id: repo.refreshSeq) { await load() }
     }
 
     private var header: some View {

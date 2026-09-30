@@ -239,7 +239,10 @@ struct LiquidTube: View {
             if isLive { liveTube } else { staticTube }
         }
         .frame(height: height)
-        .liquidOffscreen { offscreen = $0 }
+        // Only a tube that can MOVE needs to know it scrolled away. A still tube (`animated: false` — every
+        // Key-Metrics tile and vitals row on Today) paid for a scroll-visibility observer anyway, and each
+        // edge crossing wrote `offscreen` and redrew its Canvas mid-scroll for nothing.
+        .liquidOffscreen(enabled: animated) { offscreen = $0 }
         .onAppear {
             posedFrac = clamped
             sim.level = clamped      // a first change settles from the drawn level, never from empty
@@ -310,6 +313,17 @@ extension View {
     /// a no-op before that and outside a scroll view).
     func liquidOffscreen(_ action: @escaping (Bool) -> Void) -> some View {
         telosOffscreen(action)
+    }
+
+    /// `liquidOffscreen` only where `enabled` — pass a value that is FIXED for the view's life (a `let`
+    /// input), since it selects between two branches.
+    @ViewBuilder
+    func liquidOffscreen(enabled: Bool, _ action: @escaping (Bool) -> Void) -> some View {
+        if enabled {
+            telosOffscreen(action)
+        } else {
+            self
+        }
     }
 
     /// A light selection/impact haptic, available only where `sensoryFeedback` is (iOS 17 / macOS 14);

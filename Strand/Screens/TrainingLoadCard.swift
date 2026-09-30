@@ -37,10 +37,27 @@ struct TrainingLoadCard: View {
         var id: Date { date }
     }
 
-    /// One modelled point per day of the contiguous suffix the engine returned.
-    private var rows: [Row] {
-        result.points.compactMap { p in
-            guard let d = Self.dayParser.date(from: p.day) else { return nil }
+    /// The most points the card-size chart draws. CTL and ATL are exponentially smoothed, so an even
+    /// stride over a long history draws the same two curves.
+    private static let maxPlotted = 150
+
+    /// The modelled points to PLOT: the contiguous suffix the engine returned, thinned to `maxPlotted`
+    /// by an even stride that always keeps the latest day. PERF: this used to be every day of the whole
+    /// history — two catmull-rom LineMark series of hundreds to thousands of vertices each, re-laid out
+    /// whenever the card was — and the headline and footer read the engine's own last point, never this.
+    private static func rows(_ result: TrainingLoadEngine.Result) -> [Row] {
+        let points = result.points
+        let step = max(1, Int((Double(points.count) / Double(maxPlotted)).rounded(.up)))
+        var picked: [TrainingLoadEngine.Point] = []
+        picked.reserveCapacity(points.count / step + 2)
+        var i = 0
+        while i < points.count {
+            picked.append(points[i])
+            i += step
+        }
+        if let last = points.last, (points.count - 1) % step != 0 { picked.append(last) }
+        return picked.compactMap { p in
+            guard let d = dayParser.date(from: p.day) else { return nil }
             return Row(date: d, ctl: p.chronicLoad, atl: p.acuteLoad)
         }
     }
@@ -59,6 +76,8 @@ struct TrainingLoadCard: View {
     private func signed(_ v: Double) -> String { String(format: "%+.1f", v) }
 
     var body: some View {
+        // ONE engine pass per body. `result` walks the whole history; the chart used to read it again
+        // (twice) through `rows`, so each body ran the model three times.
         let tl = result
         if !tl.isAvailable {
             unavailableCard(contiguousDays: tl.contiguousDays)
@@ -72,7 +91,7 @@ struct TrainingLoadCard: View {
                 chart: {
                     VStack(alignment: .leading, spacing: NoopMetrics.space2) {
                         legend
-                        chart
+                        chart(tl)
                     }
                 },
                 footer: {
@@ -88,10 +107,12 @@ struct TrainingLoadCard: View {
     }
 
     // Two overlaid lines: CTL (fitness) and ATL (fatigue). The vertical gap between them is the form.
-    private var chart: some View {
+    private func chart(_ tl: TrainingLoadEngine.Result) -> some View {
+        let rows = Self.rows(tl)
         // Floor at 1 (matching the Android `fold(1.0)` twin): an all-rest window of zero loads would
         // otherwise make the y-domain `0...0`, which Swift Charts renders as a degenerate/empty scale.
-        let maxY = max(rows.map { max($0.ctl, $0.atl) }.max() ?? 1, 1)
+        // The peak over the FULL series, not the thinned one, so the scale never clips a stepped-over day.
+        let maxY = max(tl.points.map { max($0.chronicLoad, $0.acuteLoad) }.max() ?? 1, 1)
         return Chart {
             ForEach(rows) { r in
                 LineMark(x: .value("Day", r.date), y: .value("CTL", r.ctl),

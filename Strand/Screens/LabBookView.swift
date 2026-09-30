@@ -30,7 +30,9 @@ import WhoopStore
 
 struct LabBookView: View {
     @EnvironmentObject var repo: Repository
-    @EnvironmentObject var live: LiveState
+    /// NOT observed: the screen only WRITES import lines into the strap log. Observing `LiveState` (which
+    /// publishes per R-R packet, frame and sync chunk) re-rendered the whole lazy list at the strap's rate.
+    @Environment(\.appModelRef) private var appModelRef
 
     /// All readings, grouped + ordered for display. Loaded off the store on appear/refresh.
     @State private var markers: [LabMarkerRow] = []
@@ -310,7 +312,7 @@ struct LabBookView: View {
     /// (issue #421 parity): COUNTS only, never a file name, a path, or any health value.
     /// Same shape as DataSourcesView.logImport.
     private func logImport(_ line: String) {
-        live.append(log: "[\(AppModel.logTimeFormatter.string(from: Date()))] Import \(line)")
+        resolvedAppModel(appModelRef)?.live.append(log: "[\(AppModel.logTimeFormatter.string(from: Date()))] Import \(line)")
     }
 
     // MARK: - Empty state (honest)

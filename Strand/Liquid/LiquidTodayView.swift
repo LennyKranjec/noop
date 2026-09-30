@@ -385,6 +385,10 @@ struct LiquidTodayView: View {
     /// The Home tab's path push (iOS tab shell only). Nil on macOS / in a sheet, where `heroTap` and
     /// `showHabitsHub` keep pushing through their `isPresented` destinations.
     @Environment(\.tabRoutePush) private var tabRoutePush
+    /// The last completed `load()` / `loadCloudDay()` and the inputs it read (see the tasks in `body`).
+    /// Never read in `body`, so writing them re-renders nothing.
+    @State private var mainLoadStamp: TodayLoadStamp?
+    @State private var cloudLoadStamp: TodayLoadStamp?
 
     /// Open a route from a tap that is not a `NavigationLink`. ON THE TAB'S PATH when the shell offers one:
     /// an `isPresented` push is invisible to the path, so re-tapping Home from the screen it opened found
@@ -521,13 +525,28 @@ struct LiquidTodayView: View {
         .liquidMediumHaptic(trigger: pullHaptic)
         // hydrationSeq joins the id so logging a drink re-reads the card immediately, the same trigger set
         // classic TodayView's reloadHydration() uses.
+        //
+        // NOT ON EVERY RE-APPEARANCE. A `.task` restarts each time the view comes back — every pop from a
+        // pushed screen and every switch back to Home — and `load()` is a few hundred lines of store reads
+        // and history scans that land on the main actor as the push/pop animation is running, then
+        // re-render the whole screen. The same inputs loaded under a minute ago are skipped
+        // (`reappearLoadIsFresh`); any change of input — data, day, hosted cards, profile — still loads at
+        // once, and so does the pull to refresh.
         .task(id: "\(repo.refreshSeq)-\(selectedDayOffset)-\(repo.hydrationSeq)-\(hydrationEnabled)-\(dayCycleModeRaw)") {
+            let gate = mainLoadGateKey
+            guard !Self.reappearLoadIsFresh(mainLoadStamp, key: gate) else { return }
             await load()
+            if !Task.isCancelled { mainLoadStamp = TodayLoadStamp(key: gate, at: Date()) }
         }
         // The cloud read is keyed SEPARATELY from `load()`, on its own tick, because a WHOOP sync lands
         // without bumping `refreshSeq` — the first cut keyed the hero on the day alone and the rings
-        // stayed blank until something else happened to reload the screen.
-        .task(id: "\(selectedDayKey)-\(repo.whoopCloudSeq)") { await loadCloudDay() }
+        // stayed blank until something else happened to reload the screen. Same re-appearance rule.
+        .task(id: "\(selectedDayKey)-\(repo.whoopCloudSeq)") {
+            let gate = "\(selectedDayKey)-\(repo.whoopCloudSeq)|\(profile.age)|\(profile.sex)|\(profile.waistCm)"
+            guard !Self.reappearLoadIsFresh(cloudLoadStamp, key: gate) else { return }
+            await loadCloudDay()
+            if !Task.isCancelled { cloudLoadStamp = TodayLoadStamp(key: gate, at: Date()) }
+        }
         // THE OPTIMUM, checked whenever the day's effort or its ceiling moves.
         .task(id: "\(Int(heroEffort ?? -1))-\(Int(optimalStrainCeiling ?? -1))-\(selectedDayOffset)") {
             checkOptimum()
@@ -2461,6 +2480,24 @@ struct LiquidTodayView: View {
         }
     }
 
+    /// Everything `load()` reads that its task id does not carry: the resolved day (the id holds only the
+    /// offset, which stays 0 across midnight), the hosted cards, and the profile fields the effort, steps
+    /// and hydration figures are computed from.
+    private var mainLoadGateKey: String {
+        "\(repo.refreshSeq)-\(selectedDayOffset)-\(repo.hydrationSeq)-\(hydrationEnabled)-\(dayCycleModeRaw)"
+            + "|\(selectedDayKey)|\(hostedCardsRaw)"
+            + "|\(profile.sex)|\(profile.age)|\(profile.hrMaxOverride)|\(profile.stepCounterCalibrated)"
+    }
+
+    /// How long a completed load answers a re-appearance with the same inputs.
+    private static let reappearReloadWindow: TimeInterval = 60
+
+    /// Whether `stamp` already covers `key` recently enough that a re-appearance need not load again.
+    private static func reappearLoadIsFresh(_ stamp: TodayLoadStamp?, key: String) -> Bool {
+        guard let stamp, stamp.key == key else { return false }
+        return Date().timeIntervalSince(stamp.at) < reappearReloadWindow
+    }
+
     private func load() async {
         // #989: today's hydration total + goal. One metricSeries row + a UserDefaults read, same as classic
         // TodayView.reloadHydration(). Cleared when the feature is off so the card can't show a stale total.
@@ -3183,6 +3220,12 @@ private struct HeroScoreCell: View {
 ///
 /// No longer reads LiveState at all, so it is no longer an isolated leaf — there is nothing left to
 /// isolate it from.
+/// A completed Today load: the inputs it read and when.
+private struct TodayLoadStamp {
+    let key: String
+    let at: Date
+}
+
 private struct LiquidRefreshIndicator: View {
     /// Observed HERE only: Today holds it without observing, so a pull re-renders just this indicator.
     @ObservedObject var pull: LiquidPullOffset

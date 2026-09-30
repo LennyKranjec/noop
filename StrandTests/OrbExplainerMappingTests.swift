@@ -39,7 +39,7 @@ final class OrbExplainerMappingTests: XCTestCase {
     func testEveryChannelHasARowInOrder() {
         let rows = HomeHeroMapping.orbLegend(inputs: TelosOrbInputs(), breakdown: nil, pending: false)
         XCTAssertEqual(rows.map(\.id), ["size", "lobe.sleep", "lobe.heart", "lobe.lungs", "lobe.muscle", "lobe.focus",
-                                        "surface", "pulse", "glow", "orbit", "assembly"])
+                                        "surface", "pulse", "glow", "orbit", "dots", "assembly"])
     }
 
     func testNothingMeasuredIsAllAbsentWithAReason() {
@@ -63,6 +63,7 @@ final class OrbExplainerMappingTests: XCTestCase {
         XCTAssertTrue(row(rows, "pulse").detail.contains("6.9"), "6 × 60 / 52 = 6.9 s per breath")
         XCTAssertTrue(row(rows, "glow").value?.contains("71") == true)
         XCTAssertTrue(row(rows, "orbit").value?.contains("80") == true)
+        XCTAssertEqual(row(rows, "dots").value, "6", "one orbiting dot per 10 Level points")
         XCTAssertNotNil(row(rows, "assembly").value)
     }
 
@@ -88,7 +89,7 @@ final class OrbExplainerMappingTests: XCTestCase {
         let rows = HomeHeroMapping.orbLegend(inputs: TelosOrbInputs(level: .nan, stress: .infinity, heartRateBpm: 0,
                                                                     charge: .nan, effortRatio: .nan),
                                              breakdown: nil, pending: false)
-        for id in ["size", "surface", "pulse", "glow", "orbit", "assembly"] {
+        for id in ["size", "surface", "pulse", "glow", "orbit", "dots", "assembly"] {
             XCTAssertNil(row(rows, id).value, id)
         }
     }
@@ -119,6 +120,35 @@ final class OrbExplainerMappingTests: XCTestCase {
                        "lobe order; zero / non-finite shares have no lobe")
         XCTAssertTrue(HomeHeroMapping.orbAccessibilityValue(inputs).contains(HomeHeroMapping.orbPartName(.sleep)))
         XCTAssertTrue(HomeHeroMapping.orbLobeNames(TelosOrbInputs()).isEmpty)
+    }
+
+    // MARK: The other-levels preview
+
+    func testPreviewStartsAtTodaysLevelToTheNearestTen() {
+        XCTAssertEqual(HomeHeroMapping.orbPreviewStart(level: 64), 60)
+        XCTAssertEqual(HomeHeroMapping.orbPreviewStart(level: 66), 70)
+        XCTAssertEqual(HomeHeroMapping.orbPreviewStart(level: 340), 340, "no cap at 200")
+        XCTAssertEqual(HomeHeroMapping.orbPreviewStart(level: nil), 50)
+        XCTAssertEqual(HomeHeroMapping.orbPreviewStart(level: .nan), 50)
+    }
+
+    func testPreviewLevelsAndSanitising() {
+        XCTAssertEqual(HomeHeroMapping.orbPreviewLevels, [0, 20, 40, 60, 80, 100, 120, 140, 160, 180, 200])
+        XCTAssertEqual(HomeHeroMapping.sanitizedPreviewLevel(-30), 0)
+        XCTAssertEqual(HomeHeroMapping.sanitizedPreviewLevel(.infinity), 0)
+        XCTAssertEqual(HomeHeroMapping.sanitizedPreviewLevel(450), 450, "typed levels above 200 are kept")
+    }
+
+    func testPreviewSummaryGrowsWithTheLevel() {
+        let low = HomeHeroMapping.orbPreviewSummary(level: 20)
+        let ref = HomeHeroMapping.orbPreviewSummary(level: 100)
+        let high = HomeHeroMapping.orbPreviewSummary(level: 450)
+        XCTAssertEqual(low.dots, 2)
+        XCTAssertEqual(ref.dots, 10)
+        XCTAssertEqual(high.dots, 45)
+        XCTAssertEqual(ref.sizePercent, 100)
+        XCTAssertLessThan(low.sizePercent, ref.sizePercent)
+        XCTAssertGreaterThan(high.sizePercent, ref.sizePercent)
     }
 
     // MARK: The history

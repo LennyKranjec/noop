@@ -53,7 +53,15 @@ struct RootTabView: View {
         return onboarded && acceptedTermsVersion == Terms.currentVersion
     }
 
-    @EnvironmentObject private var repo: Repository
+    /// NOT observed: Repository publishes on every data refresh and every hydration / nutrition / cloud /
+    /// cycle tick, and the shell needs two counters from it (mirrored in `refreshSeq` / `workoutsSeq` from
+    /// de-duplicated publishers) plus a reference to call. Observing it re-evaluated the whole shell — the
+    /// TabView, the strip, the bar and every presentation modifier — on each of those publishes.
+    private var repo: Repository { requireAppModel(appModelRef).repo }
+    /// `repo.refreshSeq` / `repo.workoutsSeq`, mirrored. nil until the first value lands, so the tasks keyed on
+    /// them do not run once for a placeholder 0 and again for the real value.
+    @State private var refreshSeq: Int?
+    @State private var workoutsSeq: Int?
     /// Cross-screen navigation requests (e.g. Live → "Manage devices"). Devices isn't a tab — it lives
     /// behind the More list — so a request presents it as a sheet, matching the quick-action screens.
     @EnvironmentObject private var router: NavRouter
@@ -100,8 +108,9 @@ struct RootTabView: View {
               let level = stressMonitor.current else { return nil }
         return level
     }
-    /// The health store, for today's macros.
-    @EnvironmentObject private var health: HealthKitBridge
+    /// The health store, for today's macros. NOT observed: its sync state publishes several times per
+    /// Apple Health pass, and the shell only calls it from the nutrition hook below.
+    @Environment(\.healthBridgeRef) private var healthRef
 
     /// The level strip's data. The app's one `LevelBarModel`, shared with the Health tab, so there is a
     /// single writer to the level ledger rather than two instances racing to freeze the same morning.
@@ -211,7 +220,7 @@ struct RootTabView: View {
     ///   constant, so a phase change costs one string comparison rather than a `DateFormatter` call.
     private var meditationDueKey: String {
         let day = scenePhase == .active ? Repository.localDayKey(Date()) : ""
-        return "\(repo.refreshSeq)|\(repo.workoutsSeq)|\(day)"
+        return "\(refreshSeq ?? -1)|\(workoutsSeq ?? -1)|\(day)"
     }
 
     /// What VoiceOver reads for the Focus item while the reminder is up — the badge is a punctuation mark,
@@ -497,14 +506,22 @@ struct RootTabView: View {
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
             if keyboardVisible { keyboardVisible = false }
         }
-        .task(id: repo.refreshSeq) {
-            await levelBar.refresh(repo: repo, tick: repo.refreshSeq)
+        .task(id: refreshSeq) {
+            guard let refreshSeq else { return }
+            await levelBar.refresh(repo: repo, tick: refreshSeq)
         }
         // The Focus tab's reminder. Only while the app is actually in front: a read fired as the shell
         // goes away would be work nobody can see the result of, and the key re-fires on the way back.
         .task(id: meditationDueKey) {
-            guard scenePhase == .active else { return }
+            guard scenePhase == .active, refreshSeq != nil, workoutsSeq != nil else { return }
             await reloadMeditationDue()
+        }
+        // The two Repository counters the shell keys on (see `repo`). Replayed on subscription.
+        .onReceive(repo.$refreshSeq.removeDuplicates()) { seq in
+            if refreshSeq != seq { refreshSeq = seq }
+        }
+        .onReceive(repo.$workoutsSeq.removeDuplicates()) { seq in
+            if workoutsSeq != seq { workoutsSeq = seq }
         }
         // Both publishers replay their current value on subscription, which seeds the state on appear.
         .onReceive(coachWorkingPublisher) { working in
@@ -559,8 +576,9 @@ struct RootTabView: View {
             //
             // INSTALLED AS A HOOK, not just run once at launch: every refresh the wearer asks for should
             // re-read the diary, and the shared screens cannot call HealthKit themselves.
-            repo.refreshPlatformNutrition = { [weak repo] in
-                guard let repo else { return }
+            let health = healthRef
+            repo.refreshPlatformNutrition = { [weak repo, weak health] in
+                guard let repo, let health else { return }
                 if await health.refreshTodayMacros() != nil { repo.noteNutritionChanged() }
             }
             await repo.refreshPlatformNutrition?()
@@ -1145,6 +1163,19 @@ struct RootTabView: View {
                 }
             }
         }
+    }
+}
+
+/// The app's `HealthKitBridge`, WITHOUT observing it (the `appModelRef` idea, for the one iOS-only store).
+/// Injected at the iOS root next to its `.environmentObject(health)`; nil anywhere it was not.
+private struct HealthBridgeRefKey: EnvironmentKey {
+    static let defaultValue: HealthKitBridge? = nil
+}
+
+extension EnvironmentValues {
+    var healthBridgeRef: HealthKitBridge? {
+        get { self[HealthBridgeRefKey.self] }
+        set { self[HealthBridgeRefKey.self] = newValue }
     }
 }
 

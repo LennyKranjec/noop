@@ -171,7 +171,8 @@ enum HomeHeroMapping {
     }
 
     /// The legend, top to bottom: size (Level) · one lobe per part · surface (stress) · pulse (resting HR)
-    /// · glow (Charge) · orbit speed (Effort ÷ target) · assembling (how settled the Level is).
+    /// · glow (Charge) · orbit speed (Effort ÷ target) · orbit dots (Level ÷ 10) · assembling (how settled
+    /// the Level is).
     /// `pending` = the Level shown is a stand-in until today's night is in.
     static func orbLegend(inputs: TelosOrbInputs, breakdown: LevelBreakdown?, pending: Bool) -> [OrbLegendRow] {
         func finite(_ v: Double?) -> Double? {
@@ -256,6 +257,15 @@ enum HomeHeroMapping {
                 ? String(localized: "No effort or no target today, so the orbit dots drift at a resting pace.")
                 : String(localized: "The dots on the orbits travel faster the more of today's target you have done, and keep speeding up past 100 %.")))
 
+        // Orbit dots ← Level: one per 10 points, unbounded (the speed above is effort's).
+        let dots = level.map { TelosOrbAppearance.orbitDots(level: $0) }
+        rows.append(OrbLegendRow(
+            id: "dots", glyph: "circle.dotted", part: nil, title: String(localized: "Orbit dots"),
+            value: dots.map { String($0) },
+            detail: level == nil
+                ? String(localized: "No Level yet, so nothing orbits the orb.")
+                : String(localized: "One per 10 Level points, with no limit. Past 30 they get smaller instead of stopping.")))
+
         // Assembling ← how settled the Level is.
         let assemblyValue: String?
         let assemblyDetail: String
@@ -284,6 +294,31 @@ enum HomeHeroMapping {
         rows.append(OrbLegendRow(id: "assembly", glyph: "sparkles", part: nil,
                                  title: String(localized: "Assembling"), value: assemblyValue, detail: assemblyDetail))
         return rows
+    }
+
+    // MARK: - The orb at other levels (the explainer's preview)
+
+    /// The thumbnail strip's levels: 0, 20 … 200.
+    static let orbPreviewLevels: [Double] = stride(from: 0.0, through: 200.0, by: 20.0).map { $0 }
+
+    /// Where the preview starts: today's Level to the nearest 10, or 50 (the wearer's own average) when
+    /// there is none. A starting point for a what-if, never shown as a measurement.
+    static func orbPreviewStart(level: Double?) -> Double {
+        guard let level, level.isFinite else { return 50 }
+        return (max(0, level) / 10).rounded() * 10
+    }
+
+    /// A typed or stepped preview level: non-finite or negative → 0; no upper limit (the Level has none).
+    static func sanitizedPreviewLevel(_ level: Double) -> Double {
+        guard level.isFinite else { return 0 }
+        return max(0, level)
+    }
+
+    /// What the preview orb draws for `level`: its orbiting dots and its size as a percentage of a
+    /// Level-100 orb's.
+    static func orbPreviewSummary(level: Double) -> (dots: Int, sizePercent: Int) {
+        let a = TelosOrbAppearance.from(TelosOrbInputs(level: sanitizedPreviewLevel(level)))
+        return (a.orbitDots, Int((a.size / TelosOrbAppearance.sizeAtReference * 100).rounded()))
     }
 
     // MARK: - The orb's history

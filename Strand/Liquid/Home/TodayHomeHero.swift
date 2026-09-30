@@ -19,9 +19,9 @@ import StrandAnalytics
 // reading (`BedroomClimate.$latest`, de-duplicated).
 // Nothing here observes AppModel, LiveState or Repository — the slow per-day figures come in as values.
 //
-// COST (§2.1 rule 8): idle Today runs NO frame clock. The orb's clock is a `.burst(seconds: 8)` after
-// appear and after each value change, ≤ 20 fps, and each frame only moves transforms (the orb's canvases
-// are drawn once per data change); then one still frame. Paused offscreen / under a sheet (its own
+// COST (§2.1 rule 8): idle Today runs NO frame clock. The orb moves in an 8 s burst after appear and
+// after each value change — one animated time value driving transforms only (no TimelineView, no canvas
+// redraw; see TelosOrb) — then rests. It is `.equatable()`, so the row's other state never re-renders it. Paused offscreen / under a sheet (its own
 // explainer included) / Reduce Motion / Low Power, and absent entirely for the neutral orb. Everything
 // else is static shapes; rings animate only when their value changes. The window advice is re-checked
 // once a minute (a Combine timer in `HomeWindowAdviceTicker`, not a frame clock). No material, no blur,
@@ -132,14 +132,17 @@ struct HomeLevelOrbRow: View {
 
     /// The orb as a button: tap → what shapes it and how it has grown (`OrbExplainerSheet`).
     ///
-    /// Cost: TelosOrb — drawn once per data change; an 8 s burst clock (≤ 20 fps, transforms only) after
-    /// appear and after each value change, then a still frame. No glow behind it (decision 19).
+    /// Cost: TelosOrb — drawn once per data change; an 8 s burst of animated transforms after appear and
+    /// after each value change, then at rest. No glow behind it (decision 19).
     private func orb(_ inputs: TelosOrbInputs) -> some View {
         Button {
             TelosHaptics.play(.select)
             showExplainer = true
         } label: {
             TelosOrb(inputs: inputs, tint: .green, style: .hero, clock: .burst(seconds: 8))
+                // Equal inputs → skipped: the hero's other state (the explainer flag, the Level model's
+                // publishes) never re-renders the orb.
+                .equatable()
                 // The orb itself takes no touches; this circle is the button's hit area.
                 .background(Color.clear.contentShape(Circle()))
         }

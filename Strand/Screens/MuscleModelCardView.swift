@@ -102,7 +102,8 @@ struct MuscleModelCardView: View {
                 footnote
             }
         }
-        .task(id: repo.refreshSeq) { await load() }
+        // Fourteen store reads per load: not re-run each time the card scrolls back into the lazy column.
+        .reloadTask(id: repo.refreshSeq) { await load() }
     }
 
     private var header: some View {

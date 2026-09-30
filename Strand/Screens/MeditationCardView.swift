@@ -79,7 +79,8 @@ struct MeditationCardView: View {
                 footer
             }
         }
-        .task(id: repo.refreshSeq) { await reload() }
+        // Not re-run on each return to the Focus tab when nothing changed (`reloadTask`).
+        .reloadTask(id: "\(repo.refreshSeq)-\(repo.workoutsSeq)") { await reload() }
         // Replays the current value on subscribe, which seeds `running` on appear.
         .onReceive(runningPublisher) { now in
             if running != now { running = now }

@@ -283,6 +283,20 @@ struct BedroomHistoryView: View {
         }
     }
 
+    /// At most this many readings per chart. A reading every ten minutes is 2,016 over the 14-day span —
+    /// two monotone LineMark series that size re-laid out with the sheet, for a 160 pt tall card.
+    private static let maxPlotted = 150
+
+    /// The readings to DRAW: every k-th real reading (never an average — each vertex is a reading the
+    /// sensor gave) and always the latest. The header's min–max still reads the full series.
+    private static func plotted(_ values: [(Date, Double)]) -> [(Date, Double)] {
+        guard values.count > maxPlotted else { return values }
+        let step = Int((Double(values.count) / Double(maxPlotted)).rounded(.up))
+        var out = stride(from: 0, to: values.count, by: step).map { values[$0] }
+        if (values.count - 1) % step != 0, let last = values.last { out.append(last) }
+        return out
+    }
+
     private func chartCard(title: String, unit: String, tint: Color, band: ClosedRange<Double>,
                            values: [(Date, Double)]) -> some View {
         let ys = values.map(\.1)
@@ -305,7 +319,7 @@ struct BedroomHistoryView: View {
                     // The band a bedroom sleeps best in, behind the line.
                     RectangleMark(yStart: .value("low", band.lowerBound), yEnd: .value("high", band.upperBound))
                         .foregroundStyle(StrandPalette.statusPositive.opacity(0.10))
-                    ForEach(Array(values.enumerated()), id: \.offset) { _, v in
+                    ForEach(Array(Self.plotted(values).enumerated()), id: \.offset) { _, v in
                         LineMark(x: .value("time", v.0), y: .value(title, v.1))
                             .interpolationMethod(.monotone)
                             .foregroundStyle(tint)
