@@ -76,3 +76,14 @@ Findings for owner: load term = training done not adaptation (uncapped by decisi
 - [ ] project.yml NSMotionUsageDescription copy update (suggested text in report)
 - [ ] COORDINATOR DECISION: the sitting-break nudge, reward and penalty cues must work by default (owner asked for them). Change the gate so these cues are governed by their own switches, NOT by the Wrist-alerts master (`notif.masterEnabled`, default off, which stays in charge of HR/strain wrist alerts); update the master's copy so it no longer promises "quiet no matter what else is on" but names what it controls. Keep quiet hours, sleep window and the daily budget.
 - API: `StrapCueEngine.shared.fire(.restOver)`, `.fire(.reward, eventId:)`, `.fire(.penalty, eventId:)` → StrapCueFireResult
+
+## HB habits + trials (done — exact code in the agent report)
+- [ ] AppModel `repo.$days.sink` after the SleepScheduleProvider line: `if let model = self { HealthV2Refresh.shared.daysChanged(days, model: model) }` (also wires WeekPlanSource.refresh, trialStatusProvider, caffeine/bedroom/WiZ records, trial tick + quest, daily habit report)
+- [ ] CaffeineLog.swift ~201: `@Published public private(set) var intakes: [CaffeineIntake] { didSet { save(); CaffeineDailySummary.intakesChanged(intakes) } }`
+- [ ] WizLights.swift after `d.set(today, forKey: K.windRan)` (~L445): `WizDailyRecord.markRan(day: today, at: now)`
+- [ ] QuestStore.swift first line of `checkOff(id:)`: `if HabitTrialQuestBridge.isTrialQuest(id) { HabitTrialQuestBridge.shared.handleCheckOff(questId: id); return }`
+- [ ] QuestDifficulty + QuestGenerator: `excluding: Set<QuestMetric>` from `HabitTrialQuestBridge.conflictingMetrics()` (AI agent)
+- [ ] Coach: register `HabitAnalysisStore.shared.coachBlock()` (≤900 chars) as a CoachContextBlock; drop the 7-day journal dump in CoachExtraContext.block and the EffectRanker lines in AICoach.onDeviceSignalsBlock (AI wave 2)
+- [ ] Today: host `HabitTrialTodayCard()` near the quest strip + link to `HabitsHubView().environmentObject(model)`; present when `HabitTrialQuestBridge.shared.pendingAnswerQuestId != nil` (TODAY)
+- [ ] Coach + More: NavigationLink to `HabitsHubView()`; Insights experiment links → hub (FRAME/SYS/PROGRESS)
+- [ ] NAME CLASH: DESIGN_V2 §8 P9 plans `Strand/Screens/Habits/HabitsHubView.swift` — P9 must RESTYLE the existing `Strand/Screens/HabitsHubView.swift`, not add a second type
